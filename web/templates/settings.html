@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Настройки — cg-analytics{% endblock %}
+
+{% block content %}
+<h5 class="mb-3">Настройки</h5>
+
+<div class="row g-3">
+    <div class="col-md-6">
+        <div class="card mb-3">
+            <div class="card-header fw-semibold">Текущая конфигурация</div>
+            <div class="card-body">
+                <dl class="row mb-0" style="font-size:0.85rem">
+                    <dt class="col-5">Модель агента</dt>
+                    <dd class="col-7"><code>{{ settings.anthropic_model }}</code></dd>
+                    <dt class="col-5">Макс. tool calls</dt>
+                    <dd class="col-7">{{ settings.max_tool_calls }}</dd>
+                    <dt class="col-5">Расписание (UTC)</dt>
+                    <dd class="col-7">{{ "%02d:%02d" | format(settings.schedule_hour, settings.schedule_minute) }}</dd>
+                    <dt class="col-5">Embedding модель</dt>
+                    <dd class="col-7"><code>{{ settings.embedding_model }}</code></dd>
+                    <dt class="col-5">Embedding URL</dt>
+                    <dd class="col-7"><code>{{ settings.embedding_base_url }}</code></dd>
+                    <dt class="col-5">Web порт</dt>
+                    <dd class="col-7">{{ settings.web_port }}</dd>
+                </dl>
+                <div class="text-muted small mt-2">Для изменения отредактируйте <code>.env</code> и перезапустите сервис.</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header fw-semibold">Синхронизация реестра</div>
+            <div class="card-body">
+                <p class="small text-muted mb-2">
+                    Обновляет список оборудования из основной БД телеметрии.
+                    Запускайте после добавления нового оборудования.
+                </p>
+                <form method="post" action="/settings/sync">
+                    <button type="submit" class="btn btn-sm btn-outline-primary">
+                        Синхронизировать с основной БД
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header fw-semibold">Реестр оборудования</div>
+            <div class="card-body p-0">
+                {% if not registry %}
+                <div class="p-3 text-muted">
+                    Реестр пуст. Нажмите «Синхронизировать с основной БД».
+                </div>
+                {% else %}
+                <table class="table table-sm mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Оборудование</th>
+                            <th>Модель KB</th>
+                            <th>Анализ</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    {% for eq in registry %}
+                    <tr>
+                        <td>
+                            <small>{{ eq.router_sn }}/{{ eq.equip_type }}/{{ eq.panel_id }}</small><br>
+                            <span class="text-muted" style="font-size:0.8rem">{{ eq.name or '' }}</span>
+                        </td>
+                        <td>
+                            {% if eq.manufacturer and eq.model %}
+                                <small>{{ eq.manufacturer }}/{{ eq.model }}</small>
+                            {% else %}
+                                <span class="text-danger small">не заполнено</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <form method="post" action="/settings/equipment/toggle" class="d-inline">
+                                <input type="hidden" name="router_sn" value="{{ eq.router_sn }}">
+                                <input type="hidden" name="equip_type" value="{{ eq.equip_type }}">
+                                <input type="hidden" name="panel_id" value="{{ eq.panel_id }}">
+                                <input type="hidden" name="active" value="{{ 'off' if eq.active else 'on' }}">
+                                <button type="submit" class="btn btn-sm {{ 'btn-success' if eq.active else 'btn-outline-secondary' }}">
+                                    {{ 'Вкл' if eq.active else 'Выкл' }}
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

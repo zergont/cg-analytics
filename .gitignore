@@ -1,0 +1,18 @@
+# Конфиг с секретами — не коммитить
+config.yml
+
+# Рабочие файлы Claude Code
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# Логи
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

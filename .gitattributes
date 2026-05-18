@@ -1,0 +1,7 @@
+# Все текстовые файлы хранить в репозитории с LF (для Linux-сервера)
+* text=auto eol=lf
+
+# Бинарные файлы — без конвертации
+*.png binary
+*.jpg binary
+*.pdf binary

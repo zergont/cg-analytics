@@ -1,0 +1,30 @@
+# Anthropic API — agentic loop + tool use
+anthropic>=0.40.0
+
+# Web-фреймворк + шаблоны
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+jinja2>=3.1.0
+python-multipart>=0.0.12
+
+# PostgreSQL — асинхронный клиент для основной и аналитической БД
+asyncpg>=0.30.0
+# psycopg2 нужен для LlamaIndex PGVectorStore
+psycopg2-binary>=2.9.9
+
+# Планировщик задач (суточный запуск в 00:05)
+apscheduler>=3.11.0
+
+# Графики для agent tools
+matplotlib>=3.9.0
+
+# RAG pipeline
+llama-index-core>=0.12.0
+llama-index-vector-stores-postgres>=0.3.0
+llama-index-embeddings-ollama>=0.5.0
+
+# PDF индексация (руководства по эксплуатации)
+pypdf>=5.0.0
+
+# Конфигурация из config.yml
+pyyaml>=6.0.2

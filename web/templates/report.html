@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}Отчёт {{ report.date }} — cg-analytics{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="mb-0">
+        {{ report.manufacturer }} {{ report.model }}
+        <small class="text-muted fw-normal">/ {{ report.router_sn }} / {{ report.equip_type }} / {{ report.panel_id }}</small>
+    </h5>
+    <a href="/history/{{ report.router_sn }}/{{ report.equip_type }}/{{ report.panel_id }}" class="btn btn-sm btn-outline-secondary">← История</a>
+</div>
+
+{# Статус-баннер #}
+{% if report.status == 'ok' %}
+    <div class="alert alert-success">✅ <strong>Норма</strong> — за {{ report.date }} нарушений не выявлено</div>
+{% elif report.status == 'attention' %}
+    <div class="alert alert-warning">⚠️ <strong>Требует внимания</strong> — {{ report.date }}</div>
+{% else %}
+    <div class="alert alert-danger">🔴 <strong>Критично</strong> — {{ report.date }} | выявлены аварийные останови</div>
+{% endif %}
+
+<div class="row g-3">
+    {# Левая колонка — отчёт агента #}
+    <div class="col-lg-8">
+        <div class="card mb-3">
+            <div class="card-header fw-semibold">Отчёт агента</div>
+            <div class="card-body">
+                <pre class="report">{{ report.ai_report or 'Отчёт не сформирован.' }}</pre>
+            </div>
+        </div>
+
+        {# Аномалии #}
+        {% if report.anomalies %}
+        <div class="card mb-3">
+            <div class="card-header fw-semibold">Аномалии ({{ report.anomalies | length }})</div>
+            <div class="card-body p-0">
+                <table class="table table-sm mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Серьёзность</th>
+                            <th>Название</th>
+                            <th>Тип</th>
+                            <th>Эпизодов</th>
+                            <th>Длительность</th>
+                            <th>Первый раз</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    {% for a in report.anomalies %}
+                    <tr>
+                        <td>
+                            {% if a.severity == 'shutdown' %}
+                                <span class="badge bg-danger">shutdown</span>
+                            {% elif a.severity == 'derate' %}
+                                <span class="badge bg-warning text-dark">derate</span>
+                            {% else %}
+                                <span class="badge bg-secondary">{{ a.severity }}</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ a.name }}</td>
+                        <td><small>{{ a.type }}</small></td>
+                        <td>{{ a.episodes }}</td>
+                        <td>{{ a.duration_min }} мин</td>
+                        <td><small>{{ a.first_seen[:16] if a.first_seen else '—' }}</small></td>
+                    </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    {# Правая колонка — метаданные #}
+    <div class="col-lg-4">
+        <div class="card mb-3">
+            <div class="card-header fw-semibold">Режим работы</div>
+            <div class="card-body">
+                <dl class="row mb-0" style="font-size:0.85rem">
+                    <dt class="col-6">Дата</dt><dd class="col-6">{{ report.date }}</dd>
+                    <dt class="col-6">Наработка</dt>
+                    <dd class="col-6">
+                        {% if report.uptime_minutes %}
+                            {{ report.uptime_minutes // 60 }} ч {{ report.uptime_minutes % 60 }} мин
+                        {% else %}—{% endif %}
+                    </dd>
+                    <dt class="col-6">Пусков</dt><dd class="col-6">{{ report.starts_count or '—' }}</dd>
+                    <dt class="col-6">Двигатель S/N</dt><dd class="col-6">{{ report.engine_sn or '—' }}</dd>
+                </dl>
+            </div>
+        </div>
+
+        <div class="card mb-3">
+            <div class="card-header fw-semibold">Метаданные запроса</div>
+            <div class="card-body">
+                <dl class="row mb-0" style="font-size:0.85rem">
+                    <dt class="col-7">Модель ИИ</dt><dd class="col-5">{{ report.ai_model or '—' }}</dd>
+                    <dt class="col-7">Токены</dt><dd class="col-5">{{ report.tokens_used or '—' }}</dd>
+                    <dt class="col-7">Tool calls</dt><dd class="col-5">{{ report.tool_calls_count or '—' }}</dd>
+                    <dt class="col-7">Время генерации</dt><dd class="col-5">{{ report.generation_time_sec or '—' }} с</dd>
+                    <dt class="col-7">Создан</dt><dd class="col-5"><small>{{ report.created_at | string | truncate(16, True, '') }}</small></dd>
+                </dl>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

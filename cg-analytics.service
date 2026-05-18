@@ -1,0 +1,20 @@
+[Unit]
+Description=cg-analytics — интеллектуальная аналитика телеметрии ГУ
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=cg-analytics
+WorkingDirectory=/opt/cg-analytics
+ExecStart=/opt/cg-analytics/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=10
+
+# Конфигурация берётся из config.yml в рабочей директории
+
+# Логи пишутся в journald (просмотр: journalctl -u cg-analytics -f)
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

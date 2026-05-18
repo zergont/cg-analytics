@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}История — cg-analytics{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="mb-0">История: {{ router_sn }} / {{ equip_type }} / {{ panel_id }}</h5>
+    <a href="/" class="btn btn-sm btn-outline-secondary">← Все отчёты</a>
+</div>
+
+{% if not reports %}
+<div class="alert alert-secondary">Отчётов для этого оборудования пока нет.</div>
+{% else %}
+<table class="table table-sm table-hover">
+    <thead class="table-dark">
+        <tr>
+            <th>Дата</th>
+            <th>Статус</th>
+            <th>Наработка</th>
+            <th>Пуски</th>
+            <th>Токены</th>
+            <th>Tool calls</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for r in reports %}
+    <tr>
+        <td>{{ r.date }}</td>
+        <td>
+            {% if r.status == 'ok' %}
+                <span class="badge badge-ok">Норма</span>
+            {% elif r.status == 'attention' %}
+                <span class="badge badge-attention">Внимание</span>
+            {% else %}
+                <span class="badge badge-critical">Критично</span>
+            {% endif %}
+        </td>
+        <td>{{ (r.uptime_minutes // 60) if r.uptime_minutes else '—' }} ч</td>
+        <td>{{ r.starts_count or '—' }}</td>
+        <td>{{ r.tokens_used or '—' }}</td>
+        <td>{{ r.tool_calls_count or '—' }}</td>
+        <td><a href="/report/{{ r.id }}" class="btn btn-sm btn-outline-primary">Открыть</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endblock %}

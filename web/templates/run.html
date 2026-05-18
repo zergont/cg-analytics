@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Запуск — cg-analytics{% endblock %}
+
+{% block content %}
+<h5 class="mb-3">Ручной запуск анализа</h5>
+
+<div class="row g-3">
+    <div class="col-md-5">
+        <div class="card">
+            <div class="card-header fw-semibold">Параметры запуска</div>
+            <div class="card-body">
+                <form method="post" action="/run">
+                    <div class="mb-3">
+                        <label class="form-label">Оборудование</label>
+                        <select name="router_sn" id="eq_select" class="form-select" required
+                                onchange="fillEquipment(this)">
+                            <option value="">— выберите —</option>
+                            {% for eq in equipment %}
+                            <option value="{{ eq.router_sn }}"
+                                    data-equip="{{ eq.equip_type }}"
+                                    data-panel="{{ eq.panel_id }}">
+                                {{ eq.manufacturer or '' }} {{ eq.model or '' }}
+                                ({{ eq.router_sn }}/{{ eq.equip_type }}/{{ eq.panel_id }})
+                            </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <input type="hidden" name="equip_type" id="equip_type_inp">
+                    <input type="hidden" name="panel_id" id="panel_id_inp">
+                    <div class="mb-3">
+                        <label class="form-label">Дата анализа</label>
+                        <input type="date" name="run_date" class="form-control"
+                               value="{{ default_date }}" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Запустить</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-7">
+        <div class="card">
+            <div class="card-header fw-semibold d-flex justify-content-between">
+                Активные и завершённые задачи
+                <button class="btn btn-sm btn-outline-secondary" onclick="refreshStatus()">Обновить</button>
+            </div>
+            <div class="card-body p-0">
+                <table class="table table-sm mb-0" id="tasks_table">
+                    <thead class="table-light">
+                        <tr><th>Задача</th><th>Статус</th><th></th></tr>
+                    </thead>
+                    <tbody id="tasks_body">
+                    {% for key, task in running_tasks.items() %}
+                    <tr>
+                        <td>{{ task.label }}</td>
+                        <td>
+                            {% if task.status == 'running' %}
+                                <span class="badge bg-primary">Выполняется…</span>
+                            {% elif task.status == 'done' %}
+                                <span class="badge bg-success">Готово</span>
+                            {% else %}
+                                <span class="badge bg-danger" title="{{ task.error }}">Ошибка</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if task.report_id %}
+                            <a href="/report/{{ task.report_id }}" class="btn btn-sm btn-outline-primary">Отчёт</a>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="3" class="text-muted text-center py-3">Нет задач</td></tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function fillEquipment(sel) {
+    const opt = sel.options[sel.selectedIndex];
+    document.getElementById('equip_type_inp').value = opt.dataset.equip || '';
+    document.getElementById('panel_id_inp').value = opt.dataset.panel || '';
+}
+
+async function refreshStatus() {
+    const resp = await fetch('/run/status');
+    const tasks = await resp.json();
+    const tbody = document.getElementById('tasks_body');
+    if (!Object.keys(tasks).length) {
+        tbody.innerHTML = '<tr><td colspan="3" class="text-muted text-center py-3">Нет задач</td></tr>';
+        return;
+    }
+    tbody.innerHTML = Object.entries(tasks).map(([k, t]) => `
+        <tr>
+            <td>${t.label}</td>
+            <td>${t.status === 'running' ? '<span class="badge bg-primary">Выполняется…</span>'
+                : t.status === 'done' ? '<span class="badge bg-success">Готово</span>'
+                : '<span class="badge bg-danger">Ошибка</span>'}</td>
+            <td>${t.report_id ? '<a href="/report/' + t.report_id + '" class="btn btn-sm btn-outline-primary">Отчёт</a>' : ''}</td>
+        </tr>`).join('');
+}
+
+// Автообновление каждые 5 сек если есть активные задачи
+setInterval(refreshStatus, 5000);
+</script>
+{% endblock %}
