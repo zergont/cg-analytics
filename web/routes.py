@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 templates = Jinja2Templates(directory="web/templates")
 
+# Версия приложения — читается один раз при старте, доступна во всех шаблонах
+_version_file = __import__("pathlib").Path(__file__).parent.parent / "VERSION"
+templates.env.globals["app_version"] = _version_file.read_text(encoding="utf-8").strip()
+
 # Хранилище активных задач запуска (task_key → dict)
 _running_tasks: dict[str, dict] = {}
 
