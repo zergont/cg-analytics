@@ -69,12 +69,16 @@
                         </td>
                         <td>
                             {% if eq.manufacturer and eq.model %}
-                                <small>{{ eq.manufacturer }}/{{ eq.model }}</small>
+                                <small>{{ eq.manufacturer }} / {{ eq.model }}</small>
                             {% else %}
                                 <span class="text-danger small">не заполнено</span>
                             {% endif %}
                         </td>
                         <td>
+                            <button class="btn btn-sm btn-outline-primary me-1"
+                                    onclick="openEdit('{{ eq.router_sn }}','{{ eq.equip_type }}','{{ eq.panel_id }}','{{ eq.name or '' }}','{{ eq.manufacturer or '' }}','{{ eq.model or '' }}','{{ eq.engine_sn or '' }}')">
+                                ✏
+                            </button>
                             <form method="post" action="/settings/equipment/toggle" class="d-inline">
                                 <input type="hidden" name="router_sn" value="{{ eq.router_sn }}">
                                 <input type="hidden" name="equip_type" value="{{ eq.equip_type }}">
@@ -94,4 +98,75 @@
         </div>
     </div>
 </div>
+
+<!-- Модальное окно редактирования оборудования -->
+<div class="modal fade" id="editModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Редактировать оборудование</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form method="post" action="/settings/equipment/update">
+                <div class="modal-body">
+                    <input type="hidden" id="edit_router_sn" name="router_sn">
+                    <input type="hidden" id="edit_equip_type" name="equip_type">
+                    <input type="hidden" id="edit_panel_id" name="panel_id">
+
+                    <div class="mb-3">
+                        <label class="form-label small fw-semibold">Идентификатор</label>
+                        <div id="edit_label" class="form-control-plaintext form-control-sm text-muted"></div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="edit_name" class="form-label small fw-semibold">Название</label>
+                        <input type="text" class="form-control form-control-sm" id="edit_name" name="name"
+                               placeholder="Например: ДГУ-1 Серверная">
+                    </div>
+
+                    <div class="row g-2 mb-3">
+                        <div class="col-6">
+                            <label for="edit_manufacturer" class="form-label small fw-semibold">Производитель</label>
+                            <input type="text" class="form-control form-control-sm" id="edit_manufacturer" name="manufacturer"
+                                   placeholder="Например: Deutz">
+                        </div>
+                        <div class="col-6">
+                            <label for="edit_model" class="form-label small fw-semibold">Модель KB</label>
+                            <input type="text" class="form-control form-control-sm" id="edit_model" name="model"
+                                   placeholder="Например: TCD2013">
+                        </div>
+                    </div>
+
+                    <div class="mb-2">
+                        <label for="edit_engine_sn" class="form-label small fw-semibold">S/N двигателя</label>
+                        <input type="text" class="form-control form-control-sm" id="edit_engine_sn" name="engine_sn"
+                               placeholder="Серийный номер двигателя">
+                    </div>
+                    <div class="text-muted small mt-2">
+                        Производитель и Модель KB должны совпадать с папкой в
+                        <code>knowledge_base/equipment/{производитель}/{модель}/</code>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Отмена</button>
+                    <button type="submit" class="btn btn-sm btn-primary">Сохранить</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+function openEdit(router_sn, equip_type, panel_id, name, manufacturer, model, engine_sn) {
+    document.getElementById('edit_router_sn').value = router_sn;
+    document.getElementById('edit_equip_type').value = equip_type;
+    document.getElementById('edit_panel_id').value = panel_id;
+    document.getElementById('edit_label').textContent = router_sn + ' / ' + equip_type + ' / ' + panel_id;
+    document.getElementById('edit_name').value = name;
+    document.getElementById('edit_manufacturer').value = manufacturer;
+    document.getElementById('edit_model').value = model;
+    document.getElementById('edit_engine_sn').value = engine_sn;
+    new bootstrap.Modal(document.getElementById('editModal')).show();
+}
+</script>
 {% endblock %}

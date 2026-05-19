@@ -171,6 +171,29 @@ async def settings_page(request: Request):
     })
 
 
+@router.post("/settings/equipment/update")
+async def update_equipment(
+    router_sn: str = Form(...),
+    equip_type: str = Form(...),
+    panel_id: int = Form(...),
+    manufacturer: str = Form(""),
+    model: str = Form(""),
+    engine_sn: str = Form(""),
+    name: str = Form(""),
+):
+    """Обновить метаданные оборудования в реестре аналитики."""
+    await analytics.upsert_equipment({
+        "router_sn": router_sn,
+        "equip_type": equip_type,
+        "panel_id": panel_id,
+        "manufacturer": manufacturer or None,
+        "model": model or None,
+        "engine_sn": engine_sn or None,
+        "name": name or None,
+    })
+    return RedirectResponse(url="/settings", status_code=303)
+
+
 @router.post("/settings/equipment/toggle")
 async def toggle_equipment(
     router_sn: str = Form(...),

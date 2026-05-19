@@ -11,11 +11,7 @@ async def _connect() -> asyncpg.Connection:
 
 
 async def get_active_equipment() -> list[dict[str, Any]]:
-    """Оборудование, участвующее в ежедневном анализе.
-
-    Возвращает только записи с заполненными manufacturer и model,
-    т.к. без них невозможно найти knowledge_base.
-    """
+    """Всё оборудование из основной БД для синхронизации реестра."""
     conn = await _connect()
     try:
         rows = await conn.fetch("""
@@ -24,7 +20,6 @@ async def get_active_equipment() -> list[dict[str, Any]]:
                 name, manufacturer, model, engine_sn,
                 last_seen_at
             FROM equipment
-            WHERE manufacturer IS NOT NULL AND model IS NOT NULL
             ORDER BY router_sn, equip_type, panel_id
         """)
         return [dict(r) for r in rows]
