@@ -235,23 +235,22 @@ step "Systemd-сервис"
 
 if [[ -d /etc/systemd/system ]] && command -v systemctl &>/dev/null; then
     read -rp "  Установить cg-analytics как systemd-сервис? [y/N]: " SYSTEMD
+    # Убрать возможный \r (CRLF → LF)
+    SYSTEMD="${SYSTEMD//$'\r'/}"
     if [[ "${SYSTEMD:-N}" =~ ^[Yy]$ ]]; then
-        # Создать системного пользователя если не существует
-        if ! id cg-analytics &>/dev/null; then
-            sudo useradd --system --no-create-home --shell /sbin/nologin cg-analytics
-            ok "Пользователь cg-analytics создан"
-        fi
-
-        # Подставить реальный путь в unit-файл
+        # Запускать от имени текущего пользователя (не создаём отдельного)
         INSTALL_DIR="$SCRIPT_DIR"
-        sudo sed "s|/opt/cg-analytics|${INSTALL_DIR}|g" cg-analytics.service \
+        RUN_USER="$(whoami)"
+
+        # Подставить реальный путь и пользователя в unit-файл
+        sed "s|/opt/cg-analytics|${INSTALL_DIR}|g; s|User=cg-analytics|User=${RUN_USER}|g" \
+            cg-analytics.service \
             | sudo tee /etc/systemd/system/cg-analytics.service > /dev/null
 
-        sudo chown -R cg-analytics:cg-analytics "$INSTALL_DIR"
         sudo systemctl daemon-reload
         sudo systemctl enable cg-analytics
         sudo systemctl start cg-analytics
-        ok "Сервис установлен и запущен"
+        ok "Сервис установлен и запущен (пользователь: ${RUN_USER})"
         info "Логи: journalctl -u cg-analytics -f"
     else
         info "Пропущено. Запуск вручную: .venv/bin/python main.py"
