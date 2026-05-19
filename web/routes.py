@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 templates = Jinja2Templates(directory="web/templates")
 
-# Хранилище активных задач запуска (report_id → asyncio.Task)
+# Хранилище активных задач запуска (task_key → dict)
 _running_tasks: dict[str, dict] = {}
 
 
@@ -24,10 +24,7 @@ _running_tasks: dict[str, dict] = {}
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     reports = await analytics.get_latest_reports(limit=100)
-    return templates.TemplateResponse("index.html", {
-        "request": request,
-        "reports": reports,
-    })
+    return templates.TemplateResponse(request, "index.html", {"reports": reports})
 
 
 # ── Отчёт ─────────────────────────────────────────────────────────────────────
@@ -37,10 +34,7 @@ async def report(request: Request, report_id: str):
     rep = await analytics.get_report(report_id)
     if not rep:
         raise HTTPException(status_code=404, detail="Отчёт не найден")
-    return templates.TemplateResponse("report.html", {
-        "request": request,
-        "report": rep,
-    })
+    return templates.TemplateResponse(request, "report.html", {"report": rep})
 
 
 # ── История ──────────────────────────────────────────────────────────────────
@@ -53,8 +47,7 @@ async def history(
     panel_id: int,
 ):
     reports = await analytics.get_equipment_history(router_sn, equip_type, panel_id, limit=90)
-    return templates.TemplateResponse("history.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "history.html", {
         "router_sn": router_sn,
         "equip_type": equip_type,
         "panel_id": panel_id,
@@ -67,10 +60,8 @@ async def history(
 @router.get("/run", response_class=HTMLResponse)
 async def run_page(request: Request):
     equipment = await analytics.get_equipment_registry()
-    today = date.today()
-    yesterday = today - timedelta(days=1)
-    return templates.TemplateResponse("run.html", {
-        "request": request,
+    yesterday = date.today() - timedelta(days=1)
+    return templates.TemplateResponse(request, "run.html", {
         "equipment": equipment,
         "default_date": str(yesterday),
         "running_tasks": _running_tasks,
@@ -143,10 +134,7 @@ async def knowledge_page(request: Request):
                     "pdfs": pdf_count,
                 })
 
-    return templates.TemplateResponse("knowledge.html", {
-        "request": request,
-        "models": models,
-    })
+    return templates.TemplateResponse(request, "knowledge.html", {"models": models})
 
 
 @router.post("/knowledge/reindex")
@@ -177,8 +165,7 @@ async def reindex(
 async def settings_page(request: Request):
     from config import settings as cfg
     registry = await analytics.get_equipment_registry()
-    return templates.TemplateResponse("settings.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "settings.html", {
         "settings": cfg,
         "registry": registry,
     })
