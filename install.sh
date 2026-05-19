@@ -263,13 +263,14 @@ fi
 # Готово
 # =============================================================================
 WEB_PORT=$("$VENV_PYTHON" -c "from config import settings; print(settings.web_port)" 2>/dev/null || echo "8090")
+SERVER_IP=$(hostname -I | awk '{print $1}')
 
 echo ""
 echo -e "${GREEN}${BOLD}  ══════════════════════════════════════"
 echo -e "   Установка завершена успешно!"
 echo -e "  ══════════════════════════════════════${NC}"
 echo ""
-echo -e "  Web UI:    ${CYAN}http://localhost:${WEB_PORT}${NC}"
+echo -e "  Web UI:    ${CYAN}http://${SERVER_IP}:${WEB_PORT}${NC}"
 echo -e "  Запуск:    ${CYAN}.venv/bin/python main.py${NC}"
 echo -e "  Индекс:    ${CYAN}.venv/bin/python -m knowledge.indexer --all${NC}"
 echo -e "  Логи:      ${CYAN}journalctl -u cg-analytics -f${NC}"
