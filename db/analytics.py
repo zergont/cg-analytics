@@ -35,7 +35,7 @@ async def init_db() -> None:
 # ── Equipment registry ────────────────────────────────────────────────────────
 
 async def upsert_equipment(equipment: dict[str, Any]) -> None:
-    """Добавить или обновить запись об оборудовании в реестре."""
+    """Добавить или обновить запись об оборудовании (полная перезапись — для ручного редактирования)."""
     conn = await _connect()
     try:
         await conn.execute("""
@@ -47,6 +47,38 @@ async def upsert_equipment(equipment: dict[str, Any]) -> None:
                 manufacturer = EXCLUDED.manufacturer,
                 model        = EXCLUDED.model,
                 engine_sn    = EXCLUDED.engine_sn,
+                updated_at   = now()
+        """,
+            equipment["router_sn"],
+            equipment["equip_type"],
+            equipment["panel_id"],
+            equipment.get("name"),
+            equipment.get("manufacturer"),
+            equipment.get("model"),
+            equipment.get("engine_sn"),
+        )
+    finally:
+        await conn.close()
+
+
+async def sync_equipment_from_source(equipment: dict[str, Any]) -> None:
+    """Синхронизация из основной БД: добавляет новые записи и заполняет пустые поля.
+
+    Не перезаписывает поля, которые уже заполнены в реестре аналитики —
+    локальные правки сохраняются. Данные из источника применяются только
+    если соответствующее поле в реестре равно NULL.
+    """
+    conn = await _connect()
+    try:
+        await conn.execute("""
+            INSERT INTO equipment_registry
+                (router_sn, equip_type, panel_id, name, manufacturer, model, engine_sn, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+            ON CONFLICT (router_sn, equip_type, panel_id) DO UPDATE SET
+                name         = COALESCE(equipment_registry.name,         EXCLUDED.name),
+                manufacturer = COALESCE(equipment_registry.manufacturer, EXCLUDED.manufacturer),
+                model        = COALESCE(equipment_registry.model,        EXCLUDED.model),
+                engine_sn    = COALESCE(equipment_registry.engine_sn,    EXCLUDED.engine_sn),
                 updated_at   = now()
         """,
             equipment["router_sn"],

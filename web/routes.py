@@ -207,10 +207,14 @@ async def toggle_equipment(
 
 @router.post("/settings/sync")
 async def sync_equipment():
-    """Синхронизировать реестр аналитики с основной БД."""
+    """Синхронизировать реестр аналитики с основной БД.
+
+    Добавляет новые устройства и заполняет пустые поля из источника,
+    но не затирает данные уже введённые вручную в реестре аналитики.
+    """
     equipment = await source.get_active_equipment()
     for eq in equipment:
-        await analytics.upsert_equipment(eq)
+        await analytics.sync_equipment_from_source(eq)
     return RedirectResponse(url="/settings", status_code=303)
 
 
