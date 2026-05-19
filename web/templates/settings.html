@@ -45,7 +45,15 @@
 
     <div class="col-md-6">
         <div class="card">
-            <div class="card-header fw-semibold">Реестр оборудования</div>
+            <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
+                Реестр оборудования
+                {% if registry %}
+                <form method="post" action="/settings/equipment/clear"
+                      onsubmit="return confirm('Очистить весь реестр? Это удалит все записи об оборудовании.')">
+                    <button type="submit" class="btn btn-sm btn-outline-danger">Очистить реестр</button>
+                </form>
+                {% endif %}
+            </div>
             <div class="card-body p-0">
                 {% if not registry %}
                 <div class="p-3 text-muted">
@@ -87,6 +95,13 @@
                                 <button type="submit" class="btn btn-sm {{ 'btn-success' if eq.active else 'btn-outline-secondary' }}">
                                     {{ 'Вкл' if eq.active else 'Выкл' }}
                                 </button>
+                            </form>
+                            <form method="post" action="/settings/equipment/delete" class="d-inline"
+                                  onsubmit="return confirm('Удалить {{ eq.router_sn }}/{{ eq.equip_type }}/{{ eq.panel_id }}?')">
+                                <input type="hidden" name="router_sn" value="{{ eq.router_sn }}">
+                                <input type="hidden" name="equip_type" value="{{ eq.equip_type }}">
+                                <input type="hidden" name="panel_id" value="{{ eq.panel_id }}">
+                                <button type="submit" class="btn btn-sm btn-outline-danger">🗑</button>
                             </form>
                         </td>
                     </tr>

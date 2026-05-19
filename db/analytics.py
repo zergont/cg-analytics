@@ -109,6 +109,29 @@ async def get_equipment_registry() -> list[dict[str, Any]]:
         await conn.close()
 
 
+async def delete_equipment(router_sn: str, equip_type: str, panel_id: int) -> None:
+    """Удалить запись об оборудовании из реестра."""
+    conn = await _connect()
+    try:
+        await conn.execute("""
+            DELETE FROM equipment_registry
+            WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+        """, router_sn, equip_type, panel_id)
+    finally:
+        await conn.close()
+
+
+async def clear_equipment_registry() -> int:
+    """Очистить весь реестр оборудования. Возвращает число удалённых записей."""
+    conn = await _connect()
+    try:
+        result = await conn.execute("DELETE FROM equipment_registry")
+        # result вида "DELETE N"
+        return int(result.split()[-1])
+    finally:
+        await conn.close()
+
+
 async def set_equipment_active(
     router_sn: str, equip_type: str, panel_id: int, active: bool
 ) -> None:

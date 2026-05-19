@@ -209,6 +209,22 @@ async def toggle_equipment(
     return RedirectResponse(url="/settings", status_code=303)
 
 
+@router.post("/settings/equipment/delete")
+async def delete_equipment(
+    router_sn: str = Form(...),
+    equip_type: str = Form(...),
+    panel_id: int = Form(...),
+):
+    await analytics.delete_equipment(router_sn, equip_type, panel_id)
+    return RedirectResponse(url="/settings", status_code=303)
+
+
+@router.post("/settings/equipment/clear")
+async def clear_equipment():
+    await analytics.clear_equipment_registry()
+    return RedirectResponse(url="/settings", status_code=303)
+
+
 @router.post("/settings/sync")
 async def sync_equipment():
     """Синхронизировать реестр аналитики с основной БД.
