@@ -58,9 +58,12 @@ fi
 # =============================================================================
 step "Системные зависимости"
 
+# Все нужные пакеты одной командой
+APT_PKGS=(python3.12-venv python3.12-dev libpq-dev build-essential postgresql postgresql-16-pgvector)
+
 MISSING_PKGS=()
-for pkg in libpq-dev build-essential; do
-    if ! dpkg -s "$pkg" &>/dev/null; then
+for pkg in "${APT_PKGS[@]}"; do
+    if ! dpkg -s "$pkg" &>/dev/null 2>&1; then
         MISSING_PKGS+=("$pkg")
     fi
 done
