@@ -56,7 +56,7 @@
                     <thead class="table-light">
                         <tr>
                             <th>Оборудование</th>
-                            <th>Модель KB</th>
+                            <th>Двигатель</th>
                             <th>Анализ</th>
                         </tr>
                     </thead>
@@ -126,14 +126,14 @@
 
                     <div class="row g-2 mb-3">
                         <div class="col-6">
-                            <label for="edit_manufacturer" class="form-label small fw-semibold">Производитель</label>
+                            <label for="edit_manufacturer" class="form-label small fw-semibold">Производитель двигателя</label>
                             <input type="text" class="form-control form-control-sm" id="edit_manufacturer" name="manufacturer"
-                                   placeholder="Например: Deutz">
+                                   placeholder="Например: Cummins">
                         </div>
                         <div class="col-6">
-                            <label for="edit_model" class="form-label small fw-semibold">Модель KB</label>
+                            <label for="edit_model" class="form-label small fw-semibold">Модель двигателя</label>
                             <input type="text" class="form-control form-control-sm" id="edit_model" name="model"
-                                   placeholder="Например: TCD2013">
+                                   placeholder="Например: KTA50">
                         </div>
                     </div>
 
@@ -143,7 +143,7 @@
                                placeholder="Серийный номер двигателя">
                     </div>
                     <div class="text-muted small mt-2">
-                        Производитель и Модель KB должны совпадать с папкой в
+                        Используется для поиска документации в
                         <code>knowledge_base/equipment/{производитель}/{модель}/</code>
                     </div>
                 </div>
