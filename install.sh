@@ -138,6 +138,18 @@ ok "Конфигурация выглядит заполненной"
 # =============================================================================
 step "Схема аналитической БД"
 
+# Расширения требуют суперпользователя — создаём отдельно от имени postgres
+info "Создаю расширения pgvector и pgcrypto (требуется sudo)..."
+if sudo -u postgres psql -d analytics -c "
+    CREATE EXTENSION IF NOT EXISTS vector;
+    CREATE EXTENSION IF NOT EXISTS pgcrypto;
+" 2>&1; then
+    ok "Расширения созданы"
+else
+    fail "Не удалось создать расширения. Убедитесь что postgresql-16-pgvector установлен и PostgreSQL запущен."
+fi
+
+# Применяем схему (таблицы) от имени пользователя analytics
 info "Применяю db/schema.sql к analytics DB..."
 if "$VENV_PYTHON" - <<'PYEOF'
 import asyncio, sys
