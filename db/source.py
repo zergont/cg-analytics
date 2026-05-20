@@ -103,6 +103,33 @@ async def get_period_history(
         await conn.close()
 
 
+async def get_daily_state_events(
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    day: date,
+) -> list[dict[str, Any]]:
+    """Смены состояния enum/discrete регистров за сутки из state_events."""
+    start = datetime.combine(day, datetime.min.time()).replace(tzinfo=timezone.utc)
+    end = start + timedelta(days=1)
+
+    conn = await _connect()
+    try:
+        rows = await conn.fetch("""
+            SELECT addr, ts, received_at, raw, text, write_reason
+            FROM state_events
+            WHERE router_sn = $1
+              AND equip_type = $2
+              AND panel_id   = $3
+              AND ts >= $4
+              AND ts <  $5
+            ORDER BY ts
+        """, router_sn, equip_type, panel_id, start, end)
+        return [dict(r) for r in rows]
+    finally:
+        await conn.close()
+
+
 async def get_daily_events(
     router_sn: str,
     equip_type: str,

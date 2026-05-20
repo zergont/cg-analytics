@@ -189,8 +189,9 @@ async def _run_segments(router_sn: str, equip_type: str, panel_id: int, seg_date
     day_start = datetime(day.year, day.month, day.day, 0, 0, 0, tzinfo=timezone.utc)
     day_end   = datetime(day.year, day.month, day.day, 23, 59, 59, tzinfo=timezone.utc)
 
-    history = await source.get_daily_history(router_sn, equip_type, panel_id, day)
-    events  = await source.get_daily_events(router_sn, equip_type, panel_id, day)
+    history      = await source.get_daily_history(router_sn, equip_type, panel_id, day)
+    state_events = await source.get_daily_state_events(router_sn, equip_type, panel_id, day)
+    events       = await source.get_daily_events(router_sn, equip_type, panel_id, day)
 
     kb_path = await analytics.get_equipment_kb_path(router_sn, equip_type, panel_id)
     if kb_path:
@@ -199,6 +200,11 @@ async def _run_segments(router_sn: str, equip_type: str, panel_id: int, seg_date
         kb = {"register_map": {}, "fault_bitmap_map": {}, "enum_map": {}, "operation_rules": {}}
 
     agg = aggregator.aggregate(history, kb["register_map"])
+    uptime_min, starts_count, intervals = aggregator.calc_uptime_from_state_events(state_events)
+    agg["uptime_minutes"]      = uptime_min
+    agg["starts_count"]        = starts_count
+    agg["operating_intervals"] = intervals
+
     anomalies = detector.detect(
         history=history,
         events=events,
@@ -208,9 +214,8 @@ async def _run_segments(router_sn: str, equip_type: str, panel_id: int, seg_date
     )
     segments = segmenter.segment(
         history=history,
-        operating_intervals=agg.get("operating_intervals", []),
+        state_events=state_events,
         anomalies=anomalies,
-        events=events,
         operation_rules=kb.get("operation_rules", {}),
         register_map=kb["register_map"],
         day_start=day_start,

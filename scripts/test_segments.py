@@ -28,9 +28,9 @@ async def _run(router_sn: str, equip_type: str, panel_id: int, day: date, out_pa
     day_end   = datetime(day.year, day.month, day.day, 23, 59, 59, tzinfo=timezone.utc)
 
     logger.info("Загрузка истории: %s/%s/%s за %s", router_sn, equip_type, panel_id, day)
-    history = await source.get_daily_history(router_sn, equip_type, panel_id, day)
-    events  = await source.get_daily_events(router_sn, equip_type, panel_id, day)
-    logger.info("Строк истории: %d | событий: %d", len(history), len(events))
+    history      = await source.get_daily_history(router_sn, equip_type, panel_id, day)
+    state_events = await source.get_daily_state_events(router_sn, equip_type, panel_id, day)
+    logger.info("Строк истории: %d | state_events: %d", len(history), len(state_events))
 
     kb_path = await analytics.get_equipment_kb_path(router_sn, equip_type, panel_id)
     if kb_path:
@@ -52,12 +52,16 @@ async def _run(router_sn: str, equip_type: str, panel_id: int, day: date, out_pa
         aggregates=agg,
     )
 
+    logger.info("Наработка из state_events...")
+    from pipeline import aggregator as agg_mod
+    uptime_min, starts_count, intervals = agg_mod.calc_uptime_from_state_events(state_events)
+    logger.info("Наработка: %d мин | пусков: %d", uptime_min, starts_count)
+
     logger.info("Сегментация...")
     segments = segmenter.segment(
         history=history,
-        operating_intervals=agg.get("operating_intervals", []),
+        state_events=state_events,
         anomalies=anomalies,
-        events=events,
         operation_rules=kb.get("operation_rules", {}),
         register_map=kb["register_map"],
         day_start=day_start,

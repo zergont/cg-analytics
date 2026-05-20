@@ -54,6 +54,12 @@
                     <dd class="col-5">{{ result.anomalies_count }}</dd>
                     <dt class="col-7">Сегментов</dt>
                     <dd class="col-5">{{ result.segments|length }}</dd>
+                    <dt class="col-7">Источник сегм.</dt>
+                    <dd class="col-5">
+                        {% if result.segments %}
+                            <span class="badge bg-info-subtle text-info-emphasis">{{ result.segments[0].source or '?' }}</span>
+                        {% else %}—{% endif %}
+                    </dd>
                     <dt class="col-7">База знаний</dt>
                     <dd class="col-5">
                         {% if result.kb_path %}
@@ -116,16 +122,36 @@
                         {% if seg.parameters %}
                         <div class="d-flex flex-wrap gap-2 mt-1">
                             {% for addr, p in seg.parameters.items() %}
-                            <span class="badge bg-light text-dark border small" style="font-weight:400">
+                            <span class="badge bg-light text-dark border small" style="font-weight:400"
+                                  title="мин {{ p.min }} / макс {{ p.max }} / среднее {{ p.mean }} {{ p.unit }}{% if p.max_deviation_pct >= 20 %} ⚡ скачок {{ p.max_deviation_pct }}%{% endif %}">
                                 {{ p.name or addr }}:
-                                {% if p.min is not none and p.max is not none %}
-                                    {{ p.min }}–{{ p.max }}
-                                {% elif p.mean is not none %}
-                                    {{ p.mean }}
+                                {{ p.min }}–{{ p.max }} {{ p.unit or '' }}
+                                {% if p.max_deviation_pct is defined and p.max_deviation_pct >= 20 %}
+                                <span class="text-danger">⚡</span>
                                 {% endif %}
-                                {{ p.unit or '' }}
                             </span>
                             {% endfor %}
+                        </div>
+                        {% endif %}
+
+                        {% if seg.events %}
+                        <div class="mt-2">
+                            <details>
+                                <summary class="text-muted small" style="cursor:pointer">
+                                    События в сегменте ({{ seg.events|length }})
+                                </summary>
+                                <table class="table table-sm table-borderless mt-1 mb-0" style="font-size:0.78rem">
+                                    <tbody>
+                                    {% for ev in seg.events %}
+                                    <tr>
+                                        <td class="text-muted pe-2" style="white-space:nowrap">{{ ev.ts[11:19] }}</td>
+                                        <td class="text-muted pe-2">[{{ ev.addr }}]</td>
+                                        <td>{{ ev.text }}</td>
+                                    </tr>
+                                    {% endfor %}
+                                    </tbody>
+                                </table>
+                            </details>
                         </div>
                         {% endif %}
 

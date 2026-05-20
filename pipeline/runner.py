@@ -87,13 +87,22 @@ async def run_pipeline(
 
     # 3. Загрузка истории и событий
     logger.info("Загрузка истории телеметрии...")
-    history = await source.get_daily_history(router_sn, equip_type, panel_id, day)
-    events = await source.get_daily_events(router_sn, equip_type, panel_id, day)
-    logger.info("Загружено %d строк истории, %d событий", len(history), len(events))
+    history       = await source.get_daily_history(router_sn, equip_type, panel_id, day)
+    state_events  = await source.get_daily_state_events(router_sn, equip_type, panel_id, day)
+    events        = await source.get_daily_events(router_sn, equip_type, panel_id, day)
+    logger.info(
+        "Загружено %d строк истории, %d state_events, %d системных событий",
+        len(history), len(state_events), len(events),
+    )
 
     # 4. Агрегация
     logger.info("Агрегация данных...")
     agg_result = aggregator.aggregate(history, kb["register_map"])
+    # Наработка из state_events (40011 — enum, не попадает в history)
+    uptime_min, starts_count, intervals = aggregator.calc_uptime_from_state_events(state_events)
+    agg_result["uptime_minutes"]      = uptime_min
+    agg_result["starts_count"]        = starts_count
+    agg_result["operating_intervals"] = intervals
 
     # Подготовить history_series для agent executor
     from collections import defaultdict
@@ -119,9 +128,8 @@ async def run_pipeline(
     day_end = datetime(day.year, day.month, day.day, 23, 59, 59, tzinfo=timezone.utc)
     segments = segmenter.segment(
         history=history,
-        operating_intervals=agg_result.get("operating_intervals", []),
+        state_events=state_events,
         anomalies=anomalies,
-        events=events,
         operation_rules=kb.get("operation_rules", {}),
         register_map=kb["register_map"],
         day_start=day_start,

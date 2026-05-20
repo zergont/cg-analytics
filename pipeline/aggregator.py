@@ -83,40 +83,46 @@ def aggregate(
     }
 
 
-def _calc_uptime(
-    by_addr: dict[int, list[dict]],
-    register_map: dict[int, dict],
+def calc_uptime_from_state_events(
+    state_events: list[dict],
+    run_seq_addr: int = 40011,
 ) -> tuple[int, int, list[tuple[str, str]]]:
-    """Определить наработку и количество пусков по статусным регистрам.
+    """Наработка и пуски из state_events по RunSequenceState (addr=40011).
 
-    Ищет регистр с именем содержащим 'Run Sequence State' (addr 40011 для PCC)
-    или любой регистр с group='status'. Значение > 0 = работа.
+    Значение raw=0 → стоп, raw>0 → работа.
+    Возвращает (uptime_minutes, starts_count, intervals_iso).
     """
-    # Найти статусный регистр (GensetRun Sequence State, addr 40011)
-    status_addr = None
-    for addr, reg in register_map.items():
-        name = reg.get("name", "").lower()
-        if "run sequence" in name or "gensetrun" in name:
-            status_addr = addr
-            break
+    rows = sorted(
+        [e for e in state_events if e.get("addr") == run_seq_addr],
+        key=lambda r: r["ts"] if r["ts"].tzinfo else r["ts"].replace(tzinfo=timezone.utc),
+    )
 
-    if status_addr is None or status_addr not in by_addr:
+    if not rows:
         return 0, 0, []
-
-    rows = sorted(by_addr[status_addr], key=lambda r: r["ts"])
 
     intervals: list[tuple[str, str]] = []
     starts = 0
     run_start: datetime | None = None
     total_minutes = 0
 
+    # Определяем начальное состояние: если первое событие — стоп,
+    # значит машина работала с начала суток
+    first_raw = int(rows[0].get("raw", 0) or 0)
+    if first_raw == 0:
+        # первое событие — останов, значит работа началась до начала суток
+        first_ts = rows[0]["ts"]
+        if first_ts.tzinfo is None:
+            first_ts = first_ts.replace(tzinfo=timezone.utc)
+        run_start = first_ts.replace(hour=0, minute=0, second=0, microsecond=0)
+        starts += 1
+
     for r in rows:
-        raw = r.get("raw", 0) or 0
+        raw = int(r.get("raw", 0) or 0)
         ts: datetime = r["ts"]
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
 
-        is_running = raw > 0  # 0=Stop, всё остальное — работа
+        is_running = raw > 0
 
         if is_running and run_start is None:
             run_start = ts
@@ -137,3 +143,12 @@ def _calc_uptime(
         intervals.append((run_start.isoformat(), last_ts.isoformat()))
 
     return total_minutes, starts, intervals
+
+
+def _calc_uptime(
+    by_addr: dict[int, list[dict]],
+    register_map: dict[int, dict],
+) -> tuple[int, int, list[tuple[str, str]]]:
+    """Устаревший метод: 40011 теперь в state_events, а не в history.
+    Оставлен как заглушка — возвращает нули."""
+    return 0, 0, []
