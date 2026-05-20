@@ -1,0 +1,196 @@
+{% extends "base.html" %}
+{% block title %}Сегменты суток — cg-analytics{% endblock %}
+
+{% block content %}
+<h5 class="mb-3">Сегменты суток (Layer 1)</h5>
+
+<div class="row g-3">
+    <!-- Форма выбора -->
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header fw-semibold">Параметры</div>
+            <div class="card-body">
+                <form method="get" action="/segments">
+                    <div class="mb-3">
+                        <label class="form-label">Оборудование</label>
+                        <select name="router_sn" id="eq_select" class="form-select" required
+                                onchange="fillEquipment(this)">
+                            <option value="">— выберите —</option>
+                            {% for eq in equipment %}
+                            <option value="{{ eq.router_sn }}"
+                                    data-equip="{{ eq.equip_type }}"
+                                    data-panel="{{ eq.panel_id }}"
+                                    {% if eq.router_sn == selected_sn and eq.equip_type == selected_type and eq.panel_id|string == selected_panel %}selected{% endif %}>
+                                {{ eq.name or (eq.manufacturer or '') + ' ' + (eq.model or '') }}
+                                ({{ eq.router_sn }}/{{ eq.equip_type }}/{{ eq.panel_id }})
+                            </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <input type="hidden" name="equip_type" id="equip_type_inp" value="{{ selected_type }}">
+                    <input type="hidden" name="panel_id"   id="panel_id_inp"   value="{{ selected_panel }}">
+                    <div class="mb-3">
+                        <label class="form-label">Дата</label>
+                        <input type="date" name="seg_date" class="form-control"
+                               value="{{ default_date }}" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100">Построить сегменты</button>
+                </form>
+            </div>
+        </div>
+
+        {% if result %}
+        <div class="card mt-3">
+            <div class="card-header fw-semibold">Итоги дня</div>
+            <div class="card-body">
+                <dl class="row mb-0 small">
+                    <dt class="col-7">Строк телеметрии</dt>
+                    <dd class="col-5">{{ result.history_rows }}</dd>
+                    <dt class="col-7">Наработка</dt>
+                    <dd class="col-5">{{ result.uptime_minutes }} мин ({{ "%.1f"|format(result.uptime_minutes / 60) }} ч)</dd>
+                    <dt class="col-7">Пусков</dt>
+                    <dd class="col-5">{{ result.starts_count }}</dd>
+                    <dt class="col-7">Аномалий</dt>
+                    <dd class="col-5">{{ result.anomalies_count }}</dd>
+                    <dt class="col-7">Сегментов</dt>
+                    <dd class="col-5">{{ result.segments|length }}</dd>
+                    <dt class="col-7">База знаний</dt>
+                    <dd class="col-5">
+                        {% if result.kb_path %}
+                            <span class="badge bg-success-subtle text-success-emphasis">{{ result.kb_path }}</span>
+                        {% else %}
+                            <span class="text-muted">не задана</span>
+                        {% endif %}
+                    </dd>
+                </dl>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Результаты -->
+    <div class="col-md-8">
+        {% if error %}
+        <div class="alert alert-danger">{{ error }}</div>
+        {% elif result is none %}
+        <div class="alert alert-secondary">Выберите оборудование и дату, затем нажмите «Построить сегменты».</div>
+        {% elif result.segments|length == 0 %}
+        <div class="alert alert-warning">
+            Сегменты не найдены. Возможно, нет данных телеметрии за {{ result.date }}.
+        </div>
+        {% else %}
+
+        <div class="d-flex align-items-center mb-2 gap-2 flex-wrap">
+            <span class="fw-semibold">{{ result.date }}</span>
+            {% set seg_types = result.segments|map(attribute='type')|unique|list %}
+            {% for t in seg_types %}
+            <span class="badge {{ _seg_badge(t) }}">{{ _seg_label_short(t) }}</span>
+            {% endfor %}
+        </div>
+
+        <!-- Временная шкала -->
+        <div class="timeline mb-3">
+            {% for seg in result.segments %}
+            {% set bclass = _seg_badge(seg.type) %}
+            <div class="timeline-item mb-2">
+                <div class="card border-0 shadow-sm">
+                    <div class="card-header py-2 d-flex align-items-center gap-2 {{ _seg_header(seg.type) }}">
+                        <span class="badge {{ bclass }}">{{ _seg_label_short(seg.type) }}</span>
+                        <span class="fw-semibold small flex-grow-1">{{ seg.label }}</span>
+                        <span class="text-muted small">
+                            {{ seg.start[:19] if seg.start else '' }} –
+                            {{ seg.end[:19] if seg.end else '' }}
+                        </span>
+                        <span class="badge bg-light text-dark border">{{ seg.duration_min }} мин</span>
+                    </div>
+                    {% if seg.notes or seg.parameters or seg.related_anomalies %}
+                    <div class="card-body py-2">
+                        {% if seg.notes %}
+                        <ul class="mb-1 ps-3 small">
+                            {% for note in seg.notes %}
+                            <li>{{ note }}</li>
+                            {% endfor %}
+                        </ul>
+                        {% endif %}
+
+                        {% if seg.parameters %}
+                        <div class="d-flex flex-wrap gap-2 mt-1">
+                            {% for addr, p in seg.parameters.items() %}
+                            <span class="badge bg-light text-dark border small" style="font-weight:400">
+                                {{ p.name or addr }}:
+                                {% if p.min is not none and p.max is not none %}
+                                    {{ p.min }}–{{ p.max }}
+                                {% elif p.mean is not none %}
+                                    {{ p.mean }}
+                                {% endif %}
+                                {{ p.unit or '' }}
+                            </span>
+                            {% endfor %}
+                        </div>
+                        {% endif %}
+
+                        {% if seg.related_anomalies %}
+                        <div class="mt-1">
+                            {% for anom in seg.related_anomalies %}
+                            <span class="badge bg-danger-subtle text-danger-emphasis small">
+                                {{ anom.name or anom.type }}
+                            </span>
+                            {% endfor %}
+                        </div>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+
+        <!-- Аномалии -->
+        {% if result.anomalies %}
+        <div class="card">
+            <div class="card-header fw-semibold">Аномалии ({{ result.anomalies_count }})</div>
+            <div class="card-body p-0">
+                <table class="table table-sm mb-0">
+                    <thead class="table-light">
+                        <tr><th>Тип</th><th>Параметр</th><th>Severity</th><th>Первое</th><th>Длит, мин</th></tr>
+                    </thead>
+                    <tbody>
+                    {% for a in result.anomalies %}
+                    <tr>
+                        <td><span class="badge bg-secondary">{{ a.type }}</span></td>
+                        <td class="small">{{ a.name or a.addr or '' }}</td>
+                        <td>
+                            {% if a.severity == 'shutdown' %}
+                                <span class="badge bg-danger">shutdown</span>
+                            {% elif a.severity == 'warning' %}
+                                <span class="badge bg-warning text-dark">warning</span>
+                            {% elif a.severity == 'derate' %}
+                                <span class="badge bg-orange text-dark" style="background:#fd7e14">derate</span>
+                            {% else %}
+                                <span class="badge bg-secondary">{{ a.severity or '—' }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="small">{{ (a.first_seen or '')[:19] }}</td>
+                        <td>{{ a.duration_min or '—' }}</td>
+                    </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {% endif %}
+
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function fillEquipment(sel) {
+    const opt = sel.options[sel.selectedIndex];
+    document.getElementById('equip_type_inp').value = opt.dataset.equip || '';
+    document.getElementById('panel_id_inp').value   = opt.dataset.panel || '';
+}
+</script>
+{% endblock %}

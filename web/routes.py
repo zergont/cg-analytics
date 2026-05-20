@@ -19,6 +19,38 @@ templates = Jinja2Templates(directory="web/templates")
 _version_file = __import__("pathlib").Path(__file__).parent.parent / "VERSION"
 templates.env.globals["app_version"] = _version_file.read_text(encoding="utf-8").strip()
 
+# Хелперы для отображения сегментов в шаблоне segments.html
+_SEG_BADGE = {
+    "standstill":        "bg-secondary",
+    "startup_window":    "bg-warning text-dark",
+    "warmup":            "bg-info text-dark",
+    "normal_operation":  "bg-success",
+    "cooldown":          "bg-info text-dark",
+    "shutdown_window":   "bg-secondary",
+    "fault_window":      "bg-danger",
+}
+_SEG_LABEL = {
+    "standstill":        "Простой",
+    "startup_window":    "Пуск",
+    "warmup":            "Прогрев",
+    "normal_operation":  "Работа",
+    "cooldown":          "Охлаждение",
+    "shutdown_window":   "Останов",
+    "fault_window":      "Авария",
+}
+_SEG_HEADER = {
+    "standstill":        "bg-secondary bg-opacity-10",
+    "startup_window":    "bg-warning bg-opacity-10",
+    "warmup":            "bg-info bg-opacity-10",
+    "normal_operation":  "bg-success bg-opacity-10",
+    "cooldown":          "bg-info bg-opacity-10",
+    "shutdown_window":   "bg-secondary bg-opacity-10",
+    "fault_window":      "bg-danger bg-opacity-10",
+}
+templates.env.globals["_seg_badge"]       = lambda t: _SEG_BADGE.get(t, "bg-secondary")
+templates.env.globals["_seg_label_short"] = lambda t: _SEG_LABEL.get(t, t)
+templates.env.globals["_seg_header"]      = lambda t: _SEG_HEADER.get(t, "")
+
 # Хранилище активных задач запуска (task_key → dict)
 _running_tasks: dict[str, dict] = {}
 
@@ -110,6 +142,96 @@ async def run_start(
 @router.get("/run/status", response_class=JSONResponse)
 async def run_status():
     return JSONResponse(_running_tasks)
+
+
+# ── Просмотр сегментов суток (Layer 1, без агента) ───────────────────────────
+
+@router.get("/segments", response_class=HTMLResponse)
+async def segments_page(
+    request: Request,
+    router_sn: str = "",
+    equip_type: str = "",
+    panel_id: str = "",
+    seg_date: str = "",
+):
+    equipment = await analytics.get_equipment_registry()
+    yesterday = date.today() - timedelta(days=1)
+    result = None
+    error = None
+
+    if router_sn and equip_type and panel_id and seg_date:
+        try:
+            result = await _run_segments(router_sn, equip_type, int(panel_id), seg_date)
+        except Exception as e:
+            logger.exception("Ошибка сегментации: %s", e)
+            error = str(e)
+
+    return templates.TemplateResponse(request, "segments.html", {
+        "equipment": equipment,
+        "default_date": seg_date or str(yesterday),
+        "selected_sn": router_sn,
+        "selected_type": equip_type,
+        "selected_panel": panel_id,
+        "result": result,
+        "error": error,
+    })
+
+
+async def _run_segments(router_sn: str, equip_type: str, panel_id: int, seg_date: str) -> dict:
+    """Запустить агрегацию + детектирование + сегментацию без агента."""
+    import json
+    from datetime import datetime, timezone
+    from db import source
+    from knowledge.loader import load_knowledge
+    from pipeline import aggregator, detector, segmenter
+
+    day = date.fromisoformat(seg_date)
+    day_start = datetime(day.year, day.month, day.day, 0, 0, 0, tzinfo=timezone.utc)
+    day_end   = datetime(day.year, day.month, day.day, 23, 59, 59, tzinfo=timezone.utc)
+
+    history = await source.get_daily_history(router_sn, equip_type, panel_id, day)
+    events  = await source.get_daily_events(router_sn, equip_type, panel_id, day)
+
+    kb_path = await analytics.get_equipment_kb_path(router_sn, equip_type, panel_id)
+    if kb_path:
+        kb = load_knowledge(kb_path)
+    else:
+        kb = {"register_map": {}, "fault_bitmap_map": {}, "enum_map": {}, "operation_rules": {}}
+
+    agg = aggregator.aggregate(history, kb["register_map"])
+    anomalies = detector.detect(
+        history=history,
+        events=events,
+        register_map=kb["register_map"],
+        fault_bitmap_map=kb["fault_bitmap_map"],
+        aggregates=agg,
+    )
+    segments = segmenter.segment(
+        history=history,
+        operating_intervals=agg.get("operating_intervals", []),
+        anomalies=anomalies,
+        events=events,
+        operation_rules=kb.get("operation_rules", {}),
+        register_map=kb["register_map"],
+        day_start=day_start,
+        day_end=day_end,
+    )
+
+    def _ser(obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        raise TypeError
+
+    return {
+        "date": str(day),
+        "kb_path": kb_path or "",
+        "history_rows": len(history),
+        "anomalies_count": len(anomalies),
+        "anomalies": anomalies,
+        "uptime_minutes": agg.get("uptime_minutes", 0),
+        "starts_count": agg.get("starts_count", 0),
+        "segments": json.loads(json.dumps(segments, default=_ser)),
+    }
 
 
 # ── Knowledge Base ────────────────────────────────────────────────────────────
