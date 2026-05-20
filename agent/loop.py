@@ -32,7 +32,7 @@ async def run(ctx: "RunContext") -> dict[str, Any]:
     # RAG: извлечь релевантные описания регистров и fault-кодов
     active_addrs = list(ctx.history_series.keys())
     fault_addrs = [a["addr"] for a in ctx.anomalies if a.get("type") == "fault_bit"]
-    rag_context = retrieve_context(ctx.manufacturer, ctx.model, active_addrs, fault_addrs)
+    rag_context = retrieve_context(ctx.kb_path, active_addrs, fault_addrs)
 
     system_prompt = build_system_prompt(ctx, rag_context)
     user_prompt = build_user_prompt(ctx)

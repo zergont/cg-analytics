@@ -8,7 +8,7 @@ from typing import Any
 from config import settings
 from db import source, analytics
 from knowledge.loader import load_knowledge
-from pipeline import aggregator, detector
+from pipeline import aggregator, detector, segmenter
 from agent import loop as agent_loop
 
 logger = logging.getLogger(__name__)
@@ -27,13 +27,19 @@ class RunContext:
     engine_sn: str = ""
     equipment_name: str = ""
 
+    kb_path: str = ""
+
     # Карты из knowledge_base
     register_map: dict[int, dict] = field(default_factory=dict)
     fault_bitmap_map: dict[int, list[dict]] = field(default_factory=dict)
     enum_map: dict[str, dict] = field(default_factory=dict)
+    operation_rules: dict[str, Any] = field(default_factory=dict)
 
     # Результаты агрегации
     aggregates: dict[str, Any] = field(default_factory=dict)
+
+    # Сегменты суток (Layer 1)
+    segments: list[dict[str, Any]] = field(default_factory=list)
 
     # Сырая история для построения графиков агентом
     # addr → sorted list of (ts, value) tuples
@@ -70,15 +76,14 @@ async def run_pipeline(
     model = equip_info.get("model") or ""
     engine_sn = equip_info.get("engine_sn") or ""
 
-    if not manufacturer or not model:
-        raise ValueError(
-            f"Поля manufacturer/model не заполнены для {label}. "
-            "Заполните в разделе «Оборудование» основного UI."
-        )
-
-    # 2. Загрузка карт регистров из knowledge_base
-    logger.info("Загрузка knowledge base: %s / %s", manufacturer, model)
-    kb = load_knowledge(manufacturer, model)
+    # 2. Загрузка knowledge base по kb_path из реестра аналитики
+    kb_path = await analytics.get_equipment_kb_path(router_sn, equip_type, panel_id) or ""
+    if kb_path:
+        logger.info("Загрузка knowledge base: %s", kb_path)
+        kb = load_knowledge(kb_path)
+    else:
+        logger.warning("kb_path не задан для %s — анализ без базы знаний", label)
+        kb = {"register_map": {}, "fault_bitmap_map": {}, "enum_map": {}, "operation_rules": {}}
 
     # 3. Загрузка истории и событий
     logger.info("Загрузка истории телеметрии...")
@@ -107,7 +112,24 @@ async def run_pipeline(
     )
     logger.info("Обнаружено аномалий: %d", len(anomalies))
 
-    # 6. Формирование контекста
+    # 6. Сегментация суток (Layer 1)
+    logger.info("Сегментация суток...")
+    from datetime import datetime, timezone
+    day_start = datetime(day.year, day.month, day.day, 0, 0, 0, tzinfo=timezone.utc)
+    day_end = datetime(day.year, day.month, day.day, 23, 59, 59, tzinfo=timezone.utc)
+    segments = segmenter.segment(
+        history=history,
+        operating_intervals=agg_result.get("operating_intervals", []),
+        anomalies=anomalies,
+        events=events,
+        operation_rules=kb.get("operation_rules", {}),
+        register_map=kb["register_map"],
+        day_start=day_start,
+        day_end=day_end,
+    )
+    logger.info("Сегментов суток: %d", len(segments))
+
+    # 7. Формирование контекста
     ctx = RunContext(
         router_sn=router_sn,
         equip_type=equip_type,
@@ -117,23 +139,26 @@ async def run_pipeline(
         model=model,
         engine_sn=engine_sn,
         equipment_name=equip_info.get("name") or "",
+        kb_path=kb_path,
         register_map=kb["register_map"],
         fault_bitmap_map=kb["fault_bitmap_map"],
         enum_map=kb["enum_map"],
+        operation_rules=kb.get("operation_rules", {}),
         aggregates=agg_result,
         history_series=dict(history_series),
         events=events,
         anomalies=anomalies,
+        segments=segments,
     )
 
-    # 7. Agentic loop
+    # 8. Agentic loop
     logger.info("Запуск agentic loop...")
     agent_result = await agent_loop.run(ctx)
 
-    # 8. Определение итогового статуса
+    # 9. Определение итогового статуса
     status = _determine_status(anomalies, agent_result)
 
-    # 9. Сохранение в analytics DB
+    # 10. Сохранение в analytics DB
     generation_time = round(time.monotonic() - t_start, 2)
     report = {
         "date": day,

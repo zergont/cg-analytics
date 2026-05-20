@@ -51,6 +51,11 @@ USER_TEMPLATE = """# Суточный отчёт: {equipment_label}
 - Пусков за сутки: {starts_count}
 - Интервалы работы: {intervals_str}
 
+## Сегменты суток ({segment_count})
+```json
+{segments}
+```
+
 ## Агрегированные показатели (ключевые параметры)
 ```json
 {key_aggregates}
@@ -100,6 +105,8 @@ def build_user_prompt(ctx: "RunContext") -> str:
     by_reg = ctx.aggregates.get("by_register", {})
     key_regs = _select_key_registers(by_reg, ctx.register_map)
 
+    segments_brief = _summarize_segments(ctx.segments)
+
     return USER_TEMPLATE.format(
         equipment_label=f"{ctx.manufacturer} {ctx.model} ({ctx.equipment_name})",
         date=str(ctx.day),
@@ -107,6 +114,8 @@ def build_user_prompt(ctx: "RunContext") -> str:
         uptime_hours=uptime / 60,
         starts_count=starts,
         intervals_str=intervals_str,
+        segment_count=len(ctx.segments),
+        segments=json.dumps(segments_brief, ensure_ascii=False, indent=2),
         key_aggregates=json.dumps(key_regs, ensure_ascii=False, indent=2),
         anomaly_count=len(ctx.anomalies),
         anomalies=json.dumps(ctx.anomalies, ensure_ascii=False, indent=2),
@@ -161,3 +170,22 @@ def _summarize_events(events: list[dict[str, Any]]) -> str:
         for ev in events[:50]  # не более 50 событий в промпт
     ]
     return json.dumps(summary, ensure_ascii=False, indent=2)
+
+
+def _summarize_segments(segments: list[dict[str, Any]]) -> list[dict]:
+    """Краткое представление сегментов для промпта."""
+    result = []
+    for seg in segments:
+        brief: dict[str, Any] = {
+            "type": seg.get("type"),
+            "label": seg.get("label"),
+            "start": str(seg.get("start", ""))[:19],
+            "end": str(seg.get("end", ""))[:19],
+            "duration_min": seg.get("duration_min"),
+        }
+        if seg.get("notes"):
+            brief["notes"] = seg["notes"]
+        if seg.get("related_anomalies"):
+            brief["related_anomalies"] = len(seg["related_anomalies"])
+        result.append(brief)
+    return result

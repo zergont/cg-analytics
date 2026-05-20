@@ -7,12 +7,11 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 # Кэш инициализированных индексов
-_index_cache: dict[tuple[str, str], Any] = {}
+_index_cache: dict[str, Any] = {}
 
 
 def retrieve_context(
-    manufacturer: str,
-    model: str,
+    kb_path: str,
     active_addrs: list[int],
     fault_addrs: list[int] | None = None,
     top_k: int = 20,
@@ -22,13 +21,13 @@ def retrieve_context(
     Формирует запрос из активных адресов регистров и fault-кодов,
     возвращает текстовый блок для вставки в system prompt.
     """
-    if not active_addrs:
+    if not kb_path or not active_addrs:
         return ""
 
     try:
-        index = _get_index(manufacturer, model)
+        index = _get_index(kb_path)
     except Exception as e:
-        logger.warning("RAG недоступен для %s/%s: %s", manufacturer, model, e)
+        logger.warning("RAG недоступен для %s: %s", kb_path, e)
         return ""
 
     # Формируем запрос из адресов активных регистров
@@ -70,9 +69,9 @@ def retrieve_context(
         return ""
 
 
-def _get_index(manufacturer: str, model: str):
-    """Получить или инициализировать LlamaIndex для модели оборудования."""
-    cache_key = (manufacturer.lower(), model.lower())
+def _get_index(kb_path: str):
+    """Получить или инициализировать LlamaIndex для папки kb_path."""
+    cache_key = kb_path.lower()
     if cache_key in _index_cache:
         return _index_cache[cache_key]
 
@@ -81,7 +80,7 @@ def _get_index(manufacturer: str, model: str):
     from llama_index.vector_stores.postgres import PGVectorStore
     from llama_index.embeddings.ollama import OllamaEmbedding
 
-    from knowledge.indexer import _get_vector_store, _table_name
+    from knowledge.indexer import _get_vector_store
 
     LlamaSettings.embed_model = OllamaEmbedding(
         model_name=settings.embedding_model,
@@ -90,17 +89,17 @@ def _get_index(manufacturer: str, model: str):
     )
     LlamaSettings.llm = None
 
-    vector_store = _get_vector_store(manufacturer, model)
+    vector_store = _get_vector_store(kb_path)
     index = VectorStoreIndex.from_vector_store(vector_store)
 
     _index_cache[cache_key] = index
-    logger.info("RAG-индекс загружен: %s/%s", manufacturer, model)
+    logger.info("RAG-индекс загружен: %s", kb_path)
     return index
 
 
-def invalidate_cache(manufacturer: str | None = None, model: str | None = None) -> None:
+def invalidate_cache(kb_path: str | None = None) -> None:
     """Сбросить кэш индексов после переиндексации."""
-    if manufacturer and model:
-        _index_cache.pop((manufacturer.lower(), model.lower()), None)
+    if kb_path:
+        _index_cache.pop(kb_path.lower(), None)
     else:
         _index_cache.clear()

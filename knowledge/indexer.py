@@ -1,17 +1,15 @@
 """Построение pgvector-индекса для RAG.
 
 Индексирует register_map.jsonl, fault_bitmap_map.jsonl и PDF-документы
-из knowledge_base/equipment/{manufacturer}/{model}/docs/.
+из knowledge_base/equipment/{kb_path}/docs/.
 
 Использование:
     python -m knowledge.indexer --all
-    python -m knowledge.indexer --manufacturer Cummins --model KTA50
+    python -m knowledge.indexer --kb-path cummins_kta50_pcc3300
 """
 import argparse
 import logging
-import os
 from pathlib import Path
-from typing import Any
 
 from config import settings
 
@@ -28,12 +26,11 @@ def _get_embed_model():
     )
 
 
-def _get_vector_store(manufacturer: str, model: str):
-    """PGVectorStore для конкретной модели оборудования."""
+def _get_vector_store(kb_path: str):
+    """PGVectorStore для конкретной KB-папки."""
     from llama_index.vector_stores.postgres import PGVectorStore
 
-    # Имя таблицы: kb_{manufacturer}_{model} (нормализованное)
-    table_name = _table_name(manufacturer, model)
+    table_name = _table_name(kb_path)
 
     return PGVectorStore.from_params(
         database=_parse_db_name(settings.analytics_db_url),
@@ -46,46 +43,43 @@ def _get_vector_store(manufacturer: str, model: str):
     )
 
 
-def index_equipment(manufacturer: str, model: str) -> int:
-    """Построить или пересобрать индекс для модели. Возвращает количество документов."""
+def index_equipment(kb_path: str) -> int:
+    """Построить или пересобрать индекс для kb_path. Возвращает количество документов."""
     from llama_index.core import VectorStoreIndex, Document, StorageContext
     from llama_index.core import Settings as LlamaSettings
 
     LlamaSettings.embed_model = _get_embed_model()
-    LlamaSettings.llm = None  # LLM не нужна для индексации
+    LlamaSettings.llm = None
 
-    base_path = settings.knowledge_base_path / "equipment" / manufacturer / model
+    base_path = settings.knowledge_base_path / "equipment" / kb_path
     if not base_path.exists():
         raise FileNotFoundError(f"Папка не найдена: {base_path}")
 
     documents: list[Document] = []
 
-    # 1. Регистры
     reg_path = base_path / "register_map.jsonl"
     if reg_path.exists():
-        docs = _docs_from_register_map(reg_path, manufacturer, model)
+        docs = _docs_from_register_map(reg_path, kb_path)
         documents.extend(docs)
         logger.info("register_map.jsonl: %d документов", len(docs))
 
-    # 2. Fault-биты
     fault_path = base_path / "fault_bitmap_map.jsonl"
     if fault_path.exists():
-        docs = _docs_from_fault_bitmap(fault_path, manufacturer, model)
+        docs = _docs_from_fault_bitmap(fault_path, kb_path)
         documents.extend(docs)
         logger.info("fault_bitmap_map.jsonl: %d документов", len(docs))
 
-    # 3. PDF-документы из docs/
     docs_dir = base_path / "docs"
     if docs_dir.exists():
-        docs = _docs_from_pdfs(docs_dir, manufacturer, model)
+        docs = _docs_from_pdfs(docs_dir, kb_path)
         documents.extend(docs)
         logger.info("PDF-документы: %d чанков", len(docs))
 
     if not documents:
-        logger.warning("Нет документов для индексации: %s/%s", manufacturer, model)
+        logger.warning("Нет документов для индексации: %s", kb_path)
         return 0
 
-    vector_store = _get_vector_store(manufacturer, model)
+    vector_store = _get_vector_store(kb_path)
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
     VectorStoreIndex.from_documents(
@@ -94,14 +88,11 @@ def index_equipment(manufacturer: str, model: str) -> int:
         show_progress=True,
     )
 
-    logger.info(
-        "Индекс построен: %s/%s | документов=%d",
-        manufacturer, model, len(documents)
-    )
+    logger.info("Индекс построен: %s | документов=%d", kb_path, len(documents))
     return len(documents)
 
 
-def _docs_from_register_map(path: Path, manufacturer: str, model: str) -> list:
+def _docs_from_register_map(path: Path, kb_path: str) -> list:
     """Один документ на регистр."""
     import json
     from llama_index.core import Document
@@ -124,19 +115,14 @@ def _docs_from_register_map(path: Path, manufacturer: str, model: str) -> list:
                 )
                 docs.append(Document(
                     text=text,
-                    metadata={
-                        "type": "register",
-                        "addr": rec["addr"],
-                        "manufacturer": manufacturer,
-                        "model": model,
-                    },
+                    metadata={"type": "register", "addr": rec["addr"], "kb_path": kb_path},
                 ))
             except (json.JSONDecodeError, KeyError):
                 pass
     return docs
 
 
-def _docs_from_fault_bitmap(path: Path, manufacturer: str, model: str) -> list:
+def _docs_from_fault_bitmap(path: Path, kb_path: str) -> list:
     """Один документ на fault-бит."""
     import json
     from llama_index.core import Document
@@ -162,8 +148,7 @@ def _docs_from_fault_bitmap(path: Path, manufacturer: str, model: str) -> list:
                         "addr": rec["addr"],
                         "bit": rec["bit"],
                         "severity": rec.get("severity", "warning"),
-                        "manufacturer": manufacturer,
-                        "model": model,
+                        "kb_path": kb_path,
                     },
                 ))
             except (json.JSONDecodeError, KeyError):
@@ -171,7 +156,7 @@ def _docs_from_fault_bitmap(path: Path, manufacturer: str, model: str) -> list:
     return docs
 
 
-def _docs_from_pdfs(docs_dir: Path, manufacturer: str, model: str) -> list:
+def _docs_from_pdfs(docs_dir: Path, kb_path: str) -> list:
     """Чанкинг PDF-документов по странице."""
     from llama_index.core import Document
 
@@ -195,8 +180,7 @@ def _docs_from_pdfs(docs_dir: Path, manufacturer: str, model: str) -> list:
                         "type": "manual",
                         "source": pdf_path.name,
                         "page": i + 1,
-                        "manufacturer": manufacturer,
-                        "model": model,
+                        "kb_path": kb_path,
                     },
                 ))
         except Exception as e:
@@ -205,14 +189,13 @@ def _docs_from_pdfs(docs_dir: Path, manufacturer: str, model: str) -> list:
     return docs
 
 
-def _table_name(manufacturer: str, model: str) -> str:
+def _table_name(kb_path: str) -> str:
     import re
-    raw = f"kb_{manufacturer}_{model}".lower()
+    raw = f"kb_{kb_path}".lower()
     return re.sub(r"[^a-z0-9_]", "_", raw)[:60]
 
 
 # ── URL parsing helpers ───────────────────────────────────────────────────────
-# postgresql://user:pass@host:port/dbname
 
 def _parse_db_name(url: str) -> str:
     return url.split("/")[-1].split("?")[0]
@@ -243,27 +226,23 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
     parser = argparse.ArgumentParser(description="Построение RAG-индекса knowledge base")
-    parser.add_argument("--all", action="store_true", help="Индексировать всё оборудование")
-    parser.add_argument("--manufacturer", help="Производитель")
-    parser.add_argument("--model", help="Модель")
+    parser.add_argument("--all", action="store_true", help="Индексировать все KB-папки")
+    parser.add_argument("--kb-path", help="Папка equipment/ (например: cummins_kta50_pcc3300)")
     args = parser.parse_args()
 
     if args.all:
         eq_root = settings.knowledge_base_path / "equipment"
-        for mfr_dir in sorted(eq_root.iterdir()):
-            if not mfr_dir.is_dir():
+        for kb_dir in sorted(eq_root.iterdir()):
+            if not kb_dir.is_dir():
                 continue
-            for model_dir in sorted(mfr_dir.iterdir()):
-                if not model_dir.is_dir():
-                    continue
-                try:
-                    count = index_equipment(mfr_dir.name, model_dir.name)
-                    print(f"✓ {mfr_dir.name}/{model_dir.name}: {count} документов")
-                except Exception as e:
-                    print(f"✗ {mfr_dir.name}/{model_dir.name}: {e}", file=sys.stderr)
-    elif args.manufacturer and args.model:
-        count = index_equipment(args.manufacturer, args.model)
-        print(f"✓ {args.manufacturer}/{args.model}: {count} документов")
+            try:
+                count = index_equipment(kb_dir.name)
+                print(f"✓ {kb_dir.name}: {count} документов")
+            except Exception as e:
+                print(f"✗ {kb_dir.name}: {e}", file=sys.stderr)
+    elif args.kb_path:
+        count = index_equipment(args.kb_path)
+        print(f"✓ {args.kb_path}: {count} документов")
     else:
         parser.print_help()
         sys.exit(1)

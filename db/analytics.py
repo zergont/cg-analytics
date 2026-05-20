@@ -134,6 +134,21 @@ async def clear_equipment_registry() -> int:
         await conn.close()
 
 
+async def get_equipment_kb_path(
+    router_sn: str, equip_type: str, panel_id: int
+) -> str | None:
+    """Вернуть kb_path для конкретного устройства из реестра аналитики."""
+    conn = await _connect()
+    try:
+        row = await conn.fetchrow("""
+            SELECT kb_path FROM equipment_registry
+            WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+        """, router_sn, equip_type, panel_id)
+        return row["kb_path"] if row else None
+    finally:
+        await conn.close()
+
+
 async def set_equipment_active(
     router_sn: str, equip_type: str, panel_id: int, active: bool
 ) -> None:
