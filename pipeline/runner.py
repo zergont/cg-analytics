@@ -95,6 +95,12 @@ async def run_pipeline(
         len(history), len(state_events), len(events),
     )
 
+    if not history and not state_events:
+        raise ValueError(
+            f"Нет данных телеметрии за {day}. "
+            "Устройство не передавало данные или дата указана неверно."
+        )
+
     # 4. Агрегация
     logger.info("Агрегация данных...")
     agg_result = aggregator.aggregate(history, kb["register_map"])

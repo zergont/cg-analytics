@@ -184,6 +184,8 @@ async def _run_segments(router_sn: str, equip_type: str, panel_id: int, seg_date
     from db import source
     from knowledge.loader import load_knowledge
     from pipeline import aggregator, detector, segmenter
+    from pipeline.runner import RunContext
+    from agent.prompt import build_user_prompt
 
     day = date.fromisoformat(seg_date)
     day_start = datetime(day.year, day.month, day.day, 0, 0, 0, tzinfo=timezone.utc)
@@ -192,6 +194,8 @@ async def _run_segments(router_sn: str, equip_type: str, panel_id: int, seg_date
     history      = await source.get_daily_history(router_sn, equip_type, panel_id, day)
     state_events = await source.get_daily_state_events(router_sn, equip_type, panel_id, day)
     events       = await source.get_daily_events(router_sn, equip_type, panel_id, day)
+
+    has_data = bool(history or state_events)
 
     kb_path = await analytics.get_equipment_kb_path(router_sn, equip_type, panel_id)
     if kb_path:
@@ -227,15 +231,57 @@ async def _run_segments(router_sn: str, equip_type: str, panel_id: int, seg_date
             return obj.isoformat()
         raise TypeError
 
+    segments_json = json.loads(json.dumps(segments, default=_ser))
+
+    # Метаданные устройства для промпта
+    equip_info = await analytics.get_equipment_registry()
+    eq = next(
+        (e for e in equip_info
+         if e["router_sn"] == router_sn
+         and e["equip_type"] == equip_type
+         and str(e["panel_id"]) == str(panel_id)),
+        {}
+    )
+
+    # Предпросмотр промпта (то, что получит агент)
+    ctx = RunContext(
+        router_sn=router_sn,
+        equip_type=equip_type,
+        panel_id=int(panel_id),
+        day=day,
+        manufacturer=eq.get("manufacturer") or "",
+        model=eq.get("model") or "",
+        engine_sn=eq.get("engine_sn") or "",
+        equipment_name=eq.get("name") or "",
+        kb_path=kb_path or "",
+        register_map=kb["register_map"],
+        fault_bitmap_map=kb.get("fault_bitmap_map", {}),
+        enum_map=kb.get("enum_map", {}),
+        operation_rules=kb.get("operation_rules", {}),
+        aggregates=agg,
+        history_series={},
+        events=events,
+        anomalies=anomalies,
+        segments=segments_json,
+    )
+    prompt_preview = build_user_prompt(ctx)
+
     return {
         "date": str(day),
         "kb_path": kb_path or "",
+        "has_data": has_data,
         "history_rows": len(history),
+        "state_events_count": len(state_events),
         "anomalies_count": len(anomalies),
         "anomalies": anomalies,
         "uptime_minutes": agg.get("uptime_minutes", 0),
         "starts_count": agg.get("starts_count", 0),
-        "segments": json.loads(json.dumps(segments, default=_ser)),
+        "segments": segments_json,
+        "prompt_preview": prompt_preview,
+        "equip_label": (
+            f"{eq.get('name') or ''} "
+            f"({eq.get('manufacturer') or ''} {eq.get('model') or ''})".strip()
+        ),
     }
 
 
