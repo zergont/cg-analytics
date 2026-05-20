@@ -140,20 +140,17 @@ async def knowledge_page(request: Request):
 
 
 @router.post("/knowledge/reindex")
-async def reindex(
-    manufacturer: str = Form(...),
-    model: str = Form(...),
-):
+async def reindex(kb_path: str = Form(...)):
     """Запустить переиндексацию в фоне."""
     async def _reindex():
         from knowledge.indexer import index_equipment
         from knowledge.retriever import invalidate_cache
         from knowledge.loader import invalidate_cache as loader_invalidate
         try:
-            count = index_equipment(manufacturer, model)
-            invalidate_cache(manufacturer, model)
-            loader_invalidate(manufacturer, model)
-            logger.info("Переиндексация завершена: %s/%s, %d документов", manufacturer, model, count)
+            count = index_equipment(kb_path)
+            invalidate_cache(kb_path)
+            loader_invalidate(kb_path)
+            logger.info("Переиндексация завершена: %s, %d документов", kb_path, count)
         except Exception as e:
             logger.exception("Ошибка переиндексации: %s", e)
 

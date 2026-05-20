@@ -7,17 +7,17 @@
 {% if not models %}
 <div class="alert alert-secondary">
     База знаний пуста. Добавьте папку в
-    <code>knowledge_base/equipment/{Производитель}/{Модель}/</code>
+    <code>knowledge_base/equipment/{название}/</code>
     с файлами <code>register_map.jsonl</code>, <code>fault_bitmap_map.jsonl</code>, <code>enum_map.json</code>.
 </div>
 {% else %}
 <table class="table table-sm table-hover">
     <thead class="table-dark">
         <tr>
-            <th>Производитель</th>
-            <th>Модель</th>
+            <th>База знаний</th>
             <th>Регистров</th>
             <th>Fault-битов</th>
+            <th>Правила работы</th>
             <th>PDF-документов</th>
             <th></th>
         </tr>
@@ -25,17 +25,22 @@
     <tbody>
     {% for m in models %}
     <tr>
-        <td>{{ m.manufacturer }}</td>
-        <td>{{ m.model }}</td>
+        <td><code>{{ m.kb_path }}</code></td>
         <td>{{ m.registers }}</td>
         <td>{{ m.faults }}</td>
+        <td>
+            {% if m.has_rules %}
+                <span class="badge bg-success-subtle text-success-emphasis">есть</span>
+            {% else %}
+                <span class="badge bg-secondary-subtle text-secondary-emphasis">нет</span>
+            {% endif %}
+        </td>
         <td>{{ m.pdfs }}</td>
         <td>
             <form method="post" action="/knowledge/reindex" class="d-inline">
-                <input type="hidden" name="manufacturer" value="{{ m.manufacturer }}">
-                <input type="hidden" name="model" value="{{ m.model }}">
+                <input type="hidden" name="kb_path" value="{{ m.kb_path }}">
                 <button type="submit" class="btn btn-sm btn-outline-warning"
-                        onclick="return confirm('Пересобрать RAG-индекс для {{ m.manufacturer }} {{ m.model }}?')">
+                        onclick="return confirm('Пересобрать RAG-индекс для {{ m.kb_path }}?')">
                     Переиндексировать
                 </button>
             </form>
