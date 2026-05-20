@@ -229,7 +229,28 @@ else
 fi
 
 # =============================================================================
-# 9. Systemd-сервис (опционально)
+# 9. Статические файлы (Bootstrap — локально, без CDN)
+# =============================================================================
+step "Статические файлы Bootstrap"
+
+STATIC_DIR="web/static"
+mkdir -p "$STATIC_DIR"
+
+BS_VER="5.3.3"
+BS_CSS="$STATIC_DIR/bootstrap.min.css"
+BS_JS="$STATIC_DIR/bootstrap.bundle.min.js"
+
+if [[ ! -f "$BS_CSS" ]] || [[ ! -f "$BS_JS" ]]; then
+    info "Скачиваю Bootstrap $BS_VER..."
+    curl -fsSL "https://cdn.jsdelivr.net/npm/bootstrap@${BS_VER}/dist/css/bootstrap.min.css" -o "$BS_CSS"
+    curl -fsSL "https://cdn.jsdelivr.net/npm/bootstrap@${BS_VER}/dist/js/bootstrap.bundle.min.js" -o "$BS_JS"
+    ok "Bootstrap $BS_VER скачан в $STATIC_DIR/"
+else
+    ok "Bootstrap уже есть в $STATIC_DIR/"
+fi
+
+# =============================================================================
+# 10. Systemd-сервис (опционально)
 # =============================================================================
 step "Systemd-сервис"
 
