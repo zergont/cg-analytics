@@ -1,0 +1,829 @@
+{"reg_type": "holding", "addr": 40400, "bit": 0, "name": "Engine Magnetic Crankshaft Speed/Position", "description": "Датчик положения/скорости коленвала (магнитный)", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40400, "bit": 1, "name": "Intake Manifold 1 Pressure: Vtg Above Normal", "description": "Давление во впускном коллекторе 1: напряжение выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40400, "bit": 2, "name": "Intake Manifold 1 Pressure: Vtg Below Normal", "description": "Давление во впускном коллекторе 1: напряжение ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40400, "bit": 3, "name": "Intake Manifold 1 Pressure: Moderately Severe", "description": "Давление во впускном коллекторе 1: умеренно критическое", "severity": "warning"}
+{"reg_type": "holding", "addr": 40400, "bit": 4, "name": "Engine Oil Rifle Pressure 1: Vtg Above Normal", "description": "Давление масла в канале двигателя 1: напряжение выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40400, "bit": 5, "name": "Engine Oil Rifle Pressure 1: Vtg Below Normal", "description": "Давление масла в канале двигателя 1: напряжение ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40400, "bit": 6, "name": "Engine Oil Rifle Pressure - Moderately Severe", "description": "Давление масла в канале двигателя: умеренно критическое", "severity": "warning"}
+{"reg_type": "holding", "addr": 40400, "bit": 7, "name": "Engine Coolant Temp 1: Vtg Above Normal", "description": "Температура ОЖ двигателя 1: напряжение выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40400, "bit": 8, "name": "Engine Coolant Temp 1: Vtg Below Normal", "description": "Температура ОЖ двигателя 1: напряжение ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40400, "bit": 9, "name": "Engine Coolant Temp: Moderately Above Normal", "description": "Температура ОЖ двигателя: умеренно выше нормы", "severity": "derate"}
+{"reg_type": "holding", "addr": 40400, "bit": 10, "name": "Engine Coolant Temp: Severely Above Normal", "description": "Температура ОЖ двигателя: критически выше нормы", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40400, "bit": 11, "name": "Intake Manifold 1 Temp: Vtg Above Normal", "description": "Температура во впускном коллекторе 1: напряжение выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40400, "bit": 12, "name": "Intake Manifold 1 Temp: Vtg Below Normal", "description": "Температура во впускном коллекторе 1: напряжение ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40400, "bit": 13, "name": "Intake Manifold 1 Temp: Severely Above Normal", "description": "Температура во впускном коллекторе 1: критически выше нормы", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40400, "bit": 14, "name": "SensorSupply2:VtgBelowNormal", "description": "Питание датчика 2: напряжение ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40400, "bit": 15, "name": "Coolant Level Sensor 1: Vtg Above Normal", "description": "Датчик уровня ОЖ 1: напряжение выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40401, "bit": 0, "name": "Coolant Level Sensor 1: Vtg Below Normal", "description": "Датчик уровня ОЖ 1: напряжение ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40401, "bit": 1, "name": "Coolant Level: Below Normal - Moderately Severe", "description": "Уровень ОЖ: ниже нормы — умеренно критический", "severity": "warning"}
+{"reg_type": "holding", "addr": 40401, "bit": 2, "name": "Engine Oil Temp Sensor 1: Vtg Above Normal", "description": "Датчик температуры масла двигателя 1: напряжение выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40401, "bit": 3, "name": "Engine Oil Temp Sensor 1: Vtg below Normal", "description": "Датчик температуры масла двигателя 1: напряжение ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40401, "bit": 4, "name": "Engine Oil Temp: Above Normal - Most severe", "description": "Температура масла двигателя: выше нормы — наиболее критическая", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40401, "bit": 5, "name": "Barometric Pressure: Vtg Above Normal", "description": "Атмосферное давление: напряжение выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40401, "bit": 6, "name": "Barometric Pressure Sensor: Vtg Below Normal", "description": "Датчик атмосферного давления: напряжение ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40401, "bit": 7, "name": "Engine Oil Burn Valve Solenoid: Vtg Below Normal", "description": "Соленоид клапана дожигания масла: напряжение ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40401, "bit": 8, "name": "Engine Oil Burn Valve Solenoid: Vtg Above Normal", "description": "Соленоид клапана дожигания масла: напряжение выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40401, "bit": 9, "name": "SensorSupply2:VtgAboveNormal", "description": "Питание датчика 2: напряжение выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40401, "bit": 10, "name": "Coolant Pressure: Below Normal- Most Severe", "description": "Давление ОЖ: ниже нормы — наиболее критическое", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40401, "bit": 11, "name": "Coolant Pressure Sensor: Vtg Above Normal", "description": "Датчик давления ОЖ: напряжение выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40401, "bit": 12, "name": "Coolant Pressure Sensor: Vtg Below Normal", "description": "Датчик давления ОЖ: напряжение ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40401, "bit": 13, "name": "Engine Crankshaft Speed/Posn: Above Normal", "description": "Скорость/положение коленвала двигателя: выше нормы", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40401, "bit": 14, "name": "Coolant Level: Below Normal-Most Severe", "description": "Уровень ОЖ: ниже нормы — наиболее критический", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40401, "bit": 15, "name": "SensorSupply3:VtgBelowNormal", "description": "Питание датчика 3: напряжение ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40402, "bit": 0, "name": "VoltageSupplyCHighError", "description": "Напряжение питания C: выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40402, "bit": 1, "name": "Radiator Fan Control Driver Low Error", "description": "Ошибка нижнего уровня драйвера управления вентилятором радиатора", "severity": "warning"}
+{"reg_type": "holding", "addr": 40402, "bit": 2, "name": "Engine Fuel Temp: Above Normal- Moderately Severe", "description": "Температура топлива двигателя: выше нормы — умеренно критическая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40402, "bit": 3, "name": "Engine Fuel Temp Sensor 1: Vtg Above Normal", "description": "Датчик температуры топлива двигателя 1: напряжение выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40402, "bit": 4, "name": "Engine Fuel Temp Sensor 1: Vtg Below Normal", "description": "Датчик температуры топлива двигателя 1: напряжение ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40402, "bit": 5, "name": "Engine Fuel Temp: Above Normal- Most severe", "description": "Температура топлива двигателя: выше нормы — наиболее критическая", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40402, "bit": 6, "name": "Fuel Pump Pressurizing Assembly 1: Vtg Below Normal", "description": "Нагнетательный узел топливного насоса 1: напряжение ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40402, "bit": 7, "name": "Fuel Pump Pressurizing Assembly 1: Vtg Above Normal", "description": "Нагнетательный узел топливного насоса 1: напряжение выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40402, "bit": 8, "name": "APC_Diesel_CYL_PRS_IMBAL_Erro r", "description": "APC: дизель — дисбаланс давления в цилиндрах", "severity": "warning"}
+{"reg_type": "holding", "addr": 40402, "bit": 9, "name": "SAE J1939 Muxing PGN Timeout: Abnormal Update Rate", "description": "SAE J1939 Muxing — таймаут PGN: аномальная частота обновления", "severity": "warning"}
+{"reg_type": "holding", "addr": 40402, "bit": 10, "name": "SAE J1939 Muxing Config: Out of Calibration", "description": "SAE J1939 Muxing — конфигурация: вне калибровки", "severity": "warning"}
+{"reg_type": "holding", "addr": 40402, "bit": 13, "name": "Ambient_Air_Press_KeyOn_Error", "description": "Атмосферное давление при включении зажигания: ошибка", "severity": "warning"}
+{"reg_type": "holding", "addr": 40402, "bit": 14, "name": "RTC PWR Intr: Data Erratic Intermittent or Wrong", "description": "Прерывание питания RTC: нестабильные, прерывистые или неверные данные", "severity": "warning"}
+{"reg_type": "holding", "addr": 40402, "bit": 15, "name": "Injector Solenoid Driver Cylinder 1: UnderCurrent", "description": "Драйвер соленоида форсунки, цилиндр 1: недостаточный ток", "severity": "warning"}
+{"reg_type": "holding", "addr": 40403, "bit": 0, "name": "Injector Solenoid Driver Cylinder 5: UnderCurrent", "description": "Драйвер соленоида форсунки, цилиндр 5: недостаточный ток", "severity": "warning"}
+{"reg_type": "holding", "addr": 40403, "bit": 1, "name": "Injector Solenoid Driver Cylinder 3: UnderCurrent", "description": "Драйвер соленоида форсунки, цилиндр 3: недостаточный ток", "severity": "warning"}
+{"reg_type": "holding", "addr": 40403, "bit": 2, "name": "Injector Solenoid Driver Cylinder 6: UnderCurrent", "description": "Драйвер соленоида форсунки, цилиндр 6: недостаточный ток", "severity": "warning"}
+{"reg_type": "holding", "addr": 40403, "bit": 3, "name": "Injector Solenoid Driver Cylinder 2: UnderCurrent", "description": "Драйвер соленоида форсунки, цилиндр 2: недостаточный ток", "severity": "warning"}
+{"reg_type": "holding", "addr": 40403, "bit": 4, "name": "Injector Solenoid Driver Cylinder 4: UnderCurrent", "description": "Драйвер соленоида форсунки, цилиндр 4: недостаточный ток", "severity": "warning"}
+{"reg_type": "holding", "addr": 40403, "bit": 6, "name": "Electronic Calibration Code: Out of Calibration", "description": "Код электронной калибровки: вне калибровки", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40403, "bit": 7, "name": "Eng Ctrl: internal h/w failure-Bad Device/Component", "description": "Управление двигателем: внутренний аппаратный сбой — неисправный компонент", "severity": "warning"}
+{"reg_type": "holding", "addr": 40403, "bit": 8, "name": "Injector Power Supply: Bad Device/Component", "description": "Питание форсунок: неисправный компонент", "severity": "warning"}
+{"reg_type": "holding", "addr": 40403, "bit": 9, "name": "SensorSupply1:VtgBelowNormal", "description": "Питание датчика 1: напряжение ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40403, "bit": 10, "name": "FailToStartFault", "description": "Отказ запуска", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40403, "bit": 11, "name": "SensorSupply1:VtgAboveNormal", "description": "Питание датчика 1: напряжение выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40403, "bit": 12, "name": "Eng Oil Rifle Pressure: Below Normal-Most Severe", "description": "Давление масла в канале двигателя: ниже нормы — наиболее критическое", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40403, "bit": 13, "name": "Water in Fuel Indicator: Above Normal-Least Severe", "description": "Индикатор воды в топливе: выше нормы — наименее критический", "severity": "warning"}
+{"reg_type": "holding", "addr": 40403, "bit": 14, "name": "Eng Oil Temp: Above Normal- Moderately Severe", "description": "Температура масла двигателя: выше нормы — умеренно критическая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40403, "bit": 15, "name": "Coolant_Level_Reading_Incorrect", "description": "Показания уровня ОЖ: некорректные", "severity": "warning"}
+{"reg_type": "holding", "addr": 40404, "bit": 0, "name": "OIL_Temperature_In_Range_Error", "description": "Температура масла в допустимом диапазоне: ошибка", "severity": "warning"}
+{"reg_type": "holding", "addr": 40404, "bit": 1, "name": "J1939 Datalink: Data Erratic/Intermittent/Wrong", "description": "Канал данных J1939: нестабильные/прерывистые/неверные данные", "severity": "none"}
+{"reg_type": "holding", "addr": 40404, "bit": 2, "name": "CANDatalinkDegraded", "description": "Деградация канала данных CAN", "severity": "warning"}
+{"reg_type": "holding", "addr": 40404, "bit": 3, "name": "OIL_Pressure_Switch_Error", "description": "Ошибка датчика-выключателя давления масла", "severity": "warning"}
+{"reg_type": "holding", "addr": 40404, "bit": 4, "name": "LowBatteryVoltage", "description": "Низкое напряжение АКБ", "severity": "warning"}
+{"reg_type": "holding", "addr": 40404, "bit": 5, "name": "HighBatteryVoltage", "description": "Высокое напряжение АКБ", "severity": "warning"}
+{"reg_type": "holding", "addr": 40404, "bit": 6, "name": "Injector Metering Rail 1 Pressure: Above Normal", "description": "Давление в топливной рампе форсунок 1: выше нормы", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40404, "bit": 7, "name": "Injector Metering Rail 1 Pressure: Vtg Above Normal", "description": "Давление в топливной рампе форсунок 1: напряжение выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40404, "bit": 8, "name": "Injector Metering Rail 1 Pressure: Vtg Below Normal", "description": "Давление в топливной рампе форсунок 1: напряжение ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40404, "bit": 9, "name": "Intake Manifold 1 Temp: Above Normal-Moderate", "description": "Температура во впускном коллекторе 1: умеренно выше нормы", "severity": "derate"}
+{"reg_type": "holding", "addr": 40404, "bit": 10, "name": "Fuel Delivery Pressure: Vtg Above Normal", "description": "Давление подачи топлива: напряжение выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40404, "bit": 11, "name": "Fuel Delivery Pressure: Vtg Below Normal", "description": "Давление подачи топлива: напряжение ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40404, "bit": 12, "name": "APC_Diesel_High_PRS_Error", "description": "APC: дизель — высокое давление", "severity": "warning"}
+{"reg_type": "holding", "addr": 40404, "bit": 13, "name": "APC_DieselL_PRS_SIR_Error", "description": "APC: дизель — ошибка давления SIR", "severity": "warning"}
+{"reg_type": "holding", "addr": 40404, "bit": 15, "name": "Injector Metering Rail 1 Pressure: Below Normal", "description": "Давление в топливной рампе форсунок 1: ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40405, "bit": 1, "name": "Engine Shut Down Hot Condition Exists", "description": "Зафиксировано условие аварийной остановки двигателя по перегреву", "severity": "warning"}
+{"reg_type": "holding", "addr": 40405, "bit": 2, "name": "ECMInternalTemperatureLowError", "description": "Внутренняя температура ECM: ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40405, "bit": 3, "name": "EngCrankshaftSpeed/PosWarning", "description": "Предупреждение: скорость/положение коленвала двигателя", "severity": "warning"}
+{"reg_type": "holding", "addr": 40405, "bit": 4, "name": "Eng Speed: Cam/Crankshaft Misalignment", "description": "Частота вращения двигателя: рассогласование распредвала/коленвала", "severity": "warning"}
+{"reg_type": "holding", "addr": 40405, "bit": 5, "name": "At Least One ACK: Most Severe Fault", "description": "Подтверждена хотя бы одна наиболее критическая неисправность", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40405, "bit": 6, "name": "CANDatalinkFailed", "description": "Отказ канала данных CAN", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40405, "bit": 7, "name": "PowerLostWithIgnitionOn", "description": "Потеря питания при включённом зажигании", "severity": "warning"}
+{"reg_type": "holding", "addr": 40405, "bit": 8, "name": "RatedtoIdleTransition", "description": "Переход с номинального режима на холостой ход", "severity": "none"}
+{"reg_type": "holding", "addr": 40405, "bit": 9, "name": "DelayedShutdownFault", "description": "Неисправность: отложенная остановка", "severity": "warning"}
+{"reg_type": "holding", "addr": 40405, "bit": 10, "name": "BattleShortModeActive", "description": "Активирован режим аварийного шунтирования (Battle Short)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40405, "bit": 11, "name": "Controlled Shutdown In Process", "description": "Выполняется управляемая остановка", "severity": "warning"}
+{"reg_type": "holding", "addr": 40405, "bit": 13, "name": "EngineDerate", "description": "Снижение мощности двигателя", "severity": "derate"}
+{"reg_type": "holding", "addr": 40405, "bit": 14, "name": "EngineNormalShutdown", "description": "Штатная остановка двигателя", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40405, "bit": 15, "name": "EngineShutdown", "description": "Остановка двигателя", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40406, "bit": 0, "name": "UnrecognizedEngineFault", "description": "Нераспознанная неисправность двигателя", "severity": "warning"}
+{"reg_type": "holding", "addr": 40406, "bit": 1, "name": "EngineShutdown–Unannounced", "description": "Необъявленная остановка двигателя", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40406, "bit": 2, "name": "EngineWarning", "description": "Предупреждение двигателя", "severity": "warning"}
+{"reg_type": "holding", "addr": 40406, "bit": 3, "name": "Ctrl Module ID Input State Warning Error", "description": "Предупреждение: ошибка состояния входа идентификатора модуля управления", "severity": "warning"}
+{"reg_type": "holding", "addr": 40406, "bit": 4, "name": "Ctrl Module ID I/P State shutdown Error", "description": "Аварийная остановка по состоянию входа идентификатора модуля управления", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40406, "bit": 5, "name": "kW Load Setpoint OOR High", "description": "Уставка нагрузки (кВт): выше допустимого диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40406, "bit": 6, "name": "kW Load Setpoint OOR Low", "description": "Уставка нагрузки (кВт): ниже допустимого диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40406, "bit": 7, "name": "kVAR Load Setpoint OOR High", "description": "Уставка нагрузки (кВАР): выше допустимого диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40406, "bit": 8, "name": "kVAR Load Setpoint OOR Low", "description": "Уставка нагрузки (кВАР): ниже допустимого диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40406, "bit": 9, "name": "CooldownCompletedFault", "description": "Завершение охлаждения: неисправность", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40406, "bit": 10, "name": "Eng Oil Level Remote Reservoir: Below Normal", "description": "Уровень масла двигателя в выносном баке: ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40406, "bit": 11, "name": "Eng Oil Level Remote Reservoir: Least Severe Level", "description": "Уровень масла двигателя в выносном баке: наименее критический уровень", "severity": "warning"}
+{"reg_type": "holding", "addr": 40406, "bit": 12, "name": "HTCoolantPressureModerateLow", "description": "Давление ОЖ контура высокой температуры: умеренно низкое", "severity": "warning"}
+{"reg_type": "holding", "addr": 40406, "bit": 13, "name": "FSONONLowControlError", "description": "Ошибка нижнего уровня управления FSO NON", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40406, "bit": 14, "name": "Turbo1SpeedIncorrect", "description": "Некорректная скорость турбокомпрессора 1", "severity": "warning"}
+{"reg_type": "holding", "addr": 40406, "bit": 15, "name": "ECMInternalTemperatureHighError", "description": "Внутренняя температура ECM: выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40407, "bit": 0, "name": "EngCamshaftSpeed/PosWarning", "description": "Предупреждение: скорость/положение распредвала двигателя", "severity": "warning"}
+{"reg_type": "holding", "addr": 40407, "bit": 1, "name": "Custom Overcurrent Fault", "description": "Пользовательская неисправность: сверхток", "severity": "warning"}
+{"reg_type": "holding", "addr": 40407, "bit": 2, "name": "Negative Sequence Overcurrent", "description": "Сверхток обратной последовательности", "severity": "warning"}
+{"reg_type": "holding", "addr": 40407, "bit": 3, "name": "FailtoShutdown", "description": "Отказ остановки", "severity": "warning"}
+{"reg_type": "holding", "addr": 40407, "bit": 4, "name": "PowerDownFailure", "description": "Отказ выключения питания", "severity": "warning"}
+{"reg_type": "holding", "addr": 40407, "bit": 5, "name": "LocalE-Stop", "description": "Локальная аварийная остановка (E-Stop)", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40407, "bit": 6, "name": "RemoteE-Stop", "description": "Дистанционная аварийная остановка (E-Stop)", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40407, "bit": 7, "name": "LowCoolantTemperature", "description": "Низкая температура охлаждающей жидкости", "severity": "warning"}
+{"reg_type": "holding", "addr": 40407, "bit": 8, "name": "FailToCrankFault", "description": "Отказ прокрутки стартера", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40407, "bit": 9, "name": "LowFuelinDayTank", "description": "Низкий уровень топлива в расходном баке", "severity": "warning"}
+{"reg_type": "holding", "addr": 40407, "bit": 10, "name": "LowFuelLevel", "description": "Низкий уровень топлива", "severity": "warning"}
+{"reg_type": "holding", "addr": 40407, "bit": 11, "name": "WeakBattery", "description": "Слабый аккумулятор", "severity": "warning"}
+{"reg_type": "holding", "addr": 40407, "bit": 12, "name": "DeadBattery", "description": "Разряженный аккумулятор", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40407, "bit": 13, "name": "Overload", "description": "Перегрузка", "severity": "warning"}
+{"reg_type": "holding", "addr": 40407, "bit": 14, "name": "ShortCircuit", "description": "Короткое замыкание", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40407, "bit": 15, "name": "HighACVoltage", "description": "Высокое напряжение переменного тока", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40408, "bit": 0, "name": "LowACVoltage", "description": "Низкое напряжение переменного тока", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40408, "bit": 1, "name": "Underfrequency", "description": "Пониженная частота", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40408, "bit": 2, "name": "Overfrequency", "description": "Повышенная частота", "severity": "warning"}
+{"reg_type": "holding", "addr": 40408, "bit": 3, "name": "ReversekW", "description": "Обратная мощность (кВт)", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40408, "bit": 4, "name": "LossofField", "description": "Потеря возбуждения", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40408, "bit": 5, "name": "NotInAuto", "description": "Не в автоматическом режиме", "severity": "none"}
+{"reg_type": "holding", "addr": 40408, "bit": 6, "name": "LoadDump", "description": "Сброс нагрузки", "severity": "warning"}
+{"reg_type": "holding", "addr": 40408, "bit": 7, "name": "ReadyToLoad", "description": "Готовность к нагрузке", "severity": "none"}
+{"reg_type": "holding", "addr": 40408, "bit": 8, "name": "Speed/FrequencyMismatchFault", "description": "Несоответствие скорости/частоты", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40408, "bit": 9, "name": "HighCurrentWarning", "description": "Предупреждение: высокий ток", "severity": "warning"}
+{"reg_type": "holding", "addr": 40408, "bit": 10, "name": "OvercurrentShutdown", "description": "Аварийная остановка по сверхтоку", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40408, "bit": 11, "name": "CommonAlarm", "description": "Общая сигнализация", "severity": "none"}
+{"reg_type": "holding", "addr": 40408, "bit": 12, "name": "Injector Solenoid Driver Cylinder 7: UnderCurrent", "description": "Драйвер соленоида форсунки, цилиндр 7: недостаточный ток", "severity": "warning"}
+{"reg_type": "holding", "addr": 40408, "bit": 13, "name": "Injector Solenoid Driver Cylinder 8: UnderCurrent", "description": "Драйвер соленоида форсунки, цилиндр 8: недостаточный ток", "severity": "warning"}
+{"reg_type": "holding", "addr": 40408, "bit": 14, "name": "Injector Solenoid Driver Cylinder 10: UnderCurrent", "description": "Драйвер соленоида форсунки, цилиндр 10: недостаточный ток", "severity": "warning"}
+{"reg_type": "holding", "addr": 40408, "bit": 15, "name": "Injector Solenoid Driver Cylinder 11: UnderCurrent", "description": "Драйвер соленоида форсунки, цилиндр 11: недостаточный ток", "severity": "warning"}
+{"reg_type": "holding", "addr": 40409, "bit": 0, "name": "Injector Solenoid Driver Cylinder 12: UnderCurrent", "description": "Драйвер соленоида форсунки, цилиндр 12: недостаточный ток", "severity": "warning"}
+{"reg_type": "holding", "addr": 40409, "bit": 1, "name": "Injector Solenoid Driver Cylinder 13: UnderCurrent", "description": "Драйвер соленоида форсунки, цилиндр 13: недостаточный ток", "severity": "warning"}
+{"reg_type": "holding", "addr": 40409, "bit": 2, "name": "Injector Solenoid Driver Cylinder 14: UnderCurrent", "description": "Драйвер соленоида форсунки, цилиндр 14: недостаточный ток", "severity": "warning"}
+{"reg_type": "holding", "addr": 40409, "bit": 3, "name": "Injector Solenoid Driver Cylinder 15: UnderCurrent", "description": "Драйвер соленоида форсунки, цилиндр 15: недостаточный ток", "severity": "warning"}
+{"reg_type": "holding", "addr": 40409, "bit": 4, "name": "Injector Solenoid Driver Cylinder 16: UnderCurrent", "description": "Драйвер соленоида форсунки, цилиндр 16: недостаточный ток", "severity": "warning"}
+{"reg_type": "holding", "addr": 40409, "bit": 7, "name": "Injector Solenoid Driver Cylinder 9: UnderCurrent", "description": "Драйвер соленоида форсунки, цилиндр 9: недостаточный ток", "severity": "warning"}
+{"reg_type": "holding", "addr": 40409, "bit": 8, "name": "Real Time Clock Power Interrupt Fault", "description": "Неисправность: прерывание питания часов реального времени", "severity": "warning"}
+{"reg_type": "holding", "addr": 40409, "bit": 9, "name": "Sensor_Supply_5_Voltage_High_Err or", "description": "Напряжение питания датчика 5: выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40409, "bit": 10, "name": "SENSOR_SUPPLY_5_VOLTAGE_L OW_ERROR", "description": "Напряжение питания датчика 5: ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40409, "bit": 11, "name": "Crankcase Pressure: Vtg Above Normal", "description": "Давление в картере двигателя: напряжение выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40409, "bit": 12, "name": "Crankcase Pressure: Vtg Below Normal", "description": "Давление в картере двигателя: напряжение ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40409, "bit": 13, "name": "Water in Fuel Indicator: Vtg Above Normal", "description": "Индикатор воды в топливе: напряжение выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40409, "bit": 14, "name": "Water in Fuel Indicator: Vtg Below Normal", "description": "Индикатор воды в топливе: напряжение ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40409, "bit": 15, "name": "EngCoolantTemp-Shutdown w/Cool", "description": "Температура ОЖ двигателя: остановка с охлаждением", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40410, "bit": 0, "name": "WaterinFuelIndicator:Above Normal-Moderate", "description": "Индикатор воды в топливе: выше нормы — умеренный", "severity": "warning"}
+{"reg_type": "holding", "addr": 40410, "bit": 1, "name": "HMI113Fault1", "description": "HMI113: неисправность 1", "severity": "none"}
+{"reg_type": "holding", "addr": 40410, "bit": 2, "name": "HMI113Fault2", "description": "HMI113: неисправность 2", "severity": "none"}
+{"reg_type": "holding", "addr": 40410, "bit": 3, "name": "HMI113Fault3", "description": "HMI113: неисправность 3", "severity": "none"}
+{"reg_type": "holding", "addr": 40410, "bit": 4, "name": "High Battery Voltage", "description": "Высокое напряжение АКБ", "severity": "warning"}
+{"reg_type": "holding", "addr": 40410, "bit": 5, "name": "EngOilChangeInterval", "description": "Интервал замены масла двигателя", "severity": "warning"}
+{"reg_type": "holding", "addr": 40410, "bit": 6, "name": "J39_EGR_Valve_Comm_Timeout_Er ror", "description": "J39: таймаут связи клапана EGR", "severity": "warning"}
+{"reg_type": "holding", "addr": 40410, "bit": 7, "name": "J39_VGT_Comm_Timeout_Error", "description": "J39: таймаут связи VGT", "severity": "warning"}
+{"reg_type": "holding", "addr": 40410, "bit": 8, "name": "EGR_DL_Valve_Stuck_Error", "description": "Клапан EGR: заклинивание", "severity": "warning"}
+{"reg_type": "holding", "addr": 40410, "bit": 9, "name": "EGR_Delta_P_IR_Low_Error", "description": "Перепад давления EGR ИК: ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40410, "bit": 10, "name": "Weak Battery Fault", "description": "Неисправность: слабый аккумулятор", "severity": "warning"}
+{"reg_type": "holding", "addr": 40410, "bit": 11, "name": "UtilityLossOfPhase", "description": "Потеря фазы сети", "severity": "warning"}
+{"reg_type": "holding", "addr": 40410, "bit": 12, "name": "Genset Loss Of Phase", "description": "Потеря фазы генератора", "severity": "warning"}
+{"reg_type": "holding", "addr": 40410, "bit": 13, "name": "Utility Phase Rotation", "description": "Несоответствие чередования фаз сети", "severity": "warning"}
+{"reg_type": "holding", "addr": 40410, "bit": 14, "name": "GensetPhaseRotation", "description": "Чередование фаз генератора", "severity": "warning"}
+{"reg_type": "holding", "addr": 40410, "bit": 15, "name": "SyncCheckOK", "description": "Проверка синхронизации: ОК", "severity": "none"}
+{"reg_type": "holding", "addr": 40411, "bit": 0, "name": "HighFuelLevel", "description": "Высокий уровень топлива", "severity": "warning"}
+{"reg_type": "holding", "addr": 40411, "bit": 1, "name": "VeryLowFuelLevel", "description": "Очень низкий уровень топлива", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40411, "bit": 2, "name": "EGR_DL_Voltage_High_Error", "description": "Напряжение канала EGR: выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40411, "bit": 3, "name": "EGR_DL_Voltage_Low_Error", "description": "Напряжение канала EGR: ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40411, "bit": 4, "name": "EGR_DL_Command_Source_Error", "description": "Ошибка источника команд канала EGR", "severity": "warning"}
+{"reg_type": "holding", "addr": 40411, "bit": 5, "name": "Beyond_THD_AZ_Error", "description": "Превышение THD AZ: ошибка", "severity": "warning"}
+{"reg_type": "holding", "addr": 40411, "bit": 6, "name": "CBR_Density_Detrat_Error_ID", "description": "Ошибка плотности CBR: ID", "severity": "none"}
+{"reg_type": "holding", "addr": 40411, "bit": 7, "name": "HMI113OutputConfigurationFault", "description": "HMI113: неисправность конфигурации выхода", "severity": "warning"}
+{"reg_type": "holding", "addr": 40411, "bit": 8, "name": "EGR_DL_EDU_TMPTR_High_Error", "description": "Температура EDU канала EGR: выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40411, "bit": 9, "name": "Crankcase_Pressure_Least_Sev_Hig h", "description": "Давление в картере: наименее критическое высокое", "severity": "warning"}
+{"reg_type": "holding", "addr": 40411, "bit": 10, "name": "Eng Crankshaft Speed/Posn: Above Normal", "description": "Скорость/положение коленвала двигателя: выше нормы", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40411, "bit": 11, "name": "Maximum Parallel Time", "description": "Превышено максимальное время параллельной работы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40411, "bit": 12, "name": "SensorSupply4:VtgAboveNormal", "description": "Питание датчика 4: напряжение выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40411, "bit": 13, "name": "SensorSupply4:VtgBelowNormal", "description": "Питание датчика 4: напряжение ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40411, "bit": 14, "name": "Fuel Pump Delivery Pressure: Below Normal", "description": "Давление подачи топливного насоса: ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40411, "bit": 15, "name": "APC_Diesel_Low2_Prs_Error", "description": "APC: дизель — низкое давление 2", "severity": "warning"}
+{"reg_type": "holding", "addr": 40412, "bit": 0, "name": "Fuel Pump Delivery Pressure: Above Normal", "description": "Давление подачи топливного насоса: выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40412, "bit": 1, "name": "FuelPumpDelivery-BelowNormal", "description": "Подача топливного насоса: ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40412, "bit": 2, "name": "Electric Lift Pump for Eng Fuel: Vtg Above Normal", "description": "Электрический подкачивающий насос топлива двигателя: напряжение выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40412, "bit": 3, "name": "Electric Lift Pump for Eng Fuel: Vtg Below Normal", "description": "Электрический подкачивающий насос топлива двигателя: напряжение ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40412, "bit": 4, "name": "APC_Diesel_Flow_High_Error", "description": "APC: дизель — высокий расход", "severity": "warning"}
+{"reg_type": "holding", "addr": 40412, "bit": 5, "name": "APC_Diesel_Flow_Low_Error", "description": "APC: дизель — низкий расход", "severity": "warning"}
+{"reg_type": "holding", "addr": 40412, "bit": 6, "name": "Electronic Fuel Injection Control Valve", "description": "Электронный клапан управления впрыском топлива", "severity": "warning"}
+{"reg_type": "holding", "addr": 40412, "bit": 7, "name": "UtilityAvailable", "description": "Сеть доступна", "severity": "none"}
+{"reg_type": "holding", "addr": 40412, "bit": 8, "name": "Utility Undervoltage", "description": "Пониженное напряжение сети", "severity": "warning"}
+{"reg_type": "holding", "addr": 40412, "bit": 9, "name": "UtilityConnected", "description": "Сеть подключена", "severity": "none"}
+{"reg_type": "holding", "addr": 40412, "bit": 10, "name": "GensetConnected", "description": "Генератор подключён", "severity": "none"}
+{"reg_type": "holding", "addr": 40412, "bit": 11, "name": "Excitation/Loss of AC Voltage Sensing", "description": "Возбуждение/потеря контроля переменного напряжения", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40412, "bit": 13, "name": "TooLonginIdle", "description": "Слишком долго на холостом ходу", "severity": "warning"}
+{"reg_type": "holding", "addr": 40412, "bit": 14, "name": "Utility Overvoltage", "description": "Повышенное напряжение сети", "severity": "warning"}
+{"reg_type": "holding", "addr": 40412, "bit": 15, "name": "FanControl:VtgAboveNormal", "description": "Управление вентилятором: напряжение выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40413, "bit": 0, "name": "Utility Breaker Fail To Close", "description": "Автомат сети: отказ включения", "severity": "warning"}
+{"reg_type": "holding", "addr": 40413, "bit": 1, "name": "Utility Breaker Fail To Open", "description": "Автомат сети: отказ отключения", "severity": "warning"}
+{"reg_type": "holding", "addr": 40413, "bit": 2, "name": "BaseLoad", "description": "Базовая нагрузка", "severity": "none"}
+{"reg_type": "holding", "addr": 40413, "bit": 3, "name": "PeakShave", "description": "Пиковое сглаживание нагрузки", "severity": "none"}
+{"reg_type": "holding", "addr": 40413, "bit": 4, "name": "GHC_Low_Voltage_Error_1", "description": "GHC: пониженное напряжение 1", "severity": "warning"}
+{"reg_type": "holding", "addr": 40413, "bit": 5, "name": "GHC_High_Voltage_Error_1", "description": "GHC: повышенное напряжение 1", "severity": "warning"}
+{"reg_type": "holding", "addr": 40413, "bit": 6, "name": "ChargingAlternatorFailureFault", "description": "Неисправность зарядного генератора", "severity": "warning"}
+{"reg_type": "holding", "addr": 40413, "bit": 7, "name": "GensetAvailable", "description": "Генератор доступен", "severity": "none"}
+{"reg_type": "holding", "addr": 40413, "bit": 8, "name": "Test/ExerciseisActiveFault", "description": "Тест/упражнение: активная неисправность", "severity": "none"}
+{"reg_type": "holding", "addr": 40413, "bit": 9, "name": "FieldOverload", "description": "Перегрузка обмотки возбуждения", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40413, "bit": 10, "name": "Charge_Press_IR_Error", "description": "Давление наддува: ошибка ИК", "severity": "warning"}
+{"reg_type": "holding", "addr": 40413, "bit": 11, "name": "ManualSwitchConfigurationFault", "description": "Неисправность конфигурации ручного переключателя", "severity": "warning"}
+{"reg_type": "holding", "addr": 40413, "bit": 12, "name": "AutoSwitchConfigurationFault", "description": "Неисправность конфигурации автоматического переключателя", "severity": "warning"}
+{"reg_type": "holding", "addr": 40413, "bit": 13, "name": "GensetACMeterFailed", "description": "Отказ счётчика переменного тока генератора", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40413, "bit": 14, "name": "Genset Bus AC Meter Failed", "description": "Отказ счётчика переменного тока шины генераторов", "severity": "warning"}
+{"reg_type": "holding", "addr": 40413, "bit": 15, "name": "Utility AC Meter Failed", "description": "Отказ счётчика переменного тока сети", "severity": "warning"}
+{"reg_type": "holding", "addr": 40414, "bit": 0, "name": "GensetCTRatioTooSmall", "description": "Коэффициент трансформации ТТ генератора: слишком мал", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40414, "bit": 1, "name": "GensetCTRatioTooLarge", "description": "Коэффициент трансформации ТТ генератора: слишком велик", "severity": "warning"}
+{"reg_type": "holding", "addr": 40414, "bit": 2, "name": "GensetPTRatioTooSmall", "description": "Коэффициент трансформации ТН генератора: слишком мал", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40414, "bit": 3, "name": "GensetPTRatioTooLarge", "description": "Коэффициент трансформации ТН генератора: слишком велик", "severity": "warning"}
+{"reg_type": "holding", "addr": 40414, "bit": 4, "name": "Genset Bus PT Ratio Too Small", "description": "Коэффициент трансформации ТН шины генераторов: слишком мал", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40414, "bit": 5, "name": "Genset Bus PT Ratio Too Large", "description": "Коэффициент трансформации ТН шины генераторов: слишком велик", "severity": "warning"}
+{"reg_type": "holding", "addr": 40414, "bit": 6, "name": "Utility PT Ratio Too Small", "description": "Коэффициент трансформации ТН сети: слишком мал", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40414, "bit": 7, "name": "Utility PT Ratio Too Large", "description": "Коэффициент трансформации ТН сети: слишком велик", "severity": "warning"}
+{"reg_type": "holding", "addr": 40414, "bit": 8, "name": "Aux1010Input1Fault", "description": "Вспом. модуль 1010 вход 1: неисправность", "severity": "warning"}
+{"reg_type": "holding", "addr": 40414, "bit": 9, "name": "Aux1010Input2Fault", "description": "Вспом. модуль 1010 вход 2: неисправность", "severity": "warning"}
+{"reg_type": "holding", "addr": 40414, "bit": 10, "name": "Aux1010Input3Fault", "description": "Вспом. модуль 1010 вход 3: неисправность", "severity": "warning"}
+{"reg_type": "holding", "addr": 40414, "bit": 11, "name": "Aux1010Input4Fault", "description": "Вспом. модуль 1010 вход 4: неисправность", "severity": "warning"}
+{"reg_type": "holding", "addr": 40414, "bit": 12, "name": "Aux1010Input5Fault", "description": "Вспом. модуль 1010 вход 5: неисправность", "severity": "warning"}
+{"reg_type": "holding", "addr": 40414, "bit": 13, "name": "Aux1010Input6Fault", "description": "Вспом. модуль 1010 вход 6: неисправность", "severity": "warning"}
+{"reg_type": "holding", "addr": 40414, "bit": 14, "name": "Aux1010Input7Fault", "description": "Вспом. модуль 1010 вход 7: неисправность", "severity": "warning"}
+{"reg_type": "holding", "addr": 40414, "bit": 15, "name": "Aux1010Input8Fault", "description": "Вспом. модуль 1010 вход 8: неисправность", "severity": "warning"}
+{"reg_type": "holding", "addr": 40415, "bit": 0, "name": "Aux1011Input1Fault", "description": "Вспом. модуль 1011 вход 1: неисправность", "severity": "warning"}
+{"reg_type": "holding", "addr": 40415, "bit": 1, "name": "Aux1011Input2Fault", "description": "Вспом. модуль 1011 вход 2: неисправность", "severity": "warning"}
+{"reg_type": "holding", "addr": 40415, "bit": 2, "name": "Aux1011Input3Fault", "description": "Вспом. модуль 1011 вход 3: неисправность", "severity": "warning"}
+{"reg_type": "holding", "addr": 40420, "bit": 0, "name": "Customer Input Fault", "description": "Неисправность по входу пользователя", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40430, "bit": 0, "name": "Not in Auto", "description": "Не в автоматическом режиме", "severity": "none"}
+{"reg_type": "holding", "addr": 40430, "bit": 1, "name": "ReadyToLoad", "description": "Готовность к нагрузке", "severity": "none"}
+{"reg_type": "holding", "addr": 40430, "bit": 2, "name": "CommonAlarm", "description": "Общая сигнализация", "severity": "none"}
+{"reg_type": "holding", "addr": 40430, "bit": 3, "name": "ColdStartAdvanceConditionExists", "description": "Условие опережения холодного пуска: зафиксировано", "severity": "none"}
+{"reg_type": "holding", "addr": 40440, "bit": 7, "name": "Heavy_Knock_Error_17_(A9)", "description": "Сильная детонация, цилиндр 17 (A9)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40440, "bit": 8, "name": "Continuous_Light_Knock_Error_18_( B9)", "description": "Непрерывная лёгкая детонация, цилиндр 18 (B9)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40440, "bit": 9, "name": "Gas Exhaust Gas Temp, Cyl 1 (A1) OORH", "description": "Газ: температура выхлопных газов, цилиндр 1 (A1) — выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40440, "bit": 10, "name": "Gas Exhaust Gas Temp, Cyl 4 (B2) OORH", "description": "Газ: температура выхлопных газов, цилиндр 4 (B2) — выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40440, "bit": 11, "name": "IntakeManifPress2OORH", "description": "Давление во впускном коллекторе 2: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40440, "bit": 12, "name": "IntakeManifPress2OORL", "description": "Давление во впускном коллекторе 2: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40440, "bit": 13, "name": "CAN_Throttle_Internal_Failure_Error", "description": "CAN: внутренний отказ дроссельной заслонки", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40440, "bit": 14, "name": "CAN_Throttle_Internal_Fault_Error", "description": "CAN: внутренняя неисправность дроссельной заслонки", "severity": "warning"}
+{"reg_type": "holding", "addr": 40440, "bit": 15, "name": "Gas Engine Throttle Control Condition Exists", "description": "Газ: зафиксировано условие управления дроссельной заслонкой двигателя", "severity": "warning"}
+{"reg_type": "holding", "addr": 40441, "bit": 0, "name": "Gas CAN_Throttle_High_Temp_Warning_ Error", "description": "Газ: предупреждение CAN — высокая температура дроссельной заслонки", "severity": "warning"}
+{"reg_type": "holding", "addr": 40441, "bit": 1, "name": "CAN_Throttle_Temp_Limiting_Error", "description": "CAN: ограничение по температуре дроссельной заслонки", "severity": "warning"}
+{"reg_type": "holding", "addr": 40441, "bit": 2, "name": "ThrottleCtrl2OORHigh", "description": "Управление дроссельной заслонкой 2: выше диапазона", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40441, "bit": 3, "name": "ThrottleCtrl2OORLow", "description": "Управление дроссельной заслонкой 2: ниже диапазона", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40441, "bit": 4, "name": "ThrottleCtrl2Incorrect", "description": "Управление дроссельной заслонкой 2: некорректно", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40441, "bit": 5, "name": "ThrottleCtrl2OutofAdjustment", "description": "Управление дроссельной заслонкой 2: вне регулировки", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40441, "bit": 6, "name": "ThrottleCtrl2BadDevice", "description": "Управление дроссельной заслонкой 2: неисправное устройство", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40441, "bit": 7, "name": "ThrottleCtrl2RootUnknown", "description": "Управление дроссельной заслонкой 2: причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40441, "bit": 8, "name": "ThrottleCtrl2ConditionExists", "description": "Управление дроссельной заслонкой 2: зафиксировано состояние", "severity": "warning"}
+{"reg_type": "holding", "addr": 40441, "bit": 9, "name": "ThrottleCtrl2WarningHigh", "description": "Управление дроссельной заслонкой 2: предупреждение — высокое", "severity": "warning"}
+{"reg_type": "holding", "addr": 40441, "bit": 10, "name": "ThrottleCtrl2ModerateHigh", "description": "Управление дроссельной заслонкой 2: умеренно высокое", "severity": "warning"}
+{"reg_type": "holding", "addr": 40441, "bit": 11, "name": "FuelShutoff2OORHigh", "description": "Отсечка топлива 2: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40441, "bit": 12, "name": "FuelTmp2OORHigh", "description": "Температура топлива 2: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40441, "bit": 13, "name": "FuelTmp2OORLow", "description": "Температура топлива 2: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40441, "bit": 14, "name": "GasFlow2OORHigh", "description": "Расход газа 2: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40441, "bit": 15, "name": "GasFlow2OORLow", "description": "Расход газа 2: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40442, "bit": 0, "name": "GasFlow2IncorrectData", "description": "Расход газа 2: некорректные данные", "severity": "warning"}
+{"reg_type": "holding", "addr": 40442, "bit": 1, "name": "FCV2PosFeedbackIncorrect", "description": "Обратная связь положения FCV2: некорректна", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40442, "bit": 2, "name": "FCV_Actuator_Error_1761", "description": "Ошибка привода FCV (1761)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40442, "bit": 3, "name": "IntMan2TmpModerateHigh", "description": "Температура впускного коллектора 2: умеренно высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40442, "bit": 4, "name": "FCV2InPrOORHigh", "description": "Давление на входе FCV2: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40442, "bit": 5, "name": "FCV2InPrOORLow", "description": "Давление на входе FCV2: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40442, "bit": 6, "name": "FCV2OutPrOORHigh", "description": "Давление на выходе FCV2: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40442, "bit": 7, "name": "FCV2OutPrOORLow", "description": "Давление на выходе FCV2: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40442, "bit": 8, "name": "E_ShutdIndicationOORH", "description": "Индикация аварийной остановки: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40442, "bit": 9, "name": "E_ShutdIndicationOORL", "description": "Индикация аварийной остановки: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40442, "bit": 10, "name": "EngDerateRequestOORH", "description": "Запрос снижения мощности: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40442, "bit": 11, "name": "EngDerateRequestOORL", "description": "Запрос снижения мощности: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40442, "bit": 12, "name": "OilPrimingPumpOORH", "description": "Маслопрокачивающий насос: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40442, "bit": 13, "name": "OilPrimingPumpOORL", "description": "Маслопрокачивающий насос: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40442, "bit": 14, "name": "PowerConservationControlOORH", "description": "Управление энергосбережением: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40442, "bit": 15, "name": "PowerConservationControlOORL", "description": "Управление энергосбережением: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40443, "bit": 0, "name": "Gas Engine_Heater_Control_Driver_High _Error", "description": "Газ: ошибка верхнего уровня драйвера управления нагревателем двигателя", "severity": "warning"}
+{"reg_type": "holding", "addr": 40443, "bit": 1, "name": "Gas Engine_Heater_Control_Driver_Low_ Error", "description": "Газ: ошибка нижнего уровня драйвера управления нагревателем двигателя", "severity": "warning"}
+{"reg_type": "holding", "addr": 40443, "bit": 2, "name": "ShutdRequestOORHigh", "description": "Запрос на остановку: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40443, "bit": 3, "name": "ShutdRequestOORLow", "description": "Запрос на остановку: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40443, "bit": 4, "name": "Gas Coolant_Pump_Control_Driver_High_ Error", "description": "Газ: ошибка верхнего уровня драйвера управления насосом ОЖ", "severity": "warning"}
+{"reg_type": "holding", "addr": 40443, "bit": 5, "name": "Gas Coolant_Pump_Control_Driver_Low_ Error", "description": "Газ: ошибка нижнего уровня драйвера управления насосом ОЖ", "severity": "warning"}
+{"reg_type": "holding", "addr": 40443, "bit": 6, "name": "Gas Oil_Priming_Pump_Manual_Override _Input_On", "description": "Газ: активировано ручное управление маслопрокачивающим насосом", "severity": "warning"}
+{"reg_type": "holding", "addr": 40443, "bit": 7, "name": "Oil_Priming_Pump_Stuck_On_Error", "description": "Маслопрокачивающий насос: заклинивание во включённом состоянии", "severity": "warning"}
+{"reg_type": "holding", "addr": 40443, "bit": 8, "name": "Post_Lube_Oil_Priming_Error", "description": "Ошибка послеостановочной прокачки масла", "severity": "warning"}
+{"reg_type": "holding", "addr": 40443, "bit": 9, "name": "Gas Maintenance_Lube_Oil_Priming_Erro r", "description": "Газ: ошибка прокачки смазочного масла при техобслуживании", "severity": "warning"}
+{"reg_type": "holding", "addr": 40443, "bit": 10, "name": "Pre_Start_Lube_Oil_Priming_Error", "description": "Ошибка предпусковой прокачки масла", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40443, "bit": 11, "name": "Failure_To_Meet_Load_Speed_Error", "description": "Неспособность выйти на обороты нагрузки", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40443, "bit": 12, "name": "IdlewhenCBClosed", "description": "Холостой ход при замкнутом автомате", "severity": "warning"}
+{"reg_type": "holding", "addr": 40443, "bit": 13, "name": "Speed/PositsensoroutofAdj", "description": "Датчик скорости/положения: вне регулировки", "severity": "warning"}
+{"reg_type": "holding", "addr": 40443, "bit": 14, "name": "FireDetected", "description": "Обнаружен пожар", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40443, "bit": 15, "name": "Gas Compressor_Bypass_Position_High_ Error", "description": "Газ: ошибка высокого положения обходного клапана компрессора", "severity": "warning"}
+{"reg_type": "holding", "addr": 40444, "bit": 0, "name": "Gas Compressor_Bypass_Position_Low_ Error", "description": "Газ: ошибка низкого положения обходного клапана компрессора", "severity": "warning"}
+{"reg_type": "holding", "addr": 40444, "bit": 1, "name": "CompressorBypassctrlOORH", "description": "Управление обходом компрессора: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40444, "bit": 2, "name": "CompressorBypassctrlOORL", "description": "Управление обходом компрессора: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40444, "bit": 3, "name": "CB_Position_Err_Status", "description": "Положение автомата: состояние ошибки", "severity": "warning"}
+{"reg_type": "holding", "addr": 40444, "bit": 4, "name": "Gas HIGH_SIDE_DRV2_High_Control_Er ror (VPS)", "description": "Газ: ошибка управления HIGH_SIDE_DRV2 высокого уровня (VPS)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40444, "bit": 5, "name": "Gas HIGH_SIDE_DRV2_Low_Control_Err or (VPS)", "description": "Газ: ошибка управления HIGH_SIDE_DRV2 низкого уровня (VPS)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40444, "bit": 6, "name": "Gas Valve_Proving_System_Test_Failed_ Warning_Error", "description": "Газ: предупреждение — проверка системы подтверждения клапана не пройдена", "severity": "warning"}
+{"reg_type": "holding", "addr": 40444, "bit": 7, "name": "Valve_Proving_System_Test_Failed_ Shutdown_Error", "description": "Останов: ошибка проверки системы подтверждения клапана", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40444, "bit": 8, "name": "RLY14_High_Control_Error", "description": "Реле 14: ошибка верхнего уровня управления", "severity": "warning"}
+{"reg_type": "holding", "addr": 40444, "bit": 9, "name": "OilPre-HeaterCtrlOORLow", "description": "Управление маслоподогревателем: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40444, "bit": 10, "name": "Oil_Pre-Heater_Tripped_Error", "description": "Маслоподогреватель: сработала защита", "severity": "warning"}
+{"reg_type": "holding", "addr": 40444, "bit": 11, "name": "Oil_Pre-Heater_Not_Warming_Error", "description": "Маслоподогреватель: не нагревает", "severity": "warning"}
+{"reg_type": "holding", "addr": 40444, "bit": 12, "name": "CommonACAuxCBtripped", "description": "Общий автомат вспом. оборудования переменного тока: сработал", "severity": "warning"}
+{"reg_type": "holding", "addr": 40444, "bit": 13, "name": "Min_FSO_Speed_Error", "description": "Минимальная скорость FSO: ошибка", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40444, "bit": 14, "name": "LTCoolantLevelLowShutdown Error", "description": "Уровень ОЖ контура низкой температуры: низкий — остановка", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40444, "bit": 15, "name": "LTCoolantLevelLowWarningError", "description": "Уровень ОЖ контура низкой температуры: низкий — предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40445, "bit": 0, "name": "Gas Idle_Rated_Trans_Oil_Temp_Low_Er ror", "description": "Газ: низкая температура масла трансмиссии на холостом/номинальном режиме", "severity": "warning"}
+{"reg_type": "holding", "addr": 40445, "bit": 1, "name": "Dirty_Oil_Level_Error", "description": "Уровень загрязнённого масла: ошибка", "severity": "warning"}
+{"reg_type": "holding", "addr": 40445, "bit": 2, "name": "ECMSoftwareincompatible", "description": "Несовместимость ПО ECM", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40445, "bit": 3, "name": "Fuel_Inlet_Pressure_High_Error", "description": "Давление топлива на входе: выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40445, "bit": 4, "name": "Fuel_Inlet_Pressure_Low_Error", "description": "Давление топлива на входе: ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40445, "bit": 5, "name": "Vent_Gas_Valve_Error", "description": "Ошибка вентиляционного газового клапана", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40445, "bit": 6, "name": "Upstream_FSO_Valve_Error", "description": "Ошибка клапана FSO (вверх по потоку)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40445, "bit": 7, "name": "Downstream_FSO_Valve_Error", "description": "Ошибка клапана FSO (вниз по потоку)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40445, "bit": 8, "name": "Engine_Heater_Trip_Error", "description": "Нагреватель двигателя: сработала защита", "severity": "warning"}
+{"reg_type": "holding", "addr": 40445, "bit": 9, "name": "Coolant_Pump_Trip_Error", "description": "Насос ОЖ: сработала защита", "severity": "warning"}
+{"reg_type": "holding", "addr": 40445, "bit": 10, "name": "Oil_Priming_Pump_Tripped_Error", "description": "Маслопрокачивающий насос: сработала защита", "severity": "warning"}
+{"reg_type": "holding", "addr": 40445, "bit": 11, "name": "LCP_(LT)_Low_Serious_Error", "description": "Давление ОЖ (LT): низкое — критическое", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40445, "bit": 12, "name": "Permanent_FS_Cam_Sync_Lost_Err or", "description": "Постоянная потеря синхронизации распредвала FS", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40445, "bit": 13, "name": "Partial_Engine_Overload_Shutdown_ Error", "description": "Частичная перегрузка двигателя: остановка", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40445, "bit": 14, "name": "Fuel_Supply_Pressure_High_Error", "description": "Давление подачи топлива: выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40445, "bit": 15, "name": "Fuel_Supply_Pressure_Low_Error", "description": "Давление подачи топлива: ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40446, "bit": 0, "name": "Radiator_Fan_Trip_Error", "description": "Вентилятор радиатора: сработала защита", "severity": "warning"}
+{"reg_type": "holding", "addr": 40446, "bit": 1, "name": "ExhaustAftInletO2OORHigh", "description": "Кислород на входе дополнительной очистки выхлопа: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40446, "bit": 2, "name": "ExhaustAftInletO2OORLow", "description": "Кислород на входе дополнительной очистки выхлопа: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40446, "bit": 3, "name": "ExhaustAftInletO2Incorrect", "description": "Кислород на входе дополнительной очистки выхлопа: некорректно", "severity": "warning"}
+{"reg_type": "holding", "addr": 40446, "bit": 4, "name": "ExhaustAftOutO2OORHigh", "description": "Кислород на выходе дополнительной очистки выхлопа: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40446, "bit": 5, "name": "ExhaustAftOutletO2OORLow", "description": "Кислород на выходе дополнительной очистки выхлопа: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40446, "bit": 6, "name": "ExhaustAftOutletO2Incorrect", "description": "Кислород на выходе дополнительной очистки выхлопа: некорректно", "severity": "warning"}
+{"reg_type": "holding", "addr": 40446, "bit": 7, "name": "IntMan3TmpModerateHigh", "description": "Температура впускного коллектора 3: умеренно высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40446, "bit": 8, "name": "IntMan4TmpModerateHigh", "description": "Температура впускного коллектора 4: умеренно высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40446, "bit": 9, "name": "Gas Coolant_Inlet_Temperature_(LT)_Hig h_Error", "description": "Газ: высокая температура входящей ОЖ (LT)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40446, "bit": 10, "name": "Gas Coolant_Inlet_Temperature_(LT)_Lo w_Error", "description": "Газ: низкая температура входящей ОЖ (LT)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40446, "bit": 11, "name": "CIT_(LT)_High_Warning_Error", "description": "Температура входящей ОЖ (LT): высокая — предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40446, "bit": 12, "name": "CIT_(LT)_High_Serious_Error", "description": "Температура входящей ОЖ (LT): высокая — критическая", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40446, "bit": 13, "name": "LT_Coolant_Pressure_High_Error", "description": "Давление ОЖ контура LT: выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40446, "bit": 14, "name": "LT_Coolant_Pressure_Low_Error", "description": "Давление ОЖ контура LT: ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40446, "bit": 15, "name": "LCP_(LT)_Low_Warning_Error", "description": "Давление ОЖ (LT): низкое — предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40447, "bit": 0, "name": "Gas Exhaust_Temp_1_(A1)_High_Warnin g_Error", "description": "Газ: высокая температура выхлопа 1 (A1) — предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40447, "bit": 1, "name": "Gas Exhaust_Temp_3_(A2)_High_Warnin g_Error", "description": "Газ: высокая температура выхлопа 3 (A2) — предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40447, "bit": 2, "name": "Gas Exhaust_Temp_5_(A3)_High_Warnin g_Error", "description": "Газ: высокая температура выхлопа 5 (A3) — предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40447, "bit": 3, "name": "Gas Exhaust_Temp_7_(A4)_High_Warnin g_Error", "description": "Газ: высокая температура выхлопа 7 (A4) — предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40447, "bit": 4, "name": "Gas Exhaust_Temp_9_(A5)_High_Warnin g_Error", "description": "Газ: высокая температура выхлопа 9 (A5) — предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40447, "bit": 5, "name": "Gas Exhaust_Temp_11_(A6)_High_Warni ng_Error", "description": "Газ: высокая температура выхлопа 11 (A6) — предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40447, "bit": 6, "name": "Gas Exhaust_Temp_13_(A7)_High_Warni ng_Error", "description": "Газ: высокая температура выхлопа 13 (A7) — предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40447, "bit": 7, "name": "Gas Exhaust_Temp_15_(A8)_High_Warni ng_Error", "description": "Газ: высокая температура выхлопа 15 (A8) — предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40447, "bit": 8, "name": "Gas Exhaust_Temp_17_(A9)_High_Warni ng_Error", "description": "Газ: высокая температура выхлопа 17 (A9) — предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40447, "bit": 9, "name": "Gas Exhaust_Temp_2_(B1)_High_Warnin g_Error", "description": "Газ: высокая температура выхлопа 2 (B1) — предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40447, "bit": 10, "name": "Gas Exhaust_Temp_4_(B2)_High_Warnin g_Error", "description": "Газ: высокая температура выхлопа 4 (B2) — предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40447, "bit": 11, "name": "Gas Exhaust_Temp_6_(B3)_High_Warnin g_Error", "description": "Газ: высокая температура выхлопа 6 (B3) — предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40447, "bit": 12, "name": "Gas Exhaust_Temp_8_(B4)_High_Warnin g_Error", "description": "Газ: высокая температура выхлопа 8 (B4) — предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40447, "bit": 13, "name": "Gas Exhaust_Temp_10_(B5)_High_Warni ng_Error", "description": "Газ: высокая температура выхлопа 10 (B5) — предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40447, "bit": 14, "name": "Gas Exhaust_Temp_12_(B6)_High_Warni ng_Error", "description": "Газ: высокая температура выхлопа 12 (B6) — предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40447, "bit": 15, "name": "Gas Exhaust_Temp_14_(B7)_High_Warni ng_Error", "description": "Газ: высокая температура выхлопа 14 (B7) — предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40448, "bit": 0, "name": "Gas Exhaust_Temp_16_(B8)_High_Warni ng_Error", "description": "Газ: высокая температура выхлопа 16 (B8) — предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40448, "bit": 1, "name": "Gas Exhaust_Temp_18_(B9)_High_Warni ng_Error", "description": "Газ: высокая температура выхлопа 18 (B9) — предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40448, "bit": 2, "name": "Start_Air_Pressure_High_Error", "description": "Давление пускового воздуха: выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40448, "bit": 3, "name": "Start_Air_Pressure_Low_Error", "description": "Давление пускового воздуха: ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40448, "bit": 4, "name": "SAP_Overpressure_Error", "description": "Избыточное давление пускового воздуха", "severity": "warning"}
+{"reg_type": "holding", "addr": 40448, "bit": 5, "name": "ExhaustTemp16(B8)HighSerious Error", "description": "Критически высокая температура выхлопа 16 (B8)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40448, "bit": 6, "name": "ExhaustTemp18(B9)HighSerious Error", "description": "Критически высокая температура выхлопа 18 (B9)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40448, "bit": 7, "name": "EGT17(A9)OORLow", "description": "Температура выхлопных газов 17 (A9): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40448, "bit": 8, "name": "EGT18(B9)OORLow", "description": "Температура выхлопных газов 18 (B9): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40448, "bit": 9, "name": "Gas Oil_Filter_Outlet_Pressure_High_Err or", "description": "Газ: высокое давление на выходе масляного фильтра", "severity": "warning"}
+{"reg_type": "holding", "addr": 40448, "bit": 10, "name": "Gas Oil_Filter_Outlet_Pressure_Low_Erro r", "description": "Газ: низкое давление на выходе масляного фильтра", "severity": "warning"}
+{"reg_type": "holding", "addr": 40448, "bit": 11, "name": "IntMan2TmpAbnormalRate", "description": "Температура впускного коллектора 2: аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40448, "bit": 12, "name": "IntMan3TmpAbnormalRate", "description": "Температура впускного коллектора 3: аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40448, "bit": 13, "name": "IntMan4TmpAbnormalRate", "description": "Температура впускного коллектора 4: аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40448, "bit": 14, "name": "ExhaustO2OORHigh", "description": "Кислород в выхлопе: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40448, "bit": 15, "name": "ST_Throttle_Press_Err_Status", "description": "Давление дроссельной заслонки ST: состояние ошибки", "severity": "warning"}
+{"reg_type": "holding", "addr": 40449, "bit": 0, "name": "ExhaustO2OORLow", "description": "Кислород в выхлопе: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40449, "bit": 1, "name": "RAM_Image_Word_Error", "description": "Ошибка слова образа RAM", "severity": "warning"}
+{"reg_type": "holding", "addr": 40449, "bit": 2, "name": "ExhaustO2ModerateHigh", "description": "Кислород в выхлопе: умеренно высокий", "severity": "warning"}
+{"reg_type": "holding", "addr": 40449, "bit": 3, "name": "ExhaustO2ModerateLow", "description": "Кислород в выхлопе: умеренно низкий", "severity": "warning"}
+{"reg_type": "holding", "addr": 40449, "bit": 4, "name": "Knock11(A6)ModerateHigh", "description": "Детонация 11 (A6): умеренно высокая", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40449, "bit": 5, "name": "Knock11(A6)CriticalHigh", "description": "Детонация 11 (A6): критически высокая", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40449, "bit": 6, "name": "FuelShutoff2OORLow", "description": "Отсечка топлива 2: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40449, "bit": 7, "name": "RedLampOORHigh", "description": "Красная лампа: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40449, "bit": 8, "name": "AmberLampOORHigh", "description": "Жёлтая лампа: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40449, "bit": 9, "name": "AmberLampOORLow", "description": "Жёлтая лампа: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40449, "bit": 10, "name": "Fuel_Outlet_Pressure_High_Error", "description": "Давление топлива на выходе: выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40449, "bit": 11, "name": "Fuel_Outlet_Pressure_Low_Error", "description": "Давление топлива на выходе: ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40449, "bit": 12, "name": "TotalRealPowerCircuitOORH", "description": "Суммарная активная мощность: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40449, "bit": 13, "name": "TotalRealPowerCircuitOORL", "description": "Суммарная активная мощность: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40449, "bit": 14, "name": "Speed_Bias_Low_Error", "description": "Смещение скорости: ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40449, "bit": 15, "name": "Speed_Bias_High_Error", "description": "Смещение скорости: выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40450, "bit": 0, "name": "Max_Total_Misfire_Error", "description": "Максимальный суммарный пропуск зажигания", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40450, "bit": 1, "name": "Cylinder_2_(B1)_Total_Misfire_Error", "description": "Полный пропуск зажигания, цилиндр 2 (B1)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40450, "bit": 2, "name": "Cylinder_4_(B2)_Total_Misfire_Error", "description": "Полный пропуск зажигания, цилиндр 4 (B2)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40450, "bit": 3, "name": "Cylinder_6_(B3)_Total_Misfire_Error", "description": "Полный пропуск зажигания, цилиндр 6 (B3)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40450, "bit": 4, "name": "Cylinder_8_(B4)_Total_Misfire_Error", "description": "Полный пропуск зажигания, цилиндр 8 (B4)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40450, "bit": 5, "name": "Gas Cylinder_10_(B5)_Total_Misfire_Erro r", "description": "Газ: полный пропуск зажигания, цилиндр 10 (B5)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40450, "bit": 6, "name": "Gas Cylinder_12_(B6)_Total_Misfire_Erro r", "description": "Газ: полный пропуск зажигания, цилиндр 12 (B6)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40450, "bit": 7, "name": "Gas Cylinder_14_(B7)_Total_Misfire_Erro r", "description": "Газ: полный пропуск зажигания, цилиндр 14 (B7)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40450, "bit": 8, "name": "Gas Cylinder_16_(B8)_Total_Misfire_Erro r", "description": "Газ: полный пропуск зажигания, цилиндр 16 (B8)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40450, "bit": 9, "name": "Gas Cylinder_18_(B9)_Total_Misfire_Erro r", "description": "Газ: полный пропуск зажигания, цилиндр 18 (B9)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40450, "bit": 10, "name": "Cylinder_1_(A1)_Total_Misfire_Error", "description": "Полный пропуск зажигания, цилиндр 1 (A1)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40450, "bit": 11, "name": "Cylinder_3_(A2)_Total_Misfire_Error", "description": "Полный пропуск зажигания, цилиндр 3 (A2)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40450, "bit": 12, "name": "Cylinder_5_(A3)_Total_Misfire_Error", "description": "Полный пропуск зажигания, цилиндр 5 (A3)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40450, "bit": 13, "name": "Cylinder_7_(A4)_Total_Misfire_Error", "description": "Полный пропуск зажигания, цилиндр 7 (A4)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40450, "bit": 14, "name": "Cylinder_9_(A5)_Total_Misfire_Error", "description": "Полный пропуск зажигания, цилиндр 9 (A5)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40450, "bit": 15, "name": "Gas Cylinder_11_(A6)_Total_Misfire_Erro r", "description": "Газ: полный пропуск зажигания, цилиндр 11 (A6)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40451, "bit": 0, "name": "Gas Cylinder_13_(A7)_Total_Misfire_Erro r", "description": "Газ: полный пропуск зажигания, цилиндр 13 (A7)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40451, "bit": 1, "name": "Gas Cylinder_15_(A8)_Total_Misfire_Erro r", "description": "Газ: полный пропуск зажигания, цилиндр 15 (A8)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40451, "bit": 2, "name": "Gas Cylinder_17_(A9)_Total_Misfire_Erro r", "description": "Газ: полный пропуск зажигания, цилиндр 17 (A9)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40451, "bit": 3, "name": "Start_Before_Ready_Error", "description": "Запуск до готовности: ошибка", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40451, "bit": 4, "name": "Continuous_Starter_Failure_Error", "description": "Непрерывный отказ стартера", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40451, "bit": 5, "name": "ExhaustTemperature1(A1) AbnormalRate", "description": "Температура выхлопа 1 (A1): аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40451, "bit": 6, "name": "ExhaustTemperature3(A2) AbnormalRate", "description": "Температура выхлопа 3 (A2): аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40451, "bit": 7, "name": "ExhaustTemperature5(A3) AbnormalRate", "description": "Температура выхлопа 5 (A3): аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40451, "bit": 8, "name": "ExhaustTemperature7(A4) AbnormalRate", "description": "Температура выхлопа 7 (A4): аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40451, "bit": 9, "name": "ExhaustTemperature9(A5) AbnormalRate", "description": "Температура выхлопа 9 (A5): аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40451, "bit": 10, "name": "ExhaustTemperature11(A6) AbnormalRate", "description": "Температура выхлопа 11 (A6): аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40451, "bit": 11, "name": "ExhaustTemperature13(A7) AbnormalRate", "description": "Температура выхлопа 13 (A7): аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40451, "bit": 12, "name": "ExhaustTemperature15(A8) AbnormalRate", "description": "Температура выхлопа 15 (A8): аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40451, "bit": 13, "name": "ExhaustTemperature17(A9) AbnormalRate", "description": "Температура выхлопа 17 (A9): аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40451, "bit": 14, "name": "ExhaustTemperature2(B1) AbnormalRate", "description": "Температура выхлопа 2 (B1): аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40451, "bit": 15, "name": "ExhaustTemperature4(B2) AbnormalRate", "description": "Температура выхлопа 4 (B2): аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40452, "bit": 0, "name": "ExhaustTemperature6(B3) AbnormalRate", "description": "Температура выхлопа 6 (B3): аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40452, "bit": 1, "name": "ExhaustTemperature8(B4) AbnormalRate", "description": "Температура выхлопа 8 (B4): аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40452, "bit": 2, "name": "ExhaustTemperature10(B5) AbnormalRate", "description": "Температура выхлопа 10 (B5): аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40452, "bit": 3, "name": "ExhaustTemperature12(B6) AbnormalRate", "description": "Температура выхлопа 12 (B6): аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40452, "bit": 4, "name": "ExhaustTemperature14(B7) AbnormalRate", "description": "Температура выхлопа 14 (B7): аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40452, "bit": 5, "name": "ExhaustTemperature16(B8) AbnormalRate", "description": "Температура выхлопа 16 (B8): аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40452, "bit": 6, "name": "ExhaustTemperature18(B9) AbnormalRate", "description": "Температура выхлопа 18 (B9): аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40452, "bit": 7, "name": "Gas Compressor_Outlet_Pressure_High_ Error", "description": "Газ: высокое давление на выходе компрессора", "severity": "warning"}
+{"reg_type": "holding", "addr": 40452, "bit": 8, "name": "Gas Compressor_Outlet_Pressure_Low_ Error", "description": "Газ: низкое давление на выходе компрессора", "severity": "warning"}
+{"reg_type": "holding", "addr": 40452, "bit": 9, "name": "Bank_Id_Error", "description": "Ошибка идентификации банка", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40452, "bit": 10, "name": "Continuous_Light_Knock_Error_1_(A 1)", "description": "Непрерывная лёгкая детонация, цилиндр 1 (A1)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40452, "bit": 11, "name": "Continuous_Light_Knock_Error_2_(B 1)", "description": "Непрерывная лёгкая детонация, цилиндр 2 (B1)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40452, "bit": 12, "name": "Continuous_Light_Knock_Error_3_(A 2)", "description": "Непрерывная лёгкая детонация, цилиндр 3 (A2)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40452, "bit": 13, "name": "Continuous_Light_Knock_Error_4_(B 2)", "description": "Непрерывная лёгкая детонация, цилиндр 4 (B2)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40452, "bit": 14, "name": "Continuous_Light_Knock_Error_5_(A 3)", "description": "Непрерывная лёгкая детонация, цилиндр 5 (A3)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40452, "bit": 15, "name": "Continuous_Light_Knock_Error_6_(B 3)", "description": "Непрерывная лёгкая детонация, цилиндр 6 (B3)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40453, "bit": 0, "name": "Continuous_Light_Knock_Error_7_(A 4)", "description": "Непрерывная лёгкая детонация, цилиндр 7 (A4)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40453, "bit": 1, "name": "Continuous_Light_Knock_Error_8_(B 4)", "description": "Непрерывная лёгкая детонация, цилиндр 8 (B4)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40453, "bit": 2, "name": "Continuous_Light_Knock_Error_9_(A 5)", "description": "Непрерывная лёгкая детонация, цилиндр 9 (A5)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40453, "bit": 3, "name": "Continuous_Light_Knock_Error_10_( B5)", "description": "Непрерывная лёгкая детонация, цилиндр 10 (B5)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40453, "bit": 4, "name": "ECM_Overtemp_Error", "description": "Перегрев ECM", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40453, "bit": 5, "name": "DG_Air_Compressor_Trip_Error", "description": "Воздушный компрессор ДГУ: сработала защита", "severity": "warning"}
+{"reg_type": "holding", "addr": 40453, "bit": 6, "name": "ThrottlePos2FeedbackOORHigh", "description": "Обратная связь положения дроссельной заслонки 2: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40453, "bit": 7, "name": "ThrottlePos2FeedbackOORLow", "description": "Обратная связь положения дроссельной заслонки 2: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40453, "bit": 9, "name": "GasSupplyPrModerateHigh", "description": "Давление подачи газа: умеренно высокое", "severity": "warning"}
+{"reg_type": "holding", "addr": 40453, "bit": 10, "name": "GasSupplyPrModerateLow", "description": "Давление подачи газа: умеренно низкое", "severity": "warning"}
+{"reg_type": "holding", "addr": 40453, "bit": 11, "name": "ExhGasTmpCriticalHigh", "description": "Температура выхлопных газов: критически высокая", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40453, "bit": 12, "name": "Bank_A_CCD_Failed_Error", "description": "Банк A CCD: отказ", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40453, "bit": 13, "name": "Bank_B_CCD_Failed_Error", "description": "Банк B CCD: отказ", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40453, "bit": 14, "name": "CANParentCommunicationIncorrect", "description": "CAN: некорректная связь с родительским узлом", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40453, "bit": 15, "name": "CANChildComIncorrect", "description": "CAN: некорректная связь с дочерним узлом", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40454, "bit": 0, "name": "COT_Low_Error", "description": "Температура масла компрессора: низкая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40454, "bit": 1, "name": "COT_Low_Serious_Error", "description": "Температура масла компрессора: низкая — критическая", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40454, "bit": 2, "name": "IgnShutdRelayOORHigh", "description": "Реле отключения зажигания: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40454, "bit": 3, "name": "IgnShutdRelayOORLow", "description": "Реле отключения зажигания: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40454, "bit": 4, "name": "Gas Partial_Engine_Overload_Warning_E rror", "description": "Газ: предупреждение о частичной перегрузке двигателя", "severity": "warning"}
+{"reg_type": "holding", "addr": 40454, "bit": 5, "name": "InletGasDiffPressureOORHigh", "description": "Перепад давления газа на входе: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40454, "bit": 6, "name": "InletGasDiffPressureOORLow", "description": "Перепад давления газа на входе: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40454, "bit": 7, "name": "IMOP_Compressor_Outlet_Presure_ Delta_Error", "description": "IMOP: перепад давления на выходе компрессора", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40454, "bit": 8, "name": "IMOP_Compressor_Outlet_Pressure _Maximum_Error", "description": "IMOP: максимальное давление на выходе компрессора", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40454, "bit": 9, "name": "Gas Exhaust_Temp_1_(A1)_Deviation_Er ror", "description": "Газ: отклонение температуры выхлопа 1 (A1)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40454, "bit": 10, "name": "Gas Exhaust_Temp_3_(A2)_Deviation_Er ror", "description": "Газ: отклонение температуры выхлопа 3 (A2)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40454, "bit": 11, "name": "Gas Exhaust_Temp_5_(A3)_Deviation_Er ror", "description": "Газ: отклонение температуры выхлопа 5 (A3)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40454, "bit": 12, "name": "Gas Exhaust_Temp_7_(A4)_Deviation_Er ror", "description": "Газ: отклонение температуры выхлопа 7 (A4)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40454, "bit": 13, "name": "Gas Exhaust_Temp_9_(A5)_Deviation_Er ror", "description": "Газ: отклонение температуры выхлопа 9 (A5)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40454, "bit": 14, "name": "Gas Exhaust_Temp_11_(A6)_Deviation_E rror", "description": "Газ: отклонение температуры выхлопа 11 (A6)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40454, "bit": 15, "name": "Gas Exhaust_Temp_13_(A7)_Deviation_E rror", "description": "Газ: отклонение температуры выхлопа 13 (A7)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40455, "bit": 0, "name": "Gas Exhaust_Temp_15_(A8)_Deviation_E rror", "description": "Газ: отклонение температуры выхлопа 15 (A8)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40455, "bit": 1, "name": "Gas Exhaust_Temp_17_(A9)_Deviation_E rror", "description": "Газ: отклонение температуры выхлопа 17 (A9)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40455, "bit": 2, "name": "Gas Exhaust_Temp_2_(B1)_Deviation_Er ror", "description": "Газ: отклонение температуры выхлопа 2 (B1)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40455, "bit": 3, "name": "Gas Exhaust_Temp_4_(B2)_Deviation_Er ror", "description": "Газ: отклонение температуры выхлопа 4 (B2)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40455, "bit": 4, "name": "Gas Exhaust_Temp_6_(B3)_Deviation_Er ror", "description": "Газ: отклонение температуры выхлопа 6 (B3)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40455, "bit": 5, "name": "Gas Exhaust_Temp_8_(B4)_Deviation_Er ror", "description": "Газ: отклонение температуры выхлопа 8 (B4)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40455, "bit": 6, "name": "Gas Exhaust_Temp_10_(B5)_Deviation_E rror", "description": "Газ: отклонение температуры выхлопа 10 (B5)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40455, "bit": 7, "name": "Gas Exhaust_Temp_12_(B6)_Deviation_E rror", "description": "Газ: отклонение температуры выхлопа 12 (B6)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40455, "bit": 8, "name": "Gas Exhaust_Temp_14_(B7)_Deviation_E rror", "description": "Газ: отклонение температуры выхлопа 14 (B7)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40455, "bit": 9, "name": "Gas Exhaust_Temp_16_(B8)_Deviation_E rror", "description": "Газ: отклонение температуры выхлопа 16 (B8)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40455, "bit": 10, "name": "Gas Exhaust_Temp_18_(B9)_Deviation_E rror", "description": "Газ: отклонение температуры выхлопа 18 (B9)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40455, "bit": 11, "name": "Turbo_1_Overspeed_Critical_Error", "description": "Критическая ошибка: превышение скорости турбонагнетателя 1", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40455, "bit": 12, "name": "Turbo_2_Overspeed_Critical_Error", "description": "Критическая ошибка: превышение скорости турбонагнетателя 2", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40455, "bit": 13, "name": "AltHeaterCtrlOORHigh", "description": "Управление нагревателем генератора: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40455, "bit": 14, "name": "AltHeaterCtrlOORLow", "description": "Управление нагревателем генератора: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40455, "bit": 15, "name": "GenAlternator1stStartCondExists", "description": "Первый запуск генератора: зафиксировано состояние", "severity": "warning"}
+{"reg_type": "holding", "addr": 40456, "bit": 0, "name": "GensettoEngineComIncorrect", "description": "Связь генератора с двигателем: некорректна", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40456, "bit": 1, "name": "FSO_NON_High_Control_Error", "description": "Ошибка верхнего уровня управления FSO NON", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40456, "bit": 2, "name": "Gas Power Conservation Control Cond Exists", "description": "Газ: активен режим энергосбережения", "severity": "warning"}
+{"reg_type": "holding", "addr": 40456, "bit": 3, "name": "FCV_Position_High_Error", "description": "Положение FCV: выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40456, "bit": 4, "name": "FCV_Position_Low_Error", "description": "Положение FCV: ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40456, "bit": 5, "name": "Gas Engine_Heater_Over- Temperature_Alarm_Error", "description": "Газ: аварийная сигнализация перегрева нагревателя двигателя", "severity": "warning"}
+{"reg_type": "holding", "addr": 40456, "bit": 6, "name": "HTCoolTempDriverOORHigh", "description": "Драйвер температуры ОЖ контура HT: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40456, "bit": 7, "name": "HTCoolTempDriverOORLow", "description": "Драйвер температуры ОЖ контура HT: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40456, "bit": 8, "name": "HTCoolTempDriverCondExists", "description": "Драйвер температуры ОЖ контура HT: зафиксировано состояние", "severity": "warning"}
+{"reg_type": "holding", "addr": 40456, "bit": 9, "name": "LTCoolTempDriverOORHigh", "description": "Драйвер температуры ОЖ контура LT: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40456, "bit": 10, "name": "LTCoolTempDriverOORLow", "description": "Драйвер температуры ОЖ контура LT: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40456, "bit": 11, "name": "LTCoolTempDriverCondExists", "description": "Драйвер температуры ОЖ контура LT: зафиксировано состояние", "severity": "warning"}
+{"reg_type": "holding", "addr": 40456, "bit": 12, "name": "Comp_Surge_Shutdown_Error", "description": "Помпаж компрессора: аварийная остановка", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40456, "bit": 13, "name": "Comp_Surge_Derate_Error", "description": "Помпаж компрессора: снижение мощности", "severity": "warning"}
+{"reg_type": "holding", "addr": 40456, "bit": 14, "name": "MC68302_Error", "description": "Ошибка MC68302", "severity": "warning"}
+{"reg_type": "holding", "addr": 40456, "bit": 15, "name": "IntManPressure1CriticalHigh", "description": "Давление во впускном коллекторе 1: критически высокое", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40457, "bit": 0, "name": "IntManPressure1ModerateHigh", "description": "Давление во впускном коллекторе 1: умеренно высокое", "severity": "warning"}
+{"reg_type": "holding", "addr": 40457, "bit": 1, "name": "ExhaustO2CriticalLow", "description": "Кислород в выхлопе: критически низкий", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40457, "bit": 2, "name": "Excessive_Mech_Vibration_1_(A1)", "description": "Чрезмерная механическая вибрация 1 (A1)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40457, "bit": 3, "name": "Excessive_Mech_Vibration_2_(B1)", "description": "Чрезмерная механическая вибрация 2 (B1)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40457, "bit": 4, "name": "Excessive_Mech_Vibration_3_(A2)", "description": "Чрезмерная механическая вибрация 3 (A2)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40457, "bit": 5, "name": "Excessive_Mech_Vibration_4_(B2)", "description": "Чрезмерная механическая вибрация 4 (B2)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40457, "bit": 6, "name": "Excessive_Mech_Vibration_5_(A3)", "description": "Чрезмерная механическая вибрация 5 (A3)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40457, "bit": 7, "name": "Excessive_Mech_Vibration_6_(B3)", "description": "Чрезмерная механическая вибрация 6 (B3)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40457, "bit": 8, "name": "Excessive_Mech_Vibration_7_(A4)", "description": "Чрезмерная механическая вибрация 7 (A4)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40457, "bit": 9, "name": "Excessive_Mech_Vibration_8_(B4)", "description": "Чрезмерная механическая вибрация 8 (B4)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40457, "bit": 10, "name": "Excessive_Mech_Vibration_9_(A5)", "description": "Чрезмерная механическая вибрация 9 (A5)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40457, "bit": 11, "name": "Excessive_Mech_Vibration_10_(B5)", "description": "Чрезмерная механическая вибрация 10 (B5)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40457, "bit": 12, "name": "Excessive_Mech_Vibration_11_(A6)", "description": "Чрезмерная механическая вибрация 11 (A6)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40457, "bit": 13, "name": "Excessive_Mech_Vibration_12_(B6)", "description": "Чрезмерная механическая вибрация 12 (B6)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40457, "bit": 14, "name": "Excessive_Mech_Vibration_13_(A7)", "description": "Чрезмерная механическая вибрация 13 (A7)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40457, "bit": 15, "name": "Excessive_Mech_Vibration_14_(B7)", "description": "Чрезмерная механическая вибрация 14 (B7)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40458, "bit": 0, "name": "Excessive_Mech_Vibration_15_(A8)", "description": "Чрезмерная механическая вибрация 15 (A8)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40458, "bit": 1, "name": "Excessive_Mech_Vibration_16_(B8)", "description": "Чрезмерная механическая вибрация 16 (B8)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40458, "bit": 2, "name": "Excessive_Mech_Vibration_17_(A9)", "description": "Чрезмерная механическая вибрация 17 (A9)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40458, "bit": 3, "name": "Excessive_Mech_Vibration_18_(B9)", "description": "Чрезмерная механическая вибрация 18 (B9)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40458, "bit": 4, "name": "KnockCyl10(B5)OORL", "description": "Детонация цилиндра 10 (B5): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40458, "bit": 5, "name": "KnockCyl11(A6)OORL", "description": "Детонация цилиндра 11 (A6): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40458, "bit": 6, "name": "KnockCyl12(B6)OORL", "description": "Детонация цилиндра 12 (B6): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40458, "bit": 7, "name": "KnockCyl13(A7)OORL", "description": "Детонация цилиндра 13 (A7): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40458, "bit": 8, "name": "KnockCyl14(B7)OORL", "description": "Детонация цилиндра 14 (B7): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40458, "bit": 9, "name": "KnockCyl15(A8)OORL", "description": "Детонация цилиндра 15 (A8): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40458, "bit": 10, "name": "KnockCyl16(B8)OORL", "description": "Детонация цилиндра 16 (B8): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40458, "bit": 11, "name": "KnockCyl17(A9)OORL", "description": "Детонация цилиндра 17 (A9): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40458, "bit": 12, "name": "KnockCyl18(B9)OORL", "description": "Детонация цилиндра 18 (B9): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40459, "bit": 0, "name": "HTCoolantTemperatureRootCause Unknown", "description": "Температура ОЖ контура HT: причина неизвестна", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40459, "bit": 1, "name": "HTCoolantPressureIncorrect", "description": "Давление ОЖ контура HT: некорректное", "severity": "warning"}
+{"reg_type": "holding", "addr": 40459, "bit": 2, "name": "HTCoolantTemperatureIncorrect", "description": "Температура ОЖ контура HT: некорректная", "severity": "warning"}
+{"reg_type": "holding", "addr": 40459, "bit": 4, "name": "SparkPlug1(A1)OORL", "description": "Свеча зажигания 1 (A1): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40459, "bit": 5, "name": "SparkPlug2(B1)OORL", "description": "Свеча зажигания 2 (B1): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40459, "bit": 6, "name": "SparkPlug3(A2)OORL", "description": "Свеча зажигания 3 (A2): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40459, "bit": 7, "name": "SparkPlug4(B2)OORL", "description": "Свеча зажигания 4 (B2): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40459, "bit": 8, "name": "SparkPlug5(A3)OORL", "description": "Свеча зажигания 5 (A3): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40459, "bit": 9, "name": "SparkPlug6(B3)OORL", "description": "Свеча зажигания 6 (B3): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40459, "bit": 10, "name": "SparkPlug7(A4)OORL", "description": "Свеча зажигания 7 (A4): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40459, "bit": 11, "name": "SparkPlug8(B4)OORL", "description": "Свеча зажигания 8 (B4): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40459, "bit": 12, "name": "SparkPlug9(A5)OORL", "description": "Свеча зажигания 9 (A5): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40459, "bit": 13, "name": "SparkPlug10(B5)OORL", "description": "Свеча зажигания 10 (B5): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40459, "bit": 14, "name": "SparkPlug11(A6)OORL", "description": "Свеча зажигания 11 (A6): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40459, "bit": 15, "name": "SparkPlug12(B6)OORL", "description": "Свеча зажигания 12 (B6): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40460, "bit": 0, "name": "SparkPlug13(A7)OORL", "description": "Свеча зажигания 13 (A7): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40460, "bit": 1, "name": "SparkPlug14(B7)OORL", "description": "Свеча зажигания 14 (B7): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40460, "bit": 2, "name": "SparkPlug15(A8)OORL", "description": "Свеча зажигания 15 (A8): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40460, "bit": 3, "name": "SparkPlug16(B8)OORL", "description": "Свеча зажигания 16 (B8): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40460, "bit": 4, "name": "SparkPlug17(A9)OORL", "description": "Свеча зажигания 17 (A9): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40460, "bit": 5, "name": "SparkPlug18(B9)OORL", "description": "Свеча зажигания 18 (B9): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40460, "bit": 7, "name": "Gas Spark Plug 1 (A1) Root Cause Unknown", "description": "Газ: свеча зажигания 1 (A1) — причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40460, "bit": 8, "name": "Gas Spark Plug 2 (B1) Root Cause Unknown", "description": "Газ: свеча зажигания 2 (B1) — причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40460, "bit": 9, "name": "Gas Spark Plug 3 (A2) Root Cause Unknown", "description": "Газ: свеча зажигания 3 (A2) — причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40460, "bit": 10, "name": "Gas Spark Plug 4 (B2) Root Cause Unknown", "description": "Газ: свеча зажигания 4 (B2) — причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40460, "bit": 11, "name": "Gas Spark Plug 5 (A3) Root Cause Unknown", "description": "Газ: свеча зажигания 5 (A3) — причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40460, "bit": 12, "name": "Gas Spark Plug 6 (B3) Root Cause Unknown", "description": "Газ: свеча зажигания 6 (B3) — причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40460, "bit": 13, "name": "Gas Spark Plug 7 (A4) Root Cause Unknown", "description": "Газ: свеча зажигания 7 (A4) — причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40460, "bit": 14, "name": "Gas Spark Plug 8 (B4) Root Cause Unknown", "description": "Газ: свеча зажигания 8 (B4) — причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40460, "bit": 15, "name": "Gas Spark Plug 9 (A5) Root Cause Unknown", "description": "Газ: свеча зажигания 9 (A5) — причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40461, "bit": 0, "name": "Gas Spark Plug 10 (B5) Root Cause Unknown", "description": "Газ: свеча зажигания 10 (B5) — причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40461, "bit": 1, "name": "Gas Spark Plug 11 (A6) Root Cause Unknown", "description": "Газ: свеча зажигания 11 (A6) — причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40461, "bit": 2, "name": "Gas Spark Plug 12 (B6) Root Cause Unknown", "description": "Газ: свеча зажигания 12 (B6) — причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40461, "bit": 3, "name": "Gas Spark Plug 13 (A7) Root Cause Unknown", "description": "Газ: свеча зажигания 13 (A7) — причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40461, "bit": 4, "name": "Gas Spark Plug 14 (B7) Root Cause Unknown", "description": "Газ: свеча зажигания 14 (B7) — причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40461, "bit": 5, "name": "Gas Spark Plug 15 (A8) Root Cause Unknown", "description": "Газ: свеча зажигания 15 (A8) — причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40461, "bit": 6, "name": "Gas Spark Plug 16 (B8) Root Cause Unknown", "description": "Газ: свеча зажигания 16 (B8) — причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40461, "bit": 7, "name": "Gas Spark Plug 17 (A9) Root Cause Unknown", "description": "Газ: свеча зажигания 17 (A9) — причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40461, "bit": 8, "name": "Gas Spark Plug 18 (B9) Root Cause Unknown", "description": "Газ: свеча зажигания 18 (B9) — причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40461, "bit": 10, "name": "KnockCyl10(B5)OORH", "description": "Детонация цилиндра 10 (B5): выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40461, "bit": 11, "name": "KnockCyl11(A6)OORH", "description": "Детонация цилиндра 11 (A6): выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40461, "bit": 12, "name": "Knock12(B6)HighWarning", "description": "Детонация 12 (B6): предупреждение — высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40461, "bit": 13, "name": "KnockCyl12(B6)OORH", "description": "Детонация цилиндра 12 (B6): выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40461, "bit": 14, "name": "Knock13(A7)HighWarning", "description": "Детонация 13 (A7): предупреждение — высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40461, "bit": 15, "name": "KnockCyl13(A7)OORH", "description": "Детонация цилиндра 13 (A7): выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40462, "bit": 0, "name": "Knock14(B7)HighWarning", "description": "Детонация 14 (B7): предупреждение — высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40462, "bit": 1, "name": "KnockCyl14(B7)OORH", "description": "Детонация цилиндра 14 (B7): выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40462, "bit": 2, "name": "Knock15(A8)HighWarning", "description": "Детонация 15 (A8): предупреждение — высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40462, "bit": 3, "name": "KnockCyl15(A8)OORH", "description": "Детонация цилиндра 15 (A8): выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40462, "bit": 4, "name": "Knock16(B8)HighWarning", "description": "Детонация 16 (B8): предупреждение — высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40462, "bit": 6, "name": "KnockCyl18(B9)OORH", "description": "Детонация цилиндра 18 (B9): выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40462, "bit": 7, "name": "Knock20(B10)HighWarning", "description": "Детонация 20 (B10): предупреждение — высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40462, "bit": 8, "name": "Continuous_Light_Knock_Error_20_( B10)", "description": "Непрерывная лёгкая детонация, цилиндр 20 (B10)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40462, "bit": 9, "name": "Heavy_Knock_Error_20_(B10)", "description": "Сильная детонация, цилиндр 20 (B10)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40462, "bit": 10, "name": "KnockCyl20(B10)OORL", "description": "Детонация цилиндра 20 (B10): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40462, "bit": 11, "name": "KnockCyl20(B10)OORH", "description": "Детонация цилиндра 20 (B10): выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40462, "bit": 12, "name": "Continuous_Light_Knock_Error_19_( A10)", "description": "Непрерывная лёгкая детонация, цилиндр 19 (A10)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40462, "bit": 13, "name": "Heavy_Knock_Error_19_(A10)", "description": "Сильная детонация, цилиндр 19 (A10)", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40462, "bit": 14, "name": "KnockCyl19(A10)OORL", "description": "Детонация цилиндра 19 (A10): ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40462, "bit": 15, "name": "KnockCyl19(A10)OORH", "description": "Детонация цилиндра 19 (A10): выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40463, "bit": 0, "name": "KnockCyl16(B8)OORH", "description": "Детонация цилиндра 16 (B8): выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40463, "bit": 1, "name": "Knock17(A9)HighWarning", "description": "Детонация 17 (A9): предупреждение — высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40463, "bit": 2, "name": "KnockCyl17(A9)OORH", "description": "Детонация цилиндра 17 (A9): выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40463, "bit": 3, "name": "Knock18(B9)HighWarning", "description": "Детонация 18 (B9): предупреждение — высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40463, "bit": 4, "name": "Knock19(A10)HighWarning", "description": "Детонация 19 (A10): предупреждение — высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40463, "bit": 6, "name": "HTCoolantLevelModerateHigh", "description": "Уровень ОЖ контура HT: умеренно высокий", "severity": "warning"}
+{"reg_type": "holding", "addr": 40463, "bit": 7, "name": "KnockCyl1(A1)OORH", "description": "Детонация цилиндра 1 (A1): выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40463, "bit": 8, "name": "KnockCyl2(B1)OORH", "description": "Детонация цилиндра 2 (B1): выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40463, "bit": 9, "name": "KnockCyl3(A2)OORH", "description": "Детонация цилиндра 3 (A2): выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40463, "bit": 10, "name": "KnockCyl4(B2)OORH", "description": "Детонация цилиндра 4 (B2): выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40463, "bit": 11, "name": "KnockCyl5(A3)OORH", "description": "Детонация цилиндра 5 (A3): выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40463, "bit": 12, "name": "KnockCyl6(B3)OORH", "description": "Детонация цилиндра 6 (B3): выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40463, "bit": 13, "name": "KnockCyl7(A4)OORH", "description": "Детонация цилиндра 7 (A4): выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40463, "bit": 14, "name": "KnockCyl8(B4)OORH", "description": "Детонация цилиндра 8 (B4): выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40463, "bit": 15, "name": "KnockCyl9(A5)OORH", "description": "Детонация цилиндра 9 (A5): выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40464, "bit": 0, "name": "Knock11(A6)HighWarning", "description": "Детонация 11 (A6): предупреждение — высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40464, "bit": 1, "name": "Knock1(A1)HighWarning", "description": "Детонация 1 (A1): предупреждение — высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40464, "bit": 2, "name": "Knock2(B1)HighWarning", "description": "Детонация 2 (B1): предупреждение — высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40464, "bit": 3, "name": "Knock3(A2)HighWarning", "description": "Детонация 3 (A2): предупреждение — высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40464, "bit": 4, "name": "Knock4(B2)HighWarning", "description": "Детонация 4 (B2): предупреждение — высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40464, "bit": 5, "name": "Knock5(A3)HighWarning", "description": "Детонация 5 (A3): предупреждение — высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40464, "bit": 6, "name": "Knock6(B3)HighWarning", "description": "Детонация 6 (B3): предупреждение — высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40464, "bit": 7, "name": "Knock7(A4)HighWarning", "description": "Детонация 7 (A4): предупреждение — высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40464, "bit": 8, "name": "Knock8(B4)HighWarning", "description": "Детонация 8 (B4): предупреждение — высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40464, "bit": 9, "name": "Knock9(A5)HighWarning", "description": "Детонация 9 (A5): предупреждение — высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40464, "bit": 10, "name": "Knock10(B5)HighWarning", "description": "Детонация 10 (B5): предупреждение — высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40464, "bit": 11, "name": "ExhaustTemperature19(A10) AbnormalRate", "description": "Температура выхлопа 19 (A10): аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40464, "bit": 12, "name": "ExhaustTemperature20(B10) AbnormalRate", "description": "Температура выхлопа 20 (B10): аномальная скорость изменения", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40464, "bit": 13, "name": "EngineOilLevelLowWarningError", "description": "Низкий уровень масла двигателя: предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40464, "bit": 14, "name": "GasSupplyPressureCriticalHigh", "description": "Давление подачи газа: критически высокое", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40464, "bit": 15, "name": "GasSupplyPressureCriticalLow", "description": "Давление подачи газа: критически низкое", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40465, "bit": 0, "name": "SparkPlug1(A1)HighWarning", "description": "Свеча зажигания 1 (A1): предупреждение — высокая", "severity": "none"}
+{"reg_type": "holding", "addr": 40465, "bit": 1, "name": "SparkPlug2(B1)HighWarning", "description": "Свеча зажигания 2 (B1): предупреждение — высокая", "severity": "none"}
+{"reg_type": "holding", "addr": 40465, "bit": 2, "name": "SparkPlug3(A2)HighWarning", "description": "Свеча зажигания 3 (A2): предупреждение — высокая", "severity": "none"}
+{"reg_type": "holding", "addr": 40465, "bit": 3, "name": "SparkPlug4(B2)HighWarning", "description": "Свеча зажигания 4 (B2): предупреждение — высокая", "severity": "none"}
+{"reg_type": "holding", "addr": 40465, "bit": 4, "name": "SparkPlug5(A3)HighWarning", "description": "Свеча зажигания 5 (A3): предупреждение — высокая", "severity": "none"}
+{"reg_type": "holding", "addr": 40465, "bit": 5, "name": "SparkPlug6(B3)HighWarning", "description": "Свеча зажигания 6 (B3): предупреждение — высокая", "severity": "none"}
+{"reg_type": "holding", "addr": 40465, "bit": 6, "name": "SparkPlug1(A1)LowWarning", "description": "Свеча зажигания 1 (A1): предупреждение — низкая", "severity": "none"}
+{"reg_type": "holding", "addr": 40465, "bit": 7, "name": "SparkPlug2(B1)LowWarning", "description": "Свеча зажигания 2 (B1): предупреждение — низкая", "severity": "none"}
+{"reg_type": "holding", "addr": 40465, "bit": 8, "name": "SparkPlug3(A2)LowWarning", "description": "Свеча зажигания 3 (A2): предупреждение — низкая", "severity": "none"}
+{"reg_type": "holding", "addr": 40465, "bit": 9, "name": "SparkPlug4(B2)LowWarning", "description": "Свеча зажигания 4 (B2): предупреждение — низкая", "severity": "none"}
+{"reg_type": "holding", "addr": 40465, "bit": 10, "name": "SparkPlug5(A3)LowWarning", "description": "Свеча зажигания 5 (A3): предупреждение — низкая", "severity": "none"}
+{"reg_type": "holding", "addr": 40465, "bit": 11, "name": "SparkPlug6(B3)LowWarning", "description": "Свеча зажигания 6 (B3): предупреждение — низкая", "severity": "none"}
+{"reg_type": "holding", "addr": 40465, "bit": 12, "name": "Gas HT Coolant Temperature Condition Exists", "description": "Газ: зафиксировано условие высокой температуры ОЖ", "severity": "warning"}
+{"reg_type": "holding", "addr": 40465, "bit": 13, "name": "Gas Low Voltage Ride Through- Bad intelligent device or component", "description": "Газ: режим LVRT — неисправный интеллектуальный компонент", "severity": "warning"}
+{"reg_type": "holding", "addr": 40465, "bit": 14, "name": "Gas Low Voltage Ride Through- Abnormal update rate", "description": "Газ: режим LVRT — аномальная частота обновления данных", "severity": "warning"}
+{"reg_type": "holding", "addr": 40465, "bit": 15, "name": "Gas Low Voltage Ride Through- Data erratic, intermittent or incorrect", "description": "Газ: режим LVRT — нестабильные, прерывистые или неверные данные", "severity": "warning"}
+{"reg_type": "holding", "addr": 40466, "bit": 0, "name": "SparkPlug7(A4)HighWarning", "description": "Свеча зажигания 7 (A4): предупреждение — высокая", "severity": "none"}
+{"reg_type": "holding", "addr": 40466, "bit": 1, "name": "SparkPlug7(A4)LowWarning", "description": "Свеча зажигания 7 (A4): предупреждение — низкая", "severity": "none"}
+{"reg_type": "holding", "addr": 40466, "bit": 2, "name": "SparkPlug8(B4)HighWarning", "description": "Свеча зажигания 8 (B4): предупреждение — высокая", "severity": "none"}
+{"reg_type": "holding", "addr": 40466, "bit": 3, "name": "SparkPlug8(B4)LowWarning", "description": "Свеча зажигания 8 (B4): предупреждение — низкая", "severity": "none"}
+{"reg_type": "holding", "addr": 40466, "bit": 4, "name": "SparkPlug9(A5)HighWarning", "description": "Свеча зажигания 9 (A5): предупреждение — высокая", "severity": "none"}
+{"reg_type": "holding", "addr": 40466, "bit": 5, "name": "SparkPlug9(A5)LowWarning", "description": "Свеча зажигания 9 (A5): предупреждение — низкая", "severity": "none"}
+{"reg_type": "holding", "addr": 40466, "bit": 6, "name": "SparkPlug10(B5)HighWarning", "description": "Свеча зажигания 10 (B5): предупреждение — высокая", "severity": "none"}
+{"reg_type": "holding", "addr": 40466, "bit": 7, "name": "SparkPlug10(B5)LowWarning", "description": "Свеча зажигания 10 (B5): предупреждение — низкая", "severity": "none"}
+{"reg_type": "holding", "addr": 40466, "bit": 8, "name": "SparkPlug11(A6)HighWarning", "description": "Свеча зажигания 11 (A6): предупреждение — высокая", "severity": "none"}
+{"reg_type": "holding", "addr": 40466, "bit": 9, "name": "SparkPlug11(A6)LowWarning", "description": "Свеча зажигания 11 (A6): предупреждение — низкая", "severity": "none"}
+{"reg_type": "holding", "addr": 40466, "bit": 10, "name": "SparkPlug12(B6)HighWarning", "description": "Свеча зажигания 12 (B6): предупреждение — высокая", "severity": "none"}
+{"reg_type": "holding", "addr": 40466, "bit": 11, "name": "SparkPlug12(B6)LowWarning", "description": "Свеча зажигания 12 (B6): предупреждение — низкая", "severity": "none"}
+{"reg_type": "holding", "addr": 40466, "bit": 12, "name": "SparkPlug13(A7)HighWarning", "description": "Свеча зажигания 13 (A7): предупреждение — высокая", "severity": "none"}
+{"reg_type": "holding", "addr": 40466, "bit": 13, "name": "SparkPlug13(A7)LowWarning", "description": "Свеча зажигания 13 (A7): предупреждение — низкая", "severity": "none"}
+{"reg_type": "holding", "addr": 40466, "bit": 14, "name": "SparkPlug14(B7)HighWarning", "description": "Свеча зажигания 14 (B7): предупреждение — высокая", "severity": "none"}
+{"reg_type": "holding", "addr": 40466, "bit": 15, "name": "SparkPlug14(B7)LowWarning", "description": "Свеча зажигания 14 (B7): предупреждение — низкая", "severity": "none"}
+{"reg_type": "holding", "addr": 40467, "bit": 0, "name": "SparkPlug15(A8)HighWarning", "description": "Свеча зажигания 15 (A8): предупреждение — высокая", "severity": "none"}
+{"reg_type": "holding", "addr": 40467, "bit": 1, "name": "SparkPlug15(A8)LowWarning", "description": "Свеча зажигания 15 (A8): предупреждение — низкая", "severity": "none"}
+{"reg_type": "holding", "addr": 40467, "bit": 2, "name": "SparkPlug16(B8)HighWarning", "description": "Свеча зажигания 16 (B8): предупреждение — высокая", "severity": "none"}
+{"reg_type": "holding", "addr": 40467, "bit": 3, "name": "SparkPlug16(B8)LowWarning", "description": "Свеча зажигания 16 (B8): предупреждение — низкая", "severity": "none"}
+{"reg_type": "holding", "addr": 40467, "bit": 4, "name": "SparkPlug17(A9)HighWarning", "description": "Свеча зажигания 17 (A9): предупреждение — высокая", "severity": "none"}
+{"reg_type": "holding", "addr": 40467, "bit": 5, "name": "SparkPlug17(A9)LowWarning", "description": "Свеча зажигания 17 (A9): предупреждение — низкая", "severity": "none"}
+{"reg_type": "holding", "addr": 40467, "bit": 6, "name": "SparkPlug18(B9)HighWarning", "description": "Свеча зажигания 18 (B9): предупреждение — высокая", "severity": "none"}
+{"reg_type": "holding", "addr": 40467, "bit": 7, "name": "SparkPlug18(B9)LowWarning", "description": "Свеча зажигания 18 (B9): предупреждение — низкая", "severity": "none"}
+{"reg_type": "holding", "addr": 40467, "bit": 8, "name": "Gas Exhaust Aft Outlet Oxygen Relay OORH", "description": "Газ: реле датчика O2 на выходе задней секции выхлопа — выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40467, "bit": 9, "name": "Gas Exhaust Aft Outlet Oxygen Relay OORL", "description": "Газ: реле датчика O2 на выходе задней секции выхлопа — ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40467, "bit": 10, "name": "Gas Exhaust Aft Inlet Oxygen Relay OORH", "description": "Газ: реле датчика O2 на входе задней секции выхлопа — выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40467, "bit": 11, "name": "Gas Exhaust Aft Inlet Oxygen Relay OORL", "description": "Газ: реле датчика O2 на входе задней секции выхлопа — ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40467, "bit": 12, "name": "ExhaustOxygenRelayOORH", "description": "Реле кислорода в выхлопе: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40467, "bit": 13, "name": "ExhaustOxygenRelayOORL", "description": "Реле кислорода в выхлопе: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40468, "bit": 0, "name": "LowVoltageRideThrough- Abnormalfrequencyorpulsewidthor period", "description": "Защита от просадки напряжения: аномальная частота/ширина импульса/период", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40468, "bit": 1, "name": "Gas Low Voltage Ride Through- Root Cause Not Known", "description": "Газ: режим LVRT — причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40468, "bit": 2, "name": "Gas Low Voltage Ride Through- Condition Exists", "description": "Газ: зафиксировано условие режима LVRT", "severity": "warning"}
+{"reg_type": "holding", "addr": 40468, "bit": 3, "name": "Gas External Air Pressure Low Warning Error", "description": "Газ: предупреждение — низкое внешнее атмосферное давление", "severity": "warning"}
+{"reg_type": "holding", "addr": 40468, "bit": 4, "name": "Gas Manifold_Absolute_Pressure_2_High _Error", "description": "Газ: высокое абсолютное давление во впускном коллекторе 2", "severity": "warning"}
+{"reg_type": "holding", "addr": 40468, "bit": 5, "name": "Gas Manifold_Absolute_Pressure_2_Low _Error", "description": "Газ: низкое абсолютное давление во впускном коллекторе 2", "severity": "warning"}
+{"reg_type": "holding", "addr": 40468, "bit": 6, "name": "IntManPressure2CriticalHigh", "description": "Давление во впускном коллекторе 2: критически высокое", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40468, "bit": 7, "name": "IntManPressure2ModerateHigh", "description": "Давление во впускном коллекторе 2: умеренно высокое", "severity": "warning"}
+{"reg_type": "holding", "addr": 40468, "bit": 9, "name": "Gas Low Gearbox Oil Pressure - Condition Exists", "description": "Газ: низкое давление масла редуктора — условие зафиксировано", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40468, "bit": 10, "name": "HighGearboxOilTemperature- ConditionExists", "description": "Высокая температура масла коробки передач: зафиксировано состояние", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40468, "bit": 11, "name": "DifferentialFault-ConditionExists", "description": "Дифференциальная неисправность: зафиксировано состояние", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40468, "bit": 12, "name": "Gas DC Power Supply Fault - Condition Exists", "description": "Газ: неисправность источника питания постоянного тока — условие зафиксировано", "severity": "warning"}
+{"reg_type": "holding", "addr": 40468, "bit": 13, "name": "Gas GIB Isolator Open Fault - Condition Exists", "description": "Газ: отключение изолятора GIB — условие зафиксировано", "severity": "warning"}
+{"reg_type": "holding", "addr": 40468, "bit": 14, "name": "Gas Radiator Fan Trip Fault - Condition Exists", "description": "Газ: отключение вентилятора радиатора — условие зафиксировано", "severity": "warning"}
+{"reg_type": "holding", "addr": 40468, "bit": 15, "name": "Gas Ventilator Fan Trip Fault - Condition Exists", "description": "Газ: отключение вентилятора вентиляции — условие зафиксировано", "severity": "warning"}
+{"reg_type": "holding", "addr": 40469, "bit": 0, "name": "Gas Louvres Closed Fault - Condition Exists", "description": "Газ: неисправность — жалюзи закрыты, условие зафиксировано", "severity": "warning"}
+{"reg_type": "holding", "addr": 40469, "bit": 1, "name": "StartSystemFault-ConditionExists", "description": "Неисправность системы запуска: зафиксировано состояние", "severity": "warning"}
+{"reg_type": "holding", "addr": 40469, "bit": 2, "name": "Gas Alternator Heater Trip Fault - Condition Exists", "description": "Газ: отключение нагревателя генератора — условие зафиксировано", "severity": "warning"}
+{"reg_type": "holding", "addr": 40469, "bit": 4, "name": "ECMDerateFault", "description": "Снижение мощности ECM: неисправность", "severity": "none"}
+{"reg_type": "holding", "addr": 40469, "bit": 5, "name": "Start-InhibitShutdownFault", "description": "Блокировка запуска: аварийная остановка", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40469, "bit": 6, "name": "Start-InhibitWarningFaultEvent", "description": "Блокировка запуска: предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40469, "bit": 7, "name": "Gas High Alternator Temperature 1 Shutdown Fault", "description": "Газ: высокая температура генератора 1 — аварийная остановка", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40469, "bit": 8, "name": "Gas High Alternator Temperature 2 Shutdown Fault", "description": "Газ: высокая температура генератора 2 — аварийная остановка", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40469, "bit": 9, "name": "Gas High Alternator Temperature 3 Shutdown Fault", "description": "Газ: высокая температура генератора 3 — аварийная остановка", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40469, "bit": 10, "name": "Gas High Drive End Bearing Temperature Shutdown Fault", "description": "Газ: высокая температура подшипника со стороны привода — аварийная остановка", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40469, "bit": 11, "name": "Gas High Non-Drive End Bearing Temp Shutdown Fault", "description": "Газ: высокая температура подшипника со стороны, противоположной приводу — аварийная остановка", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40469, "bit": 12, "name": "OffLoadRunningFault", "description": "Работа без нагрузки: неисправность", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40470, "bit": 0, "name": "OilFilterRestrictionHigh", "description": "Засорённость масляного фильтра: высокая", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40470, "bit": 1, "name": "FuelControlValveError", "description": "Ошибка клапана управления топливом", "severity": "warning"}
+{"reg_type": "holding", "addr": 40470, "bit": 2, "name": "Gas Engine Electronic Fuel Valve #2 OORH", "description": "Газ: электронный топливный клапан двигателя №2 — выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40470, "bit": 3, "name": "Gas Engine Electronic Fuel Valve #2 OORL", "description": "Газ: электронный топливный клапан двигателя №2 — ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40470, "bit": 4, "name": "ThrottleControlActuatorError", "description": "Ошибка привода дроссельной заслонки", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40470, "bit": 5, "name": "CompressorBypassActuatorError", "description": "Ошибка привода обходного клапана компрессора", "severity": "warning"}
+{"reg_type": "holding", "addr": 40470, "bit": 6, "name": "KnockEngineDerate", "description": "Детонация двигателя: снижение мощности", "severity": "warning"}
+{"reg_type": "holding", "addr": 40470, "bit": 8, "name": "ThrottleActuator2-Special Instruction", "description": "Привод дроссельной заслонки 2: специальная инструкция", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40470, "bit": 9, "name": "ThrottleActuator2-ShortedHigh", "description": "Привод дроссельной заслонки 2: замыкание на высокий", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40470, "bit": 10, "name": "ThrottleActuator2-ShortedLow", "description": "Привод дроссельной заслонки 2: замыкание на низкий", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40470, "bit": 11, "name": "ThrottleActuator-ShortedHigh", "description": "Привод дроссельной заслонки: замыкание на высокий", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40470, "bit": 12, "name": "ThrottleActuator-ShortedLow", "description": "Привод дроссельной заслонки: замыкание на низкий", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40470, "bit": 13, "name": "ThrottleActuator-Specialinstruction", "description": "Привод дроссельной заслонки: специальная инструкция", "severity": "shutdown_cooldown"}
+{"reg_type": "holding", "addr": 40470, "bit": 14, "name": "ThrottleActuator-Temperaturelow", "description": "Привод дроссельной заслонки: низкая температура", "severity": "warning"}
+{"reg_type": "holding", "addr": 40470, "bit": 15, "name": "ThrottleActuator2-Templow", "description": "Привод дроссельной заслонки 2: низкая температура", "severity": "warning"}
+{"reg_type": "holding", "addr": 40474, "bit": 0, "name": "Gas Engine Turbocharger Compressor Above Normal- Least Severe", "description": "Газ: компрессор турбонагнетателя двигателя — выше нормы, наименее критически", "severity": "warning"}
+{"reg_type": "holding", "addr": 40474, "bit": 1, "name": "Gas Engine Turbocharger Compressor Below Normal- Least Severe", "description": "Газ: компрессор турбонагнетателя двигателя — ниже нормы, наименее критически", "severity": "warning"}
+{"reg_type": "holding", "addr": 40474, "bit": 2, "name": "Gas Engine Turbocharger Compressor: Root Cause Not Known", "description": "Газ: компрессор турбонагнетателя двигателя — причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40474, "bit": 3, "name": "Gas Engine Turbocharger Compressor Bypass Actuator: Special", "description": "Газ: актуатор байпаса компрессора турбонагнетателя — специальная команда", "severity": "warning"}
+{"reg_type": "holding", "addr": 40474, "bit": 4, "name": "Gas Engine Turbocharger Compressor Bypass Actuator: Bad Comp.", "description": "Газ: актуатор байпаса компрессора турбонагнетателя — неисправный компонент", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40474, "bit": 5, "name": "Gas Engine Turbocharger Compressor Bypass Actuator: N/W error", "description": "Газ: актуатор байпаса компрессора турбонагнетателя — ошибка сети", "severity": "warning"}
+{"reg_type": "holding", "addr": 40474, "bit": 6, "name": "Gas Genset Voltage Sensing MCB Protection Shutdown", "description": "Газ: защита MCB контроля напряжения генератора — аварийная остановка", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40474, "bit": 7, "name": "CustomerGasValveCloseWarning", "description": "Закрытие клиентского газового клапана: предупреждение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40474, "bit": 8, "name": "Gas Customer Gas Valve Close Shutdown", "description": "Газ: закрытие газового клапана пользователя — аварийная остановка", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40474, "bit": 9, "name": "Gas Genset Voltage Sensing MCB Protection Warning", "description": "Газ: предупреждение защиты MCB контроля напряжения генератора", "severity": "warning"}
+{"reg_type": "holding", "addr": 40474, "bit": 10, "name": "ConnectorCapNotPresent", "description": "Защитный колпачок разъёма отсутствует", "severity": "warning"}
+{"reg_type": "holding", "addr": 40474, "bit": 11, "name": "Gas Engine Turbocharger Wastegate Actuator Cal. error", "description": "Газ: ошибка калибровки актуатора вастгейта турбонагнетателя", "severity": "warning"}
+{"reg_type": "holding", "addr": 40474, "bit": 12, "name": "Gas Engine Turbocharger Wastegate Actuator Temp. High", "description": "Газ: высокая температура актуатора вастгейта турбонагнетателя", "severity": "warning"}
+{"reg_type": "holding", "addr": 40474, "bit": 13, "name": "Gas Engine Turbocharger Wastegate Act Mech. System error", "description": "Газ: механическая ошибка системы актуатора вастгейта турбонагнетателя", "severity": "warning"}
+{"reg_type": "holding", "addr": 40474, "bit": 14, "name": "Gas Engine Turbocharger Wastegate Actuator OOR High", "description": "Газ: актуатор вастгейта турбонагнетателя — выше допустимого диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40474, "bit": 15, "name": "Gas Engine Turbocharger Wastegate Actualtor OOR Low", "description": "Газ: актуатор вастгейта турбонагнетателя — ниже допустимого диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40475, "bit": 0, "name": "UtilityReversekWFault", "description": "Обратная мощность (кВт) от сети: неисправность", "severity": "warning"}
+{"reg_type": "holding", "addr": 40475, "bit": 1, "name": "Gas Engine Turbocharger Wastegate Actuator 1 Position", "description": "Газ: положение актуатора вастгейта турбонагнетателя 1", "severity": "warning"}
+{"reg_type": "holding", "addr": 40475, "bit": 2, "name": "Gas Throttle Delta Pressure Sensor Circuit High", "description": "Газ: цепь датчика перепада давления дросселя — выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40475, "bit": 3, "name": "Gas Throttle Delta Pressure Sensor Circuit Low", "description": "Газ: цепь датчика перепада давления дросселя — ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40475, "bit": 4, "name": "IntakeManifold2PressureIncorrect", "description": "Давление во впускном коллекторе 2: некорректное", "severity": "warning"}
+{"reg_type": "holding", "addr": 40475, "bit": 5, "name": "Gas Engine Turbocharger 1 Boost Pressure Error", "description": "Газ: ошибка давления наддува турбонагнетателя 1", "severity": "warning"}
+{"reg_type": "holding", "addr": 40475, "bit": 6, "name": "Gas Engine Gas Control Valve Intake Pressure Incorrect", "description": "Газ: некорректное давление на входе газового управляющего клапана", "severity": "warning"}
+{"reg_type": "holding", "addr": 40475, "bit": 7, "name": "Gas Engine Gas Control Valve Intake Pressure 2 error", "description": "Газ: ошибка давления 2 на входе газового управляющего клапана", "severity": "warning"}
+{"reg_type": "holding", "addr": 40475, "bit": 8, "name": "Gas Engine Gas Control Valve 1 Outlet Pressure Error", "description": "Газ: ошибка давления на выходе газового управляющего клапана 1", "severity": "warning"}
+{"reg_type": "holding", "addr": 40475, "bit": 9, "name": "Gas Engine Gas Control Valve Outlet Pressure 2 error", "description": "Газ: ошибка давления 2 на выходе газового управляющего клапана", "severity": "warning"}
+{"reg_type": "holding", "addr": 40475, "bit": 10, "name": "ExhaustBackPressureIncorrect", "description": "Противодавление выхлопа: некорректное", "severity": "warning"}
+{"reg_type": "holding", "addr": 40475, "bit": 11, "name": "gas Engine Coolant Temperature 2 Sensor Circuit High", "description": "Газ: цепь датчика температуры ОЖ двигателя 2 — выше нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40475, "bit": 12, "name": "Gas Engine Coolant Temperature 1 Sensor Circuit Low", "description": "Газ: цепь датчика температуры ОЖ двигателя 1 — ниже нормы", "severity": "warning"}
+{"reg_type": "holding", "addr": 40475, "bit": 13, "name": "EngineCoolantTemperature2High", "description": "Температура ОЖ двигателя 2: высокая", "severity": "warning"}
+{"reg_type": "holding", "addr": 40475, "bit": 14, "name": "EngineCoolantTemperature2Low", "description": "Температура ОЖ двигателя 2: низкая", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40475, "bit": 15, "name": "ThrottleDeltaPressureIncorrect", "description": "Перепад давления дроссельной заслонки: некорректный", "severity": "warning"}
+{"reg_type": "holding", "addr": 40476, "bit": 0, "name": "Gas MIL Control Data Communications error", "description": "Газ: ошибка передачи данных управления MIL", "severity": "warning"}
+{"reg_type": "holding", "addr": 40476, "bit": 1, "name": "Gas Malfunction Indicator Lamp- Condition Exists", "description": "Газ: индикатор неисправности (MIL) — условие зафиксировано", "severity": "warning"}
+{"reg_type": "holding", "addr": 40476, "bit": 2, "name": "EngineKnock-SpecialInstructions", "description": "Детонация двигателя: специальные инструкции", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40476, "bit": 3, "name": "AlternatorAutoLubeSystemFailed", "description": "Автосмазка генератора: отказ", "severity": "warning"}
+{"reg_type": "holding", "addr": 40476, "bit": 4, "name": "DCprelubesystemfailed", "description": "Предпусковая смазка постоянного тока: отказ", "severity": "warning"}
+{"reg_type": "holding", "addr": 40476, "bit": 5, "name": "OilHeaterSystemFailed", "description": "Система подогрева масла: отказ", "severity": "warning"}
+{"reg_type": "holding", "addr": 40495, "bit": 0, "name": "AT1DEFTankLevelSensorOOR Low", "description": "AT1: датчик уровня бака DEF — ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40495, "bit": 1, "name": "AT1DEFTankLevelSensorOOR High", "description": "AT1: датчик уровня бака DEF — выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40495, "bit": 2, "name": "AT1DieselExhaustFluidTankLevel Low", "description": "AT1: уровень бака мочевины (DEF) — низкий", "severity": "warning"}
+{"reg_type": "holding", "addr": 40495, "bit": 3, "name": "AT1DEFTemperatureSensorOOR Low", "description": "AT1: датчик температуры DEF — ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40495, "bit": 4, "name": "AT1DEFTankTemperatureSensor OORHigh", "description": "AT1: датчик температуры бака DEF — выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40495, "bit": 5, "name": "AT1DieselExhaustFluidTank Temperatureerror", "description": "AT1: ошибка температуры бака мочевины (DEF)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40495, "bit": 6, "name": "AT1DEFDoingUnitInputLines condition", "description": "AT1: состояние входных линий дозирующего блока DEF", "severity": "warning"}
+{"reg_type": "holding", "addr": 40495, "bit": 7, "name": "AT1DieselExhaustFluidTank HeaterOORHigh", "description": "AT1: нагреватель бака DEF — выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40495, "bit": 8, "name": "AT1DieselExhaustFluidTank HeaterOORLow", "description": "AT1: нагреватель бака DEF — ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40495, "bit": 9, "name": "ATDieselExhaustFluidQuality SensorOORLow", "description": "AT: датчик качества DEF — ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40495, "bit": 10, "name": "ATDieselExhaustFluidQuality SensorOORHigh", "description": "AT: датчик качества DEF — выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40495, "bit": 11, "name": "AT1DPFIntakeTemperatureSensor CircuitOORHigh", "description": "AT1: датчик температуры на входе DPF — цепь выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40495, "bit": 12, "name": "AT1DieselExhaustFluidTank HeaterLow", "description": "AT1: нагреватель бака DEF — низкий", "severity": "warning"}
+{"reg_type": "holding", "addr": 40495, "bit": 13, "name": "AT1DieselExhaustFluidTank HeaterHigh", "description": "AT1: нагреватель бака DEF — высокий", "severity": "warning"}
+{"reg_type": "holding", "addr": 40495, "bit": 14, "name": "AftertreatmentDieselExhaustFluid Qualityerror", "description": "Система нейтрализации: ошибка качества мочевины (DEF)", "severity": "warning"}
+{"reg_type": "holding", "addr": 40495, "bit": 15, "name": "ATDieselExhaustFluidQualityRoot unknown", "description": "AT: качество DEF — причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40496, "bit": 0, "name": "Fuel Delivery Pressure Above Normal", "description": "Давление подачи топлива: выше нормы", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40496, "bit": 1, "name": "Water In Fuel Above Normal", "description": "Вода в топливе: выше нормы", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40496, "bit": 2, "name": "Injector Solenoid Driver7 Calib. error", "description": "Ошибка калибровки драйвера соленоида форсунки 7", "severity": "warning"}
+{"reg_type": "holding", "addr": 40496, "bit": 3, "name": "Injector Solenoid Driver 8 Calib. error", "description": "Ошибка калибровки драйвера соленоида форсунки 8", "severity": "warning"}
+{"reg_type": "holding", "addr": 40496, "bit": 4, "name": "Injector Solenoid Driver 9 Calib. error", "description": "Ошибка калибровки драйвера соленоида форсунки 9", "severity": "warning"}
+{"reg_type": "holding", "addr": 40496, "bit": 5, "name": "Injector Solenoid Driver 10 Calib. error", "description": "Ошибка калибровки драйвера соленоида форсунки 10", "severity": "warning"}
+{"reg_type": "holding", "addr": 40496, "bit": 6, "name": "Injector Solenoid Driver 11 Calib. error", "description": "Ошибка калибровки драйвера соленоида форсунки 11", "severity": "warning"}
+{"reg_type": "holding", "addr": 40496, "bit": 7, "name": "Injector Solenoid Driver 12 Calib. error", "description": "Ошибка калибровки драйвера соленоида форсунки 12", "severity": "warning"}
+{"reg_type": "holding", "addr": 40496, "bit": 8, "name": "Injector Solenoid Driver 13 Calib. error", "description": "Ошибка калибровки драйвера соленоида форсунки 13", "severity": "warning"}
+{"reg_type": "holding", "addr": 40496, "bit": 9, "name": "Injector Solenoid Driver 14 Calib. error", "description": "Ошибка калибровки драйвера соленоида форсунки 14", "severity": "warning"}
+{"reg_type": "holding", "addr": 40496, "bit": 10, "name": "Injector Solenoid Driver 15 Calib. error", "description": "Ошибка калибровки драйвера соленоида форсунки 15", "severity": "warning"}
+{"reg_type": "holding", "addr": 40496, "bit": 11, "name": "Injector Solenoid Driver 16 calib. error", "description": "Ошибка калибровки драйвера соленоида форсунки 16", "severity": "warning"}
+{"reg_type": "holding", "addr": 40496, "bit": 12, "name": "Crankcase Pressure 2 OORH", "description": "Давление в картере 2: выше допустимого диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40496, "bit": 13, "name": "Crankcase Pressure 2 OORL", "description": "Давление в картере 2: ниже допустимого диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40496, "bit": 14, "name": "Crankcase Pressure 2 Above Normal", "description": "Давление в картере 2: выше нормы", "severity": "none"}
+{"reg_type": "holding", "addr": 40496, "bit": 15, "name": "Crankcase Pressure 2 Moderate High", "description": "Давление в картере 2: умеренно высокое", "severity": "warning"}
+{"reg_type": "holding", "addr": 40497, "bit": 0, "name": "Crankcase Pressure 2 Below Normal", "description": "Давление в картере 2: ниже нормы", "severity": "none"}
+{"reg_type": "holding", "addr": 40497, "bit": 1, "name": "Fuel Supply Pump Not Responding", "description": "Топливоподкачивающий насос не отвечает", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40497, "bit": 2, "name": "Fuel Pump Voltage Moderate Low", "description": "Напряжение топливного насоса: умеренно низкое", "severity": "warning"}
+{"reg_type": "holding", "addr": 40497, "bit": 3, "name": "Fuel Supply Voltage Below Normal", "description": "Напряжение питания топливного насоса: ниже нормы", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40497, "bit": 4, "name": "Fuel Supply Temperature: Moderate High", "description": "Температура топливоподачи: умеренно высокая", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40497, "bit": 5, "name": "Fuel Supply Temperature Critical High", "description": "Температура топливоподачи: критически высокая", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40497, "bit": 6, "name": "Fuel Supply Pump Root Unknown Cause", "description": "Топливоподкачивающий насос: причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40497, "bit": 7, "name": "Fuel Supply Pump Update Rate error", "description": "Топливоподкачивающий насос: ошибка частоты обновления данных", "severity": "warning"}
+{"reg_type": "holding", "addr": 40497, "bit": 8, "name": "Fuel Filter Press Moderate High", "description": "Давление топливного фильтра: умеренно высокое", "severity": "warning"}
+{"reg_type": "holding", "addr": 40497, "bit": 9, "name": "Fuel Supply Pump Calib. error", "description": "Ошибка калибровки топливоподкачивающего насоса", "severity": "warning"}
+{"reg_type": "holding", "addr": 40497, "bit": 10, "name": "Fule Valve 1 Bad Device", "description": "Топливный клапан 1: неисправный компонент", "severity": "warning"}
+{"reg_type": "holding", "addr": 40497, "bit": 11, "name": "Fuel Valve 1 Power Supply Data Incorrect", "description": "Топливный клапан 1: некорректные данные питания", "severity": "warning"}
+{"reg_type": "holding", "addr": 40497, "bit": 12, "name": "Fuel Valve 1 Power Supply OORH", "description": "Топливный клапан 1: напряжение питания выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40497, "bit": 13, "name": "Fuel Valve 1 Power Supply OORL", "description": "Топливный клапан 1: напряжение питания ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40497, "bit": 14, "name": "Fuel Valve 1 Temperature Above Normal", "description": "Топливный клапан 1: температура выше нормы", "severity": "none"}
+{"reg_type": "holding", "addr": 40497, "bit": 15, "name": "Fuel Valve 1 Position Data error", "description": "Топливный клапан 1: ошибка данных положения", "severity": "none"}
+{"reg_type": "holding", "addr": 40498, "bit": 0, "name": "Fuel Valve 1 Voltage OORH", "description": "Топливный клапан 1: напряжение выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40498, "bit": 1, "name": "Fuel Valve 1 Voltage OORL", "description": "Топливный клапан 1: напряжение ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40498, "bit": 2, "name": "Fuel Valve 1 Unknown Cause", "description": "Топливный клапан 1: причина неизвестна", "severity": "warning"}
+{"reg_type": "holding", "addr": 40498, "bit": 3, "name": "Fuel Valve 1 Calibration error", "description": "Ошибка калибровки топливного клапана 1", "severity": "warning"}
+{"reg_type": "holding", "addr": 40498, "bit": 4, "name": "Starter Control Voltage OORH", "description": "Напряжение управления стартером: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40498, "bit": 5, "name": "Starter Control Voltage OORL", "description": "Напряжение управления стартером: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40498, "bit": 6, "name": "Failed To Crank Condition Exists", "description": "Отказ прокрутки стартером — условие зафиксировано", "severity": "warning"}
+{"reg_type": "holding", "addr": 40498, "bit": 7, "name": "Fail To Start Condition Exists", "description": "Отказ запуска — условие зафиксировано", "severity": "warning"}
+{"reg_type": "holding", "addr": 40498, "bit": 8, "name": "Uncommanded Crank Condition Exists", "description": "Несанкционированная прокрутка стартером — условие зафиксировано", "severity": "warning"}
+{"reg_type": "holding", "addr": 40498, "bit": 9, "name": "Fuel Valve 1 Data Incorrect", "description": "Топливный клапан 1: некорректные данные", "severity": "warning"}
+{"reg_type": "holding", "addr": 40498, "bit": 10, "name": "Fuel Valve 1 Condition Exists", "description": "Топливный клапан 1: условие зафиксировано", "severity": "none"}
+{"reg_type": "holding", "addr": 40498, "bit": 11, "name": "Fule Valve 1 Update Rate error", "description": "Топливный клапан 1: ошибка частоты обновления данных", "severity": "none"}
+{"reg_type": "holding", "addr": 40498, "bit": 12, "name": "Fuel Pump Oil Pressure Sensor OORH", "description": "Датчик давления масла топливного насоса: выше диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40498, "bit": 13, "name": "Fuel Pump Oil Pressure Sensor OORL", "description": "Датчик давления масла топливного насоса: ниже диапазона", "severity": "warning"}
+{"reg_type": "holding", "addr": 40498, "bit": 14, "name": "Fuel Pump Oil Pressure Sensor Data Incorrect", "description": "Датчик давления масла топливного насоса: некорректные данные", "severity": "warning"}
+{"reg_type": "holding", "addr": 40498, "bit": 15, "name": "Injector Solenoid 19 Low Current", "description": "Соленоид форсунки 19: недостаточный ток", "severity": "warning"}
+{"reg_type": "holding", "addr": 40499, "bit": 0, "name": "L-NShortCircuitShutdown", "description": "Короткое замыкание L-N: аварийная остановка", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40499, "bit": 1, "name": "L-LShortCircuitShutdown", "description": "Короткое замыкание L-L: аварийная остановка", "severity": "shutdown"}
+{"reg_type": "holding", "addr": 40499, "bit": 2, "name": "Crankcase Pressure 2 Data Incorrect", "description": "Давление в картере 2: некорректные данные", "severity": "warning"}
+{"reg_type": "holding", "addr": 40499, "bit": 3, "name": "High Battery 1 Voltage", "description": "АКБ 1: высокое напряжение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40499, "bit": 4, "name": "High Battery 2 Voltage", "description": "АКБ 2: высокое напряжение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40499, "bit": 5, "name": "High Battery 3 Voltage", "description": "АКБ 3: высокое напряжение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40499, "bit": 6, "name": "High Battery 4 Voltage", "description": "АКБ 4: высокое напряжение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40499, "bit": 7, "name": "Low Battery 1 Voltage", "description": "АКБ 1: низкое напряжение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40499, "bit": 8, "name": "Low Battery 2 Voltage", "description": "АКБ 2: низкое напряжение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40499, "bit": 9, "name": "Low Battery 3 Voltage", "description": "АКБ 3: низкое напряжение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40499, "bit": 10, "name": "Low Battery 4 Voltage", "description": "АКБ 4: низкое напряжение", "severity": "warning"}
+{"reg_type": "holding", "addr": 40499, "bit": 11, "name": "Weak Battery 1", "description": "АКБ 1: слабый аккумулятор", "severity": "warning"}
+{"reg_type": "holding", "addr": 40499, "bit": 12, "name": "Weak Battery 2", "description": "АКБ 2: слабый аккумулятор", "severity": "warning"}
+{"reg_type": "holding", "addr": 40499, "bit": 13, "name": "Weak Battery 3", "description": "АКБ 3: слабый аккумулятор", "severity": "warning"}
+{"reg_type": "holding", "addr": 40499, "bit": 14, "name": "Weak Battery 4", "description": "АКБ 4: слабый аккумулятор", "severity": "warning"}
+{"reg_type": "holding", "addr": 40499, "bit": 15, "name": "Injector Solenoid 20 Low Current", "description": "Соленоид форсунки 20: недостаточный ток", "severity": "warning"}

@@ -1,0 +1,2281 @@
+{
+  "holding:40010": {
+    "0": "Off",
+    "1": "Auto",
+    "2": "Manual"
+  },
+  "holding:40011": {
+    "0": "Stop",
+    "1": "TimeDelaytoStart",
+    "2": "WarmupatIdle",
+    "3": "RatedFreqandVoltage",
+    "4": "Cooldown/StopDelay",
+    "5": "CooldownatIdle",
+    "6": "RatedtoIdleTransition"
+  },
+  "holding:40013": {
+    "2": "Derate",
+    "3": "ShutdownwithCooldown",
+    "4": "Shutdown"
+  },
+  "holding:40201": {
+    "0": "PGBU",
+    "1": "EBU"
+  },
+  "holding:40228": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40231": {
+    "0": "Inactive",
+    "1": "Active",
+    "2": "Failed"
+  },
+  "holding:40235": {
+    "0": "NoDerateRequest",
+    "1": "DerateRequest",
+    "2": "Error",
+    "3": "Don’tCare"
+  },
+  "holding:40236": {
+    "0": "ECM",
+    "1": "Hydro-Mechanical"
+  },
+  "holding:40237": {
+    "0": "Stop",
+    "1": "Ventilation",
+    "2": "Start",
+    "3": "Run",
+    "4": "NormalShutdown",
+    "5": "EmergencyShutdown",
+    "6": "Error",
+    "7": "Don’tCare",
+    "8": "RapidStart",
+    "9": "Reserved",
+    "10": "Reserved",
+    "11": "Reserved",
+    "12": "Reserved",
+    "13": "Reserved",
+    "14": "Reserved",
+    "15": "Don’tCare/TakeNo"
+  },
+  "holding:40278": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40282": {
+    "0": "No",
+    "1": "Yes"
+  },
+  "holding:40283": {
+    "0": "Off",
+    "1": "Ready",
+    "2": "Setup",
+    "3": "Starting",
+    "4": "Idle",
+    "5": "Rated",
+    "6": "StopNormal",
+    "7": "StopEmergency",
+    "8": "FactoryTest",
+    "9": "WaittoPowerDown"
+  },
+  "holding:40287": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40289": {
+    "0": "None",
+    "1": "Program1",
+    "2": "Program2",
+    "3": "Program3",
+    "4": "Program4",
+    "5": "Program5",
+    "6": "Program6",
+    "7": "Program7",
+    "8": "Program8",
+    "9": "Program9",
+    "10": "Program10",
+    "11": "Program11",
+    "12": "Program12",
+    "13": "Exception1",
+    "14": "Exception2"
+  },
+  "holding:40300": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40301": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40500": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40501": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40503": {
+    "0": "Inactive",
+    "1": "Active",
+    "2": "Reserved",
+    "3": "Not Available"
+  },
+  "holding:40504": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40505": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40506": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40507": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40508": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40509": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40510": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40511": {
+    "0": "Load",
+    "1": "Unload"
+  },
+  "holding:40512": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40513": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40514": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40515": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40516": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40517": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40518": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40519": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40520": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40521": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40522": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40523": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40524": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40525": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40526": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40527": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40528": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40529": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40530": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40531": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40532": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40533": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40534": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40535": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40536": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40537": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40538": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40539": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40540": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40541": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40542": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40543": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40545": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40546": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40547": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40548": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40549": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40550": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40551": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40552": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40553": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40554": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40555": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40556": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40557": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40558": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40559": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40560": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40561": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40562": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40563": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40564": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40565": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40566": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40569": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40570": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40571": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40572": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40573": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40574": {
+    "0": "NotAuto",
+    "1": "Auto"
+  },
+  "holding:40576": {
+    "0": "Voltage",
+    "1": "Current"
+  },
+  "holding:40580": {
+    "0": "Off",
+    "1": "Manual",
+    "2": "Auto"
+  },
+  "holding:40581": {
+    "0": "Inactive",
+    "1": "Pending",
+    "2": "Shutdown"
+  },
+  "holding:40582": {
+    "0": "False",
+    "1": "True"
+  },
+  "holding:40584": {
+    "0": "Inactive",
+    "1": "Active",
+    "2": "Reserved",
+    "3": "Not Available"
+  },
+  "holding:40586": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:40587": {
+    "0": "Inactive",
+    "1": "Active",
+    "2": "Reserved",
+    "3": "Not Available"
+  },
+  "holding:40590": {
+    "0": "Stop",
+    "1": "Start"
+  },
+  "holding:40592": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40593": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40598": {
+    "0": "Inactive",
+    "1": "Active",
+    "2": "Reserved",
+    "3": "Not Available"
+  },
+  "holding:40599": {
+    "0": "EmergencyStop",
+    "1": "Stop",
+    "2": "LoadDemandStop",
+    "3": "Run"
+  },
+  "holding:40710": {
+    "0": "Off",
+    "1": "Manual",
+    "2": "Auto"
+  },
+  "holding:40711": {
+    "0": "Stop",
+    "1": "TimeDelaytoStart",
+    "2": "WarmupatIdle",
+    "3": "RatedFreqandVoltage",
+    "4": "Cooldown/StopDelay",
+    "5": "CooldownatIdle",
+    "6": "RatedtoIdleTransition"
+  },
+  "holding:40713": {
+    "0": "None",
+    "1": "Warning",
+    "2": "Derate",
+    "3": "Shutdownwithcooldown",
+    "4": "Shutdown"
+  },
+  "holding:40760": {
+    "0": "Standby",
+    "1": "DeadBus",
+    "2": "Synchronize",
+    "3": "LoadShare",
+    "4": "LoadGoven"
+  },
+  "holding:40761": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40764": {
+    "0": "Open",
+    "1": "Closed",
+    "2": "Not Available"
+  },
+  "holding:40765": {
+    "0": "Open",
+    "1": "Closed",
+    "2": "Not Available"
+  },
+  "holding:40766": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40767": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40768": {
+    "0": "Inactive",
+    "1": "Active",
+    "2": "Failed"
+  },
+  "holding:40771": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:40772": {
+    "0": "On",
+    "1": "Off"
+  },
+  "holding:40773": {
+    "0": "Gen1",
+    "9": "Gen10",
+    "1": "Gen2",
+    "10": "Gen11",
+    "2": "Gen3",
+    "11": "Gen12",
+    "3": "Gen4",
+    "12": "Gen13",
+    "4": "Gen5",
+    "13": "Gen14",
+    "5": "Gen6",
+    "14": "Gen15",
+    "6": "Gen7",
+    "15": "Gen16",
+    "7": "Gen8",
+    "8": "Gen9"
+  },
+  "holding:40776": {
+    "0": "Disable",
+    "1": "Enable"
+  },
+  "holding:40777": {
+    "0": "OutofSync",
+    "1": "InSync"
+  },
+  "holding:41000": {
+    "0": "Disable",
+    "1": "Enable"
+  },
+  "holding:41001": {
+    "0": "RunHoursEqualization",
+    "1": "FixedSequence(Fixed"
+  },
+  "holding:41002": {
+    "0": "kW",
+    "1": "%kW"
+  },
+  "holding:41012": {
+    "0": "No",
+    "1": "Yes"
+  },
+  "holding:41013": {
+    "0": "Gen1",
+    "1": "Gen2",
+    "2": "Gen3",
+    "3": "Gen4",
+    "4": "Gen5",
+    "5": "Gen6",
+    "6": "Gen7",
+    "7": "Gen8",
+    "8": "Gen9",
+    "9": "Gen10",
+    "10": "Gen11",
+    "11": "Gen12",
+    "12": "Gen13",
+    "13": "Gen14",
+    "14": "Gen15",
+    "15": "Gen16"
+  },
+  "holding:41014": {
+    "0": "Gen1",
+    "1": "Gen2",
+    "2": "Gen3",
+    "3": "Gen4",
+    "4": "Gen5",
+    "5": "Gen6",
+    "6": "Gen7",
+    "7": "Gen8",
+    "8": "Gen9",
+    "9": "Gen10",
+    "10": "Gen11",
+    "11": "Gen12",
+    "12": "Gen13",
+    "13": "Gen14",
+    "14": "Gen15",
+    "15": "Gen16"
+  },
+  "holding:41015": {
+    "0": "Gen1",
+    "1": "Gen2",
+    "2": "Gen3",
+    "3": "Gen4",
+    "4": "Gen5",
+    "5": "Gen6",
+    "6": "Gen7",
+    "7": "Gen8",
+    "8": "Gen9",
+    "9": "Gen10",
+    "10": "Gen11",
+    "11": "Gen12",
+    "12": "Gen13",
+    "13": "Gen14",
+    "14": "Gen15",
+    "15": "Gen16"
+  },
+  "holding:41016": {
+    "0": "Gen1",
+    "1": "Gen2",
+    "2": "Gen3",
+    "3": "Gen4",
+    "4": "Gen5",
+    "5": "Gen6",
+    "6": "Gen7",
+    "7": "Gen8",
+    "8": "Gen9",
+    "9": "Gen10",
+    "10": "Gen11",
+    "11": "Gen12",
+    "12": "Gen13",
+    "13": "Gen14",
+    "14": "Gen15",
+    "15": "Gen16"
+  },
+  "holding:41017": {
+    "0": "Gen1",
+    "1": "Gen2",
+    "2": "Gen3",
+    "3": "Gen4",
+    "4": "Gen5",
+    "5": "Gen6",
+    "6": "Gen7",
+    "7": "Gen8",
+    "8": "Gen9",
+    "9": "Gen10",
+    "10": "Gen11",
+    "11": "Gen12",
+    "12": "Gen13",
+    "13": "Gen14",
+    "14": "Gen15",
+    "15": "Gen16"
+  },
+  "holding:41018": {
+    "0": "Gen1",
+    "1": "Gen2",
+    "2": "Gen3",
+    "3": "Gen4",
+    "4": "Gen5",
+    "5": "Gen6",
+    "6": "Gen7",
+    "7": "Gen8",
+    "8": "Gen9",
+    "9": "Gen10",
+    "10": "Gen11",
+    "11": "Gen12",
+    "12": "Gen13",
+    "13": "Gen14",
+    "14": "Gen15",
+    "15": "Gen16"
+  },
+  "holding:41019": {
+    "0": "Gen1",
+    "1": "Gen2",
+    "2": "Gen3",
+    "3": "Gen4",
+    "4": "Gen5",
+    "5": "Gen6",
+    "6": "Gen7",
+    "7": "Gen8",
+    "8": "Gen9",
+    "9": "Gen10",
+    "10": "Gen11",
+    "11": "Gen12",
+    "12": "Gen13",
+    "13": "Gen14",
+    "14": "Gen15",
+    "15": "Gen16"
+  },
+  "holding:41020": {
+    "0": "Gen1",
+    "1": "Gen2",
+    "2": "Gen3",
+    "3": "Gen4",
+    "4": "Gen5",
+    "5": "Gen6",
+    "6": "Gen7",
+    "7": "Gen8",
+    "8": "Gen9",
+    "9": "Gen10",
+    "10": "Gen11",
+    "11": "Gen12",
+    "12": "Gen13",
+    "13": "Gen14",
+    "14": "Gen15",
+    "15": "Gen16"
+  },
+  "holding:41021": {
+    "0": "Gen1",
+    "1": "Gen2",
+    "2": "Gen3",
+    "3": "Gen4",
+    "4": "Gen5",
+    "5": "Gen6",
+    "6": "Gen7",
+    "7": "Gen8",
+    "8": "Gen9",
+    "9": "Gen10",
+    "10": "Gen11",
+    "11": "Gen12",
+    "12": "Gen13",
+    "13": "Gen14",
+    "14": "Gen15",
+    "15": "Gen16"
+  },
+  "holding:41022": {
+    "0": "Gen1",
+    "1": "Gen2",
+    "2": "Gen3",
+    "3": "Gen4",
+    "4": "Gen5",
+    "5": "Gen6",
+    "6": "Gen7",
+    "7": "Gen8",
+    "8": "Gen9",
+    "9": "Gen10",
+    "10": "Gen11",
+    "11": "Gen12",
+    "12": "Gen13",
+    "13": "Gen14",
+    "14": "Gen15",
+    "15": "Gen16"
+  },
+  "holding:41023": {
+    "0": "Gen1",
+    "1": "Gen2",
+    "2": "Gen3",
+    "3": "Gen4",
+    "4": "Gen5",
+    "5": "Gen6",
+    "6": "Gen7",
+    "7": "Gen8",
+    "8": "Gen9",
+    "9": "Gen10",
+    "10": "Gen11",
+    "11": "Gen12",
+    "12": "Gen13",
+    "13": "Gen14",
+    "14": "Gen15",
+    "15": "Gen16"
+  },
+  "holding:41024": {
+    "0": "Gen1",
+    "1": "Gen2",
+    "2": "Gen3",
+    "3": "Gen4",
+    "4": "Gen5",
+    "5": "Gen6",
+    "6": "Gen7",
+    "7": "Gen8",
+    "8": "Gen9",
+    "9": "Gen10",
+    "10": "Gen11",
+    "11": "Gen12",
+    "12": "Gen13",
+    "13": "Gen14",
+    "14": "Gen15",
+    "15": "Gen16"
+  },
+  "holding:41025": {
+    "0": "Gen1",
+    "1": "Gen2",
+    "2": "Gen3",
+    "3": "Gen4",
+    "4": "Gen5",
+    "5": "Gen6",
+    "6": "Gen7",
+    "7": "Gen8",
+    "8": "Gen9",
+    "9": "Gen10",
+    "10": "Gen11",
+    "11": "Gen12",
+    "12": "Gen13",
+    "13": "Gen14",
+    "14": "Gen15",
+    "15": "Gen16"
+  },
+  "holding:41026": {
+    "0": "Gen1",
+    "1": "Gen2",
+    "2": "Gen3",
+    "3": "Gen4",
+    "4": "Gen5",
+    "5": "Gen6",
+    "6": "Gen7",
+    "7": "Gen8",
+    "8": "Gen9",
+    "9": "Gen10",
+    "10": "Gen11",
+    "11": "Gen12",
+    "12": "Gen13",
+    "13": "Gen14",
+    "14": "Gen15",
+    "15": "Gen16"
+  },
+  "holding:41027": {
+    "0": "Gen1",
+    "1": "Gen2",
+    "2": "Gen3",
+    "3": "Gen4",
+    "4": "Gen5",
+    "5": "Gen6",
+    "6": "Gen7",
+    "7": "Gen8",
+    "8": "Gen9",
+    "9": "Gen10",
+    "10": "Gen11",
+    "11": "Gen12",
+    "12": "Gen13",
+    "13": "Gen14",
+    "14": "Gen15",
+    "15": "Gen16"
+  },
+  "holding:41028": {
+    "0": "Gen1",
+    "1": "Gen2",
+    "2": "Gen3",
+    "3": "Gen4",
+    "4": "Gen5",
+    "5": "Gen6",
+    "6": "Gen7",
+    "7": "Gen8",
+    "8": "Gen9",
+    "9": "Gen10",
+    "10": "Gen11",
+    "11": "Gen12",
+    "12": "Gen13",
+    "13": "Gen14",
+    "14": "Gen15",
+    "15": "Gen16"
+  },
+  "holding:41029": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:41030": {
+    "0": "No",
+    "1": "Yes"
+  },
+  "holding:41031": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:41032": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:41033": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:41034": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:41035": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:41036": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:41037": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:41038": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:41039": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:41300": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:41301": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:42000": {
+    "0": "Off",
+    "1": "Halted",
+    "2": "InitialDelay",
+    "3": "LoadMonitor"
+  },
+  "holding:42010": {
+    "0": "No",
+    "1": "Yes"
+  },
+  "holding:42017": {
+    "0": "Gen1",
+    "1": "Gen2",
+    "2": "Gen3",
+    "3": "Gen4",
+    "4": "Gen5",
+    "5": "Gen6",
+    "6": "Gen7",
+    "7": "Gen8",
+    "8": "Gen9",
+    "9": "Gen10",
+    "10": "Gen11",
+    "11": "Gen12",
+    "12": "Gen13",
+    "13": "Gen14",
+    "14": "Gen15",
+    "15": "Gen16"
+  },
+  "holding:42018": {
+    "0": "Gen1",
+    "1": "Gen2",
+    "2": "Gen3",
+    "3": "Gen4",
+    "4": "Gen5",
+    "5": "Gen6",
+    "6": "Gen7",
+    "7": "Gen8",
+    "8": "Gen9",
+    "9": "Gen10",
+    "10": "Gen11",
+    "11": "Gen12",
+    "12": "Gen13",
+    "13": "Gen14",
+    "14": "Gen15",
+    "15": "Gen16"
+  },
+  "holding:42019": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43146": {
+    "0": "None",
+    "1": "Utility",
+    "2": "GensetBus"
+  },
+  "holding:43280": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43281": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43283": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43284": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43285": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43286": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43287": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43288": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43289": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43290": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43291": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43292": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43293": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43295": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43296": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43297": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43298": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43299": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43300": {
+    "0": "Delta",
+    "1": "Wye"
+  },
+  "holding:43302": {
+    "0": "Delta",
+    "1": "Wye"
+  },
+  "holding:43304": {
+    "0": "SinglePhase",
+    "1": "ThreePhase"
+  },
+  "holding:43306": {
+    "0": "Delta",
+    "1": "Wye"
+  },
+  "holding:43309": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:43314": {
+    "0": "GCS",
+    "1": "ECS"
+  },
+  "holding:43315": {
+    "0": "AllowStart",
+    "1": "BlockStart"
+  },
+  "holding:43339": {
+    "0": "AwakeinAuto",
+    "1": "SleepinAuto"
+  },
+  "holding:43341": {
+    "0": "Disable",
+    "1": "Enable"
+  },
+  "holding:43343": {
+    "0": "Disable",
+    "1": "Enable"
+  },
+  "holding:43347": {
+    "0": "Normal",
+    "1": "SetClock",
+    "2": "SaveClock"
+  },
+  "holding:43353": {
+    "0": "FirstOccurrence",
+    "1": "SecondOccurrence",
+    "2": "ThirdOccurrence",
+    "3": "FourthOccurrence",
+    "4": "LastOccurrence"
+  },
+  "holding:43354": {
+    "0": "Sunday",
+    "1": "Monday",
+    "2": "Tuesday",
+    "3": "Wednesday",
+    "4": "Thursday",
+    "5": "Friday",
+    "6": "Saturday"
+  },
+  "holding:43357": {
+    "0": "FirstOccurrence",
+    "1": "SecondOccurrence",
+    "2": "ThirdOccurrence",
+    "3": "FourthOccurrence",
+    "4": "LastOccurrence"
+  },
+  "holding:43359": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:43360": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:43361": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43362": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43363": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43369": {
+    "0": "Disable",
+    "1": "Enable"
+  },
+  "holding:43373": {
+    "0": "OnceOnly",
+    "1": "EveryYear"
+  },
+  "holding:43377": {
+    "0": "Disable",
+    "1": "Enable"
+  },
+  "holding:43378": {
+    "0": "Once",
+    "1": "EveryWeek",
+    "2": "Every2Weeks",
+    "3": "Every3Weeks",
+    "4": "Every4Weeks",
+    "5": "Every5Weeks",
+    "6": "FirstWeekofMonth",
+    "7": "SecondWeekofMonth",
+    "8": "ThirdWeekofMonth",
+    "9": "FourthWeekofMonth",
+    "10": "LastWeekofMonth"
+  },
+  "holding:43379": {
+    "0": "NoLoad",
+    "1": "WithLoad",
+    "2": "ExtendedParallel"
+  },
+  "holding:43380": {
+    "0": "Sunday",
+    "1": "Monday",
+    "2": "Tuesday",
+    "3": "Wednesday",
+    "4": "Thursday",
+    "5": "Friday",
+    "6": "Saturday"
+  },
+  "holding:43383": {
+    "0": "Sunday",
+    "1": "Monday",
+    "2": "Tuesday",
+    "3": "Wednesday",
+    "4": "Thursday",
+    "5": "Friday",
+    "6": "Saturday"
+  },
+  "holding:43501": {
+    "0": "EmergencyRemoteStart",
+    "1": "NonEmergencyRemote",
+    "2": "LoadDemandStart",
+    "3": "ManualRun",
+    "4": "Exercise"
+  },
+  "holding:43502": {
+    "0": "Idle",
+    "1": "Rated"
+  },
+  "holding:43503": {
+    "0": "False",
+    "1": "True"
+  },
+  "holding:43506": {
+    "0": "Inactive",
+    "1": "Active",
+    "2": "Reserved",
+    "3": "Not Available"
+  },
+  "holding:43507": {
+    "0": "Inactive",
+    "1": "Active",
+    "2": "Reserved",
+    "3": "Not Available"
+  },
+  "holding:43508": {
+    "0": "Inactive",
+    "1": "Active",
+    "2": "Reserved",
+    "3": "Not Available"
+  },
+  "holding:43512": {
+    "0": "NotManual",
+    "1": "Manual"
+  },
+  "holding:43515": {
+    "0": "Inactive",
+    "1": "Active",
+    "2": "Reserved",
+    "3": "Not Available"
+  },
+  "holding:43516": {
+    "0": "CrankAfterPrelube",
+    "1": "CrankWithPrelube",
+    "2": "PrelubeOnly"
+  },
+  "holding:43517": {
+    "0": "Complete",
+    "1": "Armed",
+    "2": "PrelubeOutputON",
+    "3": "PrelubeOutputOFF",
+    "4": "EnableCrank"
+  },
+  "holding:43518": {
+    "0": "Off",
+    "1": "Manual",
+    "2": "Normal",
+    "3": "NormalOverride",
+    "4": "Test",
+    "5": "Exercise",
+    "6": "UtilityFail",
+    "7": "ExtendedParallel"
+  },
+  "holding:43519": {
+    "0": "Inactive",
+    "1": "Active",
+    "2": "Reserved",
+    "3": "Not Available"
+  },
+  "holding:43521": {
+    "0": "Off/NotEnabled",
+    "1": "ManualMode",
+    "2": "NormalUtility",
+    "3": "Retransfer",
+    "4": "RetransferOverride",
+    "5": "EmergencyTest",
+    "6": "NormalTest",
+    "7": "Exercise",
+    "8": "UtilityFailure",
+    "9": "ExtendedParallel"
+  },
+  "holding:43522": {
+    "0": "Off",
+    "1": "Manual",
+    "2": "Normal",
+    "3": "NormalOverride",
+    "4": "Test",
+    "5": "Exercise",
+    "6": "UtilityFail",
+    "7": "ExtendedParallel"
+  },
+  "holding:43523": {
+    "0": "Inactive",
+    "1": "Active",
+    "2": "Reserved",
+    "3": "Not Available"
+  },
+  "holding:43524": {
+    "0": "Stop",
+    "1": "Start"
+  },
+  "holding:43526": {
+    "0": "Off",
+    "1": "RemoteStart",
+    "2": "LoadDemandStop",
+    "3": "LoadDemandStart"
+  },
+  "holding:43528": {
+    "0": "Off",
+    "1": "Run"
+  },
+  "holding:43529": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43530": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43536": {
+    "0": "Emergency",
+    "1": "NonEmergency"
+  },
+  "holding:43538": {
+    "0": "Inactive",
+    "1": "Active",
+    "2": "Reserved",
+    "3": "Not Available"
+  },
+  "holding:43540": {
+    "0": "None",
+    "1": "Manual",
+    "2": "Exercise"
+  },
+  "holding:43553": {
+    "0": "SynchronizerOff",
+    "1": "SynchronizerOn"
+  },
+  "holding:43555": {
+    "0": "None",
+    "1": "ProgrammedTransition",
+    "2": "Transfer",
+    "3": "Retransfer",
+    "4": "MaxParallel"
+  },
+  "holding:43556": {
+    "0": "Off",
+    "1": "Arbitrate0",
+    "2": "Winner",
+    "3": "Arbitrate1",
+    "4": "Sleep"
+  },
+  "holding:43567": {
+    "0": "Unknown",
+    "1": "Closed"
+  },
+  "holding:43558": {
+    "0": "Standby",
+    "1": "DeadBus",
+    "2": "Synchronize",
+    "3": "LoadShare",
+    "4": "LoadGovern"
+  },
+  "holding:43559": {
+    "0": "FirstStartNotAllowed",
+    "1": "FirstStartRequested",
+    "2": "FirstStartPermitted"
+  },
+  "holding:43560": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43561": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43562": {
+    "0": "Open",
+    "1": "Closed",
+    "2": "Not Available"
+  },
+  "holding:43563": {
+    "0": "Not Available",
+    "1": "Available",
+    "2": "Unknown"
+  },
+  "holding:43564": {
+    "0": "Unavailable",
+    "1": "Dead",
+    "2": "Live"
+  },
+  "holding:43565": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43566": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43570": {
+    "0": "Unknown",
+    "1": "PickedUp",
+    "2": "DroppedOut"
+  },
+  "holding:43573": {
+    "0": "Unknown",
+    "1": "PickedUp",
+    "2": "DroppedOut"
+  },
+  "holding:43576": {
+    "0": "Unknown",
+    "1": "PickedUp",
+    "2": "DroppedOut"
+  },
+  "holding:43577": {
+    "0": "Unknown",
+    "1": "PickedUp",
+    "2": "DroppedOut"
+  },
+  "holding:43580": {
+    "0": "Unknown",
+    "1": "PickedUp",
+    "2": "DroppedOut"
+  },
+  "holding:43581": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43583": {
+    "0": "NotTiming",
+    "1": "Timing",
+    "2": "Expired"
+  },
+  "holding:43584": {
+    "0": "Isochronous",
+    "1": "Droop",
+    "2": "Synchronize",
+    "3": "LoadShare",
+    "4": "LoadGovern"
+  },
+  "holding:43585": {
+    "0": "Isochronous",
+    "1": "Droop",
+    "2": "Synchronize",
+    "3": "LoadShare",
+    "4": "LoadGovern"
+  },
+  "holding:43587": {
+    "0": "NotTiming",
+    "1": "Timing",
+    "2": "Expired"
+  },
+  "holding:43588": {
+    "0": "Disable",
+    "1": "Enable"
+  },
+  "holding:43589": {
+    "0": "OpenTransition",
+    "1": "HardClosedTransition",
+    "2": "SoftClosedTransition"
+  },
+  "holding:43590": {
+    "0": "PTCNotEnabled",
+    "1": "NoSourceConnected",
+    "2": "UtilityConnected",
+    "3": "GensetConnected",
+    "4": "Paralleled"
+  },
+  "holding:43592": {
+    "0": "NotTiming",
+    "1": "Timing",
+    "2": "Expired"
+  },
+  "holding:43593": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43594": {
+    "0": "DroopDisabled",
+    "1": "DroopEnabled"
+  },
+  "holding:43596": {
+    "0": "NotTiming",
+    "1": "Timing",
+    "2": "Expired"
+  },
+  "holding:43597": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43598": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43599": {
+    "0": "Open",
+    "1": "Closed",
+    "2": "Not Available"
+  },
+  "holding:43600": {
+    "0": "GensetkW",
+    "1": "GensetkWw/Utility",
+    "2": "UtilitykW"
+  },
+  "holding:43641": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:43643": {
+    "0": "Disable",
+    "1": "Enable"
+  },
+  "holding:43645": {
+    "0": "None",
+    "1": "Warning",
+    "2": "Shutdown"
+  },
+  "holding:43660": {
+    "0": "50Hz",
+    "1": "60Hz"
+  },
+  "holding:43666": {
+    "0": "Cycle",
+    "1": "Continuous"
+  },
+  "holding:43671": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:43682": {
+    "0": "Overload",
+    "1": "Underfrequency",
+    "2": "Overloador",
+    "3": "Disabled"
+  },
+  "holding:43691": {
+    "0": "Normal",
+    "1": "BypassWarmup"
+  },
+  "holding:43693": {
+    "0": "12V",
+    "1": "24V"
+  },
+  "holding:43694": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:43696": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:43700": {
+    "0": "Not Available",
+    "1": "Available",
+    "2": "Unknown"
+  },
+  "holding:43701": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43702": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43703": {
+    "0": "Unknown",
+    "1": "Closed"
+  },
+  "holding:43706": {
+    "0": "Unknown",
+    "1": "PickedUp",
+    "2": "DroppedOut"
+  },
+  "holding:43709": {
+    "0": "Unknown",
+    "1": "PickedUp",
+    "2": "DroppedOut"
+  },
+  "holding:43712": {
+    "0": "Unknown",
+    "1": "PickedUp",
+    "2": "DroppedOut"
+  },
+  "holding:43713": {
+    "0": "Unknown",
+    "1": "PickedUp",
+    "2": "DroppedOut"
+  },
+  "holding:43716": {
+    "0": "Unknown",
+    "1": "PickedUp",
+    "2": "DroppedOut"
+  },
+  "holding:43717": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43739": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43747": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43748": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43749": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43751": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43752": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43765": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43766": {
+    "0": "NotApplicable",
+    "1": "RampLoad",
+    "2": "TrackTarget",
+    "3": "RampUnload",
+    "4": "RampUnloadComplete"
+  },
+  "holding:43768": {
+    "0": "NotApplicable",
+    "1": "RampLoad",
+    "2": "TrackTarget",
+    "3": "RampUnload",
+    "4": "RampUnloadComplete"
+  },
+  "holding:43770": {
+    "0": "NotAllowed",
+    "1": "Allowed"
+  },
+  "holding:43774": {
+    "0": "Load",
+    "1": "Unload"
+  },
+  "holding:43775": {
+    "0": "Not Available",
+    "1": "NotUnloaded",
+    "2": "Unloaded"
+  },
+  "holding:43776": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43777": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43778": {
+    "0": "Off",
+    "1": "NoLoad",
+    "2": "WithLoad",
+    "3": "ExtendedParallel"
+  },
+  "holding:43789": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43790": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43791": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43792": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43793": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43794": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43795": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43796": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43808": {
+    "0": "NotCommitted",
+    "1": "Committed"
+  },
+  "holding:43810": {
+    "0": "Inactive",
+    "1": "Committed"
+  },
+  "holding:43811": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43813": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43814": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43815": {
+    "0": "Emergency",
+    "1": "NonEmergency"
+  },
+  "holding:43816": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43817": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43818": {
+    "0": "Constant",
+    "1": "Droop"
+  },
+  "holding:43819": {
+    "0": "Constant",
+    "1": "Droop"
+  },
+  "holding:43823": {
+    "0": "PhaseMatch",
+    "1": "SlipFrequency",
+    "2": "External"
+  },
+  "holding:43824": {
+    "0": "VoltageMatch",
+    "1": "External"
+  },
+  "holding:43826": {
+    "0": "OpenTransition",
+    "1": "HardClosedTransition",
+    "2": "SoftClosedTransition"
+  },
+  "holding:43827": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43828": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43829": {
+    "0": "LoadGovern",
+    "1": "Droop"
+  },
+  "holding:43830": {
+    "0": "LoadGovern",
+    "1": "Droop",
+    "2": "LoadGovernwithDroop"
+  },
+  "holding:43831": {
+    "0": "CriticalDeviceResponse",
+    "1": "Non-CriticalDevice"
+  },
+  "holding:43832": {
+    "0": "CriticalDeviceResponse",
+    "1": "Non-CriticalDevice"
+  },
+  "holding:43834": {
+    "0": "CriticalDeviceResponse",
+    "1": "Non-CriticalDevice"
+  },
+  "holding:43835": {
+    "0": "CriticalDeviceResponse",
+    "1": "Non-CriticalDevice"
+  },
+  "holding:43836": {
+    "0": "CriticalDeviceResponse",
+    "1": "Non-CriticalDevice"
+  },
+  "holding:43837": {
+    "0": "CriticalDeviceResponse",
+    "1": "Non-CriticalDevice"
+  },
+  "holding:43838": {
+    "0": "CriticalDeviceResponse",
+    "1": "Non-CriticalDevice"
+  },
+  "holding:43840": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:43841": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43842": {
+    "0": "UtilityDisconnect",
+    "1": "GensetStart",
+    "2": "NoCommit"
+  },
+  "holding:43846": {
+    "0": "DoNothing",
+    "1": "ResetCommands"
+  },
+  "holding:43847": {
+    "0": "DoNothing",
+    "1": "ClearCounters"
+  },
+  "holding:43854": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43855": {
+    "0": "GensetkVAR",
+    "1": "GensetPowerFactor",
+    "2": "UtilitykVAR",
+    "3": "UtilityPowerFactor"
+  },
+  "holding:43858": {
+    "0": "AfterTransferDelay",
+    "1": "UponUtilityFailure"
+  },
+  "holding:43861": {
+    "0": "Load",
+    "1": "Unload"
+  },
+  "holding:43905": {
+    "0": "Normal",
+    "1": "Active"
+  },
+  "holding:43906": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43907": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43908": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43909": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43910": {
+    "0": "DoNothing",
+    "1": "SaveTrims"
+  },
+  "holding:43915": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:43954": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:43955": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:43958": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:45999": {
+    "0": "AllPairsRecognized",
+    "1": "PairNotRecognized"
+  },
+  "holding:46000": {
+    "0": "L1-L2-L3",
+    "1": "L1-L3-L2",
+    "2": "Not Available"
+  },
+  "holding:46001": {
+    "0": "L1-L2-L3",
+    "1": "L1-L3-L2",
+    "2": "Not Available"
+  },
+  "holding:46002": {
+    "0": "L1-L2-L3",
+    "1": "L1-L3-L2",
+    "2": "Not Available"
+  },
+  "holding:46091": {
+    "0": "NO",
+    "1": "YES",
+    "2": "Reserved",
+    "3": "N/A"
+  },
+  "holding:46092": {
+    "0": "NotTripped",
+    "1": "Tripped",
+    "2": "Reserved",
+    "3": "N/A",
+    "4": "NetworkFailure"
+  },
+  "holding:46093": {
+    "0": "OFF",
+    "1": "ON",
+    "2": "TRIPPED",
+    "3": "N/A"
+  },
+  "holding:46094": {
+    "0": "Open",
+    "1": "Closed",
+    "2": "Reserved",
+    "3": "N/A",
+    "4": "NetworkFailure"
+  },
+  "holding:46095": {
+    "0": "OFF",
+    "1": "ON",
+    "2": "TRIPPED",
+    "3": "N/A"
+  },
+  "holding:46096": {
+    "0": "Close",
+    "1": "Open",
+    "2": "Reserved",
+    "3": "N/A"
+  },
+  "holding:46097": {
+    "0": "OFF",
+    "1": "ON",
+    "2": "TRIPPED",
+    "3": "N/A"
+  },
+  "holding:46099": {
+    "0": "No",
+    "1": "Yes",
+    "2": "Reserved",
+    "3": "N/A",
+    "4": "NetworkFailure"
+  },
+  "holding:46100": {
+    "0": "No",
+    "1": "Yes",
+    "2": "Reserved",
+    "3": "N/A",
+    "4": "NetworkFailure"
+  },
+  "holding:46101": {
+    "0": "Inactive",
+    "1": "Active",
+    "2": "Reserved",
+    "3": "N/A"
+  },
+  "holding:46102": {
+    "0": "Inactive",
+    "1": "Active",
+    "2": "Reserved",
+    "3": "N/A"
+  },
+  "holding:46103": {
+    "0": "Inactive",
+    "1": "Active",
+    "2": "Reserved",
+    "3": "N/A"
+  },
+  "holding:46104": {
+    "0": "No",
+    "1": "Yes"
+  },
+  "holding:46105": {
+    "0": "No",
+    "1": "Yes"
+  },
+  "holding:46109": {
+    "0": "EngineStopped",
+    "1": "Pre-Start",
+    "2": "Starting",
+    "3": "Warm-Up",
+    "4": "Running",
+    "5": "Cool-Down",
+    "6": "EngineStopping",
+    "7": "Post-Run",
+    "8": "OutOfRange",
+    "9": "OutOfRange",
+    "10": "OutOfRange",
+    "11": "OutOfRange",
+    "12": "OutOfRange",
+    "13": "OutOfRange",
+    "14": "OutOfRange",
+    "15": "N/A"
+  },
+  "holding:46110": {
+    "0": "Inactive",
+    "1": "Active",
+    "2": "Reserved",
+    "3": "Not Available"
+  },
+  "holding:46112": {
+    "0": "Closed",
+    "1": "Open",
+    "2": "Reserved",
+    "3": "Not Available"
+  },
+  "holding:46113": {
+    "0": "Open",
+    "1": "Closed",
+    "2": "Reserved",
+    "3": "N/A"
+  },
+  "holding:46114": {
+    "0": "Open",
+    "1": "Closed",
+    "2": "Reserved",
+    "3": "N/A"
+  },
+  "holding:46115": {
+    "0": "OFF",
+    "1": "ON",
+    "2": "Reserved",
+    "3": "N/A"
+  },
+  "holding:46117": {
+    "0": "OFF",
+    "1": "ON",
+    "2": "Reserved",
+    "3": "N/A"
+  },
+  "holding:46118": {
+    "0": "OFF",
+    "1": "ON",
+    "2": "Reserved",
+    "3": "Not Available"
+  },
+  "holding:46119": {
+    "0": "OFF",
+    "1": "ON",
+    "2": "Reserved",
+    "3": "N/A"
+  },
+  "holding:46120": {
+    "0": "OFF",
+    "1": "ON",
+    "2": "Reserved",
+    "3": "N/A"
+  },
+  "holding:46121": {
+    "0": "Inactive",
+    "1": "Active",
+    "2": "Reserved",
+    "3": "Not Available"
+  },
+  "holding:46122": {
+    "0": "Inactive",
+    "1": "Active",
+    "2": "Reserved",
+    "3": "Not Available"
+  },
+  "holding:46130": {
+    "0": "OFF",
+    "1": "ON",
+    "2": "Reserved",
+    "3": "N/A"
+  },
+  "holding:46131": {
+    "0": "Low",
+    "1": "Optimum",
+    "2": "Reserved",
+    "3": "N/A"
+  },
+  "holding:46132": {
+    "0": "Cold",
+    "1": "Heated",
+    "2": "Reserved",
+    "3": "N/A"
+  },
+  "holding:46133": {
+    "0": "Cold",
+    "1": "Heated",
+    "2": "Reserved",
+    "3": "N/A"
+  },
+  "holding:46134": {
+    "0": "Vented",
+    "1": "NotVented",
+    "2": "VentilationDelay",
+    "3": "CurrentlyVenting",
+    "4": "Reserved",
+    "5": "Reserved",
+    "6": "NotAbleToDetermine",
+    "7": "Not Available"
+  },
+  "holding:46172": {
+    "0": "Inactive",
+    "1": "Active",
+    "2": "Reserved",
+    "3": "Not Available",
+    "4": "NetworkFailure"
+  },
+  "holding:46173": {
+    "0": "Inactive",
+    "1": "Active",
+    "2": "Reserved",
+    "3": "Not Available",
+    "4": "NetworkFailure"
+  },
+  "holding:46174": {
+    "0": "Inactive",
+    "1": "Active",
+    "2": "Reserved",
+    "3": "Not Available",
+    "4": "NetworkFailure"
+  },
+  "holding:46180": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:46176": {
+    "0": "No",
+    "1": "Yes"
+  },
+  "holding:46182": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:46183": {
+    "0": "Limited",
+    "1": "Continuous"
+  },
+  "holding:46184": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:46191": {
+    "0": "Inactive",
+    "1": "Active"
+  },
+  "holding:46273": {
+    "0": "No",
+    "1": "Yes",
+    "2": "Reserved",
+    "3": "N/A",
+    "4": "NetworkFailure"
+  },
+  "holding:46288": {
+    "0": "DriveEnd",
+    "1": "Non-DriveEnd",
+    "2": "Reserved",
+    "3": "N/A"
+  },
+  "holding:46291": {
+    "0": "NotTripped",
+    "1": "Tripped",
+    "2": "Reserved",
+    "3": "N/A"
+  },
+  "holding:46300": {
+    "0": "Disable",
+    "1": "Enable"
+  },
+  "holding:46301": {
+    "0": "Disable",
+    "1": "Enable"
+  },
+  "holding:46302": {
+    "0": "Disable",
+    "1": "Enable"
+  },
+  "holding:46303": {
+    "0": "Disable",
+    "1": "Enable"
+  },
+  "holding:46304": {
+    "0": "Disable",
+    "1": "Enable"
+  },
+  "holding:46323": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:46326": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:46327": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:46328": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:46332": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:46333": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:46334": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:46335": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:46336": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:46337": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:46338": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:46339": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:46340": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:46341": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:46342": {
+    "0": "Disabled",
+    "1": "Enabled"
+  },
+  "holding:46344": {
+    "0": "Disable",
+    "1": "Enabled"
+  },
+  "holding:46364": {
+    "0": "Disable",
+    "1": "Enable"
+  },
+  "holding:46365": {
+    "0": "Disable",
+    "1": "Enable"
+  },
+  "holding:46366": {
+    "0": "01",
+    "1": "02"
+  },
+  "holding:46374": {
+    "0": "Even",
+    "1": "Odd",
+    "2": "None"
+  },
+  "holding:46376": {
+    "0": "2400Baud",
+    "1": "4800Baud",
+    "2": "9600Baud",
+    "3": "19200Baud",
+    "4": "38400Baud"
+  },
+  "holding:46377": {
+    "0": "Even",
+    "1": "Odd",
+    "2": "None"
+  },
+  "holding:46379": {
+    "0": "01",
+    "1": "02"
+  },
+  "holding:47014": {
+    "0": "Disable",
+    "1": "Enable"
+  },
+  "holding:47021": {
+    "0": "PGBU",
+    "1": "EBU"
+  },
+  "holding:47022": {
+    "0": "Disable",
+    "1": "Enable"
+  },
+  "holding:47023": {
+    "0": "PGBU",
+    "1": "EBU"
+  },
+  "holding:47024": {
+    "0": "Disable",
+    "1": "Enable"
+  },
+  "holding:47026": {
+    "0": "Disable",
+    "1": "Enable"
+  },
+  "holding:47028": {
+    "0": "Close",
+    "1": "Open",
+    "2": "Reserved",
+    "3": "N/A",
+    "4": "NetworkFailure"
+  },
+  "holding:47029": {
+    "0": "Open",
+    "1": "Closed",
+    "2": "Reserved",
+    "3": "N/A",
+    "4": "NetworkFailure"
+  }
+}
