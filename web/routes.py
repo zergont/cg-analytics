@@ -121,22 +121,20 @@ async def knowledge_page(request: Request):
 
     models = []
     if equipment_dir.exists():
-        for mfr_dir in sorted(equipment_dir.iterdir()):
-            if not mfr_dir.is_dir():
+        for kb_dir in sorted(equipment_dir.iterdir()):
+            if not kb_dir.is_dir():
                 continue
-            for model_dir in sorted(mfr_dir.iterdir()):
-                if not model_dir.is_dir():
-                    continue
-                reg_count = _count_lines(model_dir / "register_map.jsonl")
-                fault_count = _count_lines(model_dir / "fault_bitmap_map.jsonl")
-                pdf_count = len(list((model_dir / "docs").glob("*.pdf"))) if (model_dir / "docs").exists() else 0
-                models.append({
-                    "manufacturer": mfr_dir.name,
-                    "model": model_dir.name,
-                    "registers": reg_count,
-                    "faults": fault_count,
-                    "pdfs": pdf_count,
-                })
+            reg_count = _count_lines(kb_dir / "register_map.jsonl")
+            fault_count = _count_lines(kb_dir / "fault_bitmap_map.jsonl")
+            has_rules = (kb_dir / "operation_rules.json").exists()
+            pdf_count = len(list((kb_dir / "docs").glob("*.pdf"))) if (kb_dir / "docs").exists() else 0
+            models.append({
+                "kb_path": kb_dir.name,
+                "registers": reg_count,
+                "faults": fault_count,
+                "has_rules": has_rules,
+                "pdfs": pdf_count,
+            })
 
     return templates.TemplateResponse(request, "knowledge.html", {"models": models})
 
@@ -169,9 +167,11 @@ async def reindex(
 async def settings_page(request: Request):
     from config import settings as cfg
     registry = await analytics.get_equipment_registry()
+    kb_list = _list_kb_paths(cfg.knowledge_base_path / "equipment")
     return templates.TemplateResponse(request, "settings.html", {
         "settings": cfg,
         "registry": registry,
+        "kb_list": kb_list,
     })
 
 
@@ -184,6 +184,7 @@ async def update_equipment(
     model: str = Form(""),
     engine_sn: str = Form(""),
     name: str = Form(""),
+    kb_path: str = Form(""),
 ):
     """Обновить метаданные оборудования в реестре аналитики."""
     await analytics.upsert_equipment({
@@ -194,6 +195,7 @@ async def update_equipment(
         "model": model or None,
         "engine_sn": engine_sn or None,
         "name": name or None,
+        "kb_path": kb_path or None,
     })
     return RedirectResponse(url="/settings", status_code=303)
 
@@ -247,3 +249,10 @@ def _count_lines(path) -> int:
         return sum(1 for line in path.open(encoding="utf-8") if line.strip())
     except OSError:
         return 0
+
+
+def _list_kb_paths(equipment_dir) -> list[str]:
+    """Список папок knowledge base из equipment/."""
+    if not equipment_dir.exists():
+        return []
+    return sorted(d.name for d in equipment_dir.iterdir() if d.is_dir())

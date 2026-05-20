@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS equipment_registry (
     manufacturer    TEXT,
     model           TEXT,
     engine_sn       TEXT,
+    -- Папка в knowledge_base/equipment/ (назначается вручную)
+    kb_path         TEXT,
     -- true = участвует в ежедневной генерации отчётов
     active          BOOLEAN     NOT NULL DEFAULT true,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -61,3 +63,6 @@ CREATE TABLE IF NOT EXISTS daily_reports (
 CREATE INDEX IF NOT EXISTS idx_reports_date      ON daily_reports (date DESC);
 CREATE INDEX IF NOT EXISTS idx_reports_equipment ON daily_reports (router_sn, equip_type, panel_id);
 CREATE INDEX IF NOT EXISTS idx_reports_status    ON daily_reports (status, date DESC);
+
+-- Миграция: добавить kb_path если таблица уже существует
+ALTER TABLE equipment_registry ADD COLUMN IF NOT EXISTS kb_path TEXT;

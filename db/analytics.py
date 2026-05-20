@@ -40,13 +40,14 @@ async def upsert_equipment(equipment: dict[str, Any]) -> None:
     try:
         await conn.execute("""
             INSERT INTO equipment_registry
-                (router_sn, equip_type, panel_id, name, manufacturer, model, engine_sn, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+                (router_sn, equip_type, panel_id, name, manufacturer, model, engine_sn, kb_path, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
             ON CONFLICT (router_sn, equip_type, panel_id) DO UPDATE SET
                 name         = EXCLUDED.name,
                 manufacturer = EXCLUDED.manufacturer,
                 model        = EXCLUDED.model,
                 engine_sn    = EXCLUDED.engine_sn,
+                kb_path      = EXCLUDED.kb_path,
                 updated_at   = now()
         """,
             equipment["router_sn"],
@@ -56,6 +57,7 @@ async def upsert_equipment(equipment: dict[str, Any]) -> None:
             equipment.get("manufacturer"),
             equipment.get("model"),
             equipment.get("engine_sn"),
+            equipment.get("kb_path"),
         )
     finally:
         await conn.close()
@@ -99,7 +101,7 @@ async def get_equipment_registry() -> list[dict[str, Any]]:
     try:
         rows = await conn.fetch("""
             SELECT router_sn, equip_type, panel_id,
-                   name, manufacturer, model, engine_sn,
+                   name, manufacturer, model, engine_sn, kb_path,
                    active, created_at, updated_at
             FROM equipment_registry
             ORDER BY router_sn, equip_type, panel_id

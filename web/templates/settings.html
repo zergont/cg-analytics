@@ -81,10 +81,15 @@
                             {% else %}
                                 <span class="text-danger small">не заполнено</span>
                             {% endif %}
+                            {% if eq.kb_path %}
+                                <br><span class="badge bg-success-subtle text-success-emphasis" style="font-size:0.7rem">{{ eq.kb_path }}</span>
+                            {% else %}
+                                <br><span class="badge bg-secondary-subtle text-secondary-emphasis" style="font-size:0.7rem">KB не выбрана</span>
+                            {% endif %}
                         </td>
                         <td>
                             <button class="btn btn-sm btn-outline-primary me-1"
-                                    onclick="openEdit('{{ eq.router_sn }}','{{ eq.equip_type }}','{{ eq.panel_id }}','{{ eq.name or '' }}','{{ eq.manufacturer or '' }}','{{ eq.model or '' }}','{{ eq.engine_sn or '' }}')">
+                                    onclick="openEdit('{{ eq.router_sn }}','{{ eq.equip_type }}','{{ eq.panel_id }}','{{ eq.name or '' }}','{{ eq.manufacturer or '' }}','{{ eq.model or '' }}','{{ eq.engine_sn or '' }}','{{ eq.kb_path or '' }}')">
                                 ✏
                             </button>
                             <form method="post" action="/settings/equipment/toggle" class="d-inline">
@@ -157,9 +162,18 @@
                         <input type="text" class="form-control form-control-sm" id="edit_engine_sn" name="engine_sn"
                                placeholder="Серийный номер двигателя">
                     </div>
-                    <div class="text-muted small mt-2">
-                        Используется для поиска документации в
-                        <code>knowledge_base/equipment/{производитель}/{модель}/</code>
+
+                    <div class="mb-2">
+                        <label for="edit_kb_path" class="form-label small fw-semibold">База знаний</label>
+                        <select class="form-select form-select-sm" id="edit_kb_path" name="kb_path">
+                            <option value="">— не выбрана —</option>
+                            {% for kb in kb_list %}
+                            <option value="{{ kb }}">{{ kb }}</option>
+                            {% endfor %}
+                        </select>
+                        <div class="text-muted small mt-1">
+                            Папка из <code>knowledge_base/equipment/</code>
+                        </div>
                     </div>
                 </div>
                 <div class="modal-footer">
@@ -172,7 +186,7 @@
 </div>
 
 <script>
-function openEdit(router_sn, equip_type, panel_id, name, manufacturer, model, engine_sn) {
+function openEdit(router_sn, equip_type, panel_id, name, manufacturer, model, engine_sn, kb_path) {
     document.getElementById('edit_router_sn').value = router_sn;
     document.getElementById('edit_equip_type').value = equip_type;
     document.getElementById('edit_panel_id').value = panel_id;
@@ -181,6 +195,7 @@ function openEdit(router_sn, equip_type, panel_id, name, manufacturer, model, en
     document.getElementById('edit_manufacturer').value = manufacturer;
     document.getElementById('edit_model').value = model;
     document.getElementById('edit_engine_sn').value = engine_sn;
+    document.getElementById('edit_kb_path').value = kb_path;
     new bootstrap.Modal(document.getElementById('editModal')).show();
 }
 </script>
