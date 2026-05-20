@@ -30,7 +30,8 @@ async def _run(router_sn: str, equip_type: str, panel_id: int, day: date, out_pa
     logger.info("Загрузка истории: %s/%s/%s за %s", router_sn, equip_type, panel_id, day)
     history      = await source.get_daily_history(router_sn, equip_type, panel_id, day)
     state_events = await source.get_daily_state_events(router_sn, equip_type, panel_id, day)
-    logger.info("Строк истории: %d | state_events: %d", len(history), len(state_events))
+    events       = await source.get_daily_events(router_sn, equip_type, panel_id, day)
+    logger.info("Строк истории: %d | state_events: %d | events: %d", len(history), len(state_events), len(events))
 
     kb_path = await analytics.get_equipment_kb_path(router_sn, equip_type, panel_id)
     if kb_path:

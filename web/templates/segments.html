@@ -46,6 +46,9 @@
                 <dl class="row mb-0 small">
                     <dt class="col-7">Строк телеметрии</dt>
                     <dd class="col-5">{{ result.history_rows }}</dd>
+                    <dt class="col-7">Событий состояний</dt>
+                    <dd class="col-5">{{ result.state_events_count }}</dd>
+                    {% if result.has_data %}
                     <dt class="col-7">Наработка</dt>
                     <dd class="col-5">{{ result.uptime_minutes }} мин ({{ "%.1f"|format(result.uptime_minutes / 60) }} ч)</dd>
                     <dt class="col-7">Пусков</dt>
@@ -60,6 +63,7 @@
                             <span class="badge bg-info-subtle text-info-emphasis">{{ result.segments[0].source or '?' }}</span>
                         {% else %}—{% endif %}
                     </dd>
+                    {% endif %}
                     <dt class="col-7">База знаний</dt>
                     <dd class="col-5">
                         {% if result.kb_path %}
@@ -76,25 +80,60 @@
 
     <!-- Результаты -->
     <div class="col-md-8">
+
         {% if error %}
-        <div class="alert alert-danger">{{ error }}</div>
+        {# ── Ошибка выполнения ── #}
+        <div class="alert alert-danger">
+            <strong>Ошибка:</strong> {{ error }}
+        </div>
+
         {% elif result is none %}
-        <div class="alert alert-secondary">Выберите оборудование и дату, затем нажмите «Построить сегменты».</div>
-        {% elif result.segments|length == 0 %}
+        {# ── Ничего не выбрано ── #}
+        <div class="alert alert-secondary">
+            Выберите оборудование и дату, затем нажмите «Построить сегменты».
+        </div>
+
+        {% elif not result.has_data %}
+        {# ══════════════════════════════════════════════════════════════════
+           ЭТАП 1 — Нет данных: уведомление и стоп
+           ══════════════════════════════════════════════════════════════════ #}
+        <div class="alert alert-warning d-flex align-items-start gap-3">
+            <span style="font-size:2rem">📭</span>
+            <div>
+                <strong>Нет данных телеметрии за {{ result.date }}</strong>
+                <div class="mt-1 small text-muted">
+                    Строк истории: {{ result.history_rows }} &nbsp;·&nbsp;
+                    Событий состояний: {{ result.state_events_count }}
+                </div>
+                <div class="mt-2 small">
+                    Устройство не передавало данные за эту дату, либо дата указана неверно.
+                    Проверьте подключение или выберите другой день.
+                </div>
+            </div>
+        </div>
+
+        {% else %}
+        {# ══════════════════════════════════════════════════════════════════
+           ЭТАП 2 — Визуализация сегментов
+           ══════════════════════════════════════════════════════════════════ #}
+
+        {% if result.segments|length == 0 %}
         <div class="alert alert-warning">
-            Сегменты не найдены. Возможно, нет данных телеметрии за {{ result.date }}.
+            Сегменты не построены. Данные есть ({{ result.history_rows }} строк), но сегментатор
+            не смог определить рабочие интервалы. Возможно, отсутствует регистр 40011 и 40068.
         </div>
         {% else %}
 
         <div class="d-flex align-items-center mb-2 gap-2 flex-wrap">
             <span class="fw-semibold">{{ result.date }}</span>
+            {% if result.equip_label %}<span class="text-muted small">{{ result.equip_label }}</span>{% endif %}
             {% set seg_types = result.segments|map(attribute='type')|unique|list %}
             {% for t in seg_types %}
             <span class="badge {{ _seg_badge(t) }}">{{ _seg_label_short(t) }}</span>
             {% endfor %}
         </div>
 
-        <!-- Временная шкала -->
+        <!-- Временная шкала сегментов -->
         <div class="timeline mb-3">
             {% for seg in result.segments %}
             {% set bclass = _seg_badge(seg.type) %}
@@ -109,7 +148,7 @@
                         </span>
                         <span class="badge bg-light text-dark border">{{ seg.duration_min }} мин</span>
                     </div>
-                    {% if seg.notes or seg.parameters or seg.related_anomalies %}
+                    {% if seg.notes or seg.parameters or seg.events or seg.related_anomalies %}
                     <div class="card-body py-2">
                         {% if seg.notes %}
                         <ul class="mb-1 ps-3 small">
@@ -170,10 +209,11 @@
             </div>
             {% endfor %}
         </div>
+        {% endif %}
 
         <!-- Аномалии -->
         {% if result.anomalies %}
-        <div class="card">
+        <div class="card mb-3">
             <div class="card-header fw-semibold">Аномалии ({{ result.anomalies_count }})</div>
             <div class="card-body p-0">
                 <table class="table table-sm mb-0">
@@ -206,7 +246,44 @@
         </div>
         {% endif %}
 
-        {% endif %}
+        {# ══════════════════════════════════════════════════════════════════
+           ЭТАП 3 — Промпт для агента и кнопка отправки
+           ══════════════════════════════════════════════════════════════════ #}
+        <div class="card border-primary">
+            <div class="card-header bg-primary-subtle fw-semibold d-flex align-items-center justify-content-between">
+                <span>🤖 Передать агенту</span>
+                <span class="badge bg-primary-subtle text-primary border border-primary-subtle small">Этап 3</span>
+            </div>
+            <div class="card-body">
+                <p class="small text-muted mb-2">
+                    Ниже — промпт, который получит языковая модель. Проверьте данные и нажмите
+                    «Отправить», чтобы запустить полный pipeline с ИИ-анализом.
+                </p>
+
+                {% if result.prompt_preview %}
+                <details class="mb-3">
+                    <summary class="text-muted small" style="cursor:pointer">
+                        Предпросмотр промпта ({{ result.prompt_preview|length }} символов)
+                    </summary>
+                    <pre class="mt-2 p-3 bg-light rounded border small"
+                         style="max-height:400px;overflow-y:auto;white-space:pre-wrap;word-break:break-word">{{ result.prompt_preview }}</pre>
+                </details>
+                {% endif %}
+
+                <form method="post" action="/run">
+                    <input type="hidden" name="router_sn"  value="{{ selected_sn }}">
+                    <input type="hidden" name="equip_type" value="{{ selected_type }}">
+                    <input type="hidden" name="panel_id"   value="{{ selected_panel }}">
+                    <input type="hidden" name="run_date"   value="{{ result.date }}">
+                    <button type="submit" class="btn btn-success">
+                        Отправить агенту →
+                    </button>
+                    <a href="/run" class="btn btn-outline-secondary ms-2">Перейти к очереди задач</a>
+                </form>
+            </div>
+        </div>
+
+        {% endif %}{# end has_data #}
     </div>
 </div>
 {% endblock %}
