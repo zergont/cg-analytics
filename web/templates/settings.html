@@ -27,6 +27,31 @@
             </div>
         </div>
 
+        <div class="card mb-3">
+            <div class="card-header fw-semibold">🕐 Часовой пояс суток</div>
+            <div class="card-body">
+                <p class="small text-muted mb-2">
+                    Определяет границы суток при выгрузке данных и построении сегментов.
+                    Выбирайте по расположению основной части парка оборудования.
+                </p>
+                <form method="post" action="/settings/timezone" class="d-flex gap-2 align-items-center">
+                    <select name="timezone_name" class="form-select form-select-sm" style="max-width:280px">
+                        {% for tz_key, tz_label in timezone_choices %}
+                        <option value="{{ tz_key }}"
+                                {% if tz_key == current_timezone %}selected{% endif %}>
+                            {{ tz_label }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                    <button type="submit" class="btn btn-sm btn-primary">Сохранить</button>
+                </form>
+                <div class="text-muted small mt-2">
+                    Текущий: <code>{{ current_timezone }}</code> — вступает в силу немедленно,
+                    сохраняется в БД и переживает перезапуск сервиса.
+                </div>
+            </div>
+        </div>
+
         <div class="card">
             <div class="card-header fw-semibold">Синхронизация реестра</div>
             <div class="card-body">

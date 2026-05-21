@@ -56,3 +56,37 @@ class Settings:
 
 
 settings = Settings.load()
+
+# ── Изменяемый часовой пояс ───────────────────────────────────────────────────
+# Инициализируется из config.yml, может быть обновлён из БД при старте приложения
+# или сменён пользователем через Web UI без перезапуска сервиса.
+
+_current_tz: ZoneInfo = settings.timezone
+
+
+def get_tz() -> ZoneInfo:
+    """Текущий часовой пояс разбивки суток (обновляется из БД при старте)."""
+    return _current_tz
+
+
+def set_tz(tz_name: str) -> None:
+    """Обновить часовой пояс в памяти. Вызывается при загрузке из БД или смене через UI."""
+    global _current_tz
+    _current_tz = ZoneInfo(tz_name)
+
+
+# Список часовых поясов, доступных в UI (IANA-имя → метка)
+TIMEZONE_CHOICES: list[tuple[str, str]] = [
+    ("UTC",                  "UTC+0 — UTC"),
+    ("Europe/Kaliningrad",   "UTC+2 — Калининград"),
+    ("Europe/Moscow",        "UTC+3 — Москва / МСК"),
+    ("Europe/Samara",        "UTC+4 — Самара"),
+    ("Asia/Yekaterinburg",   "UTC+5 — Екатеринбург"),
+    ("Asia/Omsk",            "UTC+6 — Омск"),
+    ("Asia/Krasnoyarsk",     "UTC+7 — Красноярск"),
+    ("Asia/Irkutsk",         "UTC+8 — Иркутск"),
+    ("Asia/Yakutsk",         "UTC+9 — Якутск"),
+    ("Asia/Vladivostok",     "UTC+10 — Владивосток"),
+    ("Asia/Magadan",         "UTC+11 — Магадан"),
+    ("Asia/Kamchatka",       "UTC+12 — Камчатка"),
+]

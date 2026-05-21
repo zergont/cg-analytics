@@ -32,6 +32,31 @@ async def init_db() -> None:
         await conn.close()
 
 
+# ── App settings ──────────────────────────────────────────────────────────────
+
+async def get_app_setting(key: str, default: str = "") -> str:
+    """Получить настройку из БД. Возвращает default если ключ не найден."""
+    conn = await _connect()
+    try:
+        row = await conn.fetchrow("SELECT value FROM app_settings WHERE key = $1", key)
+        return row["value"] if row else default
+    finally:
+        await conn.close()
+
+
+async def set_app_setting(key: str, value: str) -> None:
+    """Сохранить настройку в БД (upsert)."""
+    conn = await _connect()
+    try:
+        await conn.execute("""
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES ($1, $2, now())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+        """, key, value)
+    finally:
+        await conn.close()
+
+
 # ── Equipment registry ────────────────────────────────────────────────────────
 
 async def upsert_equipment(equipment: dict[str, Any]) -> None:

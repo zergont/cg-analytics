@@ -19,9 +19,16 @@ templates = Jinja2Templates(directory="web/templates")
 _version_file = __import__("pathlib").Path(__file__).parent.parent / "VERSION"
 templates.env.globals["app_version"] = _version_file.read_text(encoding="utf-8").strip()
 
-# Часовой пояс для отображения в шаблонах
-from config import settings as _cfg
-templates.env.globals["app_timezone"] = _cfg.timezone_name
+# Часовой пояс — строка, доступная во всех шаблонах.
+# Обновляется через _apply_tz() при старте и при смене через UI.
+from config import get_tz as _get_tz, set_tz as _set_tz
+templates.env.globals["app_timezone"] = _get_tz().key
+
+
+def _apply_tz(tz_name: str) -> None:
+    """Применить новый TZ: обновить in-memory и глобал шаблонов."""
+    _set_tz(tz_name)
+    templates.env.globals["app_timezone"] = tz_name
 
 # Хелперы для отображения сегментов в шаблоне segments.html
 _SEG_BADGE = {
@@ -192,9 +199,9 @@ async def _run_segments(router_sn: str, equip_type: str, panel_id: int, seg_date
     from agent.prompt import build_user_prompt
 
     day = date.fromisoformat(seg_date)
-    from config import settings as _cfg
+    from config import get_tz as _get_tz
     from datetime import timedelta
-    day_start = datetime(day.year, day.month, day.day, tzinfo=_cfg.timezone).astimezone(timezone.utc)
+    day_start = datetime(day.year, day.month, day.day, tzinfo=_get_tz()).astimezone(timezone.utc)
     day_end   = day_start + timedelta(days=1) - timedelta(seconds=1)
 
     history      = await source.get_daily_history(router_sn, equip_type, panel_id, day)
@@ -341,14 +348,29 @@ async def reindex(kb_path: str = Form(...)):
 
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
-    from config import settings as cfg
+    from config import settings as cfg, TIMEZONE_CHOICES, get_tz
     registry = await analytics.get_equipment_registry()
     kb_list = _list_kb_paths(cfg.knowledge_base_path / "equipment")
     return templates.TemplateResponse(request, "settings.html", {
         "settings": cfg,
         "registry": registry,
         "kb_list": kb_list,
+        "timezone_choices": TIMEZONE_CHOICES,
+        "current_timezone": get_tz().key,
     })
+
+
+@router.post("/settings/timezone")
+async def update_timezone(timezone_name: str = Form(...)):
+    """Сменить часовой пояс разбивки суток без перезапуска сервиса."""
+    from config import set_tz, TIMEZONE_CHOICES
+    valid_keys = {tz for tz, _ in TIMEZONE_CHOICES}
+    if timezone_name not in valid_keys:
+        raise HTTPException(status_code=400, detail=f"Неизвестный часовой пояс: {timezone_name}")
+    _apply_tz(timezone_name)
+    await analytics.set_app_setting("timezone", timezone_name)
+    logger.info("Часовой пояс изменён на %s", timezone_name)
+    return RedirectResponse(url="/settings", status_code=303)
 
 
 @router.post("/settings/equipment/update")

@@ -7,9 +7,9 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from config import settings
-from db.analytics import init_db
+from db.analytics import init_db, get_app_setting
 from scheduler import start_scheduler, stop_scheduler
-from web.routes import router
+from web.routes import router, _apply_tz
 
 logging.basicConfig(
     level=settings.log_level,
@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     logger.info("═══ cg-analytics запуск ═══")
     await init_db()
+    # Загружаем сохранённый часовой пояс из БД (если пользователь менял через UI)
+    saved_tz = await get_app_setting("timezone", settings.timezone_name)
+    _apply_tz(saved_tz)   # обновляет config.get_tz() и глобал Jinja2
+    logger.info("Часовой пояс: %s", saved_tz)
     start_scheduler()
     yield
     stop_scheduler()

@@ -3,11 +3,7 @@ import asyncpg
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from config import settings
-
-# Часовой пояс для разбивки суток (из конфига, по умолчанию МСК UTC+3).
-# Границы "00:00 – 23:59" считаются в этом поясе, затем переводятся в UTC для запроса.
-_TZ = settings.timezone
+from config import settings, get_tz
 
 
 async def _connect() -> asyncpg.Connection:
@@ -60,7 +56,7 @@ async def get_daily_history(
     Границы суток считаются в настроенном часовом поясе (по умолчанию МСК UTC+3),
     затем переводятся в UTC для запроса к БД.
     """
-    start = datetime(day.year, day.month, day.day, tzinfo=_TZ).astimezone(timezone.utc)
+    start = datetime(day.year, day.month, day.day, tzinfo=get_tz()).astimezone(timezone.utc)
     end = start + timedelta(days=1)
 
     conn = await _connect()
@@ -117,7 +113,7 @@ async def get_daily_state_events(
 
     Границы суток — в настроенном часовом поясе (по умолчанию МСК UTC+3).
     """
-    start = datetime(day.year, day.month, day.day, tzinfo=_TZ).astimezone(timezone.utc)
+    start = datetime(day.year, day.month, day.day, tzinfo=get_tz()).astimezone(timezone.utc)
     end = start + timedelta(days=1)
 
     conn = await _connect()
@@ -147,7 +143,7 @@ async def get_daily_events(
 
     Границы суток — в настроенном часовом поясе (по умолчанию МСК UTC+3).
     """
-    start = datetime(day.year, day.month, day.day, tzinfo=_TZ).astimezone(timezone.utc)
+    start = datetime(day.year, day.month, day.day, tzinfo=get_tz()).astimezone(timezone.utc)
     end = start + timedelta(days=1)
 
     conn = await _connect()
