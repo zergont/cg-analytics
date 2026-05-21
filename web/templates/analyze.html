@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% block title %}Анализ диапазона — cg-analytics{% endblock %}
+
+{% block content %}
+<h5 class="mb-3">Анализ временного диапазона</h5>
+
+<div class="row g-3">
+
+    {# ── Форма ── #}
+    <div class="col-md-4 col-lg-3">
+        <div class="card">
+            <div class="card-header fw-semibold">Параметры</div>
+            <div class="card-body">
+                <form method="post" action="/analyze" id="analyzeForm">
+                    <div class="mb-3">
+                        <label class="form-label">Оборудование</label>
+                        <select name="router_sn" id="eq_select" class="form-select" required
+                                onchange="fillEquipment(this)">
+                            <option value="">— выберите —</option>
+                            {% for eq in equipment %}
+                            <option value="{{ eq.router_sn }}"
+                                    data-equip="{{ eq.equip_type }}"
+                                    data-panel="{{ eq.panel_id }}"
+                                    {% if eq.router_sn == selected_sn
+                                       and eq.equip_type == selected_type
+                                       and eq.panel_id|string == selected_panel %}selected{% endif %}>
+                                {{ eq.name or (eq.manufacturer or '') ~ ' ' ~ (eq.model or '') }}
+                                ({{ eq.router_sn }}/{{ eq.equip_type }}/{{ eq.panel_id }})
+                            </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <input type="hidden" name="equip_type" id="equip_type_inp" value="{{ selected_type or '' }}">
+                    <input type="hidden" name="panel_id"   id="panel_id_inp"   value="{{ selected_panel or '' }}">
+
+                    <div class="mb-2">
+                        <label class="form-label mb-1">Начало</label>
+                        <input type="datetime-local" name="ts_from_local" class="form-control form-control-sm"
+                               value="{{ default_from }}" required>
+                    </div>
+                    <div class="mb-1">
+                        <label class="form-label mb-1">Конец</label>
+                        <input type="datetime-local" name="ts_to_local" class="form-control form-control-sm"
+                               value="{{ default_to }}" required>
+                    </div>
+                    <div class="form-text text-warning-emphasis mb-3">
+                        🕐 Время в {{ app_timezone }}
+                    </div>
+
+                    <button type="submit" class="btn btn-primary w-100">
+                        Собрать данные
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        {% if result %}
+        <div class="card mt-3">
+            <div class="card-header fw-semibold">Итоги</div>
+            <div class="card-body">
+                <dl class="row mb-0 small">
+                    <dt class="col-7">Строк истории</dt>
+                    <dd class="col-5">{{ result.history_rows }}</dd>
+                    <dt class="col-7">Регистров</dt>
+                    <dd class="col-5">{{ result.registers_count }}</dd>
+                    <dt class="col-7">Событий enum</dt>
+                    <dd class="col-5">{{ result.state_events_count }}</dd>
+                    <dt class="col-7">Событий/аварий</dt>
+                    <dd class="col-5">{{ result.events_count }}</dd>
+                </dl>
+            </div>
+        </div>
+
+        <div class="card mt-3 border-success">
+            <div class="card-header fw-semibold bg-success-subtle">🤖 Отправить ИИ</div>
+            <div class="card-body">
+                <p class="small text-muted mb-2">
+                    Пакет данных готов. Следующий этап — обогащение через RAG
+                    и отправка языковой модели.
+                </p>
+                <button class="btn btn-success btn-sm w-100" disabled title="Скоро">
+                    Отправить агенту → <span class="badge bg-light text-dark ms-1">скоро</span>
+                </button>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    {# ── Результат ── #}
+    <div class="col-md-8 col-lg-9">
+
+        {% if error %}
+        <div class="alert alert-danger">
+            <strong>Ошибка:</strong> {{ error }}
+        </div>
+
+        {% elif result is none %}
+        <div class="alert alert-secondary">
+            Выберите оборудование и временной диапазон, затем нажмите «Собрать данные».
+        </div>
+
+        {% else %}
+
+        {# Тулбар #}
+        <div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
+            <span class="text-muted small">
+                {{ result.ts_from_local }} — {{ result.ts_to_local }}
+                <span class="badge bg-secondary ms-1">{{ result.tz_name }}</span>
+            </span>
+            <div class="ms-auto d-flex gap-2">
+                <button class="btn btn-sm btn-outline-secondary" onclick="toggleRaw()" id="rawBtn">
+                    Сырой текст
+                </button>
+                <button class="btn btn-sm btn-outline-secondary" onclick="copyMd()">
+                    📋 Копировать
+                </button>
+            </div>
+        </div>
+
+        {# Rendered Markdown #}
+        <div id="mdRendered" class="border rounded p-3 bg-white" style="min-height:300px">
+            <div id="mdContent"></div>
+        </div>
+
+        {# Raw textarea (скрыт по умолчанию) #}
+        <div id="rawBlock" class="mt-2" style="display:none">
+            <textarea id="rawMd" class="form-control font-monospace" rows="20"
+                      style="font-size:0.78rem; white-space:pre">{{ result.markdown }}</textarea>
+        </div>
+
+        {# Скрытый источник для JS #}
+        <script id="mdSource" type="text/plain">{{ result.markdown | e }}</script>
+
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script>
+function fillEquipment(sel) {
+    const opt = sel.options[sel.selectedIndex];
+    document.getElementById('equip_type_inp').value = opt.dataset.equip || '';
+    document.getElementById('panel_id_inp').value   = opt.dataset.panel || '';
+}
+
+{% if result %}
+// Рендерим Markdown после загрузки
+const raw = document.getElementById('mdSource').textContent;
+document.getElementById('mdContent').innerHTML = marked.parse(raw);
+
+function toggleRaw() {
+    const rb = document.getElementById('rawBlock');
+    const rd = document.getElementById('mdRendered');
+    const btn = document.getElementById('rawBtn');
+    if (rb.style.display === 'none') {
+        rb.style.display = 'block';
+        rd.style.display = 'none';
+        btn.textContent = 'Рендер';
+    } else {
+        rb.style.display = 'none';
+        rd.style.display = 'block';
+        btn.textContent = 'Сырой текст';
+    }
+}
+
+function copyMd() {
+    navigator.clipboard.writeText(raw).then(() => {
+        const btn = event.target;
+        btn.textContent = '✓ Скопировано';
+        setTimeout(() => btn.textContent = '📋 Копировать', 2000);
+    });
+}
+{% else %}
+function toggleRaw() {}
+function copyMd() {}
+{% endif %}
+</script>
+{% endblock %}

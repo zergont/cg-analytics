@@ -152,3 +152,69 @@ def _calc_uptime(
     """Устаревший метод: 40011 теперь в state_events, а не в history.
     Оставлен как заглушка — возвращает нули."""
     return 0, 0, []
+
+
+# ── Агрегация для произвольного диапазона ─────────────────────────────────────
+
+def compute_register_stats(
+    history: list[dict[str, Any]],
+    ts_to: datetime,
+    register_map: dict | None = None,
+) -> dict[int, dict[str, Any]]:
+    """Вычислить мин/макс/взвешенное-среднее по каждому регистру за диапазон.
+
+    Args:
+        history: строки из history (addr, ts, value, ...) отсортированные по addr, ts
+        ts_to:   правая граница диапазона (UTC) — нужна для веса последнего значения
+        register_map: карта регистров {addr: {name, unit, na_values, ...}} (опционально)
+
+    Returns:
+        {addr: {name, unit, min, max, wmean, count, first_ts, last_ts}}
+    """
+    if register_map is None:
+        register_map = {}
+
+    by_addr: dict[int, list[tuple[datetime, float]]] = defaultdict(list)
+    for row in history:
+        if row["value"] is None:
+            continue
+        reg = register_map.get(row["addr"], {})
+        na = set(reg.get("na_values", []))
+        try:
+            v = float(row["value"])
+        except (TypeError, ValueError):
+            continue
+        if v in na:
+            continue
+        by_addr[row["addr"]].append((row["ts"], v))
+
+    result: dict[int, dict[str, Any]] = {}
+    for addr, readings in by_addr.items():
+        readings.sort(key=lambda x: x[0])
+        values = [v for _, v in readings]
+
+        # Взвешенное среднее: каждое значение весится длительностью до следующего
+        weighted_sum = 0.0
+        total_w = 0.0
+        for i, (ts, v) in enumerate(readings):
+            next_ts = readings[i + 1][0] if i + 1 < len(readings) else ts_to
+            dur = (next_ts - ts).total_seconds()
+            if dur > 0:
+                weighted_sum += v * dur
+                total_w += dur
+
+        wmean = round(weighted_sum / total_w, 2) if total_w > 0 else values[-1]
+
+        reg = register_map.get(addr, {})
+        result[addr] = {
+            "name": reg.get("name", ""),
+            "unit": reg.get("unit", ""),
+            "min":  round(min(values), 3),
+            "max":  round(max(values), 3),
+            "wmean": wmean,
+            "count": len(readings),
+            "first_ts": readings[0][0],
+            "last_ts":  readings[-1][0],
+        }
+
+    return result

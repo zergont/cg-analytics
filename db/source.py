@@ -161,3 +161,80 @@ async def get_daily_events(
         return [dict(r) for r in rows]
     finally:
         await conn.close()
+
+
+# ── Range-запросы (произвольный UTC-диапазон) ─────────────────────────────────
+
+async def get_history_range(
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    ts_from: datetime,
+    ts_to: datetime,
+) -> list[dict[str, Any]]:
+    """Все аналоговые регистры за произвольный UTC-диапазон [ts_from, ts_to)."""
+    conn = await _connect()
+    try:
+        rows = await conn.fetch("""
+            SELECT addr, ts, value, raw, text, reason, write_reason
+            FROM history
+            WHERE router_sn = $1
+              AND equip_type = $2
+              AND panel_id   = $3
+              AND ts >= $4
+              AND ts <  $5
+            ORDER BY addr, ts
+        """, router_sn, equip_type, panel_id, ts_from, ts_to)
+        return [dict(r) for r in rows]
+    finally:
+        await conn.close()
+
+
+async def get_state_events_range(
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    ts_from: datetime,
+    ts_to: datetime,
+) -> list[dict[str, Any]]:
+    """Смены состояния enum/discrete регистров за произвольный UTC-диапазон."""
+    conn = await _connect()
+    try:
+        rows = await conn.fetch("""
+            SELECT addr, ts, received_at, raw, text, write_reason
+            FROM state_events
+            WHERE router_sn = $1
+              AND equip_type = $2
+              AND panel_id   = $3
+              AND ts >= $4
+              AND ts <  $5
+            ORDER BY ts
+        """, router_sn, equip_type, panel_id, ts_from, ts_to)
+        return [dict(r) for r in rows]
+    finally:
+        await conn.close()
+
+
+async def get_events_range(
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    ts_from: datetime,
+    ts_to: datetime,
+) -> list[dict[str, Any]]:
+    """Системные события / аварии за произвольный UTC-диапазон."""
+    conn = await _connect()
+    try:
+        rows = await conn.fetch("""
+            SELECT id, type, description, payload, created_at
+            FROM events
+            WHERE router_sn = $1
+              AND (equip_type = $2 OR equip_type IS NULL)
+              AND (panel_id   = $3 OR panel_id   IS NULL)
+              AND created_at >= $4
+              AND created_at <  $5
+            ORDER BY created_at
+        """, router_sn, equip_type, panel_id, ts_from, ts_to)
+        return [dict(r) for r in rows]
+    finally:
+        await conn.close()
