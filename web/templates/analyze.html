@@ -2,6 +2,17 @@
 {% block title %}Анализ диапазона — cg-analytics{% endblock %}
 
 {% block content %}
+<style>
+  /* Уменьшаем заголовки внутри рендера Markdown */
+  #mdContent h1 { font-size: 1.4rem; font-weight: 700; margin-top: 0.5rem; }
+  #mdContent h2 { font-size: 1.1rem; font-weight: 600; margin-top: 1rem; border-bottom: 1px solid #dee2e6; padding-bottom: .2rem; }
+  #mdContent h3 { font-size: 0.95rem; font-weight: 600; margin-top: 0.8rem; }
+  #mdContent table { width: 100%; font-size: 0.82rem; border-collapse: collapse; margin-bottom: 0.5rem; }
+  #mdContent th, #mdContent td { border: 1px solid #dee2e6; padding: 3px 8px; }
+  #mdContent th { background: #f8f9fa; }
+  #mdContent p, #mdContent li { font-size: 0.88rem; margin-bottom: 0.2rem; }
+  #mdContent code { font-size: 0.82rem; }
+</style>
 <h5 class="mb-3">Анализ временного диапазона</h5>
 
 <div class="row g-3">
@@ -104,28 +115,32 @@
         {# Тулбар #}
         <div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
             <span class="text-muted small">
-                {{ result.ts_from_local }} — {{ result.ts_to_local }}
+                {{ result.ts_from_local | replace("T", " ") }} —
+                {{ result.ts_to_local   | replace("T", " ") }}
                 <span class="badge bg-secondary ms-1">{{ result.tz_name }}</span>
             </span>
             <div class="ms-auto d-flex gap-2">
                 <button class="btn btn-sm btn-outline-secondary" onclick="toggleRaw()" id="rawBtn">
                     Сырой текст
                 </button>
-                <button class="btn btn-sm btn-outline-secondary" onclick="copyMd()">
+                <button class="btn btn-sm btn-outline-secondary" onclick="copyMd(event)">
                     📋 Копировать
                 </button>
             </div>
         </div>
 
         {# Rendered Markdown #}
-        <div id="mdRendered" class="border rounded p-3 bg-white" style="min-height:300px">
+        <div id="mdRendered" class="border rounded p-3 bg-white overflow-auto"
+             style="min-height:400px; max-height:80vh">
             <div id="mdContent"></div>
         </div>
 
-        {# Raw textarea (скрыт по умолчанию) #}
-        <div id="rawBlock" class="mt-2" style="display:none">
-            <textarea id="rawMd" class="form-control font-monospace" rows="20"
-                      style="font-size:0.78rem; white-space:pre">{{ result.markdown }}</textarea>
+        {# Raw — на всю ширину панели, без горизонтального скролла #}
+        <div id="rawBlock" style="display:none">
+            <textarea id="rawMd" class="form-control font-monospace w-100"
+                      style="font-size:0.78rem; resize:vertical; min-height:400px; max-height:80vh;
+                             white-space:pre-wrap; word-break:break-all"
+                      readonly>{{ result.markdown }}</textarea>
         </div>
 
         {# Скрытый источник для JS #}
@@ -165,9 +180,9 @@ function toggleRaw() {
     }
 }
 
-function copyMd() {
+function copyMd(event) {
     navigator.clipboard.writeText(raw).then(() => {
-        const btn = event.target;
+        const btn = event.currentTarget;
         btn.textContent = '✓ Скопировано';
         setTimeout(() => btn.textContent = '📋 Копировать', 2000);
     });
