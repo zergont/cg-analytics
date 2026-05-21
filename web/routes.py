@@ -1,6 +1,7 @@
 """FastAPI роуты Web UI аналитики."""
 import asyncio
 import logging
+import time
 from datetime import date, timedelta
 from typing import Any
 
@@ -64,6 +65,9 @@ templates.env.globals["_seg_header"]      = lambda t: _SEG_HEADER.get(t, "")
 
 # Хранилище активных задач запуска (task_key → dict)
 _running_tasks: dict[str, dict] = {}
+
+# Статус переиндексации KB (kb_path → dict)
+_reindex_status: dict[str, dict] = {}
 
 
 # ── Главная страница ──────────────────────────────────────────────────────────
@@ -599,26 +603,60 @@ async def knowledge_page(request: Request):
                 "pdfs": pdf_count,
             })
 
-    return templates.TemplateResponse(request, "knowledge.html", {"models": models})
+    return templates.TemplateResponse(request, "knowledge.html", {
+        "models": models,
+        "reindex_status": _reindex_status,
+    })
 
 
 @router.post("/knowledge/reindex")
 async def reindex(kb_path: str = Form(...)):
     """Запустить переиндексацию в фоне."""
+    _reindex_status[kb_path] = {
+        "status": "running",
+        "step": "Инициализация…",
+        "docs": 0,
+        "started_at": time.time(),
+        "error": None,
+    }
+
     async def _reindex():
         from knowledge.indexer import index_equipment
         from knowledge.retriever import invalidate_cache
         from knowledge.loader import invalidate_cache as loader_invalidate
+
+        def _cb(step: str, total: int = 0):
+            _reindex_status[kb_path]["step"] = step
+            _reindex_status[kb_path]["docs"] = total
+
         try:
-            count = index_equipment(kb_path)
+            loop = asyncio.get_running_loop()
+            count = await loop.run_in_executor(
+                None, lambda: index_equipment(kb_path, _cb)
+            )
             invalidate_cache(kb_path)
             loader_invalidate(kb_path)
+            _reindex_status[kb_path]["status"] = "done"
+            _reindex_status[kb_path]["step"] = f"Готово: {count} документов"
+            _reindex_status[kb_path]["docs"] = count
             logger.info("Переиндексация завершена: %s, %d документов", kb_path, count)
         except Exception as e:
             logger.exception("Ошибка переиндексации: %s", e)
+            _reindex_status[kb_path]["status"] = "error"
+            _reindex_status[kb_path]["error"] = str(e)
 
     asyncio.create_task(_reindex())
     return RedirectResponse(url="/knowledge", status_code=303)
+
+
+@router.get("/knowledge/reindex/status", response_class=JSONResponse)
+async def reindex_status_api():
+    """Текущий статус переиндексаций (для JS-поллинга)."""
+    now = time.time()
+    result = {}
+    for kb, s in _reindex_status.items():
+        result[kb] = {**s, "elapsed_s": int(now - s["started_at"])}
+    return JSONResponse(result)
 
 
 # ── Настройки ─────────────────────────────────────────────────────────────────

@@ -43,10 +43,17 @@ def _get_vector_store(kb_path: str):
     )
 
 
-def index_equipment(kb_path: str) -> int:
-    """Построить или пересобрать индекс для kb_path. Возвращает количество документов."""
+def index_equipment(kb_path: str, progress_cb=None) -> int:
+    """Построить или пересобрать индекс для kb_path. Возвращает количество документов.
+
+    progress_cb(step: str, total: int) — вызывается на каждом этапе (thread-safe).
+    """
     from llama_index.core import VectorStoreIndex, Document, StorageContext
     from llama_index.core import Settings as LlamaSettings
+
+    def _cb(step: str, total: int = 0):
+        if progress_cb:
+            progress_cb(step, total)
 
     LlamaSettings.embed_model = _get_embed_model()
     LlamaSettings.llm = None
@@ -59,26 +66,33 @@ def index_equipment(kb_path: str) -> int:
 
     reg_path = base_path / "register_map.jsonl"
     if reg_path.exists():
+        _cb("Загрузка register_map…")
         docs = _docs_from_register_map(reg_path, kb_path)
         documents.extend(docs)
         logger.info("register_map.jsonl: %d документов", len(docs))
+        _cb(f"Регистры: {len(docs)} записей", len(documents))
 
     fault_path = base_path / "fault_bitmap_map.jsonl"
     if fault_path.exists():
+        _cb("Загрузка fault_bitmap_map…", len(documents))
         docs = _docs_from_fault_bitmap(fault_path, kb_path)
         documents.extend(docs)
         logger.info("fault_bitmap_map.jsonl: %d документов", len(docs))
+        _cb(f"Fault-биты: {len(docs)} записей", len(documents))
 
     docs_dir = base_path / "docs"
     if docs_dir.exists():
+        _cb("Обработка PDF-документов…", len(documents))
         docs = _docs_from_pdfs(docs_dir, kb_path)
         documents.extend(docs)
         logger.info("PDF-документы: %d чанков", len(docs))
+        _cb(f"PDF-чанки: {len(docs)} страниц", len(documents))
 
     if not documents:
         logger.warning("Нет документов для индексации: %s", kb_path)
         return 0
 
+    _cb(f"Построение векторного индекса ({len(documents)} документов)…", len(documents))
     vector_store = _get_vector_store(kb_path)
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
