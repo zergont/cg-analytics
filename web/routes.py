@@ -249,18 +249,40 @@ async def _run_analysis(
         {}
     )
 
-    # Карта регистров из KB (если задана)
+    # Карта регистров и правила эксплуатации из KB (если задана)
     kb_path = await analytics.get_equipment_kb_path(router_sn, equip_type, panel_id)
     register_map: dict = {}
+    operation_rules: dict = {}
     if kb_path:
         try:
             kb = load_knowledge(kb_path)
-            register_map = kb.get("register_map", {})
+            register_map    = kb.get("register_map", {})
+            operation_rules = kb.get("operation_rules", {})
         except Exception:
             pass
 
     # Статистика по регистрам
     reg_stats = compute_register_stats(history, ts_to_utc, register_map)
+
+    # ── RAG: обогащение из документации ──────────────────────────────────────
+    rag_context = ""
+    if kb_path:
+        try:
+            from knowledge.retriever import retrieve_context as _rag_retrieve
+            # Адреса активных аналоговых регистров
+            active_addrs = list(reg_stats.keys())
+            # Адреса fault-регистров: state_events с ненулевым raw
+            fault_addrs = list({
+                ev["addr"] for ev in state_events
+                if ev.get("raw") is not None and ev["raw"] != 0
+            })
+            loop = asyncio.get_running_loop()
+            rag_context = await loop.run_in_executor(
+                None,
+                lambda: _rag_retrieve(kb_path, active_addrs, fault_addrs or None),
+            )
+        except Exception as e:
+            logger.warning("RAG недоступен: %s", e)
 
     # Собираем Markdown
     md = _build_analysis_md(
@@ -270,6 +292,8 @@ async def _run_analysis(
         duration_h=duration_h, tz=tz,
         reg_stats=reg_stats, register_map=register_map,
         state_events=state_events, events=events,
+        rag_context=rag_context,
+        operation_rules=operation_rules,
     )
 
     return {
@@ -278,6 +302,7 @@ async def _run_analysis(
         "registers_count":    len(reg_stats),
         "state_events_count": len(state_events),
         "events_count":       len(events),
+        "rag_chunks":         len(rag_context.split("\n\n")) if rag_context else 0,
         "ts_from_local": ts_from_local,
         "ts_to_local":   ts_to_local,
         "tz_name": tz.key,
@@ -291,6 +316,8 @@ def _build_analysis_md(
     router_sn, equip_type, panel_id, eq, kb_path,
     ts_from_utc, ts_to_utc, duration_h, tz,
     reg_stats, register_map, state_events, events,
+    rag_context: str = "",
+    operation_rules: dict | None = None,
 ) -> str:
     """Сформировать Markdown-пакет данных для передачи в ИИ."""
     from datetime import timezone as _tz
@@ -376,6 +403,31 @@ def _build_analysis_md(
             lines.append(f"- `{ts_str}` [{ev_type}] {desc}")
     else:
         lines.append("_Нет событий за период_")
+
+    # ── Правила эксплуатации из KB ───────────────────────────────────────────
+    if operation_rules:
+        import json as _json
+        lines += [
+            "",
+            "## Правила эксплуатации (operation_rules)",
+            "```json",
+            _json.dumps(operation_rules, ensure_ascii=False, indent=2),
+            "```",
+        ]
+
+    # ── Контекст из документации (RAG) ───────────────────────────────────────
+    if rag_context:
+        lines += [
+            "",
+            "## Контекст из базы знаний (RAG)",
+            rag_context,
+        ]
+    elif kb_path:
+        lines += [
+            "",
+            "## Контекст из базы знаний (RAG)",
+            "_Индекс пуст или Ollama недоступна. Запустите переиндексацию в разделе «База знаний»._",
+        ]
 
     return "\n".join(lines)
 

@@ -78,6 +78,14 @@
                     <dd class="col-5">{{ result.state_events_count }}</dd>
                     <dt class="col-7">Событий/аварий</dt>
                     <dd class="col-5">{{ result.events_count }}</dd>
+                    <dt class="col-7">RAG-чанков</dt>
+                    <dd class="col-5">
+                        {% if result.rag_chunks > 0 %}
+                            <span class="text-success fw-semibold">{{ result.rag_chunks }}</span>
+                        {% else %}
+                            <span class="text-muted">—</span>
+                        {% endif %}
+                    </dd>
                 </dl>
             </div>
         </div>
