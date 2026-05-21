@@ -5,6 +5,10 @@ from typing import Any
 
 from config import settings
 
+# Часовой пояс для разбивки суток (из конфига, по умолчанию МСК UTC+3).
+# Границы "00:00 – 23:59" считаются в этом поясе, затем переводятся в UTC для запроса.
+_TZ = settings.timezone
+
 
 async def _connect() -> asyncpg.Connection:
     return await asyncpg.connect(settings.source_db_url)
@@ -51,12 +55,12 @@ async def get_daily_history(
     panel_id: int,
     day: date,
 ) -> list[dict[str, Any]]:
-    """История телеметрии за сутки (по UTC-дате).
+    """История телеметрии за сутки.
 
-    Возвращает все строки из history за указанные сутки, отсортированные
-    по адресу регистра и времени.
+    Границы суток считаются в настроенном часовом поясе (по умолчанию МСК UTC+3),
+    затем переводятся в UTC для запроса к БД.
     """
-    start = datetime.combine(day, datetime.min.time()).replace(tzinfo=timezone.utc)
+    start = datetime(day.year, day.month, day.day, tzinfo=_TZ).astimezone(timezone.utc)
     end = start + timedelta(days=1)
 
     conn = await _connect()
@@ -109,8 +113,11 @@ async def get_daily_state_events(
     panel_id: int,
     day: date,
 ) -> list[dict[str, Any]]:
-    """Смены состояния enum/discrete регистров за сутки из state_events."""
-    start = datetime.combine(day, datetime.min.time()).replace(tzinfo=timezone.utc)
+    """Смены состояния enum/discrete регистров за сутки из state_events.
+
+    Границы суток — в настроенном часовом поясе (по умолчанию МСК UTC+3).
+    """
+    start = datetime(day.year, day.month, day.day, tzinfo=_TZ).astimezone(timezone.utc)
     end = start + timedelta(days=1)
 
     conn = await _connect()
@@ -136,8 +143,11 @@ async def get_daily_events(
     panel_id: int,
     day: date,
 ) -> list[dict[str, Any]]:
-    """События за сутки из таблицы events."""
-    start = datetime.combine(day, datetime.min.time()).replace(tzinfo=timezone.utc)
+    """События за сутки из таблицы events.
+
+    Границы суток — в настроенном часовом поясе (по умолчанию МСК UTC+3).
+    """
+    start = datetime(day.year, day.month, day.day, tzinfo=_TZ).astimezone(timezone.utc)
     end = start + timedelta(days=1)
 
     conn = await _connect()

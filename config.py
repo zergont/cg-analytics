@@ -1,5 +1,6 @@
 """Загрузка конфигурации из config.yml."""
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -33,6 +34,11 @@ class Settings:
         web = data.get("web", {})
         self.web_host: str = web.get("host", "0.0.0.0")
         self.web_port: int = int(web.get("port", 8090))
+        # Часовой пояс для разбивки суток. По умолчанию МСК (UTC+3).
+        # Границы суток в БД-запросах и сегментаторе считаются по этому поясу.
+        tz_name: str = web.get("timezone", "Europe/Moscow")
+        self.timezone: ZoneInfo = ZoneInfo(tz_name)
+        self.timezone_name: str = tz_name
 
         log = data.get("logging", {})
         self.log_level: str = log.get("level", "INFO").upper()

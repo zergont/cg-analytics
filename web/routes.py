@@ -19,6 +19,10 @@ templates = Jinja2Templates(directory="web/templates")
 _version_file = __import__("pathlib").Path(__file__).parent.parent / "VERSION"
 templates.env.globals["app_version"] = _version_file.read_text(encoding="utf-8").strip()
 
+# Часовой пояс для отображения в шаблонах
+from config import settings as _cfg
+templates.env.globals["app_timezone"] = _cfg.timezone_name
+
 # Хелперы для отображения сегментов в шаблоне segments.html
 _SEG_BADGE = {
     "standstill":        "bg-secondary",
@@ -188,8 +192,10 @@ async def _run_segments(router_sn: str, equip_type: str, panel_id: int, seg_date
     from agent.prompt import build_user_prompt
 
     day = date.fromisoformat(seg_date)
-    day_start = datetime(day.year, day.month, day.day, 0, 0, 0, tzinfo=timezone.utc)
-    day_end   = datetime(day.year, day.month, day.day, 23, 59, 59, tzinfo=timezone.utc)
+    from config import settings as _cfg
+    from datetime import timedelta
+    day_start = datetime(day.year, day.month, day.day, tzinfo=_cfg.timezone).astimezone(timezone.utc)
+    day_end   = day_start + timedelta(days=1) - timedelta(seconds=1)
 
     history      = await source.get_daily_history(router_sn, equip_type, panel_id, day)
     state_events = await source.get_daily_state_events(router_sn, equip_type, panel_id, day)

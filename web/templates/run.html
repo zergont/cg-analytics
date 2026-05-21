@@ -31,6 +31,9 @@
                         <label class="form-label">Дата анализа</label>
                         <input type="date" name="run_date" class="form-control"
                                value="{{ default_date }}" required>
+                        <div class="form-text text-warning-emphasis">
+                            🕐 Сутки по {{ app_timezone }}
+                        </div>
                     </div>
                     <button type="submit" class="btn btn-primary">Запустить</button>
                 </form>

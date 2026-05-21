@@ -129,9 +129,10 @@ async def run_pipeline(
 
     # 6. Сегментация суток (Layer 1)
     logger.info("Сегментация суток...")
-    from datetime import datetime, timezone
-    day_start = datetime(day.year, day.month, day.day, 0, 0, 0, tzinfo=timezone.utc)
-    day_end = datetime(day.year, day.month, day.day, 23, 59, 59, tzinfo=timezone.utc)
+    from datetime import datetime, timezone, timedelta
+    from config import settings as _cfg
+    day_start = datetime(day.year, day.month, day.day, tzinfo=_cfg.timezone).astimezone(timezone.utc)
+    day_end   = day_start + timedelta(days=1) - timedelta(seconds=1)
     segments = segmenter.segment(
         history=history,
         state_events=state_events,
