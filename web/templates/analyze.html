@@ -15,10 +15,10 @@
 </style>
 <h5 class="mb-3">Анализ временного диапазона</h5>
 
-<div class="row g-3">
+<div class="row g-2" style="height:calc(100vh - 100px); overflow:hidden">
 
     {# ── Форма ── #}
-    <div class="col-md-4 col-lg-3">
+    <div class="col-md-4 col-lg-3 overflow-y-auto h-100">
         <div class="card">
             <div class="card-header fw-semibold">Параметры</div>
             <div class="card-body">
@@ -98,7 +98,7 @@
     </div>
 
     {# ── Результат ── #}
-    <div class="col-md-8 col-lg-9">
+    <div class="col-md-8 col-lg-9 d-flex flex-column h-100">
 
         {% if error %}
         <div class="alert alert-danger">
@@ -129,16 +129,15 @@
             </div>
         </div>
 
-        {# Rendered Markdown #}
-        <div id="mdRendered" class="border rounded p-3 bg-white overflow-auto"
-             style="min-height:400px; max-height:80vh">
+        {# Rendered Markdown — flex-grow заполняет остаток колонки #}
+        <div id="mdRendered" class="border rounded p-3 bg-white overflow-auto flex-grow-1">
             <div id="mdContent"></div>
         </div>
 
-        {# Raw — на всю ширину панели, без горизонтального скролла #}
-        <div id="rawBlock" style="display:none">
-            <textarea id="rawMd" class="form-control font-monospace w-100"
-                      style="font-size:0.78rem; resize:vertical; min-height:400px; max-height:80vh;
+        {# Raw — на всю ширину и высоту панели #}
+        <div id="rawBlock" class="flex-grow-1" style="display:none">
+            <textarea id="rawMd" class="form-control font-monospace w-100 h-100"
+                      style="font-size:0.78rem; resize:none;
                              white-space:pre-wrap; word-break:break-all"
                       readonly>{{ result.markdown }}</textarea>
         </div>
