@@ -170,8 +170,25 @@ def _docs_from_fault_bitmap(path: Path, kb_path: str) -> list:
     return docs
 
 
+_CHUNK_MAX_CHARS = 4000   # ~1000 токенов — безопасно для nomic-embed-text (8192 ctx)
+_CHUNK_OVERLAP   = 200
+
+
+def _split_text(text: str) -> list[str]:
+    """Разбить длинный текст на перекрывающиеся чанки."""
+    if len(text) <= _CHUNK_MAX_CHARS:
+        return [text]
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + _CHUNK_MAX_CHARS
+        chunks.append(text[start:end])
+        start = end - _CHUNK_OVERLAP
+    return chunks
+
+
 def _docs_from_pdfs(docs_dir: Path, kb_path: str) -> list:
-    """Чанкинг PDF-документов по странице."""
+    """Чанкинг PDF-документов по странице (с разбивкой длинных страниц)."""
     from llama_index.core import Document
 
     try:
@@ -188,15 +205,17 @@ def _docs_from_pdfs(docs_dir: Path, kb_path: str) -> list:
                 text = page.extract_text() or ""
                 if len(text.strip()) < 50:
                     continue
-                docs.append(Document(
-                    text=text,
-                    metadata={
-                        "type": "manual",
-                        "source": pdf_path.name,
-                        "page": i + 1,
-                        "kb_path": kb_path,
-                    },
-                ))
+                for chunk_idx, chunk in enumerate(_split_text(text)):
+                    docs.append(Document(
+                        text=chunk,
+                        metadata={
+                            "type": "manual",
+                            "source": pdf_path.name,
+                            "page": i + 1,
+                            "chunk": chunk_idx,
+                            "kb_path": kb_path,
+                        },
+                    ))
         except Exception as e:
             logger.warning("Ошибка обработки %s: %s", pdf_path.name, e)
 
