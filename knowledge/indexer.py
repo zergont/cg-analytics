@@ -55,8 +55,13 @@ def index_equipment(kb_path: str, progress_cb=None) -> int:
         if progress_cb:
             progress_cb(step, total)
 
+    from llama_index.core.node_parser import SentenceSplitter
+
     LlamaSettings.embed_model = _get_embed_model()
     LlamaSettings.llm = None
+    # nomic-embed-text: 8192 token ctx. LlamaIndex uses tiktoken (GPT tokens),
+    # которые ~2-3× меньше реальных токенов nomic. Ставим chunk_size=256 — запас 10×.
+    LlamaSettings.transformations = [SentenceSplitter(chunk_size=256, chunk_overlap=32)]
 
     base_path = settings.knowledge_base_path / "equipment" / kb_path
     if not base_path.exists():
@@ -126,7 +131,7 @@ def _docs_from_register_map(path: Path, kb_path: str) -> list:
                     f"Описание: {rec.get('description', '')}. "
                     f"Тип данных: {rec.get('data_type', '')}. "
                     f"Множитель: {rec.get('multiplier', 1)}."
-                )
+                )[:_CHUNK_MAX_CHARS]
                 docs.append(Document(
                     text=text,
                     metadata={"type": "register", "addr": rec["addr"], "kb_path": kb_path},
@@ -154,7 +159,7 @@ def _docs_from_fault_bitmap(path: Path, kb_path: str) -> list:
                     f"{rec.get('name', '')}. "
                     f"Описание: {rec.get('description', '')}. "
                     f"Серьёзность: {rec.get('severity', 'warning')}."
-                )
+                )[:_CHUNK_MAX_CHARS]
                 docs.append(Document(
                     text=text,
                     metadata={
@@ -170,8 +175,8 @@ def _docs_from_fault_bitmap(path: Path, kb_path: str) -> list:
     return docs
 
 
-_CHUNK_MAX_CHARS = 4000   # ~1000 токенов — безопасно для nomic-embed-text (8192 ctx)
-_CHUNK_OVERLAP   = 200
+_CHUNK_MAX_CHARS = 1500   # ~375 токенов — большой запас для nomic-embed-text (8192 ctx)
+_CHUNK_OVERLAP   = 100
 
 
 def _split_text(text: str) -> list[str]:
