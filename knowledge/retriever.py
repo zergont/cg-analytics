@@ -1,4 +1,5 @@
 """RAG-запросы к pgvector-индексу: поиск релевантных описаний регистров и fault-кодов."""
+import html
 import logging
 from typing import Any
 
@@ -49,17 +50,18 @@ def retrieve_context(
         for node in nodes:
             meta = node.metadata or {}
             doc_type = meta.get("type", "")
+            content = html.unescape(node.get_content())
 
             if doc_type == "register":
-                sections.append(f"[Регистр {meta.get('addr')}] {node.get_content()}")
+                sections.append(f"[Регистр {meta.get('addr')}] {content}")
             elif doc_type == "fault":
                 sections.append(
                     f"[Fault addr={meta.get('addr')} bit={meta.get('bit')} "
-                    f"severity={meta.get('severity')}] {node.get_content()}"
+                    f"severity={meta.get('severity')}] {content}"
                 )
             elif doc_type == "manual":
                 sections.append(
-                    f"[РЭ {meta.get('source')} стр.{meta.get('page')}]\n{node.get_content()[:500]}"
+                    f"[РЭ {meta.get('source')} стр.{meta.get('page')}]\n{content[:500]}"
                 )
 
         return "\n\n".join(sections)
