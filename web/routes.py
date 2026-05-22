@@ -316,6 +316,114 @@ async def _run_analysis(
     }
 
 
+def _format_operation_rules(rules: dict) -> list[str]:
+    """Сформировать компактную сводку operation_rules для промпта ИИ.
+
+    Извлекает только критически важные числовые пороги, не дампит весь JSON.
+    """
+    lines: list[str] = []
+
+    meta = rules.get("metadata", {})
+    if meta.get("engine_model"):
+        lines.append(f"Модель: {meta['engine_model']} / {meta.get('controller', '')}")
+
+    def _val(obj) -> str | None:
+        """Извлечь значение: из {value:...} или напрямую."""
+        if obj is None:
+            return None
+        if isinstance(obj, dict):
+            v = obj.get("value")
+            return str(v) if v is not None else None
+        return str(obj) if obj else None
+
+    def _row(label: str, val_str: str | None) -> str | None:
+        return f"  - {label}: **{val_str}**" if val_str else None
+
+    normal = rules.get("normal_operation", {})
+
+    # Давление масла
+    oil = normal.get("oil_pressure_kpa", {})
+    oil_rows = [
+        _row("Норма при номинале, мин (кПа)",    _val(oil.get("rated", {}).get("min"))),
+        _row("Предупреждение (кПа)",              _val(oil.get("warning_threshold_rated_kpa"))),
+        _row("Аварийный останов (кПа)",           _val(oil.get("shutdown_threshold_rated_kpa"))),
+    ]
+    if any(oil_rows):
+        lines += ["", "**Давление масла**"] + [r for r in oil_rows if r]
+
+    # Температура ОЖ
+    cwt = normal.get("coolant_temperature_c", {})
+    cwt_rows = [
+        _row("Норма мин–макс (°C)", f"{cwt.get('normal', {}).get('min')}–{cwt.get('normal', {}).get('max')}"
+             if cwt.get("normal", {}).get("min") and cwt.get("normal", {}).get("max") else None),
+        _row("Предупреждение (°C)",        _val(cwt.get("warning_threshold"))),
+        _row("Останов с охлаждением (°C)", _val(cwt.get("shutdown_with_cooldown_threshold"))),
+        _row("Аварийный останов (°C)",     _val(cwt.get("shutdown_threshold"))),
+    ]
+    if any(cwt_rows):
+        lines += ["", "**Температура охлаждающей жидкости**"] + [r for r in cwt_rows if r]
+
+    # Температура масла
+    olt = normal.get("oil_temperature_c", {})
+    olt_rows = [
+        _row("Норма макс (°C)",         _val(olt.get("normal", {}).get("max"))),
+        _row("Предупреждение (°C)",     _val(olt.get("warning_threshold"))),
+        _row("Аварийный останов (°C)",  _val(olt.get("shutdown_threshold"))),
+    ]
+    if any(olt_rows):
+        lines += ["", "**Температура масла**"] + [r for r in olt_rows if r]
+
+    # Обороты
+    rpm = normal.get("engine_speed_rpm", {})
+    rpm_rows = [
+        _row("Номинал (RPM)",      _val(rpm.get("rated", {}).get("value"))),
+        _row("Заброс — останов",   _val(rpm.get("overspeed_shutdown"))),
+    ]
+    if any(rpm_rows):
+        lines += ["", "**Обороты двигателя**"] + [r for r in rpm_rows if r]
+
+    # АКБ
+    bat = normal.get("battery_voltage_vdc", {})
+    bat_rows = [
+        _row("Предупреждение низкого (VDC)", _val(bat.get("warning_low_running"))),
+        _row("Предупреждение высокого (VDC)", _val(bat.get("warning_high"))),
+    ]
+    if any(bat_rows):
+        lines += ["", "**Напряжение АКБ**"] + [r for r in bat_rows if r]
+
+    # Нагрузка
+    load = normal.get("load_pct", {})
+    load_rows = [
+        _row("Рекомендуемый минимум (%)", _val(load.get("min_recommended_load_pct"))),
+    ]
+    if any(load_rows):
+        lines += ["", "**Нагрузка**"] + [r for r in load_rows if r]
+
+    # ТО
+    maint = rules.get("maintenance_intervals", {})
+    if maint:
+        maint_rows = [
+            _row("Замена масла (м/ч)", _val(maint.get("engine_oil_change_hours"))),
+            _row("Замена масла (мес.)", _val(maint.get("engine_oil_change_months"))),
+            _row("Регулировка клапанов (м/ч)", _val(maint.get("valve_adjustment_hours"))),
+            _row("Смена ОЖ (м/ч)", _val(maint.get("coolant_change_hours"))),
+        ]
+        if any(maint_rows):
+            lines += ["", "**Интервалы ТО**"] + [r for r in maint_rows if r]
+
+    # Пуск
+    startup = rules.get("startup_sequence", {})
+    start_rows = [
+        _row("Попыток запуска",         _val(startup.get("max_crank_attempts"))),
+        _row("Время кручения (с)",      _val(startup.get("max_crank_time_sec"))),
+        _row("Перерыв между попытками (с)", _val(startup.get("rest_between_cranks_sec"))),
+    ]
+    if any(start_rows):
+        lines += ["", "**Последовательность пуска**"] + [r for r in start_rows if r]
+
+    return lines
+
+
 def _build_analysis_md(
     router_sn, equip_type, panel_id, eq, kb_path,
     ts_from_utc, ts_to_utc, duration_h, tz,
@@ -408,16 +516,13 @@ def _build_analysis_md(
     else:
         lines.append("_Нет событий за период_")
 
-    # ── Правила эксплуатации из KB ───────────────────────────────────────────
+    # ── Правила эксплуатации из KB (компактная выжимка) ─────────────────────
     if operation_rules:
-        import json as _json
         lines += [
             "",
-            "## Правила эксплуатации (operation_rules)",
-            "```json",
-            _json.dumps(operation_rules, ensure_ascii=False, indent=2),
-            "```",
+            "## Правила эксплуатации (ключевые пороги)",
         ]
+        lines += _format_operation_rules(operation_rules)
 
     # ── Контекст из документации (RAG) ───────────────────────────────────────
     if rag_context:
