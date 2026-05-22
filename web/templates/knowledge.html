@@ -21,7 +21,7 @@
             <th>Регистров</th>
             <th>Fault-битов</th>
             <th>Правила работы</th>
-            <th>PDF-документов</th>
+            <th>PDF</th>
             <th></th>
         </tr>
     </thead>
@@ -39,7 +39,11 @@
             {% endif %}
         </td>
         <td>{{ m.pdfs }}</td>
-        <td>
+        <td class="text-end">
+            <button class="btn btn-sm btn-outline-info me-1"
+                    onclick="openKbModal('{{ m.kb_path }}')">
+                📁 Файлы
+            </button>
             <form method="post" action="/knowledge/reindex" class="d-inline"
                   onsubmit="return confirmReindex(this, '{{ m.kb_path }}')">
                 <input type="hidden" name="kb_path" value="{{ m.kb_path }}">
@@ -49,7 +53,7 @@
                     {% if reindex_status.get(m.kb_path, {}).get('status') == 'running' %}
                         <span class="spinner-border spinner-border-sm me-1" role="status"></span>Индексируется…
                     {% else %}
-                        Переиндексировать
+                        ⟳ Переиндексировать
                     {% endif %}
                 </button>
             </form>
@@ -62,11 +66,31 @@
     Первичная индексация: <code>python -m knowledge.indexer --all</code>
 </div>
 {% endif %}
+
+{# ── Модальное окно управления файлами ── #}
+<div class="modal fade" id="kbModal" tabindex="-1" aria-labelledby="kbModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="kbModalLabel">
+            Файлы базы знаний: <code id="kbModalKbPath"></code>
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="kbModalBody">
+        <div class="text-center py-4">
+            <div class="spinner-border spinner-border-sm text-secondary"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 {% endblock %}
 
 {% block scripts %}
 <script>
-// Начальный статус из шаблона
+// ── Прогресс переиндексации ────────────────────────────────────────────────
 const initialStatus = {{ reindex_status | tojson }};
 
 function confirmReindex(form, kbPath) {
@@ -74,80 +98,183 @@ function confirmReindex(form, kbPath) {
 }
 
 function fmtElapsed(s) {
-    if (s < 60) return s + ' с';
-    return Math.floor(s / 60) + ' м ' + (s % 60) + ' с';
+    return s < 60 ? s + ' с' : Math.floor(s / 60) + ' м ' + (s % 60) + ' с';
 }
 
 function renderPanel(status) {
     const panel = document.getElementById('reindexPanel');
     const entries = Object.entries(status);
     if (!entries.length) { panel.innerHTML = ''; return; }
-
     const cards = entries.map(([kb, s]) => {
-        if (s.status === 'running') {
-            return `<div class="alert alert-info d-flex align-items-center gap-3 mb-2">
-                <div class="spinner-border spinner-border-sm text-info flex-shrink-0" role="status"></div>
-                <div class="flex-grow-1">
-                    <strong>${kb}</strong> — ${s.step}
+        if (s.status === 'running') return `
+            <div class="alert alert-info d-flex align-items-center gap-3 mb-2">
+                <div class="spinner-border spinner-border-sm text-info flex-shrink-0"></div>
+                <div class="flex-grow-1"><strong>${kb}</strong> — ${s.step}
                     ${s.docs > 0 ? '<span class="badge bg-info-subtle text-info-emphasis ms-2">' + s.docs + ' docs</span>' : ''}
                 </div>
                 <span class="text-muted small">${fmtElapsed(s.elapsed_s)}</span>
             </div>`;
-        }
-        if (s.status === 'done') {
-            return `<div class="alert alert-success d-flex align-items-center gap-3 mb-2">
-                <i class="text-success">✓</i>
+        if (s.status === 'done') return `
+            <div class="alert alert-success d-flex align-items-center gap-3 mb-2">
+                <span>✓</span>
                 <div class="flex-grow-1"><strong>${kb}</strong> — ${s.step}</div>
                 <span class="text-muted small">${fmtElapsed(s.elapsed_s)}</span>
             </div>`;
-        }
-        if (s.status === 'error') {
-            return `<div class="alert alert-danger d-flex align-items-center gap-3 mb-2">
-                <i class="text-danger">✗</i>
+        if (s.status === 'error') return `
+            <div class="alert alert-danger d-flex align-items-center gap-3 mb-2">
+                <span>✗</span>
                 <div class="flex-grow-1"><strong>${kb}</strong> — Ошибка: ${s.error || '?'}</div>
                 <span class="text-muted small">${fmtElapsed(s.elapsed_s)}</span>
             </div>`;
-        }
         return '';
     });
     panel.innerHTML = cards.join('');
 }
 
-// Поллинг пока есть хотя бы одна задача со статусом running
 let pollTimer = null;
-
 function poll() {
     fetch('/knowledge/reindex/status')
         .then(r => r.json())
         .then(status => {
             renderPanel(status);
-            // Обновляем кнопки
             for (const [kb, s] of Object.entries(status)) {
-                const btnId = 'btn-' + kb.replace(/\//g, '_');
-                const btn = document.getElementById(btnId);
+                const btn = document.getElementById('btn-' + kb.replace(/\//g, '_'));
                 if (!btn) continue;
                 if (s.status === 'running') {
                     btn.disabled = true;
                     btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Индексируется…';
                 } else {
                     btn.disabled = false;
-                    btn.innerHTML = 'Переиндексировать';
+                    btn.innerHTML = '⟳ Переиндексировать';
                 }
             }
-            // Продолжаем поллинг если есть running
             const hasRunning = Object.values(status).some(s => s.status === 'running');
-            if (hasRunning) {
-                pollTimer = setTimeout(poll, 2000);
-            } else {
-                pollTimer = null;
-            }
+            pollTimer = hasRunning ? setTimeout(poll, 2000) : null;
         })
         .catch(() => { pollTimer = null; });
 }
 
-// Запуск: показать начальный статус и начать поллинг если нужно
 renderPanel(initialStatus);
-const hasRunning = Object.values(initialStatus).some(s => s.status === 'running');
-if (hasRunning) poll();
+if (Object.values(initialStatus).some(s => s.status === 'running')) poll();
+
+// ── Файловый менеджер KB ───────────────────────────────────────────────────
+let _currentKbPath = '';
+
+function openKbModal(kbPath) {
+    _currentKbPath = kbPath;
+    document.getElementById('kbModalKbPath').textContent = kbPath;
+    document.getElementById('kbModalBody').innerHTML =
+        '<div class="text-center py-4"><div class="spinner-border spinner-border-sm text-secondary"></div></div>';
+    new bootstrap.Modal(document.getElementById('kbModal')).show();
+    loadKbFiles(kbPath);
+}
+
+function loadKbFiles(kbPath) {
+    fetch('/knowledge/' + encodeURIComponent(kbPath) + '/files')
+        .then(r => r.json())
+        .then(data => renderKbFiles(kbPath, data))
+        .catch(() => {
+            document.getElementById('kbModalBody').innerHTML =
+                '<div class="alert alert-danger">Ошибка загрузки списка файлов</div>';
+        });
+}
+
+function renderKbFiles(kbPath, data) {
+    const enc = encodeURIComponent(kbPath);
+    let html = '';
+
+    // Файлы данных
+    html += '<h6 class="fw-semibold mb-2">Файлы данных</h6>';
+    html += '<table class="table table-sm table-bordered mb-3"><thead class="table-light"><tr><th>Файл</th><th class="text-end">Размер</th><th></th></tr></thead><tbody>';
+    for (const f of data.data_files) {
+        const exists = f.exists;
+        const sizeCell = exists
+            ? `<span class="text-success">${f.size_fmt}</span>`
+            : '<span class="text-muted fst-italic">отсутствует</span>';
+        const dlBtn = exists
+            ? `<a href="/knowledge/${enc}/download/${encodeURIComponent(f.name)}"
+                  class="btn btn-sm btn-outline-secondary me-1" download>⬇</a>`
+            : '';
+        html += `<tr>
+            <td><code>${f.name}</code></td>
+            <td class="text-end">${sizeCell}</td>
+            <td class="text-end text-nowrap">
+                ${dlBtn}
+                <button class="btn btn-sm btn-outline-primary"
+                        onclick="showUploadForm('${kbPath}','${f.name}',false)">
+                    ⬆ Загрузить
+                </button>
+            </td>
+        </tr>`;
+    }
+    html += '</tbody></table>';
+
+    // PDF-документы
+    html += '<h6 class="fw-semibold mb-2">PDF-документы</h6>';
+    html += '<table class="table table-sm table-bordered mb-3"><thead class="table-light"><tr><th>Файл</th><th class="text-end">Размер</th><th></th></tr></thead><tbody>';
+    if (data.pdf_files.length === 0) {
+        html += '<tr><td colspan="3" class="text-center text-muted fst-italic">Нет PDF-документов</td></tr>';
+    }
+    for (const f of data.pdf_files) {
+        html += `<tr>
+            <td><code>${f.name}</code></td>
+            <td class="text-end">${f.size_fmt}</td>
+            <td class="text-end text-nowrap">
+                <a href="/knowledge/${enc}/download/${encodeURIComponent(f.name)}"
+                   class="btn btn-sm btn-outline-secondary me-1" download>⬇</a>
+                <form method="post" action="/knowledge/${enc}/delete" class="d-inline"
+                      onsubmit="return confirm('Удалить ${f.name.replace(/'/g,"\\'")}?')">
+                    <input type="hidden" name="filename" value="${f.name}">
+                    <button type="submit" class="btn btn-sm btn-outline-danger">✕</button>
+                </form>
+            </td>
+        </tr>`;
+    }
+    html += '</tbody></table>';
+
+    // Кнопка добавить PDF
+    html += `<button class="btn btn-sm btn-outline-success mb-3"
+                     onclick="showUploadForm('${kbPath}',null,true)">
+                 + Добавить PDF
+             </button>`;
+
+    // Форма загрузки (скрыта)
+    html += `<div id="uploadBlock" style="display:none" class="border rounded p-3 bg-light">
+        <h6 id="uploadTitle" class="mb-2"></h6>
+        <form method="post" action="/knowledge/${enc}/upload"
+              enctype="multipart/form-data" id="uploadForm">
+            <div class="input-group input-group-sm">
+                <input type="file" name="file" id="uploadInput" class="form-control"
+                       required accept=".jsonl,.json,.pdf">
+                <button type="submit" class="btn btn-primary">Загрузить</button>
+                <button type="button" class="btn btn-secondary"
+                        onclick="document.getElementById('uploadBlock').style.display='none'">
+                    Отмена
+                </button>
+            </div>
+            <div class="form-text mt-1" id="uploadHint"></div>
+        </form>
+    </div>`;
+
+    document.getElementById('kbModalBody').innerHTML = html;
+}
+
+function showUploadForm(kbPath, filename, isPdf) {
+    const block = document.getElementById('uploadBlock');
+    const title = document.getElementById('uploadTitle');
+    const input = document.getElementById('uploadInput');
+    const hint  = document.getElementById('uploadHint');
+    block.style.display = 'block';
+    if (isPdf) {
+        title.textContent  = 'Добавить PDF-документ';
+        input.accept       = '.pdf';
+        hint.textContent   = 'Выберите PDF-файл. Имя файла сохранится как есть.';
+    } else {
+        title.textContent  = 'Заменить файл: ' + filename;
+        input.accept       = filename.endsWith('.pdf') ? '.pdf' : '.jsonl,.json';
+        hint.textContent   = 'Имя загружаемого файла должно точно совпадать: ' + filename;
+    }
+    block.scrollIntoView({ behavior: 'smooth' });
+}
 </script>
 {% endblock %}

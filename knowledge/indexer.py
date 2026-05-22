@@ -124,11 +124,13 @@ def _docs_from_register_map(path: Path, kb_path: str) -> list:
                 continue
             try:
                 rec = json.loads(line)
+                # notes_ru приоритетнее description (чище, на русском)
+                desc = rec.get("notes_ru") or rec.get("description", "")
                 text = (
                     f"Регистр {rec['addr']} ({rec.get('reg_type', 'holding')}): "
                     f"{rec.get('name', '')}. "
                     f"Единица: {rec.get('unit', '')}. "
-                    f"Описание: {rec.get('description', '')}. "
+                    f"Описание: {desc}. "
                     f"Тип данных: {rec.get('data_type', '')}. "
                     f"Множитель: {rec.get('multiplier', 1)}."
                 )[:_CHUNK_MAX_CHARS]

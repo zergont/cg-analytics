@@ -1,12 +1,14 @@
 """FastAPI роуты Web UI аналитики."""
 import asyncio
 import logging
+import re
 import time
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Request, Form, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi import APIRouter, Request, Form, HTTPException, UploadFile, File
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 
 from db import analytics, source
@@ -762,6 +764,131 @@ async def reindex_status_api():
     for kb, s in _reindex_status.items():
         result[kb] = {**s, "elapsed_s": int(now - s["started_at"])}
     return JSONResponse(result)
+
+
+# ── KB: управление файлами ────────────────────────────────────────────────────
+
+_KB_NAME_RE = re.compile(r"^[a-z0-9_]+$")
+_KB_DATA_FILES = [
+    "register_map.jsonl",
+    "fault_bitmap_map.jsonl",
+    "enum_map.json",
+    "operation_rules.json",
+]
+_KB_ALLOWED_EXT = {".jsonl", ".json", ".pdf"}
+
+
+def _kb_base(kb_path: str) -> Path:
+    """Вернуть абсолютный путь к папке KB с валидацией имени."""
+    from config import settings as _cfg
+    if not _KB_NAME_RE.match(kb_path):
+        raise HTTPException(status_code=400, detail="Недопустимое имя KB")
+    p = _cfg.knowledge_base_path / "equipment" / kb_path
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="KB не найдена")
+    return p
+
+
+def _safe_filename(filename: str) -> str:
+    """Валидировать имя файла — без path-traversal."""
+    if not filename or "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Недопустимое имя файла")
+    return filename
+
+
+def _fmt_size(b: int) -> str:
+    if b < 1024:
+        return f"{b} Б"
+    if b < 1024 * 1024:
+        return f"{b / 1024:.1f} КБ"
+    return f"{b / (1024 * 1024):.1f} МБ"
+
+
+@router.get("/knowledge/{kb_path}/files", response_class=JSONResponse)
+async def kb_files(kb_path: str):
+    """Список файлов KB (для модального окна)."""
+    base = _kb_base(kb_path)
+
+    data_files = []
+    for name in _KB_DATA_FILES:
+        p = base / name
+        data_files.append({
+            "name": name,
+            "exists": p.exists(),
+            "size_fmt": _fmt_size(p.stat().st_size) if p.exists() else None,
+        })
+
+    pdf_files = []
+    docs_dir = base / "docs"
+    if docs_dir.exists():
+        for pdf in sorted(docs_dir.glob("*.pdf")):
+            pdf_files.append({"name": pdf.name, "size_fmt": _fmt_size(pdf.stat().st_size)})
+
+    return JSONResponse({"data_files": data_files, "pdf_files": pdf_files})
+
+
+@router.get("/knowledge/{kb_path}/download/{filename}")
+async def kb_download(kb_path: str, filename: str):
+    """Скачать файл KB."""
+    base = _kb_base(kb_path)
+    _safe_filename(filename)
+
+    # Сначала ищем в корне KB, затем в docs/
+    for candidate in [base / filename, base / "docs" / filename]:
+        if candidate.exists() and candidate.is_file():
+            # Проверяем что файл внутри папки KB
+            try:
+                candidate.resolve().relative_to(base.resolve())
+            except ValueError:
+                raise HTTPException(status_code=403, detail="Доступ запрещён")
+            return FileResponse(path=str(candidate), filename=filename)
+
+    raise HTTPException(status_code=404, detail="Файл не найден")
+
+
+@router.post("/knowledge/{kb_path}/upload")
+async def kb_upload(kb_path: str, file: UploadFile = File(...)):
+    """Загрузить или заменить файл KB."""
+    base = _kb_base(kb_path)
+    filename = _safe_filename(file.filename or "")
+
+    suffix = Path(filename).suffix.lower()
+    if suffix not in _KB_ALLOWED_EXT:
+        raise HTTPException(status_code=400, detail=f"Недопустимое расширение: {suffix}")
+
+    if suffix == ".pdf":
+        dest = base / "docs" / filename
+        dest.parent.mkdir(exist_ok=True)
+    elif filename in _KB_DATA_FILES:
+        dest = base / filename
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Неизвестный файл данных: {filename}. Разрешены: {', '.join(_KB_DATA_FILES)}",
+        )
+
+    content = await file.read()
+    dest.write_bytes(content)
+    logger.info("KB upload: %s / %s (%d байт)", kb_path, filename, len(content))
+    return RedirectResponse(url="/knowledge", status_code=303)
+
+
+@router.post("/knowledge/{kb_path}/delete")
+async def kb_delete_file(kb_path: str, filename: str = Form(...)):
+    """Удалить PDF из docs/."""
+    base = _kb_base(kb_path)
+    _safe_filename(filename)
+
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Удалять можно только PDF-файлы")
+
+    p = base / "docs" / filename
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="Файл не найден")
+
+    p.unlink()
+    logger.info("KB delete PDF: %s / docs/%s", kb_path, filename)
+    return RedirectResponse(url="/knowledge", status_code=303)
 
 
 # ── Настройки ─────────────────────────────────────────────────────────────────
