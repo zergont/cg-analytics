@@ -74,9 +74,17 @@
                     <dd class="col-5">{{ result.history_rows }}</dd>
                     <dt class="col-7">Регистров</dt>
                     <dd class="col-5">{{ result.registers_count }}</dd>
-                    <dt class="col-7">Событий enum</dt>
-                    <dd class="col-5">{{ result.state_events_count }}</dd>
-                    <dt class="col-7">Событий/аварий</dt>
+                    <dt class="col-7">Периодов enum</dt>
+                    <dd class="col-5">{{ result.enum_periods_count }}</dd>
+                    <dt class="col-7">Неисправностей</dt>
+                    <dd class="col-5">
+                        {% if result.fault_periods_count > 0 %}
+                            <span class="text-danger fw-semibold">{{ result.fault_periods_count }}</span>
+                        {% else %}
+                            {{ result.fault_periods_count }}
+                        {% endif %}
+                    </dd>
+                    <dt class="col-7">Событий системы</dt>
                     <dd class="col-5">{{ result.events_count }}</dd>
                     <dt class="col-7">RAG-чанков</dt>
                     <dd class="col-5">

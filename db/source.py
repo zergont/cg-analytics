@@ -1,9 +1,9 @@
 """Чтение данных из основной БД телеметрии (TimescaleDB)."""
 import asyncpg
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any
 
-from config import settings, get_tz
+from config import settings
 
 
 async def _connect() -> asyncpg.Connection:
@@ -45,126 +45,6 @@ async def get_equipment_info(
         await conn.close()
 
 
-async def get_daily_history(
-    router_sn: str,
-    equip_type: str,
-    panel_id: int,
-    day: date,
-) -> list[dict[str, Any]]:
-    """История телеметрии за сутки.
-
-    Границы суток считаются в настроенном часовом поясе (по умолчанию МСК UTC+3),
-    затем переводятся в UTC для запроса к БД.
-    """
-    start = datetime(day.year, day.month, day.day, tzinfo=get_tz()).astimezone(timezone.utc)
-    end = start + timedelta(days=1)
-
-    conn = await _connect()
-    try:
-        rows = await conn.fetch("""
-            SELECT addr, ts, value, raw, text, reason, write_reason
-            FROM history
-            WHERE router_sn = $1
-              AND equip_type = $2
-              AND panel_id   = $3
-              AND ts >= $4
-              AND ts <  $5
-            ORDER BY addr, ts
-        """, router_sn, equip_type, panel_id, start, end)
-        return [dict(r) for r in rows]
-    finally:
-        await conn.close()
-
-
-async def get_period_history(
-    router_sn: str,
-    equip_type: str,
-    panel_id: int,
-    addr: int,
-    ts_from: datetime,
-    ts_to: datetime,
-) -> list[dict[str, Any]]:
-    """История одного регистра за произвольный период (для agent tools)."""
-    conn = await _connect()
-    try:
-        rows = await conn.fetch("""
-            SELECT ts, value, raw, text
-            FROM history
-            WHERE router_sn = $1
-              AND equip_type = $2
-              AND panel_id   = $3
-              AND addr       = $4
-              AND ts >= $5
-              AND ts <  $6
-            ORDER BY ts
-        """, router_sn, equip_type, panel_id, addr, ts_from, ts_to)
-        return [dict(r) for r in rows]
-    finally:
-        await conn.close()
-
-
-async def get_daily_state_events(
-    router_sn: str,
-    equip_type: str,
-    panel_id: int,
-    day: date,
-) -> list[dict[str, Any]]:
-    """Смены состояния enum/discrete регистров за сутки из state_events.
-
-    Границы суток — в настроенном часовом поясе (по умолчанию МСК UTC+3).
-    """
-    start = datetime(day.year, day.month, day.day, tzinfo=get_tz()).astimezone(timezone.utc)
-    end = start + timedelta(days=1)
-
-    conn = await _connect()
-    try:
-        rows = await conn.fetch("""
-            SELECT addr, ts, received_at, raw, text, write_reason
-            FROM state_events
-            WHERE router_sn = $1
-              AND equip_type = $2
-              AND panel_id   = $3
-              AND ts >= $4
-              AND ts <  $5
-            ORDER BY ts
-        """, router_sn, equip_type, panel_id, start, end)
-        return [dict(r) for r in rows]
-    finally:
-        await conn.close()
-
-
-async def get_daily_events(
-    router_sn: str,
-    equip_type: str,
-    panel_id: int,
-    day: date,
-) -> list[dict[str, Any]]:
-    """События за сутки из таблицы events.
-
-    Границы суток — в настроенном часовом поясе (по умолчанию МСК UTC+3).
-    """
-    start = datetime(day.year, day.month, day.day, tzinfo=get_tz()).astimezone(timezone.utc)
-    end = start + timedelta(days=1)
-
-    conn = await _connect()
-    try:
-        rows = await conn.fetch("""
-            SELECT id, type, description, payload, created_at
-            FROM events
-            WHERE router_sn = $1
-              AND (equip_type = $2 OR equip_type IS NULL)
-              AND (panel_id   = $3 OR panel_id   IS NULL)
-              AND created_at >= $4
-              AND created_at <  $5
-            ORDER BY created_at
-        """, router_sn, equip_type, panel_id, start, end)
-        return [dict(r) for r in rows]
-    finally:
-        await conn.close()
-
-
-# ── Range-запросы (произвольный UTC-диапазон) ─────────────────────────────────
-
 async def get_history_range(
     router_sn: str,
     equip_type: str,
@@ -172,15 +52,21 @@ async def get_history_range(
     ts_from: datetime,
     ts_to: datetime,
 ) -> list[dict[str, Any]]:
-    """Все аналоговые регистры за произвольный UTC-диапазон [ts_from, ts_to)."""
+    """Аналоговые регистры за произвольный UTC-диапазон [ts_from, ts_to).
+
+    Использует history_rich (history LEFT JOIN register_catalog).
+    Фильтр: register_kind = 'analog'.
+    Колонки: addr, ts, value, raw, name_ru, unit.
+    """
     conn = await _connect()
     try:
         rows = await conn.fetch("""
-            SELECT addr, ts, value, raw, text, reason, write_reason
-            FROM history
-            WHERE router_sn = $1
-              AND equip_type = $2
-              AND panel_id   = $3
+            SELECT addr, ts, value, raw, name_ru, unit
+            FROM history_rich
+            WHERE router_sn     = $1
+              AND equip_type    = $2
+              AND panel_id      = $3
+              AND register_kind = 'analog'
               AND ts >= $4
               AND ts <  $5
             ORDER BY addr, ts
@@ -190,25 +76,88 @@ async def get_history_range(
         await conn.close()
 
 
-async def get_state_events_range(
+async def get_enum_history_range(
     router_sn: str,
     equip_type: str,
     panel_id: int,
     ts_from: datetime,
     ts_to: datetime,
 ) -> list[dict[str, Any]]:
-    """Смены состояния enum/discrete регистров за произвольный UTC-диапазон."""
+    """Периоды enum-состояний, пересекающиеся с диапазоном [ts_from, ts_to).
+
+    Возвращает периоды, у которых state_start < ts_to И (state_end IS NULL OR state_end > ts_from).
+    Колонки: addr, name_ru, state_start, state_end, value, label, duration_sec.
+    duration_sec считается до ts_to для незакрытых (активных) периодов.
+    state_end IS NULL — состояние активно прямо сейчас.
+    """
     conn = await _connect()
     try:
         rows = await conn.fetch("""
-            SELECT addr, ts, received_at, raw, text, write_reason
-            FROM state_events
-            WHERE router_sn = $1
-              AND equip_type = $2
-              AND panel_id   = $3
-              AND ts >= $4
-              AND ts <  $5
-            ORDER BY ts
+            SELECT
+                e.addr,
+                r.name_ru,
+                e.state_start,
+                e.state_end,
+                e.value,
+                COALESCE(
+                    r.states_json->'labels_ru'->>e.value::text,
+                    r.states_json->'labels'   ->>e.value::text,
+                    e.value::text
+                ) AS label,
+                EXTRACT(EPOCH FROM (
+                    COALESCE(e.state_end, $5) - e.state_start
+                ))::int AS duration_sec
+            FROM enum_history e
+            LEFT JOIN register_catalog r
+                ON r.equip_type = e.equip_type AND r.addr = e.addr
+            WHERE e.router_sn  = $1
+              AND e.equip_type = $2
+              AND e.panel_id   = $3
+              AND e.state_start < $5
+              AND (e.state_end IS NULL OR e.state_end > $4)
+            ORDER BY e.addr, e.state_start
+        """, router_sn, equip_type, panel_id, ts_from, ts_to)
+        return [dict(r) for r in rows]
+    finally:
+        await conn.close()
+
+
+async def get_fault_history_range(
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    ts_from: datetime,
+    ts_to: datetime,
+) -> list[dict[str, Any]]:
+    """Периоды fault-битов, пересекающиеся с диапазоном [ts_from, ts_to).
+
+    Возвращает периоды, у которых fault_start < ts_to И (fault_end IS NULL OR fault_end > ts_from).
+    Колонки: addr, bit, fault_start, fault_end, fault_name_ru, fault_name, severity, duration_sec.
+    fault_end IS NULL — неисправность активна прямо сейчас.
+    """
+    conn = await _connect()
+    try:
+        rows = await conn.fetch("""
+            SELECT
+                f.addr,
+                f.bit,
+                f.fault_start,
+                f.fault_end,
+                r.states_json->f.bit::text->>'name_ru'  AS fault_name_ru,
+                r.states_json->f.bit::text->>'name'     AS fault_name,
+                r.states_json->f.bit::text->>'severity' AS severity,
+                EXTRACT(EPOCH FROM (
+                    COALESCE(f.fault_end, $5) - f.fault_start
+                ))::int AS duration_sec
+            FROM fault_history f
+            LEFT JOIN register_catalog r
+                ON r.equip_type = f.equip_type AND r.addr = f.addr
+            WHERE f.router_sn  = $1
+              AND f.equip_type = $2
+              AND f.panel_id   = $3
+              AND f.fault_start < $5
+              AND (f.fault_end IS NULL OR f.fault_end > $4)
+            ORDER BY f.fault_start
         """, router_sn, equip_type, panel_id, ts_from, ts_to)
         return [dict(r) for r in rows]
     finally:
@@ -226,14 +175,14 @@ async def get_events_range(
     conn = await _connect()
     try:
         rows = await conn.fetch("""
-            SELECT id, type, description, payload, created_at
+            SELECT id, event_type, description, payload, ts
             FROM events
             WHERE router_sn = $1
               AND (equip_type = $2 OR equip_type IS NULL)
               AND (panel_id   = $3 OR panel_id   IS NULL)
-              AND created_at >= $4
-              AND created_at <  $5
-            ORDER BY created_at
+              AND ts >= $4
+              AND ts <  $5
+            ORDER BY ts
         """, router_sn, equip_type, panel_id, ts_from, ts_to)
         return [dict(r) for r in rows]
     finally:

@@ -12,7 +12,6 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, File
 from fastapi.templating import Jinja2Templates
 
 from db import analytics, source
-from pipeline.runner import run_pipeline
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -32,41 +31,6 @@ def _apply_tz(tz_name: str) -> None:
     """Применить новый TZ: обновить in-memory и глобал шаблонов."""
     _set_tz(tz_name)
     templates.env.globals["app_timezone"] = tz_name
-
-# Хелперы для отображения сегментов в шаблоне segments.html
-_SEG_BADGE = {
-    "standstill":        "bg-secondary",
-    "startup_window":    "bg-warning text-dark",
-    "warmup":            "bg-info text-dark",
-    "normal_operation":  "bg-success",
-    "cooldown":          "bg-info text-dark",
-    "shutdown_window":   "bg-secondary",
-    "fault_window":      "bg-danger",
-}
-_SEG_LABEL = {
-    "standstill":        "Простой",
-    "startup_window":    "Пуск",
-    "warmup":            "Прогрев",
-    "normal_operation":  "Работа",
-    "cooldown":          "Охлаждение",
-    "shutdown_window":   "Останов",
-    "fault_window":      "Авария",
-}
-_SEG_HEADER = {
-    "standstill":        "bg-secondary bg-opacity-10",
-    "startup_window":    "bg-warning bg-opacity-10",
-    "warmup":            "bg-info bg-opacity-10",
-    "normal_operation":  "bg-success bg-opacity-10",
-    "cooldown":          "bg-info bg-opacity-10",
-    "shutdown_window":   "bg-secondary bg-opacity-10",
-    "fault_window":      "bg-danger bg-opacity-10",
-}
-templates.env.globals["_seg_badge"]       = lambda t: _SEG_BADGE.get(t, "bg-secondary")
-templates.env.globals["_seg_label_short"] = lambda t: _SEG_LABEL.get(t, t)
-templates.env.globals["_seg_header"]      = lambda t: _SEG_HEADER.get(t, "")
-
-# Хранилище активных задач запуска (task_key → dict)
-_running_tasks: dict[str, dict] = {}
 
 # Статус переиндексации KB (kb_path → dict)
 _reindex_status: dict[str, dict] = {}
@@ -106,59 +70,6 @@ async def history(
         "panel_id": panel_id,
         "reports": reports,
     })
-
-
-# ── Ручной запуск ─────────────────────────────────────────────────────────────
-
-@router.get("/run", response_class=HTMLResponse)
-async def run_page(request: Request):
-    equipment = await analytics.get_equipment_registry()
-    yesterday = date.today() - timedelta(days=1)
-    return templates.TemplateResponse(request, "run.html", {
-        "equipment": equipment,
-        "default_date": str(yesterday),
-        "running_tasks": _running_tasks,
-    })
-
-
-@router.post("/run", response_class=HTMLResponse)
-async def run_start(
-    request: Request,
-    router_sn: str = Form(...),
-    equip_type: str = Form(...),
-    panel_id: int = Form(...),
-    run_date: str = Form(...),
-):
-    day = date.fromisoformat(run_date)
-    task_key = f"{router_sn}_{equip_type}_{panel_id}_{run_date}"
-
-    if task_key in _running_tasks and _running_tasks[task_key].get("status") == "running":
-        return RedirectResponse(url="/run", status_code=303)
-
-    _running_tasks[task_key] = {
-        "status": "running",
-        "label": f"{router_sn}/{equip_type}/{panel_id} за {run_date}",
-        "report_id": None,
-        "error": None,
-    }
-
-    async def _run():
-        try:
-            result = await run_pipeline(router_sn, equip_type, panel_id, day)
-            _running_tasks[task_key]["status"] = "done"
-            _running_tasks[task_key]["report_id"] = result["id"]
-        except Exception as e:
-            logger.exception("Ошибка pipeline: %s", e)
-            _running_tasks[task_key]["status"] = "error"
-            _running_tasks[task_key]["error"] = str(e)
-
-    asyncio.create_task(_run())
-    return RedirectResponse(url="/run", status_code=303)
-
-
-@router.get("/run/status", response_class=JSONResponse)
-async def run_status():
-    return JSONResponse(_running_tasks)
 
 
 # ── Анализ произвольного диапазона ───────────────────────────────────────────
@@ -224,9 +135,9 @@ async def _run_analysis(
     tz,
 ) -> dict:
     """Собрать данные за диапазон и сформировать Markdown-пакет для ИИ."""
+    import json as _json
     from datetime import datetime, timezone as _tz
     from pipeline.aggregator import compute_register_stats
-    from knowledge.loader import load_knowledge
 
     # Парсим локальное время → UTC
     fmt = "%Y-%m-%dT%H:%M"
@@ -238,10 +149,11 @@ async def _run_analysis(
 
     duration_h = (ts_to_utc - ts_from_utc).total_seconds() / 3600
 
-    # Загружаем данные параллельно
-    history, state_events, events = await asyncio.gather(
+    # Загружаем данные параллельно: аналог, enum-периоды, fault-периоды, события
+    history, enum_periods, fault_periods, events = await asyncio.gather(
         source.get_history_range(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc),
-        source.get_state_events_range(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc),
+        source.get_enum_history_range(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc),
+        source.get_fault_history_range(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc),
         source.get_events_range(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc),
     )
 
@@ -255,37 +167,32 @@ async def _run_analysis(
         {}
     )
 
-    # Карта регистров и правила эксплуатации из KB (если задана)
+    # Правила эксплуатации из KB (только operation_rules.json, если задан kb_path)
     kb_path = await analytics.get_equipment_kb_path(router_sn, equip_type, panel_id)
-    register_map: dict = {}
     operation_rules: dict = {}
     if kb_path:
         try:
-            kb = load_knowledge(kb_path)
-            register_map    = kb.get("register_map", {})
-            operation_rules = kb.get("operation_rules", {})
+            from config import settings as _cfg
+            op_path = _cfg.knowledge_base_path / "equipment" / kb_path / "operation_rules.json"
+            if op_path.exists():
+                operation_rules = _json.loads(op_path.read_text(encoding="utf-8"))
         except Exception:
             pass
 
-    # Статистика по регистрам
-    reg_stats = compute_register_stats(history, ts_to_utc, register_map)
+    # Статистика по аналоговым регистрам
+    reg_stats = compute_register_stats(history, ts_to_utc)
 
     # ── RAG: обогащение из документации ──────────────────────────────────────
     rag_context = ""
     if kb_path:
         try:
             from knowledge.retriever import retrieve_context as _rag_retrieve
-            # Адреса активных аналоговых регистров
             active_addrs = list(reg_stats.keys())
-            # Адреса fault-регистров: state_events с ненулевым raw
-            fault_addrs = list({
-                ev["addr"] for ev in state_events
-                if ev.get("raw") is not None and ev["raw"] != 0
-            })
+            fault_addrs  = list({f["addr"] for f in fault_periods}) or None
             loop = asyncio.get_running_loop()
             rag_context = await loop.run_in_executor(
                 None,
-                lambda: _rag_retrieve(kb_path, active_addrs, fault_addrs or None),
+                lambda: _rag_retrieve(kb_path, active_addrs, fault_addrs),
             )
         except Exception as e:
             logger.warning("RAG недоступен: %s", e)
@@ -296,19 +203,20 @@ async def _run_analysis(
         eq=eq, kb_path=kb_path or "",
         ts_from_utc=ts_from_utc, ts_to_utc=ts_to_utc,
         duration_h=duration_h, tz=tz,
-        reg_stats=reg_stats, register_map=register_map,
-        state_events=state_events, events=events,
+        reg_stats=reg_stats,
+        enum_periods=enum_periods, fault_periods=fault_periods, events=events,
         rag_context=rag_context,
         operation_rules=operation_rules,
     )
 
     return {
         "markdown": md,
-        "history_rows":       len(history),
-        "registers_count":    len(reg_stats),
-        "state_events_count": len(state_events),
-        "events_count":       len(events),
-        "rag_chunks":         len(rag_context.split("\n\n")) if rag_context else 0,
+        "history_rows":        len(history),
+        "registers_count":     len(reg_stats),
+        "enum_periods_count":  len(enum_periods),
+        "fault_periods_count": len(fault_periods),
+        "events_count":        len(events),
+        "rag_chunks":          len(rag_context.split("\n\n")) if rag_context else 0,
         "ts_from_local": ts_from_local,
         "ts_to_local":   ts_to_local,
         "tz_name": tz.key,
@@ -426,18 +334,30 @@ def _format_operation_rules(rules: dict) -> list[str]:
     return lines
 
 
+def _fmt_dur(seconds: float | None, is_open: bool = False) -> str:
+    """Отформатировать длительность в секундах как читаемую строку."""
+    if is_open:
+        return "активно"
+    if seconds is None:
+        return "—"
+    s = int(seconds)
+    if s < 60:
+        return f"{s} с"
+    if s < 3600:
+        return f"{s // 60} мин {s % 60} с"
+    return f"{s // 3600} ч {(s % 3600) // 60} мин"
+
+
 def _build_analysis_md(
     router_sn, equip_type, panel_id, eq, kb_path,
     ts_from_utc, ts_to_utc, duration_h, tz,
-    reg_stats, register_map, state_events, events,
+    reg_stats, enum_periods, fault_periods, events,
     rag_context: str = "",
     operation_rules: dict | None = None,
 ) -> str:
     """Сформировать Markdown-пакет данных для передачи в ИИ."""
-    from datetime import timezone as _tz
-
-    fmt_dt = "%Y-%m-%d %H:%M"
-    fmt_t  = "%H:%M:%S"
+    fmt_dt   = "%Y-%m-%d %H:%M"
+    fmt_t    = "%H:%M:%S"
     tz_label = tz.key
 
     def local(dt) -> str:
@@ -491,34 +411,61 @@ def _build_analysis_md(
     else:
         lines.append("_Нет данных аналоговых регистров за период_")
 
-    # ── Журнал состояний (enum) ───────────────────────────────────────────────
+    # ── Журнал состояний (enum) — периоды ────────────────────────────────────
     lines += [
         "",
-        f"## Журнал состояний / enum ({len(state_events)} событий)",
+        f"## Журнал состояний — enum ({len(enum_periods)} периодов)",
     ]
-    if state_events:
-        for ev in state_events:
-            ts_str = local_t(ev["ts"])
-            lines.append(f"- `{ts_str}` [{ev['addr']}] {ev['text'] or ev['raw']}")
+    if enum_periods:
+        lines.append("| Начало | Конец | Адрес | Регистр | Состояние | Длительность |")
+        lines.append("|--------|-------|------:|---------|-----------|-------------|")
+        for p in enum_periods:
+            t_start  = local_t(p["state_start"])
+            t_end    = local_t(p["state_end"]) if p.get("state_end") else "—"
+            reg_name = p.get("name_ru") or f"addr {p['addr']}"
+            label    = p.get("label") or str(p.get("value", "?"))
+            dur      = _fmt_dur(p.get("duration_sec"), is_open=p.get("state_end") is None)
+            lines.append(
+                f"| {t_start} | {t_end} | {p['addr']} | {reg_name} | {label} | {dur} |"
+            )
     else:
-        lines.append("_Нет событий за период_")
+        lines.append("_Нет данных за период_")
 
-    # ── Системные события / аварии ────────────────────────────────────────────
+    # ── Неисправности (fault_history) ────────────────────────────────────────
     lines += [
         "",
-        f"## Системные события / аварии ({len(events)} событий)",
+        f"## Неисправности ({len(fault_periods)} событий)",
+    ]
+    if fault_periods:
+        lines.append("| Начало | Конец | Адрес | Бит | Неисправность | Серьёзность | Длительность |")
+        lines.append("|--------|-------|------:|----:|---------------|-------------|-------------|")
+        for f in fault_periods:
+            t_start = local_t(f["fault_start"])
+            t_end   = local_t(f["fault_end"]) if f.get("fault_end") else "—"
+            name    = f.get("fault_name_ru") or f.get("fault_name") or f"addr={f['addr']} бит={f['bit']}"
+            sev     = f.get("severity") or "?"
+            dur     = _fmt_dur(f.get("duration_sec"), is_open=f.get("fault_end") is None)
+            lines.append(
+                f"| {t_start} | {t_end} | {f['addr']} | {f['bit']} | {name} | {sev} | {dur} |"
+            )
+    else:
+        lines.append("_Неисправностей в периоде не зафиксировано_")
+
+    # ── Системные события ─────────────────────────────────────────────────────
+    lines += [
+        "",
+        f"## Системные события ({len(events)} событий)",
     ]
     if events:
         for ev in events:
-            ts_dt = ev.get("created_at") or ev.get("ts")
-            ts_str = local_t(ts_dt) if ts_dt else "?"
-            desc = ev.get("description") or ev.get("text") or ""
-            ev_type = ev.get("type") or ""
+            ts_str  = local_t(ev["ts"]) if ev.get("ts") else "?"
+            ev_type = ev.get("event_type") or ""
+            desc    = ev.get("description") or ""
             lines.append(f"- `{ts_str}` [{ev_type}] {desc}")
     else:
         lines.append("_Нет событий за период_")
 
-    # ── Правила эксплуатации из KB (компактная выжимка) ─────────────────────
+    # ── Правила эксплуатации из KB (компактная выжимка) ──────────────────────
     if operation_rules:
         lines += [
             "",
@@ -541,149 +488,6 @@ def _build_analysis_md(
         ]
 
     return "\n".join(lines)
-
-
-# ── Просмотр сегментов суток (Layer 1, без агента) ───────────────────────────
-
-@router.get("/segments", response_class=HTMLResponse)
-async def segments_page(
-    request: Request,
-    router_sn: str = "",
-    equip_type: str = "",
-    panel_id: str = "",
-    seg_date: str = "",
-):
-    equipment = await analytics.get_equipment_registry()
-    yesterday = date.today() - timedelta(days=1)
-    result = None
-    error = None
-
-    if router_sn and equip_type and panel_id and seg_date:
-        try:
-            result = await _run_segments(router_sn, equip_type, int(panel_id), seg_date)
-        except Exception as e:
-            logger.exception("Ошибка сегментации: %s", e)
-            error = str(e)
-
-    return templates.TemplateResponse(request, "segments.html", {
-        "equipment": equipment,
-        "default_date": seg_date or str(yesterday),
-        "selected_sn": router_sn,
-        "selected_type": equip_type,
-        "selected_panel": panel_id,
-        "result": result,
-        "error": error,
-    })
-
-
-async def _run_segments(router_sn: str, equip_type: str, panel_id: int, seg_date: str) -> dict:
-    """Запустить агрегацию + детектирование + сегментацию без агента."""
-    import json
-    from datetime import datetime, timezone
-    from db import source
-    from knowledge.loader import load_knowledge
-    from pipeline import aggregator, detector, segmenter
-    from pipeline.runner import RunContext
-    from agent.prompt import build_user_prompt
-
-    day = date.fromisoformat(seg_date)
-    from config import get_tz as _get_tz
-    from datetime import timedelta
-    day_start = datetime(day.year, day.month, day.day, tzinfo=_get_tz()).astimezone(timezone.utc)
-    day_end   = day_start + timedelta(days=1) - timedelta(seconds=1)
-
-    history      = await source.get_daily_history(router_sn, equip_type, panel_id, day)
-    state_events = await source.get_daily_state_events(router_sn, equip_type, panel_id, day)
-    events       = await source.get_daily_events(router_sn, equip_type, panel_id, day)
-
-    has_data = bool(history or state_events)
-
-    kb_path = await analytics.get_equipment_kb_path(router_sn, equip_type, panel_id)
-    if kb_path:
-        kb = load_knowledge(kb_path)
-    else:
-        kb = {"register_map": {}, "fault_bitmap_map": {}, "enum_map": {}, "operation_rules": {}}
-
-    agg = aggregator.aggregate(history, kb["register_map"])
-    uptime_min, starts_count, intervals = aggregator.calc_uptime_from_state_events(state_events)
-    agg["uptime_minutes"]      = uptime_min
-    agg["starts_count"]        = starts_count
-    agg["operating_intervals"] = intervals
-
-    anomalies = detector.detect(
-        history=history,
-        events=events,
-        register_map=kb["register_map"],
-        fault_bitmap_map=kb["fault_bitmap_map"],
-        aggregates=agg,
-    )
-    segments = segmenter.segment(
-        history=history,
-        state_events=state_events,
-        anomalies=anomalies,
-        operation_rules=kb.get("operation_rules", {}),
-        register_map=kb["register_map"],
-        day_start=day_start,
-        day_end=day_end,
-    )
-
-    def _ser(obj):
-        if isinstance(obj, datetime):
-            return obj.isoformat()
-        raise TypeError
-
-    segments_json = json.loads(json.dumps(segments, default=_ser))
-
-    # Метаданные устройства для промпта
-    equip_info = await analytics.get_equipment_registry()
-    eq = next(
-        (e for e in equip_info
-         if e["router_sn"] == router_sn
-         and e["equip_type"] == equip_type
-         and str(e["panel_id"]) == str(panel_id)),
-        {}
-    )
-
-    # Предпросмотр промпта (то, что получит агент)
-    ctx = RunContext(
-        router_sn=router_sn,
-        equip_type=equip_type,
-        panel_id=int(panel_id),
-        day=day,
-        manufacturer=eq.get("manufacturer") or "",
-        model=eq.get("model") or "",
-        engine_sn=eq.get("engine_sn") or "",
-        equipment_name=eq.get("name") or "",
-        kb_path=kb_path or "",
-        register_map=kb["register_map"],
-        fault_bitmap_map=kb.get("fault_bitmap_map", {}),
-        enum_map=kb.get("enum_map", {}),
-        operation_rules=kb.get("operation_rules", {}),
-        aggregates=agg,
-        history_series={},
-        events=events,
-        anomalies=anomalies,
-        segments=segments_json,
-    )
-    prompt_preview = build_user_prompt(ctx)
-
-    return {
-        "date": str(day),
-        "kb_path": kb_path or "",
-        "has_data": has_data,
-        "history_rows": len(history),
-        "state_events_count": len(state_events),
-        "anomalies_count": len(anomalies),
-        "anomalies": anomalies,
-        "uptime_minutes": agg.get("uptime_minutes", 0),
-        "starts_count": agg.get("starts_count", 0),
-        "segments": segments_json,
-        "prompt_preview": prompt_preview,
-        "equip_label": (
-            f"{eq.get('name') or ''} "
-            f"({eq.get('manufacturer') or ''} {eq.get('model') or ''})".strip()
-        ),
-    }
 
 
 # ── Knowledge Base ────────────────────────────────────────────────────────────

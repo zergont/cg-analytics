@@ -159,34 +159,33 @@ def _calc_uptime(
 def compute_register_stats(
     history: list[dict[str, Any]],
     ts_to: datetime,
-    register_map: dict | None = None,
 ) -> dict[int, dict[str, Any]]:
     """Вычислить мин/макс/взвешенное-среднее по каждому регистру за диапазон.
 
     Args:
-        history: строки из history (addr, ts, value, ...) отсортированные по addr, ts
+        history: строки из history_rich (addr, ts, value, name_ru, unit)
         ts_to:   правая граница диапазона (UTC) — нужна для веса последнего значения
-        register_map: карта регистров {addr: {name, unit, na_values, ...}} (опционально)
 
     Returns:
         {addr: {name, unit, min, max, wmean, count, first_ts, last_ts}}
     """
-    if register_map is None:
-        register_map = {}
-
     by_addr: dict[int, list[tuple[datetime, float]]] = defaultdict(list)
+    meta: dict[int, dict] = {}
+
     for row in history:
         if row["value"] is None:
             continue
-        reg = register_map.get(row["addr"], {})
-        na = set(reg.get("na_values", []))
         try:
             v = float(row["value"])
         except (TypeError, ValueError):
             continue
-        if v in na:
-            continue
-        by_addr[row["addr"]].append((row["ts"], v))
+        addr = row["addr"]
+        by_addr[addr].append((row["ts"], v))
+        if addr not in meta:
+            meta[addr] = {
+                "name": row.get("name_ru") or "",
+                "unit": row.get("unit") or "",
+            }
 
     result: dict[int, dict[str, Any]] = {}
     for addr, readings in by_addr.items():
@@ -205,10 +204,9 @@ def compute_register_stats(
 
         wmean = round(weighted_sum / total_w, 2) if total_w > 0 else values[-1]
 
-        reg = register_map.get(addr, {})
         result[addr] = {
-            "name": reg.get("name", ""),
-            "unit": reg.get("unit", ""),
+            "name": meta[addr]["name"],
+            "unit": meta[addr]["unit"],
             "min":  round(min(values), 3),
             "max":  round(max(values), 3),
             "wmean": wmean,
