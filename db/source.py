@@ -175,14 +175,18 @@ async def get_events_range(
     conn = await _connect()
     try:
         rows = await conn.fetch("""
-            SELECT id, event_type, description, payload, ts
+            SELECT id,
+                   type        AS event_type,
+                   description,
+                   payload,
+                   created_at  AS ts
             FROM events
             WHERE router_sn = $1
               AND (equip_type = $2 OR equip_type IS NULL)
               AND (panel_id   = $3 OR panel_id   IS NULL)
-              AND ts >= $4
-              AND ts <  $5
-            ORDER BY ts
+              AND created_at >= $4
+              AND created_at <  $5
+            ORDER BY created_at
         """, router_sn, equip_type, panel_id, ts_from, ts_to)
         return [dict(r) for r in rows]
     finally:
