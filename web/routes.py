@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Request, Form, HTTPException, UploadFile, File
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
@@ -125,6 +125,116 @@ async def analyze_run(
         "result": result,
         "error":  error,
     })
+
+
+@router.post("/analyze/stream")
+async def analyze_stream(
+    router_sn:     str = Form(...),
+    equip_type:    str = Form(...),
+    panel_id:      int = Form(...),
+    ts_from_local: str = Form(...),
+    ts_to_local:   str = Form(...),
+):
+    """SSE-стрим сбора данных с прогрессом по этапам."""
+    import json as _json
+    from datetime import datetime, timezone as _tz_mod
+    from pipeline.aggregator import compute_register_stats
+    from config import get_tz
+
+    def _evt(data: dict) -> str:
+        return f"data: {_json.dumps(data, ensure_ascii=False)}\n\n"
+
+    async def _stream():
+        try:
+            tz = get_tz()
+            fmt = "%Y-%m-%dT%H:%M"
+            ts_from_utc = datetime.strptime(ts_from_local, fmt).replace(tzinfo=tz).astimezone(_tz_mod.utc)
+            ts_to_utc   = datetime.strptime(ts_to_local,   fmt).replace(tzinfo=tz).astimezone(_tz_mod.utc)
+            if ts_to_utc <= ts_from_utc:
+                yield _evt({"stage": "error", "message": "Конец диапазона должен быть позже начала"})
+                return
+
+            duration_h = (ts_to_utc - ts_from_utc).total_seconds() / 3600
+
+            yield _evt({"stage": "history", "status": "running", "label": "История аналогов"})
+            history = await source.get_history_range(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc)
+            yield _evt({"stage": "history", "status": "done", "rows": len(history)})
+
+            yield _evt({"stage": "enum", "status": "running", "label": "Периоды состояний"})
+            enum_periods = await source.get_enum_history_range(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc)
+            yield _evt({"stage": "enum", "status": "done", "count": len(enum_periods)})
+
+            yield _evt({"stage": "fault", "status": "running", "label": "Неисправности"})
+            fault_periods = await source.get_fault_history_range(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc)
+            yield _evt({"stage": "fault", "status": "done", "count": len(fault_periods)})
+
+            yield _evt({"stage": "events", "status": "running", "label": "События системы"})
+            events = await source.get_events_range(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc)
+            yield _evt({"stage": "events", "status": "done", "count": len(events)})
+
+            yield _evt({"stage": "build", "status": "running", "label": "Сборка MD-пакета"})
+            import json as _j2
+            registry = await analytics.get_equipment_registry()
+            eq = next(
+                (e for e in registry
+                 if e["router_sn"] == router_sn and e["equip_type"] == equip_type
+                 and str(e["panel_id"]) == str(panel_id)), {}
+            )
+            kb_path = await analytics.get_equipment_kb_path(router_sn, equip_type, panel_id)
+            operation_rules: dict = {}
+            if kb_path:
+                try:
+                    from config import settings as _cfg
+                    op_path = _cfg.knowledge_base_path / "equipment" / kb_path / "operation_rules.json"
+                    if op_path.exists():
+                        operation_rules = _j2.loads(op_path.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+            reg_stats = compute_register_stats(history, ts_to_utc)
+            md = _build_analysis_md(
+                router_sn=router_sn, equip_type=equip_type, panel_id=panel_id,
+                eq=eq, kb_path=kb_path or "",
+                ts_from_utc=ts_from_utc, ts_to_utc=ts_to_utc,
+                duration_h=duration_h, tz=tz,
+                reg_stats=reg_stats,
+                enum_periods=enum_periods, fault_periods=fault_periods, events=events,
+                operation_rules=operation_rules,
+            )
+            yield _evt({"stage": "build", "status": "done"})
+            yield _evt({
+                "stage": "complete",
+                "result": {
+                    "markdown":            md,
+                    "history_rows":        len(history),
+                    "registers_count":     len(reg_stats),
+                    "enum_periods_count":  len(enum_periods),
+                    "fault_periods_count": len(fault_periods),
+                    "events_count":        len(events),
+                    "ts_from_local":       ts_from_local,
+                    "ts_to_local":         ts_to_local,
+                    "tz_name":             tz.key,
+                },
+            })
+        except Exception as e:
+            logger.exception("Ошибка сбора данных: %s", e)
+            yield _evt({"stage": "error", "message": str(e)})
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/log", response_class=HTMLResponse)
+async def log_page(request: Request):
+    return templates.TemplateResponse(request, "log.html", {})
+
+
+@router.get("/api/log")
+async def api_log(n: int = 200):
+    from web.log_buffer import get_entries
+    return JSONResponse(get_entries(min(n, 500)))
 
 
 async def _run_analysis(

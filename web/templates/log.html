@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}Журнал — cg-analytics{% endblock %}
+
+{% block content %}
+<div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+    <h5 class="mb-0">Журнал событий</h5>
+
+    <div class="d-flex gap-1 ms-3">
+        <button class="btn btn-sm btn-outline-secondary active" id="fAll"     onclick="filterLevel('')">Все</button>
+        <button class="btn btn-sm btn-outline-danger"           id="fERROR"   onclick="filterLevel('ERROR')">ERROR</button>
+        <button class="btn btn-sm btn-outline-warning"          id="fWARNING" onclick="filterLevel('WARNING')">WARNING</button>
+        <button class="btn btn-sm btn-outline-info"             id="fINFO"    onclick="filterLevel('INFO')">INFO</button>
+        <button class="btn btn-sm btn-outline-secondary"        id="fDEBUG"   onclick="filterLevel('DEBUG')">DEBUG</button>
+    </div>
+
+    <div class="ms-auto d-flex align-items-center gap-2">
+        <span class="text-muted small" id="entryCount"></span>
+        <div class="form-check form-switch mb-0">
+            <input class="form-check-input" type="checkbox" id="autoRefresh"
+                   onchange="toggleAutoRefresh(this.checked)">
+            <label class="form-check-label small" for="autoRefresh">Авто (5 с)</label>
+        </div>
+        <button class="btn btn-sm btn-outline-secondary" onclick="loadLog()">↻ Обновить</button>
+    </div>
+</div>
+
+<div style="height:calc(100vh - 140px); overflow-y:auto">
+    <table class="table table-sm table-hover mb-0" style="font-size:.78rem; font-family:monospace">
+        <thead class="table-dark" style="position:sticky;top:0;z-index:1">
+            <tr>
+                <th style="width:7.5rem">Время</th>
+                <th style="width:5.5rem">Уровень</th>
+                <th style="width:15rem">Логгер</th>
+                <th>Сообщение</th>
+            </tr>
+        </thead>
+        <tbody id="logBody">
+            <tr><td colspan="4" class="text-center text-muted py-4">Загрузка…</td></tr>
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let _all    = [];
+let _filter = '';
+let _timer  = null;
+
+const LEVEL_ROW = {ERROR:'table-danger', WARNING:'table-warning', DEBUG:'table-secondary'};
+const LEVEL_BADGE = {
+    ERROR:   'bg-danger',
+    WARNING: 'bg-warning text-dark',
+    INFO:    'bg-info text-dark',
+    DEBUG:   'bg-secondary',
+};
+
+async function loadLog() {
+    try {
+        const r = await fetch('/api/log?n=500');
+        _all = await r.json();
+        renderLog();
+    } catch(e) {
+        document.getElementById('logBody').innerHTML =
+            `<tr><td colspan="4" class="text-danger">Ошибка загрузки: ${e.message}</td></tr>`;
+    }
+}
+
+function renderLog() {
+    const entries = _filter ? _all.filter(e => e.level === _filter) : _all;
+    document.getElementById('entryCount').textContent =
+        `${entries.length} / ${_all.length} записей`;
+
+    if (!entries.length) {
+        document.getElementById('logBody').innerHTML =
+            '<tr><td colspan="4" class="text-center text-muted py-4">Нет записей</td></tr>';
+        return;
+    }
+
+    const rows = entries.slice().reverse().map(e => {
+        const t   = new Date(e.ts * 1000).toLocaleTimeString('ru-RU', {hour12:false});
+        const cls = LEVEL_ROW[e.level] || '';
+        const bdg = LEVEL_BADGE[e.level] || 'bg-secondary';
+        const msg = e.msg.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        const log = e.logger.replace(/&/g,'&amp;');
+        return `<tr class="${cls}">` +
+            `<td class="text-nowrap">${t}</td>` +
+            `<td><span class="badge ${bdg}">${e.level}</span></td>` +
+            `<td class="text-truncate" style="max-width:15rem" title="${log}">${log}</td>` +
+            `<td>${msg}</td>` +
+            `</tr>`;
+    }).join('');
+
+    document.getElementById('logBody').innerHTML = rows;
+}
+
+function filterLevel(level) {
+    _filter = level;
+    for (const id of ['fAll','fERROR','fWARNING','fINFO','fDEBUG']) {
+        document.getElementById(id).classList.remove('active');
+    }
+    document.getElementById(level ? 'f' + level : 'fAll').classList.add('active');
+    renderLog();
+}
+
+function toggleAutoRefresh(on) {
+    if (_timer) { clearInterval(_timer); _timer = null; }
+    if (on) _timer = setInterval(loadLog, 5000);
+}
+
+loadLog();
+</script>
+{% endblock %}

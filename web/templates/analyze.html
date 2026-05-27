@@ -3,290 +3,388 @@
 
 {% block content %}
 <style>
-  /* Уменьшаем заголовки внутри рендера Markdown */
-  #mdContent h1 { font-size: 1.4rem; font-weight: 700; margin-top: 0.5rem; }
-  #mdContent h2 { font-size: 1.1rem; font-weight: 600; margin-top: 1rem; border-bottom: 1px solid #dee2e6; padding-bottom: .2rem; }
-  #mdContent h3 { font-size: 0.95rem; font-weight: 600; margin-top: 0.8rem; }
-  #mdContent table { width: 100%; font-size: 0.82rem; border-collapse: collapse; margin-bottom: 0.5rem; }
-  #mdContent th, #mdContent td { border: 1px solid #dee2e6; padding: 3px 8px; }
-  #mdContent th { background: #f8f9fa; }
-  #mdContent p, #mdContent li { font-size: 0.88rem; margin-bottom: 0.2rem; }
-  #mdContent code { font-size: 0.82rem; }
-  /* Панель агента */
-  #agentContent h1 { font-size: 1.4rem; font-weight: 700; margin-top: 0.5rem; }
-  #agentContent h2 { font-size: 1.1rem; font-weight: 600; margin-top: 1rem; border-bottom: 1px solid #dee2e6; padding-bottom: .2rem; }
-  #agentContent h3 { font-size: 0.95rem; font-weight: 600; margin-top: 0.8rem; }
-  #agentContent table { width: 100%; font-size: 0.82rem; border-collapse: collapse; margin-bottom: 0.5rem; }
-  #agentContent th, #agentContent td { border: 1px solid #dee2e6; padding: 3px 8px; }
-  #agentContent th { background: #f8f9fa; }
-  #agentContent p, #agentContent li { font-size: 0.88rem; margin-bottom: 0.2rem; }
-  #agentContent code { font-size: 0.82rem; }
-  /* Мигающий курсор во время стриминга */
-  .streaming-cursor::after { content: "▋"; animation: blink .7s step-end infinite; }
-  @keyframes blink { 50% { opacity: 0; } }
+  #mdContent h1,#agentContent h1 { font-size:1.4rem; font-weight:700; margin-top:.5rem; }
+  #mdContent h2,#agentContent h2 { font-size:1.1rem; font-weight:600; margin-top:1rem; border-bottom:1px solid #dee2e6; padding-bottom:.2rem; }
+  #mdContent h3,#agentContent h3 { font-size:.95rem; font-weight:600; margin-top:.8rem; }
+  #mdContent table,#agentContent table { width:100%; font-size:.82rem; border-collapse:collapse; margin-bottom:.5rem; }
+  #mdContent th,#mdContent td,#agentContent th,#agentContent td { border:1px solid #dee2e6; padding:3px 8px; }
+  #mdContent th,#agentContent th { background:#f8f9fa; }
+  #mdContent p,#mdContent li,#agentContent p,#agentContent li { font-size:.88rem; margin-bottom:.2rem; }
+  #mdContent code,#agentContent code { font-size:.82rem; }
+  .streaming-cursor::after { content:"▋"; animation:blink .7s step-end infinite; }
+  @keyframes blink { 50%{opacity:0;} }
+  .stage-icon { font-size:.9rem; width:1.2rem; display:inline-block; text-align:center; }
 </style>
 <h5 class="mb-3">Анализ временного диапазона</h5>
 
 <div class="row g-2" style="height:calc(100vh - 100px); overflow:hidden">
 
-    {# ── Форма ── #}
-    <div class="col-md-4 col-lg-3 overflow-y-auto h-100">
-        <div class="card">
-            <div class="card-header fw-semibold">Параметры</div>
-            <div class="card-body">
-                <form method="post" action="/analyze" id="analyzeForm">
-                    <div class="mb-3">
-                        <label class="form-label">Оборудование</label>
-                        <select name="router_sn" id="eq_select" class="form-select" required
-                                onchange="fillEquipment(this)">
-                            <option value="">— выберите —</option>
-                            {% for eq in equipment %}
-                            <option value="{{ eq.router_sn }}"
-                                    data-equip="{{ eq.equip_type }}"
-                                    data-panel="{{ eq.panel_id }}"
-                                    {% if eq.router_sn == selected_sn
-                                       and eq.equip_type == selected_type
-                                       and eq.panel_id|string == selected_panel %}selected{% endif %}>
-                                {{ eq.name or (eq.manufacturer or '') ~ ' ' ~ (eq.model or '') }}
-                                ({{ eq.router_sn }}/{{ eq.equip_type }}/{{ eq.panel_id }})
-                            </option>
-                            {% endfor %}
-                        </select>
-                    </div>
-                    <input type="hidden" name="equip_type" id="equip_type_inp" value="{{ selected_type or '' }}">
-                    <input type="hidden" name="panel_id"   id="panel_id_inp"   value="{{ selected_panel or '' }}">
+  {# ── Левая панель ── #}
+  <div class="col-md-4 col-lg-3 overflow-y-auto h-100">
 
-                    <div class="mb-2">
-                        <label class="form-label mb-1">Начало</label>
-                        <input type="datetime-local" name="ts_from_local" class="form-control form-control-sm"
-                               value="{{ default_from }}" required>
-                    </div>
-                    <div class="mb-1">
-                        <label class="form-label mb-1">Конец</label>
-                        <input type="datetime-local" name="ts_to_local" class="form-control form-control-sm"
-                               value="{{ default_to }}" required>
-                    </div>
-                    <div class="form-text text-warning-emphasis mb-3">
-                        🕐 Время в {{ app_timezone }}
-                    </div>
-
-                    <button type="submit" class="btn btn-primary w-100">
-                        Собрать данные
-                    </button>
-                </form>
-            </div>
-        </div>
-
-        {% if result %}
-        <div class="card mt-3">
-            <div class="card-header fw-semibold">Итоги</div>
-            <div class="card-body">
-                <dl class="row mb-0 small">
-                    <dt class="col-7">Строк истории</dt>
-                    <dd class="col-5">{{ result.history_rows }}</dd>
-                    <dt class="col-7">Регистров</dt>
-                    <dd class="col-5">{{ result.registers_count }}</dd>
-                    <dt class="col-7">Периодов enum</dt>
-                    <dd class="col-5">{{ result.enum_periods_count }}</dd>
-                    <dt class="col-7">Неисправностей</dt>
-                    <dd class="col-5">
-                        {% if result.fault_periods_count > 0 %}
-                            <span class="text-danger fw-semibold">{{ result.fault_periods_count }}</span>
-                        {% else %}
-                            {{ result.fault_periods_count }}
-                        {% endif %}
-                    </dd>
-                    <dt class="col-7">Событий системы</dt>
-                    <dd class="col-5">{{ result.events_count }}</dd>
-                </dl>
-            </div>
-        </div>
-
-        <div class="card mt-3 border-success">
-            <div class="card-header fw-semibold bg-success-subtle">🤖 ИИ-анализ</div>
-            <div class="card-body">
-                <p class="small text-muted mb-2">
-                    Отправить пакет локальной модели для диагностического заключения.
-                </p>
-                <button class="btn btn-success btn-sm w-100" id="agentBtn" onclick="runAgent()">
-                    Отправить агенту →
-                </button>
-                <div id="agentStatus" class="mt-2 small text-muted" style="display:none"></div>
-            </div>
-        </div>
-        {% endif %}
+    <div class="card">
+      <div class="card-header fw-semibold">Параметры</div>
+      <div class="card-body">
+        <form id="analyzeForm">
+          <div class="mb-3">
+            <label class="form-label">Оборудование</label>
+            <select name="router_sn" id="eq_select" class="form-select" required
+                    onchange="fillEquipment(this)">
+              <option value="">— выберите —</option>
+              {% for eq in equipment %}
+              <option value="{{ eq.router_sn }}"
+                      data-equip="{{ eq.equip_type }}"
+                      data-panel="{{ eq.panel_id }}">
+                {{ eq.name or (eq.manufacturer or '') ~ ' ' ~ (eq.model or '') }}
+                ({{ eq.router_sn }}/{{ eq.equip_type }}/{{ eq.panel_id }})
+              </option>
+              {% endfor %}
+            </select>
+          </div>
+          <input type="hidden" name="equip_type" id="equip_type_inp">
+          <input type="hidden" name="panel_id"   id="panel_id_inp">
+          <div class="mb-2">
+            <label class="form-label mb-1">Начало</label>
+            <input type="datetime-local" name="ts_from_local" class="form-control form-control-sm"
+                   value="{{ default_from }}" required>
+          </div>
+          <div class="mb-1">
+            <label class="form-label mb-1">Конец</label>
+            <input type="datetime-local" name="ts_to_local" class="form-control form-control-sm"
+                   value="{{ default_to }}" required>
+          </div>
+          <div class="form-text text-warning-emphasis mb-3">🕐 Время в {{ app_timezone }}</div>
+          <button type="submit" class="btn btn-primary w-100" id="submitBtn">
+            Собрать данные
+          </button>
+        </form>
+      </div>
     </div>
 
-    {# ── Результат ── #}
-    <div class="col-md-8 col-lg-9 d-flex flex-column h-100">
-
-        {% if error %}
-        <div class="alert alert-danger">
-            <strong>Ошибка:</strong> {{ error }}
-        </div>
-
-        {% elif result is none %}
-        <div class="alert alert-secondary">
-            Выберите оборудование и временной диапазон, затем нажмите «Собрать данные».
-        </div>
-
-        {% else %}
-
-        {# Тулбар #}
-        <div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
-            <span class="text-muted small">
-                {{ result.ts_from_local | replace("T", " ") }} —
-                {{ result.ts_to_local   | replace("T", " ") }}
-                <span class="badge bg-secondary ms-1">{{ result.tz_name }}</span>
-            </span>
-            <div class="ms-auto d-flex gap-2">
-                <button class="btn btn-sm btn-outline-secondary" onclick="showPanel('md')" id="tabMd">
-                    📄 Телеметрия
-                </button>
-                <button class="btn btn-sm btn-outline-secondary" onclick="showPanel('raw')" id="tabRaw">
-                    Сырой текст
-                </button>
-                <button class="btn btn-sm btn-outline-success" onclick="showPanel('agent')" id="tabAgent" disabled>
-                    🤖 Заключение
-                </button>
-                <button class="btn btn-sm btn-outline-secondary" onclick="copyMd(event)">
-                    📋 Копировать
-                </button>
-            </div>
-        </div>
-
-        {# Rendered Markdown — flex-grow заполняет остаток колонки #}
-        <div id="mdRendered" class="border rounded p-3 bg-white overflow-auto flex-grow-1">
-            <div id="mdContent"></div>
-        </div>
-
-        {# Raw — на всю ширину и высоту панели #}
-        <div id="rawBlock" class="flex-grow-1" style="display:none">
-            <textarea id="rawMd" class="form-control font-monospace w-100 h-100"
-                      style="font-size:0.78rem; resize:none;
-                             white-space:pre-wrap; word-break:break-all"
-                      readonly>{{ result.markdown }}</textarea>
-        </div>
-
-        {# Панель заключения агента #}
-        <div id="agentBlock" class="border rounded p-3 bg-white overflow-auto flex-grow-1" style="display:none">
-            <div id="agentContent" class="streaming-cursor"></div>
-        </div>
-
-        {# Скрытый источник для JS #}
-        <script id="mdSource" type="text/plain">{{ result.markdown | e }}</script>
-
-        {% endif %}
+    {# Прогресс сбора данных #}
+    <div id="progressCard" class="card mt-3" style="display:none">
+      <div class="card-header fw-semibold">📊 Сбор данных</div>
+      <div class="card-body p-2">
+        <ul id="stageList" class="list-unstyled small mb-0"></ul>
+      </div>
     </div>
+
+    {# Итоги (скрыты до получения результата) #}
+    <div id="statsCard" class="card mt-3" style="display:none">
+      <div class="card-header fw-semibold">Итоги</div>
+      <div class="card-body">
+        <dl class="row mb-0 small">
+          <dt class="col-7">Строк истории</dt>
+          <dd class="col-5" id="stat_history_rows">—</dd>
+          <dt class="col-7">Регистров</dt>
+          <dd class="col-5" id="stat_registers_count">—</dd>
+          <dt class="col-7">Периодов enum</dt>
+          <dd class="col-5" id="stat_enum_periods_count">—</dd>
+          <dt class="col-7">Неисправностей</dt>
+          <dd class="col-5" id="stat_fault_periods_count">—</dd>
+          <dt class="col-7">Событий системы</dt>
+          <dd class="col-5" id="stat_events_count">—</dd>
+        </dl>
+      </div>
+    </div>
+
+    {# ИИ-анализ (скрыт до получения результата) #}
+    <div id="agentCard" class="card mt-3 border-success" style="display:none">
+      <div class="card-header fw-semibold bg-success-subtle">🤖 ИИ-анализ</div>
+      <div class="card-body">
+        <p class="small text-muted mb-2">
+          Отправить пакет локальной модели для диагностического заключения.
+        </p>
+        <button class="btn btn-success btn-sm w-100" id="agentBtn" onclick="runAgent()">
+          Отправить агенту →
+        </button>
+        <div id="agentStatus" class="mt-2 small text-muted" style="display:none"></div>
+      </div>
+    </div>
+
+  </div>
+
+  {# ── Правая панель ── #}
+  <div class="col-md-8 col-lg-9 d-flex flex-column h-100">
+
+    <div id="emptyState" class="alert alert-secondary">
+      Выберите оборудование и временной диапазон, затем нажмите «Собрать данные».
+    </div>
+
+    <div id="errorState" class="alert alert-danger" style="display:none">
+      <strong>Ошибка:</strong> <span id="errorMsg"></span>
+    </div>
+
+    <div id="resultArea" class="d-flex flex-column h-100" style="display:none">
+
+      {# Тулбар #}
+      <div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
+        <span class="text-muted small">
+          <span id="toolbar_ts_from">—</span> — <span id="toolbar_ts_to">—</span>
+          <span class="badge bg-secondary ms-1" id="toolbar_tz">—</span>
+        </span>
+        <div class="ms-auto d-flex gap-2">
+          <button class="btn btn-sm btn-outline-secondary active" onclick="showPanel('md')" id="tabMd">
+            📄 Телеметрия
+          </button>
+          <button class="btn btn-sm btn-outline-secondary" onclick="showPanel('raw')" id="tabRaw">
+            Сырой текст
+          </button>
+          <button class="btn btn-sm btn-outline-success" onclick="showPanel('agent')" id="tabAgent" disabled>
+            🤖 Заключение
+          </button>
+          <button class="btn btn-sm btn-outline-secondary" onclick="copyMd(event)">
+            📋 Копировать
+          </button>
+        </div>
+      </div>
+
+      {# Панели #}
+      <div id="mdRendered" class="border rounded p-3 bg-white overflow-auto flex-grow-1">
+        <div id="mdContent"></div>
+      </div>
+
+      <div id="rawBlock" class="flex-grow-1" style="display:none">
+        <textarea id="rawMd" class="form-control font-monospace w-100 h-100"
+                  style="font-size:.78rem;resize:none;white-space:pre-wrap;word-break:break-all"
+                  readonly></textarea>
+      </div>
+
+      <div id="agentBlock" class="border rounded p-3 bg-white overflow-auto flex-grow-1" style="display:none">
+        <div id="agentContent"></div>
+      </div>
+
+    </div>
+  </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script>
+// ── Оборудование ──────────────────────────────────────────────────────────────
 function fillEquipment(sel) {
     const opt = sel.options[sel.selectedIndex];
     document.getElementById('equip_type_inp').value = opt.dataset.equip || '';
     document.getElementById('panel_id_inp').value   = opt.dataset.panel || '';
 }
 
-{% if result %}
-// Рендерим Markdown после загрузки
-const raw = document.getElementById('mdSource').textContent;
-document.getElementById('mdContent').innerHTML = marked.parse(raw);
+// ── Состояние ─────────────────────────────────────────────────────────────────
+let _raw        = '';
+let _agentDone  = false;
+let _agentText  = '';
 
-// ── Переключение панелей ───────────────────────────────────────────────────────
-const _panels = { md: 'mdRendered', raw: 'rawBlock', agent: 'agentBlock' };
-const _tabs   = { md: 'tabMd',      raw: 'tabRaw',   agent: 'tabAgent'  };
-let _activePanel = 'md';
+const STAGES = [
+    {id:'history', label:'История аналогов'},
+    {id:'enum',    label:'Периоды состояний'},
+    {id:'fault',   label:'Неисправности'},
+    {id:'events',  label:'События системы'},
+    {id:'build',   label:'Сборка MD-пакета'},
+];
 
-function showPanel(name) {
-    for (const [k, id] of Object.entries(_panels)) {
-        document.getElementById(id).style.display = (k === name) ? '' : 'none';
+// ── Перехват формы ────────────────────────────────────────────────────────────
+document.getElementById('analyzeForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    startCollect(new FormData(this));
+});
+
+function startCollect(formData) {
+    // Сброс агента
+    _raw = '';
+    _agentDone = false;
+    _agentText = '';
+
+    // Состояния UI
+    _el('emptyState').style.display   = 'none';
+    _el('errorState').style.display   = 'none';
+    _el('resultArea').style.display   = 'none';
+    _el('progressCard').style.display = '';
+    _el('statsCard').style.display    = 'none';
+    _el('agentCard').style.display    = 'none';
+    _el('submitBtn').disabled = true;
+
+    // Инициализируем список этапов
+    const list = _el('stageList');
+    list.innerHTML = '';
+    for (const s of STAGES) {
+        const li = document.createElement('li');
+        li.id = 'stage_' + s.id;
+        li.className = 'mb-1 d-flex align-items-center gap-2';
+        li.innerHTML =
+            `<span class="stage-icon text-muted">○</span>` +
+            `<span>${s.label}</span>` +
+            `<small class="text-muted ms-auto" id="stage_detail_${s.id}"></small>`;
+        list.appendChild(li);
     }
-    for (const [k, id] of Object.entries(_tabs)) {
-        const btn = document.getElementById(id);
-        if (!btn) continue;
-        btn.classList.toggle('active', k === name);
-    }
-    _activePanel = name;
+
+    // Сбрасываем кнопку агента
+    const aBtn = _el('agentBtn');
+    aBtn.disabled = false;
+    aBtn.textContent = 'Отправить агенту →';
+    aBtn.className = 'btn btn-success btn-sm w-100';
+    _el('tabAgent').disabled = true;
+    _el('agentStatus').style.display = 'none';
+
+    // SSE
+    fetch('/analyze/stream', { method:'POST', body: formData })
+        .then(resp => {
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const reader = resp.body.getReader();
+            const dec    = new TextDecoder();
+            let buf = '';
+
+            function pump() {
+                reader.read().then(({ done, value }) => {
+                    if (done) return;
+                    buf += dec.decode(value, { stream: true });
+                    const lines = buf.split('\n');
+                    buf = lines.pop();
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        try { onCollectEvent(JSON.parse(line.slice(6))); } catch(e) {}
+                    }
+                    pump();
+                }).catch(err => onCollectError(err.message));
+            }
+            pump();
+        })
+        .catch(err => onCollectError(err.message));
 }
 
-// Активна по умолчанию кнопка «Телеметрия»
-document.getElementById('tabMd').classList.add('active');
+function onCollectEvent(msg) {
+    if (msg.stage === 'error') { onCollectError(msg.message); return; }
+
+    if (msg.status === 'running') {
+        const icon = _stageIcon(msg.stage);
+        if (icon) { icon.textContent = '⏳'; icon.className = 'stage-icon text-warning'; }
+    }
+    if (msg.status === 'done') {
+        const icon = _stageIcon(msg.stage);
+        if (icon) { icon.textContent = '✓'; icon.className = 'stage-icon text-success'; }
+        const det = _el('stage_detail_' + msg.stage);
+        if (det) {
+            if (msg.rows  !== undefined) det.textContent = msg.rows  + ' строк';
+            if (msg.count !== undefined) det.textContent = msg.count + ' шт';
+        }
+    }
+    if (msg.stage === 'complete') {
+        _el('progressCard').style.display = 'none';
+        _el('submitBtn').disabled = false;
+        initResult(msg.result);
+    }
+}
+
+function onCollectError(message) {
+    _el('progressCard').style.display = 'none';
+    _el('submitBtn').disabled = false;
+    _el('errorState').style.display = '';
+    _el('errorMsg').textContent = message;
+}
+
+function initResult(r) {
+    _raw = r.markdown;
+
+    // Статистика
+    _el('stat_history_rows').textContent       = r.history_rows;
+    _el('stat_registers_count').textContent    = r.registers_count;
+    _el('stat_enum_periods_count').textContent = r.enum_periods_count;
+
+    const fe = _el('stat_fault_periods_count');
+    fe.textContent = r.fault_periods_count;
+    fe.className   = r.fault_periods_count > 0 ? 'text-danger fw-semibold' : '';
+
+    _el('stat_events_count').textContent = r.events_count;
+
+    // Тулбар
+    _el('toolbar_ts_from').textContent = (r.ts_from_local || '').replace('T', ' ');
+    _el('toolbar_ts_to').textContent   = (r.ts_to_local   || '').replace('T', ' ');
+    _el('toolbar_tz').textContent      = r.tz_name || '';
+
+    // Контент
+    _el('rawMd').value = _raw;
+    _el('mdContent').innerHTML = marked.parse(_raw);
+
+    // Показываем панели
+    _el('statsCard').style.display = '';
+    _el('agentCard').style.display = '';
+    _el('resultArea').style.display = '';
+    showPanel('md');
+}
+
+// ── Переключение вкладок ──────────────────────────────────────────────────────
+const _PANELS = {md:'mdRendered', raw:'rawBlock', agent:'agentBlock'};
+const _TABS   = {md:'tabMd',      raw:'tabRaw',   agent:'tabAgent'};
+
+function showPanel(name) {
+    for (const [k, id] of Object.entries(_PANELS)) {
+        _el(id).style.display = k === name ? '' : 'none';
+    }
+    for (const [k, id] of Object.entries(_TABS)) {
+        const btn = _el(id);
+        if (btn) btn.classList.toggle('active', k === name);
+    }
+}
 
 // ── Копирование ───────────────────────────────────────────────────────────────
 function copyMd(event) {
+    if (!_raw) return;
     const btn = event.currentTarget;
     const ok = () => {
         btn.textContent = '✓ Скопировано';
         setTimeout(() => btn.textContent = '📋 Копировать', 2000);
     };
     if (navigator.clipboard && window.isSecureContext) {
-        navigator.clipboard.writeText(raw).then(ok).catch(() => fallbackCopy(ok));
+        navigator.clipboard.writeText(_raw).then(ok).catch(() => fallbackCopy(ok));
     } else {
         fallbackCopy(ok);
     }
 }
-
 function fallbackCopy(cb) {
     const ta = document.createElement('textarea');
-    ta.value = raw;
+    ta.value = _raw;
     ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0';
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
+    document.body.appendChild(ta); ta.focus(); ta.select();
     try { if (document.execCommand('copy')) cb(); } catch(e) {}
     document.body.removeChild(ta);
 }
 
 // ── ИИ-агент: SSE-стрим ───────────────────────────────────────────────────────
-let _agentDone = false;
-let _agentText = '';
-
 function runAgent() {
-    if (_agentDone) {
-        // Уже есть результат — просто переключаемся
-        showPanel('agent');
-        return;
-    }
+    if (_agentDone) { showPanel('agent'); return; }
 
-    const btn    = document.getElementById('agentBtn');
-    const status = document.getElementById('agentStatus');
-    const tabBtn = document.getElementById('tabAgent');
-    const content = document.getElementById('agentContent');
+    const btn    = _el('agentBtn');
+    const status = _el('agentStatus');
+    const tabBtn = _el('tabAgent');
+    const content = _el('agentContent');
 
     btn.disabled = true;
     btn.textContent = '⏳ Анализирую...';
     status.style.display = '';
     status.textContent = 'Подключение к модели…';
-
-    // Включаем вкладку и переключаемся
     tabBtn.disabled = false;
     showPanel('agent');
 
-    content.classList.add('streaming-cursor');
+    content.className = 'streaming-cursor';
     content.innerHTML = '<span class="text-muted fst-italic">Генерация заключения…</span>';
     _agentText = '';
 
     fetch('/analyze/run', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ markdown: raw }),
-    }).then(response => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({markdown: _raw}),
+    }).then(resp => {
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         status.textContent = 'Генерация…';
+        const reader = resp.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '';
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-
-        function processChunk() {
+        function pump() {
             reader.read().then(({ done, value }) => {
                 if (done) { onAgentDone(); return; }
-                buffer += decoder.decode(value, { stream: true });
-                const lines = buffer.split('\n');
-                buffer = lines.pop(); // неполная строка
+                buf += dec.decode(value, { stream: true });
+                const lines = buf.split('\n');
+                buf = lines.pop();
                 for (const line of lines) {
                     if (!line.startsWith('data: ')) continue;
                     try {
@@ -295,39 +393,37 @@ function runAgent() {
                         if (msg.done)  { onAgentDone();  return; }
                         if (msg.token) {
                             _agentText += msg.token;
-                            // Обновляем рендер каждые ~50 символов для производительности
-                            if (_agentText.length % 50 < msg.token.length) {
+                            if (_agentText.length % 60 < msg.token.length) {
                                 content.innerHTML = marked.parse(_agentText);
-                                content.classList.add('streaming-cursor');
+                                content.className = 'streaming-cursor';
                             }
                         }
                     } catch(e) {}
                 }
-                processChunk();
+                pump();
             }).catch(err => onAgentError(err.message));
         }
-        processChunk();
-
+        pump();
     }).catch(err => onAgentError(err.message));
 }
 
 function onAgentDone() {
     _agentDone = true;
-    const content = document.getElementById('agentContent');
-    const btn     = document.getElementById('agentBtn');
-    const status  = document.getElementById('agentStatus');
-    content.classList.remove('streaming-cursor');
+    const content = _el('agentContent');
+    const btn     = _el('agentBtn');
+    const status  = _el('agentStatus');
+    content.className = '';
     content.innerHTML = _agentText ? marked.parse(_agentText) : '<em>Модель не вернула ответ</em>';
     btn.textContent = '✓ Заключение готово';
-    btn.classList.replace('btn-success', 'btn-outline-success');
+    btn.className = 'btn btn-outline-success btn-sm w-100';
     status.textContent = '✓ Готово';
 }
 
 function onAgentError(msg) {
-    const content = document.getElementById('agentContent');
-    const btn     = document.getElementById('agentBtn');
-    const status  = document.getElementById('agentStatus');
-    content.classList.remove('streaming-cursor');
+    const content = _el('agentContent');
+    const btn     = _el('agentBtn');
+    const status  = _el('agentStatus');
+    content.className = '';
     content.innerHTML = `<div class="alert alert-danger">Ошибка: ${msg}</div>`;
     btn.disabled = false;
     btn.textContent = 'Повторить →';
@@ -335,10 +431,8 @@ function onAgentError(msg) {
     _agentDone = false;
 }
 
-{% else %}
-function copyMd() {}
-function runAgent() {}
-function showPanel() {}
-{% endif %}
+// ── Утилиты ───────────────────────────────────────────────────────────────────
+function _el(id) { return document.getElementById(id); }
+function _stageIcon(stage) { return document.querySelector(`#stage_${stage} .stage-icon`); }
 </script>
 {% endblock %}
