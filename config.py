@@ -28,6 +28,12 @@ class Settings:
         self.embedding_model: str = emb.get("model", "nomic-embed-text")
         self.embedding_dim: int = int(emb.get("dim", 768))
 
+        llm = data.get("llm", {})
+        self.llm_base_url: str = llm.get("base_url", "http://localhost:11434")
+        self.llm_model: str = llm.get("model", "qwen2.5:14b")
+        self.llm_temperature: float = float(llm.get("temperature", 0.1))
+        self.llm_num_ctx: int = int(llm.get("num_ctx", 16384))
+
         kb = data.get("knowledge_base", {})
         self.knowledge_base_path: Path = Path(kb.get("path", "./knowledge_base"))
 

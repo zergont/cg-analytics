@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import APIRouter, Request, Form, HTTPException, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 
 from db import analytics, source
 
@@ -182,21 +183,6 @@ async def _run_analysis(
     # Статистика по аналоговым регистрам
     reg_stats = compute_register_stats(history, ts_to_utc)
 
-    # ── RAG: обогащение из документации ──────────────────────────────────────
-    rag_context = ""
-    if kb_path:
-        try:
-            from knowledge.retriever import retrieve_context as _rag_retrieve
-            active_addrs = list(reg_stats.keys())
-            fault_addrs  = list({f["addr"] for f in fault_periods}) or None
-            loop = asyncio.get_running_loop()
-            rag_context = await loop.run_in_executor(
-                None,
-                lambda: _rag_retrieve(kb_path, active_addrs, fault_addrs),
-            )
-        except Exception as e:
-            logger.warning("RAG недоступен: %s", e)
-
     # Собираем Markdown
     md = _build_analysis_md(
         router_sn=router_sn, equip_type=equip_type, panel_id=panel_id,
@@ -205,7 +191,6 @@ async def _run_analysis(
         duration_h=duration_h, tz=tz,
         reg_stats=reg_stats,
         enum_periods=enum_periods, fault_periods=fault_periods, events=events,
-        rag_context=rag_context,
         operation_rules=operation_rules,
     )
 
@@ -216,7 +201,6 @@ async def _run_analysis(
         "enum_periods_count":  len(enum_periods),
         "fault_periods_count": len(fault_periods),
         "events_count":        len(events),
-        "rag_chunks":          len(rag_context.split("\n\n")) if rag_context else 0,
         "ts_from_local": ts_from_local,
         "ts_to_local":   ts_to_local,
         "tz_name": tz.key,
@@ -334,6 +318,36 @@ def _format_operation_rules(rules: dict) -> list[str]:
     return lines
 
 
+# ── ИИ-агент: анализ телеметрии ──────────────────────────────────────────────
+
+class _AgentRequest(BaseModel):
+    markdown: str
+
+
+@router.post("/analyze/run")
+async def analyze_run_agent(req: _AgentRequest):
+    """SSE-стрим: отправить MD-пакет в локальную LLM и получить заключение."""
+    import json as _json
+    from fastapi.responses import StreamingResponse as _SR
+    from llm.client import stream_analysis
+
+    async def _generate():
+        try:
+            async for token in stream_analysis(req.markdown):
+                yield f"data: {_json.dumps({'token': token}, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            logger.exception("Ошибка LLM: %s", e)
+            yield f"data: {_json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+        finally:
+            yield f"data: {_json.dumps({'done': True})}\n\n"
+
+    return _SR(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 def _fmt_dur(seconds: float | None, is_open: bool = False) -> str:
     """Отформатировать длительность в секундах как читаемую строку."""
     if is_open:
@@ -352,7 +366,6 @@ def _build_analysis_md(
     router_sn, equip_type, panel_id, eq, kb_path,
     ts_from_utc, ts_to_utc, duration_h, tz,
     reg_stats, enum_periods, fault_periods, events,
-    rag_context: str = "",
     operation_rules: dict | None = None,
 ) -> str:
     """Сформировать Markdown-пакет данных для передачи в ИИ."""
@@ -472,20 +485,6 @@ def _build_analysis_md(
             "## Правила эксплуатации (ключевые пороги)",
         ]
         lines += _format_operation_rules(operation_rules)
-
-    # ── Контекст из документации (RAG) ───────────────────────────────────────
-    if rag_context:
-        lines += [
-            "",
-            "## Контекст из базы знаний (RAG)",
-            rag_context,
-        ]
-    elif kb_path:
-        lines += [
-            "",
-            "## Контекст из базы знаний (RAG)",
-            "_Индекс пуст или Ollama недоступна. Запустите переиндексацию в разделе «База знаний»._",
-        ]
 
     return "\n".join(lines)
 
@@ -783,9 +782,13 @@ async def sync_equipment():
     Добавляет новые устройства и заполняет пустые поля из источника,
     но не затирает данные уже введённые вручную в реестре аналитики.
     """
-    equipment = await source.get_active_equipment()
-    for eq in equipment:
-        await analytics.sync_equipment_from_source(eq)
+    try:
+        equipment = await source.get_active_equipment()
+        for eq in equipment:
+            await analytics.sync_equipment_from_source(eq)
+    except Exception as e:
+        logger.exception("Ошибка синхронизации: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
     return RedirectResponse(url="/settings", status_code=303)
 
 

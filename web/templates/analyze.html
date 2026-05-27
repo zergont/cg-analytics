@@ -12,6 +12,18 @@
   #mdContent th { background: #f8f9fa; }
   #mdContent p, #mdContent li { font-size: 0.88rem; margin-bottom: 0.2rem; }
   #mdContent code { font-size: 0.82rem; }
+  /* Панель агента */
+  #agentContent h1 { font-size: 1.4rem; font-weight: 700; margin-top: 0.5rem; }
+  #agentContent h2 { font-size: 1.1rem; font-weight: 600; margin-top: 1rem; border-bottom: 1px solid #dee2e6; padding-bottom: .2rem; }
+  #agentContent h3 { font-size: 0.95rem; font-weight: 600; margin-top: 0.8rem; }
+  #agentContent table { width: 100%; font-size: 0.82rem; border-collapse: collapse; margin-bottom: 0.5rem; }
+  #agentContent th, #agentContent td { border: 1px solid #dee2e6; padding: 3px 8px; }
+  #agentContent th { background: #f8f9fa; }
+  #agentContent p, #agentContent li { font-size: 0.88rem; margin-bottom: 0.2rem; }
+  #agentContent code { font-size: 0.82rem; }
+  /* Мигающий курсор во время стриминга */
+  .streaming-cursor::after { content: "▋"; animation: blink .7s step-end infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
 </style>
 <h5 class="mb-3">Анализ временного диапазона</h5>
 
@@ -86,28 +98,20 @@
                     </dd>
                     <dt class="col-7">Событий системы</dt>
                     <dd class="col-5">{{ result.events_count }}</dd>
-                    <dt class="col-7">RAG-чанков</dt>
-                    <dd class="col-5">
-                        {% if result.rag_chunks > 0 %}
-                            <span class="text-success fw-semibold">{{ result.rag_chunks }}</span>
-                        {% else %}
-                            <span class="text-muted">—</span>
-                        {% endif %}
-                    </dd>
                 </dl>
             </div>
         </div>
 
         <div class="card mt-3 border-success">
-            <div class="card-header fw-semibold bg-success-subtle">🤖 Отправить ИИ</div>
+            <div class="card-header fw-semibold bg-success-subtle">🤖 ИИ-анализ</div>
             <div class="card-body">
                 <p class="small text-muted mb-2">
-                    Пакет данных готов. Следующий этап — обогащение через RAG
-                    и отправка языковой модели.
+                    Отправить пакет локальной модели для диагностического заключения.
                 </p>
-                <button class="btn btn-success btn-sm w-100" disabled title="Скоро">
-                    Отправить агенту → <span class="badge bg-light text-dark ms-1">скоро</span>
+                <button class="btn btn-success btn-sm w-100" id="agentBtn" onclick="runAgent()">
+                    Отправить агенту →
                 </button>
+                <div id="agentStatus" class="mt-2 small text-muted" style="display:none"></div>
             </div>
         </div>
         {% endif %}
@@ -136,8 +140,14 @@
                 <span class="badge bg-secondary ms-1">{{ result.tz_name }}</span>
             </span>
             <div class="ms-auto d-flex gap-2">
-                <button class="btn btn-sm btn-outline-secondary" onclick="toggleRaw()" id="rawBtn">
+                <button class="btn btn-sm btn-outline-secondary" onclick="showPanel('md')" id="tabMd">
+                    📄 Телеметрия
+                </button>
+                <button class="btn btn-sm btn-outline-secondary" onclick="showPanel('raw')" id="tabRaw">
                     Сырой текст
+                </button>
+                <button class="btn btn-sm btn-outline-success" onclick="showPanel('agent')" id="tabAgent" disabled>
+                    🤖 Заключение
                 </button>
                 <button class="btn btn-sm btn-outline-secondary" onclick="copyMd(event)">
                     📋 Копировать
@@ -156,6 +166,11 @@
                       style="font-size:0.78rem; resize:none;
                              white-space:pre-wrap; word-break:break-all"
                       readonly>{{ result.markdown }}</textarea>
+        </div>
+
+        {# Панель заключения агента #}
+        <div id="agentBlock" class="border rounded p-3 bg-white overflow-auto flex-grow-1" style="display:none">
+            <div id="agentContent" class="streaming-cursor"></div>
         </div>
 
         {# Скрытый источник для JS #}
@@ -180,21 +195,27 @@ function fillEquipment(sel) {
 const raw = document.getElementById('mdSource').textContent;
 document.getElementById('mdContent').innerHTML = marked.parse(raw);
 
-function toggleRaw() {
-    const rb = document.getElementById('rawBlock');
-    const rd = document.getElementById('mdRendered');
-    const btn = document.getElementById('rawBtn');
-    if (rb.style.display === 'none') {
-        rb.style.display = 'block';
-        rd.style.display = 'none';
-        btn.textContent = 'Рендер';
-    } else {
-        rb.style.display = 'none';
-        rd.style.display = 'block';
-        btn.textContent = 'Сырой текст';
+// ── Переключение панелей ───────────────────────────────────────────────────────
+const _panels = { md: 'mdRendered', raw: 'rawBlock', agent: 'agentBlock' };
+const _tabs   = { md: 'tabMd',      raw: 'tabRaw',   agent: 'tabAgent'  };
+let _activePanel = 'md';
+
+function showPanel(name) {
+    for (const [k, id] of Object.entries(_panels)) {
+        document.getElementById(id).style.display = (k === name) ? '' : 'none';
     }
+    for (const [k, id] of Object.entries(_tabs)) {
+        const btn = document.getElementById(id);
+        if (!btn) continue;
+        btn.classList.toggle('active', k === name);
+    }
+    _activePanel = name;
 }
 
+// Активна по умолчанию кнопка «Телеметрия»
+document.getElementById('tabMd').classList.add('active');
+
+// ── Копирование ───────────────────────────────────────────────────────────────
 function copyMd(event) {
     const btn = event.currentTarget;
     const ok = () => {
@@ -218,9 +239,106 @@ function fallbackCopy(cb) {
     try { if (document.execCommand('copy')) cb(); } catch(e) {}
     document.body.removeChild(ta);
 }
+
+// ── ИИ-агент: SSE-стрим ───────────────────────────────────────────────────────
+let _agentDone = false;
+let _agentText = '';
+
+function runAgent() {
+    if (_agentDone) {
+        // Уже есть результат — просто переключаемся
+        showPanel('agent');
+        return;
+    }
+
+    const btn    = document.getElementById('agentBtn');
+    const status = document.getElementById('agentStatus');
+    const tabBtn = document.getElementById('tabAgent');
+    const content = document.getElementById('agentContent');
+
+    btn.disabled = true;
+    btn.textContent = '⏳ Анализирую...';
+    status.style.display = '';
+    status.textContent = 'Подключение к модели…';
+
+    // Включаем вкладку и переключаемся
+    tabBtn.disabled = false;
+    showPanel('agent');
+
+    content.classList.add('streaming-cursor');
+    content.innerHTML = '<span class="text-muted fst-italic">Генерация заключения…</span>';
+    _agentText = '';
+
+    fetch('/analyze/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ markdown: raw }),
+    }).then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        status.textContent = 'Генерация…';
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        function processChunk() {
+            reader.read().then(({ done, value }) => {
+                if (done) { onAgentDone(); return; }
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop(); // неполная строка
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    try {
+                        const msg = JSON.parse(line.slice(6));
+                        if (msg.error) { onAgentError(msg.error); return; }
+                        if (msg.done)  { onAgentDone();  return; }
+                        if (msg.token) {
+                            _agentText += msg.token;
+                            // Обновляем рендер каждые ~50 символов для производительности
+                            if (_agentText.length % 50 < msg.token.length) {
+                                content.innerHTML = marked.parse(_agentText);
+                                content.classList.add('streaming-cursor');
+                            }
+                        }
+                    } catch(e) {}
+                }
+                processChunk();
+            }).catch(err => onAgentError(err.message));
+        }
+        processChunk();
+
+    }).catch(err => onAgentError(err.message));
+}
+
+function onAgentDone() {
+    _agentDone = true;
+    const content = document.getElementById('agentContent');
+    const btn     = document.getElementById('agentBtn');
+    const status  = document.getElementById('agentStatus');
+    content.classList.remove('streaming-cursor');
+    content.innerHTML = _agentText ? marked.parse(_agentText) : '<em>Модель не вернула ответ</em>';
+    btn.textContent = '✓ Заключение готово';
+    btn.classList.replace('btn-success', 'btn-outline-success');
+    status.textContent = '✓ Готово';
+}
+
+function onAgentError(msg) {
+    const content = document.getElementById('agentContent');
+    const btn     = document.getElementById('agentBtn');
+    const status  = document.getElementById('agentStatus');
+    content.classList.remove('streaming-cursor');
+    content.innerHTML = `<div class="alert alert-danger">Ошибка: ${msg}</div>`;
+    btn.disabled = false;
+    btn.textContent = 'Повторить →';
+    status.textContent = '⚠ Ошибка';
+    _agentDone = false;
+}
+
 {% else %}
-function toggleRaw() {}
 function copyMd() {}
+function runAgent() {}
+function showPanel() {}
 {% endif %}
 </script>
 {% endblock %}
