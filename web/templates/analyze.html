@@ -334,7 +334,7 @@ function initResult(r) {
 
     const fe = _el('stat_fault_periods_count');
     fe.textContent = r.fault_periods_count;
-    fe.className   = r.fault_periods_count > 0 ? 'text-danger fw-semibold' : '';
+    fe.className   = 'col-5' + (r.fault_periods_count > 0 ? ' text-danger fw-semibold' : '');
 
     // Тулбар
     _el('toolbar_ts_from').textContent = (r.ts_from_local || '').replace('T', ' ');
