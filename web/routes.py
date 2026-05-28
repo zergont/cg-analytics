@@ -18,9 +18,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 templates = Jinja2Templates(directory="web/templates")
 
-# Версия приложения — читается один раз при старте, доступна во всех шаблонах
-_version_file = __import__("pathlib").Path(__file__).parent.parent / "VERSION"
-templates.env.globals["app_version"] = _version_file.read_text(encoding="utf-8").strip()
+# Версия приложения — читается из файла при каждом рендере шаблона.
+# Меняется без перезапуска сервиса: достаточно обновить VERSION на диске.
+_version_file = Path(__file__).parent.parent / "VERSION"
+templates.env.globals["app_version"] = lambda: _version_file.read_text(encoding="utf-8").strip()
 
 # Часовой пояс — строка, доступная во всех шаблонах.
 # Обновляется через _apply_tz() при старте и при смене через UI.
