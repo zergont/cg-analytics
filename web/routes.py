@@ -164,13 +164,9 @@ async def analyze_stream(
             enum_periods = await source.get_enum_history_range(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc)
             yield _evt({"stage": "enum", "status": "done", "count": len(enum_periods)})
 
-            yield _evt({"stage": "fault", "status": "running", "label": "Неисправности"})
+            yield _evt({"stage": "fault", "status": "running", "label": "События"})
             fault_periods = await source.get_fault_history_range(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc)
             yield _evt({"stage": "fault", "status": "done", "count": len(fault_periods)})
-
-            yield _evt({"stage": "events", "status": "running", "label": "События системы"})
-            events = await source.get_events_range(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc)
-            yield _evt({"stage": "events", "status": "done", "count": len(events)})
 
             yield _evt({"stage": "build", "status": "running", "label": "Сборка MD-пакета"})
             import json as _j2
@@ -197,7 +193,7 @@ async def analyze_stream(
                 ts_from_utc=ts_from_utc, ts_to_utc=ts_to_utc,
                 duration_h=duration_h, tz=tz,
                 reg_stats=reg_stats,
-                enum_periods=enum_periods, fault_periods=fault_periods, events=events,
+                enum_periods=enum_periods, fault_periods=fault_periods,
                 operation_rules=operation_rules,
             )
             yield _evt({"stage": "build", "status": "done"})
@@ -209,7 +205,6 @@ async def analyze_stream(
                     "registers_count":     len(reg_stats),
                     "enum_periods_count":  len(enum_periods),
                     "fault_periods_count": len(fault_periods),
-                    "events_count":        len(events),
                     "ts_from_local":       ts_from_local,
                     "ts_to_local":         ts_to_local,
                     "tz_name":             tz.key,
@@ -237,6 +232,13 @@ async def api_log(n: int = 200):
     return JSONResponse(get_entries(min(n, 500)))
 
 
+@router.post("/api/log/clear")
+async def api_log_clear():
+    from web.log_buffer import clear_buffer
+    clear_buffer()
+    return JSONResponse({"ok": True})
+
+
 async def _run_analysis(
     router_sn: str,
     equip_type: str,
@@ -260,12 +262,11 @@ async def _run_analysis(
 
     duration_h = (ts_to_utc - ts_from_utc).total_seconds() / 3600
 
-    # Загружаем данные параллельно: аналог, enum-периоды, fault-периоды, события
-    history, enum_periods, fault_periods, events = await asyncio.gather(
+    # Загружаем данные параллельно: аналог, enum-периоды, fault-периоды
+    history, enum_periods, fault_periods = await asyncio.gather(
         source.get_history_range(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc),
         source.get_enum_history_range(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc),
         source.get_fault_history_range(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc),
-        source.get_events_range(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc),
     )
 
     # Метаданные оборудования из реестра
@@ -300,7 +301,7 @@ async def _run_analysis(
         ts_from_utc=ts_from_utc, ts_to_utc=ts_to_utc,
         duration_h=duration_h, tz=tz,
         reg_stats=reg_stats,
-        enum_periods=enum_periods, fault_periods=fault_periods, events=events,
+        enum_periods=enum_periods, fault_periods=fault_periods,
         operation_rules=operation_rules,
     )
 
@@ -310,7 +311,6 @@ async def _run_analysis(
         "registers_count":     len(reg_stats),
         "enum_periods_count":  len(enum_periods),
         "fault_periods_count": len(fault_periods),
-        "events_count":        len(events),
         "ts_from_local": ts_from_local,
         "ts_to_local":   ts_to_local,
         "tz_name": tz.key,
@@ -475,7 +475,7 @@ def _fmt_dur(seconds: float | None, is_open: bool = False) -> str:
 def _build_analysis_md(
     router_sn, equip_type, panel_id, eq, kb_path,
     ts_from_utc, ts_to_utc, duration_h, tz,
-    reg_stats, enum_periods, fault_periods, events,
+    reg_stats, enum_periods, fault_periods,
     operation_rules: dict | None = None,
 ) -> str:
     """Сформировать Markdown-пакет данных для передачи в ИИ."""
@@ -554,39 +554,25 @@ def _build_analysis_md(
     else:
         lines.append("_Нет данных за период_")
 
-    # ── Неисправности (fault_history) ────────────────────────────────────────
+    # ── События (fault_history) ───────────────────────────────────────────────
     lines += [
         "",
-        f"## Неисправности ({len(fault_periods)} событий)",
+        f"## События ({len(fault_periods)} записей)",
     ]
     if fault_periods:
-        lines.append("| Начало | Конец | Адрес | Бит | Неисправность | Серьёзность | Длительность |")
-        lines.append("|--------|-------|------:|----:|---------------|-------------|-------------|")
+        lines.append("| Начало | Конец | Адрес | Бит | Событие | Серьёзность | Длительность |")
+        lines.append("|--------|-------|------:|----:|---------|-------------|-------------|")
         for f in fault_periods:
             t_start = local_t(f["fault_start"])
             t_end   = local_t(f["fault_end"]) if f.get("fault_end") else "—"
             name    = f.get("fault_name_ru") or f.get("fault_name") or f"addr={f['addr']} бит={f['bit']}"
-            sev     = f.get("severity") or "?"
+            sev     = f.get("severity") or "—"
             dur     = _fmt_dur(f.get("duration_sec"), is_open=f.get("fault_end") is None)
             lines.append(
                 f"| {t_start} | {t_end} | {f['addr']} | {f['bit']} | {name} | {sev} | {dur} |"
             )
     else:
-        lines.append("_Неисправностей в периоде не зафиксировано_")
-
-    # ── Системные события ─────────────────────────────────────────────────────
-    lines += [
-        "",
-        f"## Системные события ({len(events)} событий)",
-    ]
-    if events:
-        for ev in events:
-            ts_str  = local_t(ev["ts"]) if ev.get("ts") else "?"
-            ev_type = ev.get("event_type") or ""
-            desc    = ev.get("description") or ""
-            lines.append(f"- `{ts_str}` [{ev_type}] {desc}")
-    else:
-        lines.append("_Нет событий за период_")
+        lines.append("_Событий в периоде не зафиксировано_")
 
     # ── Правила эксплуатации из KB (компактная выжимка) ──────────────────────
     if operation_rules:

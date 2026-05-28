@@ -80,10 +80,8 @@
           <dd class="col-5" id="stat_registers_count">—</dd>
           <dt class="col-7">Периодов enum</dt>
           <dd class="col-5" id="stat_enum_periods_count">—</dd>
-          <dt class="col-7">Неисправностей</dt>
+          <dt class="col-7">Событий</dt>
           <dd class="col-5" id="stat_fault_periods_count">—</dd>
-          <dt class="col-7">Событий системы</dt>
-          <dd class="col-5" id="stat_events_count">—</dd>
         </dl>
       </div>
     </div>
@@ -177,15 +175,60 @@ let _agentText  = '';
 const STAGES = [
     {id:'history', label:'История аналогов'},
     {id:'enum',    label:'Периоды состояний'},
-    {id:'fault',   label:'Неисправности'},
-    {id:'events',  label:'События системы'},
+    {id:'fault',   label:'События'},
     {id:'build',   label:'Сборка MD-пакета'},
 ];
+
+// ── localStorage: сохранение и восстановление выбора ─────────────────────────
+const LS_KEY = 'analyze_last';
+
+function _saveForm(fd) {
+    try {
+        localStorage.setItem(LS_KEY, JSON.stringify({
+            router_sn:    fd.get('router_sn'),
+            equip_type:   fd.get('equip_type'),
+            panel_id:     fd.get('panel_id'),
+            ts_from_local: fd.get('ts_from_local'),
+            ts_to_local:   fd.get('ts_to_local'),
+        }));
+    } catch(e) {}
+}
+
+function _restoreForm() {
+    try {
+        const s = localStorage.getItem(LS_KEY);
+        if (!s) return;
+        const d = JSON.parse(s);
+
+        // Восстанавливаем дату/время
+        if (d.ts_from_local) document.querySelector('[name=ts_from_local]').value = d.ts_from_local;
+        if (d.ts_to_local)   document.querySelector('[name=ts_to_local]').value   = d.ts_to_local;
+
+        // Восстанавливаем выбор оборудования
+        if (d.router_sn) {
+            const sel = _el('eq_select');
+            for (const opt of sel.options) {
+                if (opt.value === d.router_sn
+                    && opt.dataset.equip === d.equip_type
+                    && opt.dataset.panel === d.panel_id) {
+                    sel.value = opt.value;
+                    _el('equip_type_inp').value = d.equip_type || '';
+                    _el('panel_id_inp').value   = d.panel_id   || '';
+                    break;
+                }
+            }
+        }
+    } catch(e) {}
+}
+
+_restoreForm();
 
 // ── Перехват формы ────────────────────────────────────────────────────────────
 document.getElementById('analyzeForm').addEventListener('submit', function(e) {
     e.preventDefault();
-    startCollect(new FormData(this));
+    const fd = new FormData(this);
+    _saveForm(fd);
+    startCollect(fd);
 });
 
 function startCollect(formData) {
@@ -292,8 +335,6 @@ function initResult(r) {
     const fe = _el('stat_fault_periods_count');
     fe.textContent = r.fault_periods_count;
     fe.className   = r.fault_periods_count > 0 ? 'text-danger fw-semibold' : '';
-
-    _el('stat_events_count').textContent = r.events_count;
 
     // Тулбар
     _el('toolbar_ts_from').textContent = (r.ts_from_local || '').replace('T', ' ');
