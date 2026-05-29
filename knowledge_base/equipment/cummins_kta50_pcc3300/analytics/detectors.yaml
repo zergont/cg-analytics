@@ -32,18 +32,29 @@ PHASE_IMBALANCE:
 # ─── COOLING_FAILURE: Отказ охлаждения ──────────────────────────────────────
 COOLING_FAILURE:
   enabled: true
-  # Скорость роста Т ОЖ при стабильной нагрузке (нагрузка стабильна если нет LOAD_STEP)
-  dCoolant_dt_warning_c_per_hour: 10.0  # > 10 °C/ч → WARNING
-  dCoolant_dt_alarm_c_per_hour: 20.0    # > 20 °C/ч → ALARM
-  # Приближение к порогу HCT Warning (из thresholds.yaml)
-  # coolant_proximity_pct вычисляется динамически из thresholds.yaml
-  proximity_warning_pct: 10          # coolant > HCT_warning - 10% * HCT_warning → WARNING
+  # Детектор использует SLOPE (устойчивый тренд за подсегмент), а НЕ
+  # dCoolant_dt_max (мгновенная скорость). Мгновенный максимум на коротком
+  # интервале (~1 мин) давал ложные ALARM при нормальной тепловой качке ±1-2°C.
+  # Slope из линейной регрессии по реальным измерениям фильтрует кратковременные всплески.
+  #
+  # Калибровка на ДГУ 6003790403: нормальные значения slope = -12..+13 °C/ч.
+  # Пороги выбраны заметно выше нормального прогрева, с требованием устойчивости.
+  cooling_slope_warning_c_per_h: 20.0   # Устойчивый тренд > 20 °C/ч → WARNING
+  cooling_slope_alarm_c_per_h:   40.0   # Устойчивый тренд > 40 °C/ч → ALARM
+  # Минимальная длительность подсегмента для применения детектора
+  min_segment_duration_sec: 300         # Короткие сегменты (< 5 мин) игнорируем
+  # Гейт по режиму: только RUN_STATE=3 (установившаяся работа)
+  # valid_run_states: задаётся неявно в коде (run_state != 3 → return [])
+  # Приближение к порогу HCT Warning (вторичная проверка по max-значению)
+  proximity_warning_pct: 10          # coolant_max > HCT_warning - 10% → WARNING
   severity_default: WARNING
   _source: TUNABLE
 
 # ─── OIL_DILUTION: Разжижение/перегрев масла ────────────────────────────────
 OIL_DILUTION:
   enabled: true
+  # Валидные режимы: давление масла = 0 на остановленном моторе — норма, не диагноз.
+  valid_run_states: [3]
   # Совместное срабатывание: давление масла падает И температура растёт
   oil_press_drop_kpa: 50          # падение OIL_PRESS на > 50 кПа от медианы подсегмента
   oil_temp_rise_c: 10             # одновременный рост OIL_TEMP на > 10 °C
@@ -131,6 +142,8 @@ THERMAL_HIGHLOAD:
 # ─── LIMIT_PROXIMITY: Близость к паспортному порогу ─────────────────────────
 LIMIT_PROXIMITY:
   enabled: true
+  # Валидные режимы: давление масла 0 на стопе — норма, не приближение к аварии.
+  valid_run_states: [3]
   # Предупреждать когда любой параметр приближается к паспортному/контроллерному порогу
   proximity_pct: 10               # в пределах X% от порога → WARNING
   # Конкретные пороги берутся из thresholds.yaml:

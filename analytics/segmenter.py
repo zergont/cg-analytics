@@ -20,6 +20,7 @@ from typing import Any
 
 from .config import AnalyticsConfig
 from .contract import RiskAccumulators, Segment, Subsegment
+from .forward_fill import apply_forward_fill
 from .metrics import compute_characteristics, compute_derived_metrics
 from .accumulators import update_accumulators
 from .detectors import run_all_detectors
@@ -815,14 +816,18 @@ def segment(
             if pre_rows or seg_rows:
                 seg_by_addr[addr] = pre_rows + seg_rows
 
+        # Forward-fill: заполняем отсутствующие значения в пакетах по пинг-регистру.
+        # Строки с is_carried_forward=True используются только для агрегатов;
+        # velocity-метрики их игнорируют.
+        seg_gaps = _filter_gaps(gaps, seg_start, seg_end)
+        seg_by_addr = apply_forward_fill(seg_by_addr, cfg, seg_start, seg_end, seg_gaps)
+
         # Fault-периоды, пересекающиеся с сегментом
         fault_periods_in_seg = [
             fp for fp in fault_periods
             if _tz(fp["fault_start"]) < _tz(seg_end)
             and (_tz(fp["fault_end"]) if fp.get("fault_end") else _tz(seg_end)) > _tz(seg_start)
         ]
-
-        seg_gaps = _filter_gaps(gaps, seg_start, seg_end)
 
         # Идентификатор сегмента — детерминированный
         seg_id = (

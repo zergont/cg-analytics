@@ -104,8 +104,10 @@ def compute_characteristics(
         role = meta.get("role", f"addr_{addr}")
         unit = meta.get("unit", "")
 
-        # Только валидные значения внутри окна
+        # Все валидные значения в окне (включая forward-fill) — для агрегатов.
+        # Только реальные измерения (is_carried_forward=False) — для slope/тренда.
         window: list[tuple[datetime, float]] = []
+        window_real: list[tuple[datetime, float]] = []  # только реальные, без ff
         for r in rows:
             ts = _tz(r["ts"])
             if ts < t_start or ts >= t_end:
@@ -120,6 +122,8 @@ def compute_characteristics(
             except (TypeError, ValueError):
                 continue
             window.append((ts, fv))
+            if not r.get("is_carried_forward", False):
+                window_real.append((ts, fv))
 
         if not window:
             continue
@@ -127,7 +131,9 @@ def compute_characteristics(
         vals = [v for _, v in window]
         med = _median(vals)
         mad_v = _mad(vals)
-        slope = _linear_slope_per_hour(window)
+        # Slope считается только по реальным измерениям — ff-копии не вносят
+        # ложных ступенек при экстраполяции тренда.
+        slope = _linear_slope_per_hour(window_real if window_real else window)
 
         char = Characteristic(
             role=role,
@@ -164,10 +170,18 @@ def compute_derived_metrics(
     heartbeat = float(cfg.seg("data_quality", "heartbeat_nominal_sec", default=30))
     max_mult = float(cfg.seg("data_quality", "heartbeat_max_multiplier", default=3))
 
-    def _rows_in(addr: int) -> list[tuple[datetime, float]]:
+    def _rows_in(addr: int, real_only: bool = False) -> list[tuple[datetime, float]]:
+        """Выборка значений по адресу в окне подсегмента.
+
+        real_only=True — пропускать строки с is_carried_forward=True.
+        Используется для скоростных метрик (V), чтобы ff-строки не порождали
+        артефактных скачков на длинных стабильных участках.
+        """
         rows = by_addr.get(addr, [])
         result = []
         for r in rows:
+            if real_only and r.get("is_carried_forward", False):
+                continue
             ts = _tz(r["ts"])
             if ts < t_start or ts >= t_end:
                 continue
@@ -295,18 +309,25 @@ def compute_derived_metrics(
     freq_vals = [v for _, v in freq_rows]
     freq_stability_mad = _mad(freq_vals)
 
+    # Скоростные метрики (V) — только реальные измерения (real_only=True),
+    # forward-fill строки не участвуют: они несут «последнее известное», а не
+    # новое измерение, и не должны создавать артефактных скачков скорости.
+    p_total_real = _rows_in(_addr("ACTIVE_POWER_TOTAL") or 0, real_only=True) if _addr("ACTIVE_POWER_TOTAL") else []
+    rpm_rows_real = _rows_in(_addr("RPM") or 0, real_only=True) if _addr("RPM") else []
+    cool_t_real = _rows_in(_addr("COOLANT_TEMP") or 0, real_only=True) if _addr("COOLANT_TEMP") else []
+    oil_press_real = _rows_in(_addr("OIL_PRESS") or 0, real_only=True) if _addr("OIL_PRESS") else []
+
     # dP_dt_max (кВт/с) — максимальная скорость изменения мощности
-    dP_dt_max = _max_speed(p_total, gaps, heartbeat, max_mult, absolute=True)
+    dP_dt_max = _max_speed(p_total_real, gaps, heartbeat, max_mult, absolute=True)
 
     # dRPM_dt_max
-    dRPM_dt_max = _max_speed(rpm_rows, gaps, heartbeat, max_mult, absolute=True)
+    dRPM_dt_max = _max_speed(rpm_rows_real, gaps, heartbeat, max_mult, absolute=True)
 
     # dCoolant_dt_max (°C/час) — максимальная скорость роста Т ОЖ
-    dCoolant_dt_max = _max_speed_per_hour(cool_t, gaps, heartbeat, max_mult, positive=True)
+    dCoolant_dt_max = _max_speed_per_hour(cool_t_real, gaps, heartbeat, max_mult, positive=True)
 
     # dOil_press_dt_min (кПа/с) — максимальная скорость ПАДЕНИЯ давления масла (отрицательная)
-    oil_press = _rows_in(_addr("OIL_PRESS") or 0) if _addr("OIL_PRESS") else []
-    dOil_press_dt_min = _min_speed(oil_press, gaps, heartbeat, max_mult)
+    dOil_press_dt_min = _min_speed(oil_press_real, gaps, heartbeat, max_mult)
 
     # coolant_below_60_sec — время с Т ОЖ < порога
     below_c = float(cfg.thr("coolant_temperature", "tunable", "below_60_risk_threshold_c", default=60.0))
