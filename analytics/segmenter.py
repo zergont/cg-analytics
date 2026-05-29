@@ -253,19 +253,39 @@ def _compute_data_quality(
         return 1.0
     expected_per_addr = effective_sec / heartbeat
 
+    # Приоритет 1: регистр-пинг (heartbeat_addr) — меняется при каждом опросе,
+    # поэтому его плотность = прямой индикатор качества связи.
+    # Большинство остальных регистров работают «report-by-exception» и почти
+    # не меняются в стабильном режиме — их считать нельзя.
+    hb_addr = cfg.seg("data_quality", "heartbeat_addr", default=None)
+    if hb_addr is not None:
+        try:
+            hb_addr = int(hb_addr)
+        except (TypeError, ValueError):
+            hb_addr = None
+
+    if hb_addr and hb_addr in by_addr and expected_per_addr > 0:
+        actual = len([r for r in by_addr[hb_addr] if t0 <= _tz(r["ts"]) < t1])
+        return round(min(1.0, actual / expected_per_addr), 3)
+
+    # Fallback: нет пинг-регистра — считаем по активным аналоговым регистрам
+    # (тем, у которых есть хоть одна строка в окне).
     analog_addrs = [
         addr for addr, meta in cfg.register_map.items()
         if meta.get("kind") == "analog"
     ]
-    if not analog_addrs or expected_per_addr <= 0:
+    active_addrs = [
+        addr for addr in analog_addrs
+        if any(t0 <= _tz(r["ts"]) < t1 for r in by_addr.get(addr, []))
+    ]
+    if not active_addrs or expected_per_addr <= 0:
         return 1.0
 
-    total_expected = len(analog_addrs) * expected_per_addr
+    total_expected = len(active_addrs) * expected_per_addr
     total_actual = sum(
         len([r for r in by_addr.get(addr, []) if t0 <= _tz(r["ts"]) < t1])
-        for addr in analog_addrs
+        for addr in active_addrs
     )
-
     return round(min(1.0, total_actual / total_expected), 3)
 
 

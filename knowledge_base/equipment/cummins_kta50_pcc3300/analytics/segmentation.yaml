@@ -34,10 +34,16 @@ data_quality:
   # Если Δt > heartbeat_nominal_sec × heartbeat_max_multiplier — считаем разрывом.
   heartbeat_nominal_sec: 30    # номинальный интервал опроса Modbus (сек)
   heartbeat_max_multiplier: 3  # Δt > 30 × 3 = 90 сек → аномальный пропуск
+  # Регистр-пинг: всегда меняется при каждом опросе (счётчик или время).
+  # Используется как точный индикатор качества связи вместо усреднения по всем регистрам
+  # (большинство регистров работают «report-by-exception» и почти не меняются в стабильном режиме).
+  # data_quality = actual_ping_rows / expected_rows (duration / heartbeat_nominal_sec)
+  heartbeat_addr: 40290
   description: >
     Скорости (V-метрики) через разрывы не вычисляются.
-    Разрыв also проверяется по таблице data_gaps (offline/stale).
-    data_quality = доля валидных данных от ожидаемого объёма [0.0 – 1.0].
+    data_quality считается по регистру-пингу (heartbeat_addr): число пришедших
+    пакетов / ожидаемое число (duration / heartbeat_nominal_sec).
+    Если heartbeat_addr не задан или нет данных — fallback на покрытие активных регистров.
   _source: TUNABLE
 
 # ─── ИСТОЧНИК LOAD_PCT ───────────────────────────────────────────────────────

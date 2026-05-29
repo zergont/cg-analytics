@@ -561,10 +561,13 @@ def _detect_controller_faults(
         if fs >= t_end or fe <= t_start:
             continue
 
-        raw_sev = fp.get("severity", "warning")
+        # severity=None означает, что для бита не задана серьёзность → INFO (игнорируем).
+        # fp.get("severity", "warning") возвращает None если ключ есть со значением NULL,
+        # поэтому явно проверяем на отсутствие/пустоту и маппим на "none" → INFO.
+        raw_sev = fp.get("severity") or "none"
         severity = cfg.bitmap_severity(raw_sev)
         if severity == "INFO":
-            continue  # не добавляем INFO-фолты в детекции
+            continue  # информационные биты (ReadyToLoad, NotInAuto и т.п.) не детектируем
 
         name = fp.get("fault_name_ru") or fp.get("fault_name") or f"addr={fp['addr']} bit={fp['bit']}"
         addr = fp.get("addr", 0)
