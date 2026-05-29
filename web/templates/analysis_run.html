@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Аналитический прогон — cg-analytics{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="mb-0">
+        Аналитический прогон
+        <small class="text-muted fw-normal">/ {{ run.router_sn }} / {{ run.equip_type }} / {{ run.panel_id }}</small>
+    </h5>
+    <div class="d-flex gap-2">
+        <a href="/history-v2/{{ run.router_sn }}/{{ run.equip_type }}/{{ run.panel_id }}"
+           class="btn btn-sm btn-outline-secondary">← История прогонов</a>
+        <a href="/analysis/{{ run.id }}/md"
+           class="btn btn-sm btn-outline-primary">↓ Скачать MD</a>
+    </div>
+</div>
+
+{# Статус-баннер #}
+{% if run.error %}
+    <div class="alert alert-danger">⚠ <strong>Ошибка прогона:</strong> {{ run.error }}</div>
+{% elif run.max_severity == 'SHUTDOWN' %}
+    <div class="alert alert-danger">🔴 <strong>SHUTDOWN</strong> — выявлены события аварийного останова</div>
+{% elif run.max_severity == 'ALARM' %}
+    <div class="alert alert-warning">🟠 <strong>ALARM</strong> — требуется внимание</div>
+{% elif run.max_severity == 'WARNING' %}
+    <div class="alert alert-warning">🟡 <strong>WARNING</strong> — предупреждения зафиксированы</div>
+{% else %}
+    <div class="alert alert-success">🟢 <strong>Норма</strong> — нарушений не выявлено</div>
+{% endif %}
+
+<div class="row g-3 mb-3">
+    <div class="col-md-3">
+        <div class="card text-center">
+            <div class="card-body py-2">
+                <div class="fs-3 fw-bold">{{ run.segments_count or 0 }}</div>
+                <div class="text-muted small">Сегментов</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card text-center">
+            <div class="card-body py-2">
+                <div class="fs-3 fw-bold">{{ run.detections_count or 0 }}</div>
+                <div class="text-muted small">Обнаружений</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card text-center">
+            <div class="card-body py-2">
+                <div class="fs-3 fw-bold">
+                    {% if run.data_quality_avg is not none %}
+                        {{ "%.0f" | format(run.data_quality_avg * 100) }}%
+                    {% else %}—{% endif %}
+                </div>
+                <div class="text-muted small">Качество данных</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card text-center">
+            <div class="card-body py-2">
+                <div class="fs-3 fw-bold">
+                    {% if run.duration_ms is not none %}
+                        {{ "%.1f" | format(run.duration_ms / 1000) }}с
+                    {% else %}—{% endif %}
+                </div>
+                <div class="text-muted small">Время прогона</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3">
+    <div class="col-lg-8">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between">
+                <span class="fw-semibold">Аналитический отчёт</span>
+                <small class="text-muted">v{{ run.analytics_version }}</small>
+            </div>
+            <div class="card-body">
+                {% if run.report_md %}
+                    <pre class="report" style="white-space: pre-wrap; font-size: 0.85rem;">{{ run.report_md }}</pre>
+                {% else %}
+                    <p class="text-muted">Отчёт не сформирован.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-4">
+        <div class="card mb-3">
+            <div class="card-header fw-semibold">Параметры прогона</div>
+            <div class="card-body p-0">
+                <table class="table table-sm mb-0">
+                    <tbody>
+                        <tr><td class="text-muted">UUID</td><td><code style="font-size:0.75rem">{{ run.id }}</code></td></tr>
+                        <tr><td class="text-muted">Оборудование</td><td>{{ run.router_sn }} / {{ run.equip_type }} / {{ run.panel_id }}</td></tr>
+                        <tr><td class="text-muted">Двигатель</td><td>{{ run.engine_sn or '—' }}</td></tr>
+                        <tr><td class="text-muted">Период с</td><td>{{ run.ts_from }}</td></tr>
+                        <tr><td class="text-muted">Период по</td><td>{{ run.ts_to }}</td></tr>
+                        <tr><td class="text-muted">Создан</td><td>{{ run.created_at }}</td></tr>
+                        <tr><td class="text-muted">Версия аналитики</td><td>{{ run.analytics_version }}</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

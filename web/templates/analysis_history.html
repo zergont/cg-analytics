@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}История прогонов — cg-analytics{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="mb-0">
+        История аналитических прогонов
+        <small class="text-muted fw-normal">/ {{ router_sn }} / {{ equip_type }} / {{ panel_id }}</small>
+    </h5>
+    <a href="/analyze" class="btn btn-sm btn-outline-secondary">← Новый анализ</a>
+</div>
+
+{% if runs %}
+<div class="card">
+    <div class="card-body p-0">
+        <table class="table table-hover table-sm mb-0">
+            <thead class="table-light">
+                <tr>
+                    <th>Период с</th>
+                    <th>Период по</th>
+                    <th class="text-center">Сегментов</th>
+                    <th class="text-center">Обнаружений</th>
+                    <th class="text-center">Макс. тревога</th>
+                    <th class="text-center">Качество данных</th>
+                    <th class="text-center">Время прогона</th>
+                    <th>Создан</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for run in runs %}
+                <tr {% if run.error %}class="table-danger"{% endif %}>
+                    <td>{{ run.ts_from }}</td>
+                    <td>{{ run.ts_to }}</td>
+                    <td class="text-center">{{ run.segments_count or '—' }}</td>
+                    <td class="text-center">{{ run.detections_count or '—' }}</td>
+                    <td class="text-center">
+                        {% if run.error %}
+                            <span class="badge bg-secondary">ОШИБКА</span>
+                        {% elif run.max_severity == 'SHUTDOWN' %}
+                            <span class="badge bg-danger">SHUTDOWN</span>
+                        {% elif run.max_severity == 'ALARM' %}
+                            <span class="badge" style="background:#fd7e14">ALARM</span>
+                        {% elif run.max_severity == 'WARNING' %}
+                            <span class="badge bg-warning text-dark">WARNING</span>
+                        {% elif run.max_severity == 'INFO' %}
+                            <span class="badge bg-info">INFO</span>
+                        {% else %}
+                            <span class="badge bg-success">OK</span>
+                        {% endif %}
+                    </td>
+                    <td class="text-center">
+                        {% if run.data_quality_avg is not none %}
+                            {{ "%.0f" | format(run.data_quality_avg * 100) }}%
+                        {% else %}—{% endif %}
+                    </td>
+                    <td class="text-center">
+                        {% if run.duration_ms is not none %}
+                            {{ "%.1f" | format(run.duration_ms / 1000) }}с
+                        {% else %}—{% endif %}
+                    </td>
+                    <td>{{ run.created_at }}</td>
+                    <td>
+                        {% if not run.error %}
+                            <a href="/analysis/{{ run.id }}" class="btn btn-sm btn-outline-primary">Отчёт</a>
+                        {% else %}
+                            <span class="text-muted small">{{ run.error[:60] }}…</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% else %}
+<div class="alert alert-secondary">
+    Прогонов аналитики не найдено. <a href="/analyze">Запустить анализ</a>.
+</div>
+{% endif %}
+{% endblock %}

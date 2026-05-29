@@ -1,0 +1,270 @@
+# Маппинг addr → роль → группа → единица измерения
+# Whitelist регистров для аналитического блока KTA50/PCC3300
+# Источник: ТЗ аналитики, раздел 2.3
+# Изменение: только через веб-морду (раздел 9 ТЗ)
+
+registers:
+
+  # ═══════════════════════════════════════════════════════════════
+  # ГРУППА НАГРУЗКИ  (kind: analog → из history_rich)
+  # ═══════════════════════════════════════════════════════════════
+
+  40034:
+    role: ACTIVE_POWER_TOTAL
+    group: LOAD
+    unit: kW
+    kind: analog
+    description: Суммарная активная мощность (3 фазы)
+    _source: PASSPORT_РЭ
+
+  40031:
+    role: ACTIVE_POWER_L1
+    group: LOAD
+    unit: kW
+    kind: analog
+    description: Активная мощность фаза L1
+    _source: PASSPORT_РЭ
+
+  40032:
+    role: ACTIVE_POWER_L2
+    group: LOAD
+    unit: kW
+    kind: analog
+    description: Активная мощность фаза L2
+    _source: PASSPORT_РЭ
+
+  40033:
+    role: ACTIVE_POWER_L3
+    group: LOAD
+    unit: kW
+    kind: analog
+    description: Активная мощность фаза L3
+    _source: PASSPORT_РЭ
+
+  40038:
+    role: REACTIVE_POWER_TOTAL
+    group: LOAD
+    unit: kVAR
+    kind: analog
+    description: Суммарная реактивная мощность
+    _source: PASSPORT_РЭ
+
+  40043:
+    role: APPARENT_POWER_TOTAL
+    group: LOAD
+    unit: kVA
+    kind: analog
+    description: Суммарная полная мощность
+    _source: PASSPORT_РЭ
+
+  40039:
+    role: POWER_FACTOR
+    group: LOAD
+    unit: PF
+    kind: analog
+    description: Коэффициент мощности
+    _source: PASSPORT_РЭ
+
+  40029:
+    role: CURRENT_AVG
+    group: LOAD
+    unit: A
+    kind: analog
+    description: Средний ток по трём фазам
+    _source: PASSPORT_РЭ
+
+  40026:
+    role: CURRENT_L1
+    group: LOAD
+    unit: A
+    kind: analog
+    description: Ток фаза L1
+    _source: PASSPORT_РЭ
+
+  40027:
+    role: CURRENT_L2
+    group: LOAD
+    unit: A
+    kind: analog
+    description: Ток фаза L2
+    _source: PASSPORT_РЭ
+
+  40028:
+    role: CURRENT_L3
+    group: LOAD
+    unit: A
+    kind: analog
+    description: Ток фаза L3
+    _source: PASSPORT_РЭ
+
+  40068:
+    role: RPM
+    group: LOAD
+    unit: rpm
+    kind: analog
+    description: Частота вращения двигателя
+    _source: PASSPORT_РЭ
+
+  40014:
+    role: LOAD_PCT
+    group: LOAD
+    unit: "%"
+    kind: analog
+    description: Нагрузка в % от номинала (standby)
+    priority: primary   # приоритетный источник LOAD_PCT
+    _source: PASSPORT_РЭ
+
+  43017:
+    role: LOAD_PCT_TOTAL
+    group: LOAD
+    unit: "%"
+    kind: analog
+    description: Нагрузка в % от номинала (total)
+    priority: secondary
+    _source: PASSPORT_РЭ
+
+  43019:
+    role: RATING_KW
+    group: LOAD
+    unit: kW
+    kind: analog
+    description: Номинальная активная мощность установки
+    _source: PASSPORT_РЭ
+
+  43018:
+    role: RATING_KVA
+    group: LOAD
+    unit: kVA
+    kind: analog
+    description: Номинальная полная мощность установки
+    _source: PASSPORT_РЭ
+
+  # ═══════════════════════════════════════════════════════════════
+  # ГРУППА ТЕРМОДИНАМИКИ  (kind: analog → из history_rich)
+  # ═══════════════════════════════════════════════════════════════
+
+  40064:
+    role: COOLANT_TEMP
+    group: THERMO
+    unit: "°C"
+    kind: analog
+    description: Температура охлаждающей жидкости (ОЖ)
+    _source: PASSPORT_РЭ
+
+  40063:
+    role: OIL_TEMP
+    group: THERMO
+    unit: "°C"
+    kind: analog
+    description: Температура масла двигателя
+    _source: PASSPORT_РЭ
+
+  # ═══════════════════════════════════════════════════════════════
+  # ГРУППА ГИДРАВЛИКИ  (kind: analog → из history_rich)
+  # ═══════════════════════════════════════════════════════════════
+
+  40062:
+    role: OIL_PRESS
+    group: HYDRAULIC
+    unit: kPa
+    kind: analog
+    description: Давление масла в канале двигателя
+    _source: PASSPORT_РЭ
+
+  # ═══════════════════════════════════════════════════════════════
+  # ГРУППА ЗДОРОВЬЯ / ЭЛЕКТРИКИ  (kind: analog → из history_rich)
+  # ═══════════════════════════════════════════════════════════════
+
+  40044:
+    role: FREQUENCY
+    group: HEALTH
+    unit: Hz
+    kind: analog
+    description: Частота генератора
+    _source: PASSPORT_РЭ
+
+  40061:
+    role: BATTERY_V
+    group: HEALTH
+    unit: Vdc
+    kind: analog
+    description: Напряжение аккумулятора
+    _source: PASSPORT_РЭ
+
+  # ═══════════════════════════════════════════════════════════════
+  # ГРУППА НАРАБОТКИ  (kind: analog → из history_rich, склеена в БД)
+  # ═══════════════════════════════════════════════════════════════
+
+  40070:
+    role: ENGINE_HOURS
+    group: STATE
+    unit: h
+    kind: analog
+    description: Наработка двигателя (склеена в БД, выдаётся обработанной)
+    _source: PASSPORT_РЭ
+
+  # ═══════════════════════════════════════════════════════════════
+  # ГРУППА СОСТОЯНИЯ / СОБЫТИЙ  (kind: enum → из enum_history)
+  # ═══════════════════════════════════════════════════════════════
+
+  40011:
+    role: RUN_STATE
+    group: STATE
+    unit: ~
+    kind: enum
+    description: Genset Run Sequence State — основной сигнал сегментации L1
+    states:
+      0: Stop
+      1: Time Delay to Start
+      2: Warmup at Idle
+      3: Rated Freq and Voltage
+      4: Cooldown / Stop Delay
+      5: Cooldown at Idle
+      6: Rated to Idle Transition Delay
+    _source: PASSPORT_РЭ
+
+  40010:
+    role: SWITCH_POS
+    group: STATE
+    unit: ~
+    kind: enum
+    description: Switch Position (ручной/автомат/выкл)
+    _source: PASSPORT_РЭ
+
+  40012:
+    role: LAST_FAULT_CODE
+    group: STATE
+    unit: ~
+    kind: analog
+    description: Код последней неисправности
+    _source: PASSPORT_РЭ
+
+  40013:
+    role: LAST_FAULT_TYPE
+    group: STATE
+    unit: ~
+    kind: analog
+    description: Тип последней неисправности (enum)
+    _source: PASSPORT_РЭ
+
+  # ═══════════════════════════════════════════════════════════════
+  # FAULT MASKS 40400–40415  (kind: fault_bitmap → из fault_history)
+  # Регистры хранятся как периоды активных битов
+  # ═══════════════════════════════════════════════════════════════
+
+  40400: {role: FAULT_MASK_0,  group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40401: {role: FAULT_MASK_1,  group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40402: {role: FAULT_MASK_2,  group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40403: {role: FAULT_MASK_3,  group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40404: {role: FAULT_MASK_4,  group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40405: {role: FAULT_MASK_5,  group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40406: {role: FAULT_MASK_6,  group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40407: {role: FAULT_MASK_7,  group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40408: {role: FAULT_MASK_8,  group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40409: {role: FAULT_MASK_9,  group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40410: {role: FAULT_MASK_10, group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40411: {role: FAULT_MASK_11, group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40412: {role: FAULT_MASK_12, group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40413: {role: FAULT_MASK_13, group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40414: {role: FAULT_MASK_14, group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40415: {role: FAULT_MASK_15, group: FAULT, kind: fault_bitmap, _source: CONTROLLER}

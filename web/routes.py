@@ -136,11 +136,14 @@ async def analyze_stream(
     ts_from_local: str = Form(...),
     ts_to_local:   str = Form(...),
 ):
-    """SSE-стрим сбора данных с прогрессом по этапам."""
+    """SSE-стрим аналитики v2 с прогрессом по этапам."""
     import json as _json
     from datetime import datetime, timezone as _tz_mod
-    from pipeline.aggregator import compute_register_stats
-    from config import get_tz
+    from config import get_tz, settings as _cfg
+    from analytics.config import AnalyticsConfig
+    from analytics import source as _asrc
+    from analytics.segmenter import segment as _segment
+    from analytics.serializer import to_markdown, build_run_summary
 
     def _evt(data: dict) -> str:
         return f"data: {_json.dumps(data, ensure_ascii=False)}\n\n"
@@ -155,64 +158,102 @@ async def analyze_stream(
                 yield _evt({"stage": "error", "message": "Конец диапазона должен быть позже начала"})
                 return
 
-            duration_h = (ts_to_utc - ts_from_utc).total_seconds() / 3600
+            # Конфигурация
+            kb_path_rel = await analytics.get_equipment_kb_path(router_sn, equip_type, panel_id)
+            if not kb_path_rel:
+                yield _evt({"stage": "error", "message": "Не задан kb_path для оборудования"})
+                return
+            kb_path = _cfg.knowledge_base_path / "equipment" / kb_path_rel
+            cfg = AnalyticsConfig(kb_path)
 
-            yield _evt({"stage": "history", "status": "running", "label": "История аналогов"})
-            history = await source.get_history_range(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc)
-            yield _evt({"stage": "history", "status": "done", "rows": len(history)})
-
-            yield _evt({"stage": "enum", "status": "running", "label": "Периоды состояний"})
-            enum_periods = await source.get_enum_history_range(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc)
-            yield _evt({"stage": "enum", "status": "done", "count": len(enum_periods)})
-
-            yield _evt({"stage": "fault", "status": "running", "label": "События"})
-            fault_periods = await source.get_fault_history_range(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc)
-            yield _evt({"stage": "fault", "status": "done", "count": len(fault_periods)})
-
-            yield _evt({"stage": "build", "status": "running", "label": "Сборка MD-пакета"})
-            import json as _j2
             registry = await analytics.get_equipment_registry()
             eq = next(
                 (e for e in registry
                  if e["router_sn"] == router_sn and e["equip_type"] == equip_type
                  and str(e["panel_id"]) == str(panel_id)), {}
             )
-            kb_path = await analytics.get_equipment_kb_path(router_sn, equip_type, panel_id)
-            operation_rules: dict = {}
-            if kb_path:
-                try:
-                    from config import settings as _cfg
-                    op_path = _cfg.knowledge_base_path / "equipment" / kb_path / "operation_rules.json"
-                    if op_path.exists():
-                        operation_rules = _j2.loads(op_path.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
-            reg_stats = compute_register_stats(history, ts_to_utc)
-            md = _build_analysis_md(
-                router_sn=router_sn, equip_type=equip_type, panel_id=panel_id,
-                eq=eq, kb_path=kb_path or "",
-                ts_from_utc=ts_from_utc, ts_to_utc=ts_to_utc,
-                duration_h=duration_h, tz=tz,
-                reg_stats=reg_stats,
-                enum_periods=enum_periods, fault_periods=fault_periods,
-                operation_rules=operation_rules,
+            engine_sn = eq.get("engine_sn") or ""
+
+            # Этап 1: Аналоговая история
+            yield _evt({"stage": "history", "status": "running", "label": "История аналогов"})
+            history = await _asrc.get_whitelist_history(
+                router_sn, equip_type, panel_id,
+                ts_from_utc, ts_to_utc, cfg.whitelist_analog,
             )
+            yield _evt({"stage": "history", "status": "done", "rows": len(history)})
+
+            # Этап 2: Периоды состояний
+            yield _evt({"stage": "enum", "status": "running", "label": "Периоды состояний"})
+            enum_periods = await _asrc.get_enum_periods(
+                router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc,
+                addrs=[40011, 40010],
+            )
+            yield _evt({"stage": "enum", "status": "done", "count": len(enum_periods)})
+
+            # Этап 3: Fault-периоды
+            yield _evt({"stage": "fault", "status": "running", "label": "События и неисправности"})
+            fault_periods = await _asrc.get_fault_periods(
+                router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc,
+                fault_addrs=cfg.whitelist_fault,
+            )
+            yield _evt({"stage": "fault", "status": "done", "count": len(fault_periods)})
+
+            # Этап 4: Пропуски связи
+            yield _evt({"stage": "gaps", "status": "running", "label": "Пропуски связи"})
+            gaps = await _asrc.get_data_gaps(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc)
+            yield _evt({"stage": "gaps", "status": "done", "count": len(gaps)})
+
+            # Этап 5: Сегментация и расчёт
+            yield _evt({"stage": "build", "status": "running", "label": "Сегментация и диагностика"})
+            segments = _segment(
+                enum_periods=enum_periods,
+                history=history,
+                fault_periods=fault_periods,
+                gaps=gaps,
+                cfg=cfg,
+                router_sn=router_sn,
+                equip_type=equip_type,
+                panel_id=panel_id,
+                engine_sn=engine_sn,
+                ts_from=ts_from_utc,
+                ts_to=ts_to_utc,
+            )
+            md = to_markdown(segments, router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc)
+            summary = build_run_summary(segments)
             yield _evt({"stage": "build", "status": "done"})
+
+            # Сохранение в БД (не блокируем стрим)
+            run_id = None
+            try:
+                from analytics.serializer import to_json as _to_json
+                from db.analytics import save_analysis_run as _save
+                seg_json = _to_json(segments, router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc)
+                run_id = await _save({
+                    "router_sn": router_sn, "equip_type": equip_type, "panel_id": panel_id,
+                    "engine_sn": engine_sn, "ts_from": ts_from_utc, "ts_to": ts_to_utc,
+                    "analytics_version": "2.0.0",
+                    "segments_json": seg_json, "report_md": md,
+                    **summary,
+                })
+            except Exception as _db_err:
+                logger.warning("Ошибка сохранения в БД: %s", _db_err)
+
             yield _evt({
                 "stage": "complete",
                 "result": {
-                    "markdown":            md,
-                    "history_rows":        len(history),
-                    "registers_count":     len(reg_stats),
-                    "enum_periods_count":  len(enum_periods),
-                    "fault_periods_count": len(fault_periods),
-                    "ts_from_local":       ts_from_local,
-                    "ts_to_local":         ts_to_local,
-                    "tz_name":             tz.key,
+                    "markdown":          md,
+                    "run_id":            run_id,
+                    "segments_count":    summary["segments_count"],
+                    "detections_count":  summary["detections_count"],
+                    "max_severity":      summary.get("max_severity"),
+                    "data_quality_avg":  summary.get("data_quality_avg"),
+                    "ts_from_local":     ts_from_local,
+                    "ts_to_local":       ts_to_local,
+                    "tz_name":           tz.key,
                 },
             })
         except Exception as e:
-            logger.exception("Ошибка сбора данных: %s", e)
+            logger.exception("Ошибка аналитики: %s", e)
             yield _evt({"stage": "error", "message": str(e)})
 
     return StreamingResponse(
@@ -220,6 +261,48 @@ async def analyze_stream(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.get("/analysis/{run_id}", response_class=HTMLResponse)
+async def analysis_run_view(request: Request, run_id: str):
+    """Просмотр результата аналитического прогона v2."""
+    run = await analytics.get_analysis_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Прогон не найден")
+    return templates.TemplateResponse(request, "analysis_run.html", {"run": run})
+
+
+@router.get("/analysis/{run_id}/md")
+async def analysis_run_md(run_id: str):
+    """Скачать Markdown-отчёт прогона."""
+    run = await analytics.get_analysis_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Прогон не найден")
+    md = run.get("report_md") or "# Нет данных"
+    filename = f"analysis_{run_id[:8]}.md"
+    from fastapi.responses import Response
+    return Response(
+        content=md.encode("utf-8"),
+        media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/history-v2/{router_sn}/{equip_type}/{panel_id}", response_class=HTMLResponse)
+async def analysis_history(
+    request: Request,
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+):
+    """История аналитических прогонов v2 для одной ГУ."""
+    runs = await analytics.list_analysis_runs(router_sn, equip_type, panel_id, limit=50)
+    return templates.TemplateResponse(request, "analysis_history.html", {
+        "router_sn": router_sn,
+        "equip_type": equip_type,
+        "panel_id": panel_id,
+        "runs": runs,
+    })
 
 
 @router.get("/log", response_class=HTMLResponse)
@@ -248,12 +331,11 @@ async def _run_analysis(
     ts_to_local: str,
     tz,
 ) -> dict:
-    """Собрать данные за диапазон и сформировать Markdown-пакет для ИИ."""
-    import json as _json
+    """Запустить аналитику v2 за диапазон и вернуть результат с Markdown-отчётом."""
     from datetime import datetime, timezone as _tz
-    from pipeline.aggregator import compute_register_stats
+    from config import settings as _cfg
+    from analytics.runner import run_analysis
 
-    # Парсим локальное время → UTC
     fmt = "%Y-%m-%dT%H:%M"
     ts_from_utc = datetime.strptime(ts_from_local, fmt).replace(tzinfo=tz).astimezone(_tz.utc)
     ts_to_utc   = datetime.strptime(ts_to_local,   fmt).replace(tzinfo=tz).astimezone(_tz.utc)
@@ -261,16 +343,15 @@ async def _run_analysis(
     if ts_to_utc <= ts_from_utc:
         raise ValueError("Конец диапазона должен быть позже начала")
 
-    duration_h = (ts_to_utc - ts_from_utc).total_seconds() / 3600
+    # Метаданные из реестра (engine_sn, kb_path)
+    kb_path_rel = await analytics.get_equipment_kb_path(router_sn, equip_type, panel_id)
+    if not kb_path_rel:
+        raise ValueError(
+            f"Не задан kb_path для {router_sn}/{equip_type}/{panel_id}. "
+            "Укажите путь к Knowledge Base в настройках оборудования."
+        )
+    kb_path = _cfg.knowledge_base_path / "equipment" / kb_path_rel
 
-    # Загружаем данные параллельно: аналог, enum-периоды, fault-периоды
-    history, enum_periods, fault_periods = await asyncio.gather(
-        source.get_history_range(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc),
-        source.get_enum_history_range(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc),
-        source.get_fault_history_range(router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc),
-    )
-
-    # Метаданные оборудования из реестра
     registry = await analytics.get_equipment_registry()
     eq = next(
         (e for e in registry
@@ -279,45 +360,35 @@ async def _run_analysis(
          and str(e["panel_id"]) == str(panel_id)),
         {}
     )
+    engine_sn = eq.get("engine_sn") or ""
 
-    # Правила эксплуатации из KB (только operation_rules.json, если задан kb_path)
-    kb_path = await analytics.get_equipment_kb_path(router_sn, equip_type, panel_id)
-    operation_rules: dict = {}
-    if kb_path:
-        try:
-            from config import settings as _cfg
-            op_path = _cfg.knowledge_base_path / "equipment" / kb_path / "operation_rules.json"
-            if op_path.exists():
-                operation_rules = _json.loads(op_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-
-    # Статистика по аналоговым регистрам
-    reg_stats = compute_register_stats(history, ts_to_utc)
-
-    # Собираем Markdown
-    md = _build_analysis_md(
-        router_sn=router_sn, equip_type=equip_type, panel_id=panel_id,
-        eq=eq, kb_path=kb_path or "",
-        ts_from_utc=ts_from_utc, ts_to_utc=ts_to_utc,
-        duration_h=duration_h, tz=tz,
-        reg_stats=reg_stats,
-        enum_periods=enum_periods, fault_periods=fault_periods,
-        operation_rules=operation_rules,
+    result = await run_analysis(
+        router_sn=router_sn,
+        equip_type=equip_type,
+        panel_id=panel_id,
+        engine_sn=engine_sn,
+        ts_from=ts_from_utc,
+        ts_to=ts_to_utc,
+        kb_path=kb_path,
     )
 
+    if result.get("error"):
+        raise RuntimeError(result["error"])
+
     return {
-        "markdown": md,
-        "history_rows":        len(history),
-        "registers_count":     len(reg_stats),
-        "enum_periods_count":  len(enum_periods),
-        "fault_periods_count": len(fault_periods),
-        "ts_from_local": ts_from_local,
-        "ts_to_local":   ts_to_local,
-        "tz_name": tz.key,
-        "router_sn": router_sn,
-        "equip_type": equip_type,
-        "panel_id": panel_id,
+        "markdown":          result["report_md"],
+        "run_id":            result.get("run_id"),
+        "segments_count":    result["segments_count"],
+        "detections_count":  result["detections_count"],
+        "max_severity":      result.get("max_severity"),
+        "data_quality_avg":  result.get("data_quality_avg"),
+        "duration_ms":       result.get("duration_ms"),
+        "ts_from_local":     ts_from_local,
+        "ts_to_local":       ts_to_local,
+        "tz_name":           tz.key,
+        "router_sn":         router_sn,
+        "equip_type":        equip_type,
+        "panel_id":          panel_id,
     }
 
 
@@ -890,6 +961,69 @@ async def sync_equipment():
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+_ANALYTICS_CONFIG_FILES = [
+    "mapping.yaml",
+    "thresholds.yaml",
+    "zones.yaml",
+    "segmentation.yaml",
+    "detectors.yaml",
+    "fault_matrix.yaml",
+]
+
+
+@router.get("/knowledge/{kb_path}/analytics-config", response_class=JSONResponse)
+async def analytics_config_files(kb_path: str):
+    """Список YAML-конфигов аналитики для KB."""
+    base = _kb_base(kb_path)
+    analytics_dir = base / "analytics"
+    files = []
+    for name in _ANALYTICS_CONFIG_FILES:
+        p = analytics_dir / name
+        files.append({
+            "name": name,
+            "exists": p.exists(),
+            "size_fmt": _fmt_size(p.stat().st_size) if p.exists() else None,
+        })
+    return JSONResponse({"files": files, "dir_exists": analytics_dir.exists()})
+
+
+@router.get("/knowledge/{kb_path}/analytics-config/download/{filename}")
+async def analytics_config_download(kb_path: str, filename: str):
+    """Скачать YAML-конфиг аналитики."""
+    base = _kb_base(kb_path)
+    _safe_filename(filename)
+    if filename not in _ANALYTICS_CONFIG_FILES:
+        raise HTTPException(status_code=400, detail="Недопустимое имя файла конфига")
+    p = base / "analytics" / filename
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="Файл не найден")
+    return FileResponse(path=str(p), filename=filename, media_type="application/x-yaml")
+
+
+@router.post("/knowledge/{kb_path}/analytics-config/upload")
+async def analytics_config_upload(kb_path: str, file: UploadFile = File(...)):
+    """Загрузить (заменить) YAML-конфиг аналитики."""
+    base = _kb_base(kb_path)
+    filename = _safe_filename(file.filename or "")
+    if filename not in _ANALYTICS_CONFIG_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Недопустимое имя файла. Разрешены: {', '.join(_ANALYTICS_CONFIG_FILES)}",
+        )
+    analytics_dir = base / "analytics"
+    analytics_dir.mkdir(exist_ok=True)
+    content = await file.read()
+    # Базовая валидация: YAML должен парситься
+    try:
+        import yaml as _yaml
+        _yaml.safe_load(content)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Невалидный YAML: {e}")
+    (analytics_dir / filename).write_bytes(content)
+    logger.info("Analytics config upload: %s / analytics/%s (%d байт)", kb_path, filename, len(content))
+    return RedirectResponse(url="/knowledge", status_code=303)
+
 
 def _count_lines(path) -> int:
     if not path or not path.exists():

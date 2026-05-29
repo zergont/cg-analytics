@@ -1,0 +1,123 @@
+# Пороговые значения для аналитики KTA50/PCC3300
+# Три класса: PASSPORT_РЭ (РЭ Cummins) / CONTROLLER (уставки PCC3300) / TUNABLE (настраиваемые)
+# При конфликте: для детекции используется CONTROLLER (строже и соответствует реальной защите).
+# Паспортные значения хранятся как справочные (для контекста и LLM-интерпретации).
+# Источники: A035B516, 0900-0670, K38-50_РЭ_и_ТО, PCC_3_3_Rus
+# Изменение: только через веб-морду (раздел 9 ТЗ)
+
+# ─── ДАВЛЕНИЕ МАСЛА ─────────────────────────────────────────────────────────
+oil_pressure:
+  passport:
+    idle_min_kpa: 138         # K38-50_РЭ_и_ТО, раздел V (20 psi)
+    rated_min_kpa: 310        # K38-50_РЭ_и_ТО, раздел V (45 psi) — нижняя граница нормы
+    rated_max_kpa: 483        # K38-50_РЭ_и_ТО, раздел V (70 psi) — верхняя граница нормы
+    _source: PASSPORT_РЭ
+  controller:
+    warning_rated_kpa: 275.8  # 0900-0670, стр.277: LOP Warning, Default 40 psig; код 143
+    warning_idle_kpa: 103.4   # 0900-0670, стр.277: LOP Idle Warning, Default 15 psig
+    shutdown_rated_kpa: 241.3 # 0900-0670, стр.277: LOP Shutdown, Default 35 psig; код 415
+    shutdown_idle_kpa: 68.9   # 0900-0670, стр.277: LOP Idle Shutdown, Default 10 psig
+    lop_enable_time_sec: 10   # 0900-0670, стр.277: LOP Enable Time — время от Running до активации защиты
+    warning_set_time_sec: 5   # 0900-0670, стр.277: LOP Warning Set Time
+    shutdown_set_time_sec: 8  # 0900-0670, стр.277: LOP Shutdown Set Time
+    _source: CONTROLLER
+  tunable:
+    proximity_warning_pct: 15 # предупреждать при подходе на X% к порогу shutdown_rated_kpa
+    _source: TUNABLE
+
+# ─── ТЕМПЕРАТУРА МАСЛА ──────────────────────────────────────────────────────
+oil_temperature:
+  passport:
+    max_c: 120                # K38-50_РЭ_и_ТО, раздел V (250°F) — механический предел
+    _source: PASSPORT_РЭ
+  controller:
+    warning_c: 105.0          # 0900-0670, стр.277: HOT Warning, Default 221°F; код 212
+    shutdown_c: 110.0         # 0900-0670, стр.277: HOT Shutdown, Default 230°F; код 214
+    shutdown_set_time_sec: 2  # 0900-0670, стр.277: HOT Shutdown Set Time
+    _source: CONTROLLER
+  tunable:
+    proximity_warning_pct: 10 # % от controller.warning_c
+    _source: TUNABLE
+
+# ─── ТЕМПЕРАТУРА ОЖ ─────────────────────────────────────────────────────────
+coolant_temperature:
+  passport:
+    normal_min_c: 70          # K38-50_РЭ_и_ТО: минимальная рабочая температура
+    normal_max_c: 95          # K38-50_РЭ_и_ТО: максимум в верхнем бачке радиатора
+    thermostat_open_c: 80     # K38-50_РЭ_и_ТО: начало открытия термостата (175°F)
+    thermostat_full_c: 90     # K38-50_РЭ_и_ТО: полное открытие термостата (195°F)
+    _source: PASSPORT_РЭ
+  controller:
+    warning_c: 97.8           # 0900-0670, стр.277: HCT Warning, Default 208°F; код 144
+    shutdown_with_cooldown_c: 102.2  # 0900-0670, стр.277: HCT Shutdown/w Cooldown, Default 216°F
+    shutdown_c: 103.9         # 0900-0670, стр.277: HCT Shutdown, Default 219°F; код 151
+    low_warning_c: 21         # A035B516, стр.51: Low Coolant Temperature warning; код 1435
+    shutdown_set_time_sec: 2  # 0900-0670, стр.277: HCT Shutdown Set Time
+    _source: CONTROLLER
+  tunable:
+    below_60_risk_threshold_c: 60  # Т ОЖ < 60°C → риск wet stacking / закоксовки (РЭ)
+    proximity_warning_pct: 10      # % от controller.warning_c
+    _source: TUNABLE
+
+# ─── НАПРЯЖЕНИЕ АКБ ─────────────────────────────────────────────────────────
+battery_voltage:
+  passport:
+    nominal_v: 24             # 0900-0670, стр.272: Nominal Battery Voltage
+    _source: PASSPORT_РЭ
+  controller:
+    normal_min_v: 24          # A035B516, стр.126, код 441
+    normal_max_v: 32          # A035B516, стр.126, код 442
+    weak_cranking_v: 14.4     # 0900-0670, стр.272: Weak Battery Threshold при прокрутке; код 1442
+    warning_low_v: 24         # 0900-0670, стр.272: 24V Low Battery Running Threshold; код 441
+    warning_high_v: 32        # 0900-0670, стр.272: 24V High Battery Voltage; код 442
+    _source: CONTROLLER
+  tunable:
+    sag_alarm_v: 19.0         # провальное напряжение при пуске → START_FAILURE; TUNABLE
+    _source: TUNABLE
+
+# ─── ЧАСТОТА ────────────────────────────────────────────────────────────────
+frequency:
+  passport:
+    nominal_hz: 50.0          # 50 Hz (установка на данном объекте)
+    rated_rpm: 1500           # 1500 об/мин / 50 Hz; A035B516, стр.14-15
+    _source: PASSPORT_РЭ
+  controller:
+    overspeed_rpm: 1725       # 0900-0670, стр.278: Overspeed Shutdown (50Hz); код 234
+    underfreq_pct: 90         # A035B516: Under Frequency < 90% от номинала; код 1448
+    underfreq_set_time_sec: 10 # A035B516, стр.128: ~10 секунд
+    _source: CONTROLLER
+  tunable:
+    deviation_warning_hz: 1.0  # |freq - nominal| > 1 Hz → внимание
+    stability_mad_warning: 0.3  # MAD(freq) > 0.3 Hz → нестабильность регулятора
+    _source: TUNABLE
+
+# ─── ОБОРОТЫ ────────────────────────────────────────────────────────────────
+rpm:
+  passport:
+    rated_rpm: 1500           # A035B516, стр.14-15 (50 Hz)
+    _source: PASSPORT_РЭ
+  controller:
+    overspeed_rpm: 1725       # 0900-0670, стр.278 (50 Hz)
+    _source: CONTROLLER
+  tunable:
+    idle_max_rpm: 1100        # выше этого — уже не х.х.; TUNABLE (точное значение в документах не указано)
+    stability_mad_warning: 5  # MAD(RPM) > 5 → нестабильность регулятора
+    _source: TUNABLE
+
+# ─── РЕЖИМЫ РАБОТЫ ДВИГАТЕЛЯ ─────────────────────────────────────────────────
+engine_operation:
+  passport:
+    idle_max_duration_sec: 600  # K38-50_РЭ_и_ТО / РЭ: >10 мин на х.х. — риск закоксовки / wet stacking
+    min_load_pct: 30            # A035B516, стр.63: рекомендуемый минимум 30%
+    warmup_min_sec: 180         # A035B516, стр.67-68: прогрев 3-5 мин (берём нижнюю границу)
+    warmup_max_sec: 300         # A035B516: 5 мин
+    cooldown_min_sec: 0         # A035B516, стр.68: 0-10 мин (по обстановке)
+    cooldown_max_sec: 600       # A035B516, стр.68: до 10 мин
+    oil_press_rise_time_sec: 15 # ТЗ, раздел 6.2: паспортный критерий появления давления масла
+    lop_enable_sec: 10          # 0900-0670, стр.277: до активации защиты LOP
+    cold_start_coolant_c: 21    # A035B516: порог «холодного» пуска (ОЖ < 21°C → требуется прогрев)
+    _source: PASSPORT_РЭ
+  tunable:
+    purge_min_load_pct: 30      # нагрузка для «прожига» (сброс риска закоксовки)
+    purge_min_duration_sec: 300 # минимальная длина прожига (5 мин)
+    _source: TUNABLE

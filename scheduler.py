@@ -38,12 +38,17 @@ def stop_scheduler() -> None:
 
 
 async def _run_all_equipment() -> None:
-    """Запустить pipeline для всего активного оборудования за вчерашний день."""
+    """Запустить аналитику v2 для всего активного оборудования за вчерашний день."""
+    from datetime import datetime, timezone
     from db.analytics import get_equipment_registry
-    from pipeline.runner import run_pipeline
+    from analytics.runner import run_analysis
+    from config import settings
 
     yesterday = date.today() - timedelta(days=1)
-    logger.info("Плановый запуск аналитики за %s", yesterday)
+    ts_from = datetime(yesterday.year, yesterday.month, yesterday.day, tzinfo=timezone.utc)
+    ts_to = ts_from + timedelta(days=1)
+
+    logger.info("Плановый запуск аналитики v2 за %s", yesterday)
 
     registry = await get_equipment_registry()
     active = [eq for eq in registry if eq.get("active")]
@@ -55,15 +60,39 @@ async def _run_all_equipment() -> None:
     logger.info("Активных ГУ: %d", len(active))
 
     for eq in active:
+        kb_path_rel = eq.get("kb_path")
+        if not kb_path_rel:
+            logger.warning(
+                "Нет kb_path для %s/%s/%s — пропуск",
+                eq["router_sn"], eq["equip_type"], eq["panel_id"],
+            )
+            continue
+        kb_path = settings.knowledge_base_path / "equipment" / kb_path_rel
         try:
-            await run_pipeline(
+            result = await run_analysis(
                 router_sn=eq["router_sn"],
                 equip_type=eq["equip_type"],
                 panel_id=eq["panel_id"],
-                day=yesterday,
+                engine_sn=eq.get("engine_sn", ""),
+                ts_from=ts_from,
+                ts_to=ts_to,
+                kb_path=kb_path,
             )
+            if result.get("error"):
+                logger.error(
+                    "Ошибка аналитики для %s/%s/%s: %s",
+                    eq["router_sn"], eq["equip_type"], eq["panel_id"],
+                    result["error"],
+                )
+            else:
+                logger.info(
+                    "Аналитика %s/%s/%s: сегментов=%d обнаружений=%d run_id=%s",
+                    eq["router_sn"], eq["equip_type"], eq["panel_id"],
+                    result["segments_count"], result["detections_count"],
+                    result.get("run_id"),
+                )
         except Exception:
             logger.exception(
-                "Ошибка pipeline для %s/%s/%s",
+                "Ошибка аналитики для %s/%s/%s",
                 eq["router_sn"], eq["equip_type"], eq["panel_id"],
             )

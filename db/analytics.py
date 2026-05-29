@@ -298,3 +298,123 @@ async def get_equipment_history(
         return [{**dict(r), "id": str(r["id"])} for r in rows]
     finally:
         await conn.close()
+
+
+# ── Analysis runs (v2 analytics) ─────────────────────────────────────────────
+
+async def save_analysis_run(run: dict[str, Any]) -> str:
+    """Сохранить результат аналитического прогона. Возвращает UUID записи."""
+    conn = await _connect()
+    try:
+        row = await conn.fetchrow("""
+            INSERT INTO analysis_runs (
+                router_sn, equip_type, panel_id, engine_sn,
+                ts_from, ts_to, analytics_version,
+                segments_json, report_md,
+                segments_count, detections_count, max_severity, data_quality_avg,
+                duration_ms, error
+            ) VALUES (
+                $1, $2, $3, $4,
+                $5, $6, $7,
+                $8::jsonb, $9,
+                $10, $11, $12, $13,
+                $14, $15
+            )
+            ON CONFLICT (router_sn, equip_type, panel_id, ts_from, ts_to) DO UPDATE SET
+                engine_sn         = EXCLUDED.engine_sn,
+                analytics_version = EXCLUDED.analytics_version,
+                segments_json     = EXCLUDED.segments_json,
+                report_md         = EXCLUDED.report_md,
+                segments_count    = EXCLUDED.segments_count,
+                detections_count  = EXCLUDED.detections_count,
+                max_severity      = EXCLUDED.max_severity,
+                data_quality_avg  = EXCLUDED.data_quality_avg,
+                duration_ms       = EXCLUDED.duration_ms,
+                error             = EXCLUDED.error,
+                created_at        = now()
+            RETURNING id
+        """,
+            run["router_sn"],
+            run["equip_type"],
+            run["panel_id"],
+            run.get("engine_sn"),
+            run["ts_from"],
+            run["ts_to"],
+            run.get("analytics_version", "2.0.0"),
+            run.get("segments_json"),
+            run.get("report_md"),
+            run.get("segments_count"),
+            run.get("detections_count"),
+            run.get("max_severity"),
+            run.get("data_quality_avg"),
+            run.get("duration_ms"),
+            run.get("error"),
+        )
+        return str(row["id"])
+    finally:
+        await conn.close()
+
+
+async def get_analysis_run(run_id: str) -> dict[str, Any] | None:
+    """Загрузить результат прогона по UUID."""
+    conn = await _connect()
+    try:
+        row = await conn.fetchrow(
+            "SELECT * FROM analysis_runs WHERE id = $1", run_id
+        )
+        if not row:
+            return None
+        r = dict(row)
+        r["id"] = str(r["id"])
+        return r
+    finally:
+        await conn.close()
+
+
+async def get_analysis_run_for_period(
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    ts_from: Any,
+    ts_to: Any,
+) -> dict[str, Any] | None:
+    """Найти прогон по ГУ и точному периоду."""
+    conn = await _connect()
+    try:
+        row = await conn.fetchrow("""
+            SELECT * FROM analysis_runs
+            WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+              AND ts_from = $4 AND ts_to = $5
+            ORDER BY created_at DESC
+            LIMIT 1
+        """, router_sn, equip_type, panel_id, ts_from, ts_to)
+        if not row:
+            return None
+        r = dict(row)
+        r["id"] = str(r["id"])
+        return r
+    finally:
+        await conn.close()
+
+
+async def list_analysis_runs(
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Список прогонов для одной ГУ, от новых к старым."""
+    conn = await _connect()
+    try:
+        rows = await conn.fetch("""
+            SELECT id, ts_from, ts_to, analytics_version,
+                   segments_count, detections_count, max_severity,
+                   data_quality_avg, duration_ms, error, created_at
+            FROM analysis_runs
+            WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+            ORDER BY created_at DESC
+            LIMIT $4
+        """, router_sn, equip_type, panel_id, limit)
+        return [{**dict(r), "id": str(r["id"])} for r in rows]
+    finally:
+        await conn.close()

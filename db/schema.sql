@@ -67,6 +67,42 @@ CREATE INDEX IF NOT EXISTS idx_reports_status    ON daily_reports (status, date 
 -- Миграция: добавить kb_path если таблица уже существует
 ALTER TABLE equipment_registry ADD COLUMN IF NOT EXISTS kb_path TEXT;
 
+-- ── Аналитические прогоны v2 ─────────────────────────────────────────────────
+-- Хранит полный контракт аналитики (JSON) + Markdown-отчёт за произвольный период.
+CREATE TABLE IF NOT EXISTS analysis_runs (
+    id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    -- Идентификатор ГУ
+    router_sn           TEXT        NOT NULL,
+    equip_type          TEXT        NOT NULL,
+    panel_id            INT         NOT NULL,
+    engine_sn           TEXT,
+    -- Запрошенный период
+    ts_from             TIMESTAMPTZ NOT NULL,
+    ts_to               TIMESTAMPTZ NOT NULL,
+    -- Версия аналитического модуля
+    analytics_version   TEXT        NOT NULL DEFAULT '2.0.0',
+    -- Полный результат (контракт ТЗ Этап 1)
+    segments_json       JSONB,
+    -- Markdown-отчёт для человека и LLM
+    report_md           TEXT,
+    -- Сводные цифры (денормализованы для быстрого чтения)
+    segments_count      INT,
+    detections_count    INT,
+    max_severity        TEXT CHECK (max_severity IN ('SHUTDOWN','ALARM','WARNING','INFO') OR max_severity IS NULL),
+    data_quality_avg    NUMERIC(4,3),
+    -- Служебные
+    duration_ms         INT,        -- время выполнения прогона в мс
+    error               TEXT,       -- текст ошибки (NULL = успех)
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Уникальность: один прогон на ГУ + период
+    UNIQUE (router_sn, equip_type, panel_id, ts_from, ts_to)
+);
+
+CREATE INDEX IF NOT EXISTS idx_analysis_runs_equipment
+    ON analysis_runs (router_sn, equip_type, panel_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_analysis_runs_period
+    ON analysis_runs (ts_from, ts_to);
+
 -- ── Настройки приложения ──────────────────────────────────────────────────────
 -- Пары ключ-значение, редактируемые через Web UI без перезапуска сервиса.
 CREATE TABLE IF NOT EXISTS app_settings (

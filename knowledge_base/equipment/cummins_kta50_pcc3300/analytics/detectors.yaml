@@ -1,0 +1,143 @@
+# Параметры детекторов диагностических сценариев KTA50/PCC3300
+# Источник: ТЗ аналитики, раздел 7.1; пороги из thresholds.yaml
+# ХАРДКОД ЗАПРЕЩЁН: числа только здесь, код ссылается на конфиг.
+# Изменение: только через веб-морду (раздел 9 ТЗ)
+
+# ─── LOAD_STEP: Наброс/сброс нагрузки ───────────────────────────────────────
+LOAD_STEP:
+  enabled: true
+  # Скорость изменения мощности → открыть TRANSIENT-окно
+  dP_dt_threshold_kw_per_s: 50.0   # |ΔP/Δt| > 50 кВт/с → TRANSIENT
+  transient_window_sec: 30         # длина окна наблюдения после наброса
+  # Просадка частоты внутри окна
+  freq_dip_info_hz: 0.5            # < 0.5 Hz → INFO (нормально)
+  freq_dip_warning_hz: 1.5         # ≥ 1.5 Hz → WARNING
+  freq_dip_alarm_hz: 2.5           # ≥ 2.5 Hz → ALARM
+  # Время восстановления частоты до ±0.5 Hz от номинала
+  recovery_time_warning_sec: 10    # > 10 сек → WARNING
+  recovery_time_alarm_sec: 20      # > 20 сек → ALARM
+  severity_default: INFO
+  _source: TUNABLE
+
+# ─── PHASE_IMBALANCE: Перекос фаз ───────────────────────────────────────────
+PHASE_IMBALANCE:
+  enabled: true
+  # Порог перекоса по токам (из уставок neg-seq PCC3300)
+  current_imbalance_warning_pct: 12.0  # max|I_Lk - I_avg| / I_avg × 100 > 12%
+  # Перекос должен держаться непрерывно дольше порога для срабатывания
+  duration_warning_sec: 60            # суммарное время > 60 сек → WARNING
+  severity_default: WARNING
+  _source: CONTROLLER  # 12% — уставка neg-seq PCC3300
+
+# ─── COOLING_FAILURE: Отказ охлаждения ──────────────────────────────────────
+COOLING_FAILURE:
+  enabled: true
+  # Скорость роста Т ОЖ при стабильной нагрузке (нагрузка стабильна если нет LOAD_STEP)
+  dCoolant_dt_warning_c_per_hour: 10.0  # > 10 °C/ч → WARNING
+  dCoolant_dt_alarm_c_per_hour: 20.0    # > 20 °C/ч → ALARM
+  # Приближение к порогу HCT Warning (из thresholds.yaml)
+  # coolant_proximity_pct вычисляется динамически из thresholds.yaml
+  proximity_warning_pct: 10          # coolant > HCT_warning - 10% * HCT_warning → WARNING
+  severity_default: WARNING
+  _source: TUNABLE
+
+# ─── OIL_DILUTION: Разжижение/перегрев масла ────────────────────────────────
+OIL_DILUTION:
+  enabled: true
+  # Совместное срабатывание: давление масла падает И температура растёт
+  oil_press_drop_kpa: 50          # падение OIL_PRESS на > 50 кПа от медианы подсегмента
+  oil_temp_rise_c: 10             # одновременный рост OIL_TEMP на > 10 °C
+  concurrent_window_sec: 300      # в пределах 5 минут
+  # Порог по абсолютным значениям (см. thresholds.yaml, oil_pressure.passport.rated_min_kpa)
+  oil_press_abs_warning_kpa: 310  # давление ниже паспортного минимума при номинале
+  severity_default: WARNING
+  _source: TUNABLE
+
+# ─── COKING_RISK: Закоксовка / wet stacking ─────────────────────────────────
+COKING_RISK:
+  enabled: true
+  # Порог по холостому ходу (idle_duration — сквозной аккумулятор)
+  idle_duration_warning_sec: 600       # > 10 мин на х.х. → WARNING (K38-50_РЭ_и_ТО)
+  # Порог по Т ОЖ < 60°C (из thresholds.yaml, coolant.tunable.below_60_risk_threshold_c)
+  coolant_below_60_warning_sec: 1800   # > 30 мин с Т < 60°C → WARNING
+  # Порог по зоне LOW
+  low_load_zone_warning_sec: 3600      # > 60 мин в зоне LOW → WARNING
+  # Параметры «прожига» (сброс риска): работа ≥30% при прогретом двигателе
+  purge_min_load_pct: 30               # из thresholds.yaml, engine_operation.tunable.purge_min_load_pct
+  purge_min_duration_sec: 300          # и не менее 5 мин непрерывно
+  purge_min_coolant_c: 60             # двигатель должен быть прогрет (ОЖ ≥ 60°C)
+  # Уровни риска (GREEN/YELLOW/RED)
+  risk_yellow_idle_sec: 600
+  risk_red_idle_sec: 1800
+  risk_yellow_low_load_sec: 3600
+  risk_red_low_load_sec: 7200
+  severity_default: WARNING
+  _source: PASSPORT_РЭ  # idle 600 сек — K38-50_РЭ_и_ТО
+
+# ─── WARMUP_VIOLATION: Нарушение прогрева ───────────────────────────────────
+WARMUP_VIOLATION:
+  enabled: true
+  # Минимальная длительность прогрева при холодном пуске (ОЖ < cold_start_coolant_c)
+  min_warmup_sec: 180              # из thresholds.yaml, engine_operation.passport.warmup_min_sec
+  cold_start_coolant_c: 21        # из thresholds.yaml, engine_operation.passport.cold_start_coolant_c
+  severity_default: WARNING
+  _source: PASSPORT_РЭ
+
+# ─── COOLDOWN_VIOLATION: Нарушение охлаждения перед остановом ───────────────
+COOLDOWN_VIOLATION:
+  enabled: true
+  # Охлаждение обязательно если последний подсегмент был в зоне ELEVATED
+  required_after_zone: ELEVATED
+  # Минимальная длительность охлаждения (RUN_STATE 4 или 5)
+  min_cooldown_sec: 0             # РЭ допускает быстрый останов, но рекомендует 3-5 мин
+  # Считаем нарушением: переход Stop без каких-либо cooldown-фаз после ELEVATED
+  severity_default: WARNING
+  _source: PASSPORT_РЭ
+
+# ─── START_FAILURE: Проблема пуска ──────────────────────────────────────────
+START_FAILURE:
+  enabled: true
+  # Давление масла не появилось за нормативное время
+  oil_press_rise_time_alarm_sec: 15   # из thresholds.yaml, engine_operation.passport.oil_press_rise_time_sec
+  # Просадка АКБ при прокрутке стартера
+  battery_sag_alarm_v: 19.0           # из thresholds.yaml, battery_voltage.tunable.sag_alarm_v
+  # Длительность RUN_STATE=1 (Time Delay to Start / прокрутка)
+  crank_time_alarm_sec: 45            # > 3 × 15 сек (3 попытки без учёта перерывов)
+  severity_default: ALARM
+  _source: PASSPORT_РЭ
+
+# ─── THERMAL_HIGHLOAD: Перегрев от высокой нагрузки ─────────────────────────
+THERMAL_HIGHLOAD:
+  enabled: true
+  zone: ELEVATED
+  # Приближение к порогам (берём из thresholds.yaml динамически)
+  coolant_proximity_pct: 10        # coolant > HCT_warning - 10% → WARNING
+  oil_proximity_pct: 10            # oil > HOT_warning - 10% → WARNING
+  # Уровни теплового риска (сквозной аккумулятор)
+  risk_yellow_elevated_sec: 3600   # 60 мин в ELEVATED → YELLOW
+  risk_red_elevated_sec: 7200      # 120 мин в ELEVATED → RED
+  coolant_near_limit_pct: 5        # coolant в пределах 5% от warning → "вблизи порога"
+  oil_near_limit_pct: 5
+  severity_default: WARNING
+  _source: TUNABLE
+
+# ─── LIMIT_PROXIMITY: Близость к паспортному порогу ─────────────────────────
+LIMIT_PROXIMITY:
+  enabled: true
+  # Предупреждать когда любой параметр приближается к паспортному/контроллерному порогу
+  proximity_pct: 10               # в пределах X% от порога → WARNING
+  # Конкретные пороги берутся из thresholds.yaml:
+  # OIL_PRESS → oil_pressure.controller.shutdown_rated_kpa
+  # COOLANT_TEMP → coolant_temperature.controller.shutdown_c
+  # OIL_TEMP → oil_temperature.controller.shutdown_c
+  severity_default: WARNING
+  _source: TUNABLE
+
+# ─── CONTROLLER_FAULT: Активная неисправность контроллера ───────────────────
+CONTROLLER_FAULT:
+  enabled: true
+  # Срабатывает при появлении нового бита в fault_history (40400-40415)
+  # Severity берётся из fault_matrix.yaml по severity бита (bitmap_severity_map)
+  # НЕ эвристика — строго по матрице приоритетов
+  severity_default: WARNING
+  _source: CONTROLLER
