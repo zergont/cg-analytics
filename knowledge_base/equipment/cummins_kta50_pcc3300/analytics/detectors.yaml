@@ -80,6 +80,9 @@ WARMUP_VIOLATION:
   # Минимальная длительность прогрева при холодном пуске (ОЖ < cold_start_coolant_c)
   min_warmup_sec: 180              # из thresholds.yaml, engine_operation.passport.warmup_min_sec
   cold_start_coolant_c: 21        # из thresholds.yaml, engine_operation.passport.cold_start_coolant_c
+  # Требование к прогреву при ГОРЯЧЕМ пуске (ОЖ >= cold_start_coolant_c)
+  # 0 = прогрев не обязателен; можно задать мягкое требование, напр. 60 сек
+  hot_start_warmup_sec: 0
   severity_default: WARNING
   _source: PASSPORT_РЭ
 
@@ -118,6 +121,10 @@ THERMAL_HIGHLOAD:
   risk_red_elevated_sec: 7200      # 120 мин в ELEVATED → RED
   coolant_near_limit_pct: 5        # coolant в пределах 5% от warning → "вблизи порога"
   oil_near_limit_pct: 5
+  # Спад теплового риска вне зоны ELEVATED (обратимый риск — физика: снятие нагрузки → охлаждение)
+  # Скорость спада: на 1 сек простоя вне ELEVATED накопитель уменьшается на thermal_decay_rate_per_sec сек.
+  # Пример: 0.5 → за 2 мин без нагрузки «прощается» 1 мин теплового риска.
+  thermal_decay_rate_per_sec: 0.5
   severity_default: WARNING
   _source: TUNABLE
 

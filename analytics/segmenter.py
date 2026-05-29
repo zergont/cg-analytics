@@ -484,7 +484,11 @@ def _sequence_checks(
     fault_periods: list[dict],
     cfg: AnalyticsConfig,
 ) -> list[dict[str, Any]]:
-    """Проверки корректности последовательности событий внутри сегмента."""
+    """Внутрисегментные проверки (данные, активные fault).
+
+    Межсегментные проверки (warmup/cooldown) выполняются отдельным проходом
+    в _inter_segment_checks() после построения всего списка сегментов.
+    """
     checks: list[dict[str, Any]] = []
 
     if run_state == 3:
@@ -496,22 +500,6 @@ def _sequence_checks(
             "details": f"empty_subsegments={empty}" if empty else "ok",
         })
 
-        # Проверка: не было перехода LOW→ELEVATED без промежуточного NORMAL
-        zones_seq = [s.load_zone for s in subsegments]
-        skip_detected = False
-        for i in range(len(zones_seq) - 1):
-            if zones_seq[i] == "LOW" and zones_seq[i + 1] == "ELEVATED":
-                skip_detected = True
-                break
-            if zones_seq[i] == "ELEVATED" and zones_seq[i + 1] == "LOW":
-                skip_detected = True
-                break
-        checks.append({
-            "check": "zone_sequence_no_skip",
-            "passed": not skip_detected,
-            "details": f"zones={zones_seq}" if skip_detected else "ok",
-        })
-
     # Проверка: нет активных критических fault в конце сегмента
     shutdown_faults = [
         fp for fp in fault_periods
@@ -520,11 +508,221 @@ def _sequence_checks(
     checks.append({
         "check": "no_active_shutdown_fault",
         "passed": len(shutdown_faults) == 0,
-        "details": f"active_shutdown_faults={[fp['fault_name'] for fp in shutdown_faults]}"
-        if shutdown_faults else "ok",
+        "details": (
+            f"active_shutdown_faults={[fp.get('fault_name') for fp in shutdown_faults]}"
+            if shutdown_faults else "ok"
+        ),
     })
 
     return checks
+
+
+# ── Межсегментные проверки ────────────────────────────────────────────────────
+
+def _inter_segment_checks(
+    segments: list[Segment],
+    cfg: AnalyticsConfig,
+) -> None:
+    """Второй проход по готовому списку сегментов: проверяет переходы между ними.
+
+    Мутирует sequence_checks и detections сегментов/подсегментов на месте.
+    Вызывается после основного цикла в segment(), перед возвратом результата.
+    """
+    from .contract import Detection
+
+    warmup_en = bool(cfg.det("WARMUP_VIOLATION", "enabled", default=True))
+    cooldown_en = bool(cfg.det("COOLDOWN_VIOLATION", "enabled", default=True))
+
+    for i, seg in enumerate(segments):
+        prev_segs = segments[:i]
+
+        # WARMUP_CHECK: Running-сегмент проверяет предшествующий прогрев
+        if seg.run_state == 3 and warmup_en:
+            _check_warmup_transition(seg, prev_segs, cfg, Detection)
+
+        # COOLDOWN_CHECK: Stop-сегмент проверяет наличие охлаждения
+        if seg.run_state == 0 and cooldown_en:
+            _check_cooldown_transition(seg, prev_segs, cfg, Detection)
+
+
+def _check_warmup_transition(
+    running_seg: Segment,
+    prev_segs: list[Segment],
+    cfg: AnalyticsConfig,
+    Detection: type,
+) -> None:
+    """Проверить наличие и длительность прогрева перед running-сегментом.
+
+    Добавляет cold_start_context и warmup_duration в sequence_checks.
+    При нарушении добавляет Detection WARMUP_VIOLATION в первый подсегмент.
+    """
+    min_warmup = float(cfg.det("WARMUP_VIOLATION", "min_warmup_sec", default=180.0))
+    hot_warmup = float(cfg.det("WARMUP_VIOLATION", "hot_start_warmup_sec", default=0.0))
+    cold_thr = float(cfg.det("WARMUP_VIOLATION", "cold_start_coolant_c", default=21.0))
+
+    # Найти последний предшествующий RUN_STATE=2 (Warmup)
+    prev_warmup: Segment | None = next(
+        (s for s in reversed(prev_segs) if s.run_state == 2), None
+    )
+
+    if prev_warmup is None:
+        # Прогрев не обнаружен в запрошенном периоде — не можем оценить
+        running_seg.sequence_checks.append({
+            "check": "warmup_presence",
+            "passed": True,
+            "cold_start": None,
+            "details": "RUN_STATE=2 (Warmup) не обнаружен в периоде анализа",
+        })
+        return
+
+    # Определить cold_start по Т ОЖ в начале warmup-сегмента
+    coolant_start: float | None = None
+    if prev_warmup.subsegments:
+        cool_char = prev_warmup.subsegments[0].characteristics.get("COOLANT_TEMP", {})
+        coolant_start = cool_char.get("value_start")
+
+    cold_start = (coolant_start is not None and coolant_start < cold_thr)
+
+    # Записать контекст пуска в sequence_checks running-сегмента
+    running_seg.sequence_checks.append({
+        "check": "cold_start_context",
+        "passed": True,
+        "cold_start": cold_start,
+        "coolant_at_start_c": coolant_start,
+        "details": (
+            f"cold_start={cold_start}, Т ОЖ на пуске={coolant_start:.1f}°C"
+            if coolant_start is not None
+            else "cold_start=неизвестно (нет данных Т ОЖ)"
+        ),
+    })
+
+    # Проверить длительность прогрева с учётом типа пуска
+    required = min_warmup if cold_start else hot_warmup
+    warmup_dur = prev_warmup.duration_sec
+    passed = warmup_dur >= required
+
+    running_seg.sequence_checks.append({
+        "check": "warmup_duration",
+        "passed": passed,
+        "warmup_duration_sec": warmup_dur,
+        "required_sec": required,
+        "cold_start": cold_start,
+        "details": (
+            f"ok: прогрев {warmup_dur:.0f}с >= {required:.0f}с"
+            if passed
+            else (
+                f"НАРУШЕНИЕ: прогрев {warmup_dur:.0f}с < {required:.0f}с "
+                f"(cold_start={cold_start}, Т ОЖ={coolant_start}°C)"
+            )
+        ),
+    })
+
+    if not passed and running_seg.subsegments:
+        trigger = (
+            f"warmup_duration={warmup_dur:.0f}с < {required:.0f}с при "
+            f"{'холодном' if cold_start else 'горячем'} пуске"
+            + (f" (Т ОЖ={coolant_start:.1f}°C)" if coolant_start is not None else "")
+        )
+        running_seg.subsegments[0].detections.append(Detection(
+            scenario="WARMUP_VIOLATION",
+            severity=cfg.det("WARMUP_VIOLATION", "severity_default", default="WARNING"),
+            t_detected=running_seg.t_start,
+            source="PASSPORT_THRESHOLD",
+            trigger=trigger,
+            related_roles=["COOLANT_TEMP"],
+            fault_codes=[],
+            description_key="WARMUP_VIOLATION.insufficient_warmup",
+            values={
+                "warmup_duration_sec": warmup_dur,
+                "required_sec": required,
+                "cold_start": cold_start,
+                "coolant_at_start_c": coolant_start,
+                "cold_threshold_c": cold_thr,
+            },
+        ))
+
+
+def _check_cooldown_transition(
+    stop_seg: Segment,
+    prev_segs: list[Segment],
+    cfg: AnalyticsConfig,
+    Detection: type,
+) -> None:
+    """Проверить наличие охлаждения после работы в зоне высокой нагрузки.
+
+    Добавляет cooldown_after_elevated в sequence_checks.
+    При нарушении добавляет Detection COOLDOWN_VIOLATION в первый подсегмент.
+    """
+    required_after = cfg.det("COOLDOWN_VIOLATION", "required_after_zone", default="ELEVATED")
+    min_cooldown = float(cfg.det("COOLDOWN_VIOLATION", "min_cooldown_sec", default=0.0))
+
+    # Найти последний running-сегмент (RUN_STATE=3)
+    last_running: Segment | None = None
+    last_running_idx: int = -1
+    for j, s in enumerate(prev_segs):
+        if s.run_state == 3:
+            last_running = s
+            last_running_idx = j
+
+    if last_running is None:
+        return  # нечего проверять
+
+    # Была ли высокая нагрузка?
+    elevated_zones = {required_after, "OVERLOAD"}
+    had_elevated = any(sub.load_zone in elevated_zones for sub in last_running.subsegments)
+
+    if not had_elevated:
+        return  # охлаждение не требуется
+
+    # Была ли фаза охлаждения (RUN_STATE 4/5) между running-сегментом и текущим stop?
+    segs_between = prev_segs[last_running_idx + 1:]
+    cooldown_dur = sum(s.duration_sec for s in segs_between if s.run_state in (4, 5))
+    had_cooldown_phase = cooldown_dur > 0
+
+    # Проверка: при min_cooldown_sec = 0 требуем лишь наличие cooldown-фазы (любой длины).
+    # При min_cooldown_sec > 0 требуем конкретную длительность.
+    if min_cooldown <= 0:
+        passed = had_cooldown_phase
+    else:
+        passed = cooldown_dur >= min_cooldown
+
+    stop_seg.sequence_checks.append({
+        "check": "cooldown_after_elevated",
+        "passed": passed,
+        "cooldown_duration_sec": cooldown_dur,
+        "required_sec": min_cooldown,
+        "had_elevated": had_elevated,
+        "had_cooldown_phase": had_cooldown_phase,
+        "details": (
+            f"ok: охлаждение {cooldown_dur:.0f}с после {required_after}"
+            if passed
+            else (
+                f"НАРУШЕНИЕ: нет фазы охлаждения RUN_STATE=4/5 после зоны {required_after}"
+                if not had_cooldown_phase
+                else f"НАРУШЕНИЕ: cooldown={cooldown_dur:.0f}с < {min_cooldown:.0f}с требуемых"
+            )
+        ),
+    })
+
+    if not passed and stop_seg.subsegments:
+        stop_seg.subsegments[0].detections.append(Detection(
+            scenario="COOLDOWN_VIOLATION",
+            severity=cfg.det("COOLDOWN_VIOLATION", "severity_default", default="WARNING"),
+            t_detected=stop_seg.t_start,
+            source="PASSPORT_THRESHOLD",
+            trigger=(
+                f"Останов без охлаждения после зоны {required_after} "
+                f"(cooldown={cooldown_dur:.0f}с, требуется {min_cooldown:.0f}с)"
+            ),
+            related_roles=["COOLANT_TEMP"],
+            fault_codes=[611],
+            description_key="COOLDOWN_VIOLATION.no_cooldown_after_elevated",
+            values={
+                "cooldown_duration_sec": cooldown_dur,
+                "required_sec": min_cooldown,
+                "previous_zone": required_after,
+            },
+        ))
 
 
 # ── Главная функция ───────────────────────────────────────────────────────────
@@ -700,5 +898,8 @@ def segment(
             events=events,
         )
         segments.append(seg)
+
+    # Второй проход: межсегментные проверки (warmup / cooldown / cold_start)
+    _inter_segment_checks(segments, cfg)
 
     return segments

@@ -51,16 +51,15 @@ def run_all_detectors(
     if cfg.det("COKING_RISK", "enabled", default=True):
         detections.extend(_detect_coking_risk(accumulators, run_state, load_zone, seg_start, cfg))
 
-    if cfg.det("WARMUP_VIOLATION", "enabled", default=True) and run_state == 2:
-        detections.extend(_detect_warmup_violation(characteristics, seg_start, seg_end, cfg))
-
-    if cfg.det("COOLDOWN_VIOLATION", "enabled", default=True) and run_state == 0:
-        detections.extend(_detect_cooldown_violation(prev_zone, seg_start, cfg))
+    # WARMUP_VIOLATION и COOLDOWN_VIOLATION требуют анализа соседних сегментов —
+    # они вызываются из _inter_segment_checks() в segmenter.py, а не здесь.
 
     if cfg.det("START_FAILURE", "enabled", default=True) and run_state == 1:
         detections.extend(_detect_start_failure(characteristics, derived, seg_start, seg_end, cfg))
 
-    if cfg.det("THERMAL_HIGHLOAD", "enabled", default=True):
+    # THERMAL_HIGHLOAD срабатывает только в зонах высокой нагрузки:
+    # необратимого накопления нет (thermal_risk обратим — спадает при выходе из ELEVATED).
+    if cfg.det("THERMAL_HIGHLOAD", "enabled", default=True) and load_zone in ("ELEVATED", "OVERLOAD"):
         detections.extend(_detect_thermal_highload(accumulators, characteristics, seg_start, cfg))
 
     if cfg.det("LIMIT_PROXIMITY", "enabled", default=True):

@@ -1,10 +1,13 @@
 """Загрузчик и валидатор YAML-конфигов аналитического блока."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+_log = logging.getLogger(__name__)
 
 
 class AnalyticsConfig:
@@ -38,6 +41,9 @@ class AnalyticsConfig:
         self._whitelist_analog: frozenset[int] = self._build_whitelist("analog")
         self._whitelist_enum: frozenset[int] = self._build_whitelist("enum")
         self._whitelist_fault: frozenset[int] = self._build_whitelist("fault_bitmap")
+
+        self._validate()
+        self._warn_missing_keys()
 
     # ── Публичные свойства ──────────────────────────────────────────────────
 
@@ -121,6 +127,151 @@ class AnalyticsConfig:
 
     def hysteresis_pct(self) -> float:
         return float(self.zones.get("hysteresis", {}).get("pct", 5.0))
+
+    # ── Валидация ───────────────────────────────────────────────────────────
+
+    def _validate(self) -> None:
+        """Проверить конфиг на корректность. Бросает ValueError при ошибках.
+
+        Запускается при загрузке — невалидный конфиг отклоняется целиком.
+        """
+        errors: list[str] = []
+
+        # ── Зоны нагрузки ──────────────────────────────────────────────────
+        zones = self.zones.get("load_zones", {})
+        ordered = ["LOW", "NORMAL", "ELEVATED", "OVERLOAD"]
+        prev_max: float = 0.0
+        for name in ordered:
+            z = zones.get(name, {})
+            z_min = z.get("min_pct")
+            z_max = z.get("max_pct")
+            if z_min is None:
+                errors.append(f"zones.load_zones.{name}: отсутствует min_pct")
+                continue
+            try:
+                z_min_f = float(z_min)
+            except (TypeError, ValueError):
+                errors.append(f"zones.load_zones.{name}.min_pct={z_min!r}: не число")
+                continue
+            if abs(z_min_f - prev_max) > 1e-6 and prev_max > 0:
+                errors.append(
+                    f"zones: разрыв/перекрытие между зонами: {name}.min={z_min_f} != "
+                    f"предыдущей max={prev_max}"
+                )
+            if z_max is not None:
+                try:
+                    z_max_f = float(z_max)
+                except (TypeError, ValueError):
+                    errors.append(f"zones.load_zones.{name}.max_pct={z_max!r}: не число")
+                    continue
+                if z_max_f <= z_min_f:
+                    errors.append(f"zones.load_zones.{name}: max_pct={z_max_f} <= min_pct={z_min_f}")
+                prev_max = z_max_f
+
+        # Гистерезис < ширины самой узкой зоны (без OVERLOAD)
+        hyst = self.zones.get("hysteresis", {}).get("pct")
+        if hyst is not None:
+            try:
+                hyst_f = float(hyst)
+            except (TypeError, ValueError):
+                errors.append(f"zones.hysteresis.pct={hyst!r}: не число")
+                hyst_f = 0.0
+            for name in ["LOW", "NORMAL", "ELEVATED"]:
+                z = zones.get(name, {})
+                z_min = z.get("min_pct")
+                z_max = z.get("max_pct")
+                if z_min is not None and z_max is not None:
+                    try:
+                        width = float(z_max) - float(z_min)
+                        if hyst_f >= width:
+                            errors.append(
+                                f"zones.hysteresis.pct={hyst_f} >= ширины зоны {name} "
+                                f"({width}): это сделает зону недостижимой"
+                            )
+                    except (TypeError, ValueError):
+                        pass
+
+        # ── Сегментация ────────────────────────────────────────────────────
+        n_stab = self.segmentation.get("boundary_confirmation", {}).get("n_stab")
+        if n_stab is None or not isinstance(n_stab, int) or n_stab < 1:
+            errors.append(
+                f"segmentation.boundary_confirmation.n_stab должен быть целым >= 1, "
+                f"получено: {n_stab!r}"
+            )
+        heartbeat = self.segmentation.get("data_quality", {}).get("heartbeat_nominal_sec")
+        if heartbeat is not None:
+            try:
+                if float(heartbeat) <= 0:
+                    errors.append("segmentation.data_quality.heartbeat_nominal_sec должен быть > 0")
+            except (TypeError, ValueError):
+                errors.append(f"segmentation.data_quality.heartbeat_nominal_sec={heartbeat!r}: не число")
+
+        # ── Детекторы: severity_default ────────────────────────────────────
+        valid_sev = {"INFO", "WARNING", "ALARM", "SHUTDOWN"}
+        for scenario, params in self.detectors.items():
+            if not isinstance(params, dict):
+                continue
+            sev = params.get("severity_default")
+            if sev is not None and sev not in valid_sev:
+                errors.append(
+                    f"detectors.{scenario}.severity_default={sev!r} "
+                    f"не входит в {valid_sev}"
+                )
+            # Числовые пороги >= 0
+            for key, val in params.items():
+                if key.endswith(("_sec", "_pct", "_kpa", "_c", "_v", "_hz", "_kw_per_s")):
+                    try:
+                        if float(val) < 0:
+                            errors.append(
+                                f"detectors.{scenario}.{key}={val}: ожидается >= 0"
+                            )
+                    except (TypeError, ValueError):
+                        pass  # не числовое поле
+
+        # ── Fault matrix: severity mapping ─────────────────────────────────
+        for raw_sev, mapped in self.fault_matrix.get("bitmap_severity_map", {}).items():
+            if mapped not in valid_sev:
+                errors.append(
+                    f"fault_matrix.bitmap_severity_map.{raw_sev}={mapped!r} "
+                    f"не входит в {valid_sev}"
+                )
+
+        # ── Mapping: критические роли присутствуют ─────────────────────────
+        critical_roles = ["LOAD_PCT", "COOLANT_TEMP", "OIL_PRESS", "RPM", "RUN_STATE"]
+        defined_roles = {m.get("role") for m in self._register_map.values()}
+        for role in critical_roles:
+            if role not in defined_roles:
+                errors.append(f"mapping: критическая роль {role!r} не найдена ни в одном регистре")
+
+        if errors:
+            raise ValueError(
+                f"Невалидная конфигурация аналитики ({len(errors)} ошибок):\n"
+                + "\n".join(f"  • {e}" for e in errors)
+            )
+
+    def _warn_missing_keys(self) -> None:
+        """Логировать предупреждение если ожидаемые ключи отсутствуют в YAML.
+
+        Стратегия B (пункт 6 Addendum v1.1): тихий fallback разрешён,
+        но расхождение YAML ↔ default должно быть видимым.
+        """
+        expected: list[tuple[str, str, str]] = [
+            # (путь для логирования, метод, аргументы для проверки)
+            ("THERMAL_HIGHLOAD.thermal_decay_rate_per_sec", "det", "THERMAL_HIGHLOAD.thermal_decay_rate_per_sec"),
+            ("WARMUP_VIOLATION.hot_start_warmup_sec", "det", "WARMUP_VIOLATION.hot_start_warmup_sec"),
+            ("COKING_RISK.purge_min_coolant_c", "det", "COKING_RISK.purge_min_coolant_c"),
+        ]
+        for label, _method, dotted in expected:
+            parts = dotted.split(".")
+            node = self.detectors
+            found = True
+            for p in parts:
+                if not isinstance(node, dict) or p not in node:
+                    found = False
+                    break
+                node = node[p]
+            if not found:
+                _log.warning("config: ключ %r отсутствует в detectors.yaml — используется default", label)
 
     # ── Приватные методы ────────────────────────────────────────────────────
 

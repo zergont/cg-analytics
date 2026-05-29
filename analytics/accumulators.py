@@ -69,8 +69,10 @@ def _update_coking(
     t_start = _tz(seg_start)
     t_end = _tz(seg_end)
 
-    # 1. Idle на малых оборотах (RUN_STATE = 2 или 5 — Warmup/Cooldown at Idle)
-    idle_states = {2, 5, 6}
+    # 1. Idle на малых оборотах (RUN_STATE = 2, 5 — Warmup/Cooldown at Idle)
+    # RUN_STATE=6 «Rated to Idle Transition Delay» — короткий переходный период (единицы секунд),
+    # не накапливаем idle-риск: это не длительный холостой ход, а переход между режимами.
+    idle_states = {2, 5}
     if run_state in idle_states:
         cr.idle_low_rpm_sec += duration_sec
 
@@ -136,42 +138,52 @@ def _update_thermal(
     t_start = _tz(seg_start)
     t_end = _tz(seg_end)
 
-    # 1. Время в зоне ELEVATED
-    if load_zone == "ELEVATED":
+    # 1. Накопление или спад elevated_zone_sec
+    # THERMAL — ОБРАТИМЫЙ риск: снятие нагрузки → мотор остывает → риск уходит.
+    # Накапливаем в ELEVATED/OVERLOAD, спадаем с настраиваемой скоростью вне них.
+    if load_zone in ("ELEVATED", "OVERLOAD"):
         tr.elevated_zone_sec += duration_sec
+    else:
+        decay = float(cfg.det("THERMAL_HIGHLOAD", "thermal_decay_rate_per_sec", default=0.5))
+        tr.elevated_zone_sec = max(0.0, tr.elevated_zone_sec - duration_sec * decay)
 
-    # 2. Время с Т ОЖ вблизи порога HCT Warning
-    hct_warn = float(cfg.thr("coolant_temperature", "controller", "warning_c", default=97.8))
-    near_pct = float(cfg.det("THERMAL_HIGHLOAD", "coolant_near_limit_pct", default=5.0))
-    hct_near = hct_warn * (1 - near_pct / 100)
-    cool_addr = cfg.role_to_addr("COOLANT_TEMP")
-    if cool_addr and cool_addr in by_addr:
-        rows = [r for r in by_addr[cool_addr]
-                if t_start <= _tz(r["ts"]) < t_end and r.get("value") is not None]
-        for i, r in enumerate(rows[:-1]):
-            v = _fv(r)
-            if v is not None and v >= hct_near:
-                dt = (_tz(rows[i + 1]["ts"]) - _tz(r["ts"])).total_seconds()
-                tr.coolant_near_limit_sec += max(0, dt)
+    # 2. Время с Т ОЖ вблизи порога HCT Warning (только в ELEVATED/OVERLOAD)
+    if load_zone in ("ELEVATED", "OVERLOAD"):
+        hct_warn = float(cfg.thr("coolant_temperature", "controller", "warning_c", default=97.8))
+        near_pct = float(cfg.det("THERMAL_HIGHLOAD", "coolant_near_limit_pct", default=5.0))
+        hct_near = hct_warn * (1 - near_pct / 100)
+        cool_addr = cfg.role_to_addr("COOLANT_TEMP")
+        if cool_addr and cool_addr in by_addr:
+            rows = [r for r in by_addr[cool_addr]
+                    if t_start <= _tz(r["ts"]) < t_end and r.get("value") is not None]
+            for i, r in enumerate(rows[:-1]):
+                v = _fv(r)
+                if v is not None and v >= hct_near:
+                    dt = (_tz(rows[i + 1]["ts"]) - _tz(r["ts"])).total_seconds()
+                    tr.coolant_near_limit_sec += max(0, dt)
+    else:
+        decay = float(cfg.det("THERMAL_HIGHLOAD", "thermal_decay_rate_per_sec", default=0.5))
+        tr.coolant_near_limit_sec = max(0.0, tr.coolant_near_limit_sec - duration_sec * decay)
 
-    # 3. Время с Т масла вблизи порога HOT Warning
-    hot_warn = float(cfg.thr("oil_temperature", "controller", "warning_c", default=105.0))
-    near_pct_oil = float(cfg.det("THERMAL_HIGHLOAD", "oil_near_limit_pct", default=5.0))
-    hot_near = hot_warn * (1 - near_pct_oil / 100)
-    oil_addr = cfg.role_to_addr("OIL_TEMP")
-    if oil_addr and oil_addr in by_addr:
-        rows = [r for r in by_addr[oil_addr]
-                if t_start <= _tz(r["ts"]) < t_end and r.get("value") is not None]
-        for i, r in enumerate(rows[:-1]):
-            v = _fv(r)
-            if v is not None and v >= hot_near:
-                dt = (_tz(rows[i + 1]["ts"]) - _tz(r["ts"])).total_seconds()
-                tr.oil_near_limit_sec += max(0, dt)
+    # 3. Время с Т масла вблизи порога HOT Warning (только в ELEVATED/OVERLOAD)
+    if load_zone in ("ELEVATED", "OVERLOAD"):
+        hot_warn = float(cfg.thr("oil_temperature", "controller", "warning_c", default=105.0))
+        near_pct_oil = float(cfg.det("THERMAL_HIGHLOAD", "oil_near_limit_pct", default=5.0))
+        hot_near = hot_warn * (1 - near_pct_oil / 100)
+        oil_addr = cfg.role_to_addr("OIL_TEMP")
+        if oil_addr and oil_addr in by_addr:
+            rows = [r for r in by_addr[oil_addr]
+                    if t_start <= _tz(r["ts"]) < t_end and r.get("value") is not None]
+            for i, r in enumerate(rows[:-1]):
+                v = _fv(r)
+                if v is not None and v >= hot_near:
+                    dt = (_tz(rows[i + 1]["ts"]) - _tz(r["ts"])).total_seconds()
+                    tr.oil_near_limit_sec += max(0, dt)
+    else:
+        decay = float(cfg.det("THERMAL_HIGHLOAD", "thermal_decay_rate_per_sec", default=0.5))
+        tr.oil_near_limit_sec = max(0.0, tr.oil_near_limit_sec - duration_sec * decay)
 
-    # 4. Сброс при выходе из ELEVATED (опционально)
-    # Тепловой риск не сбрасывается автоматически — только при явном решении оператора.
-
-    # 5. Обновить уровень риска
+    # 4. Обновить уровень риска
     yellow_elev = float(cfg.det("THERMAL_HIGHLOAD", "risk_yellow_elevated_sec", default=3600))
     red_elev = float(cfg.det("THERMAL_HIGHLOAD", "risk_red_elevated_sec", default=7200))
 
