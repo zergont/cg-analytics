@@ -24,7 +24,13 @@ from .serializer import to_json, to_markdown, build_run_summary
 
 logger = logging.getLogger(__name__)
 
-ANALYTICS_VERSION = "2.0.0"
+def _read_version() -> str:
+    try:
+        return (Path(__file__).parent.parent / "VERSION").read_text(encoding="utf-8").strip()
+    except Exception:
+        return "unknown"
+
+ANALYTICS_VERSION = _read_version()
 
 
 def _tz(ts: datetime) -> datetime:
@@ -39,6 +45,7 @@ async def run_analysis(
     ts_from: datetime,
     ts_to: datetime,
     kb_path: str | Path,
+    tz=None,
 ) -> dict[str, Any]:
     """Запустить аналитический прогон за период [ts_from, ts_to).
 
@@ -100,7 +107,7 @@ async def run_analysis(
             segments, router_sn, equip_type, panel_id, tf, tt, ANALYTICS_VERSION
         )
         report_md = to_markdown(
-            segments, router_sn, equip_type, panel_id, tf, tt, ANALYTICS_VERSION
+            segments, router_sn, equip_type, panel_id, tf, tt, ANALYTICS_VERSION, tz=tz
         )
 
         summary = build_run_summary(segments)

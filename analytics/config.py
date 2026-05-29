@@ -99,10 +99,16 @@ class AnalyticsConfig:
             node = node.get(k, {})
         return node if node != {} else default
 
-    def bitmap_severity(self, raw_severity: str) -> str:
-        """Перевести severity из fault_bitmap_map → шкалу ТЗ (SHUTDOWN/ALARM/WARNING/INFO)."""
+    def bitmap_severity(self, raw_severity: str | None) -> str:
+        """Перевести severity из fault_bitmap_map → шкалу ТЗ (SHUTDOWN/ALARM/WARNING/INFO).
+
+        Бит без поля severity (raw_severity=None/'') → INFO:
+        это статусный/информационный бит, не неисправность.
+        """
+        if not raw_severity:
+            return "INFO"
         return self.fault_matrix.get("bitmap_severity_map", {}).get(
-            raw_severity, "WARNING"
+            raw_severity, self.fault_matrix.get("default_severity", "WARNING")
         )
 
     def code_severity(self, code: int) -> str:

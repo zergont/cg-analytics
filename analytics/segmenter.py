@@ -386,9 +386,13 @@ def _build_subsegments_for_running(
                 break
         return z
 
-    # Fault-события — немедленные границы (без N_stab)
+    # Fault-события — немедленные границы (без N_stab).
+    # INFO-фолты (статусные биты без severity) подсегменты НЕ режут.
     fault_splits: list[tuple[datetime, str, str]] = []
     for fp in fault_periods_in_seg:
+        mapped_sev = cfg.bitmap_severity(fp.get("severity"))
+        if mapped_sev == "INFO":
+            continue
         ft = _tz(fp["fault_start"])
         if t_start_tz < ft < t_end_tz:
             fault_splits.append((ft, "FAULT_START", zone_at(ft)))

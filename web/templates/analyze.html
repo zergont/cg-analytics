@@ -76,13 +76,22 @@
         <dl class="row mb-0 small">
           <dt class="col-7">Строк истории</dt>
           <dd class="col-5" id="stat_history_rows">—</dd>
-          <dt class="col-7">Регистров</dt>
-          <dd class="col-5" id="stat_registers_count">—</dd>
-          <dt class="col-7">Периодов enum</dt>
-          <dd class="col-5" id="stat_enum_periods_count">—</dd>
-          <dt class="col-7">Событий</dt>
-          <dd class="col-5" id="stat_fault_periods_count">—</dd>
+          <dt class="col-7">Периодов RUN_STATE</dt>
+          <dd class="col-5" id="stat_enum_count">—</dd>
+          <dt class="col-7">Событий fault</dt>
+          <dd class="col-5" id="stat_fault_count">—</dd>
+          <dt class="col-7">Сегментов</dt>
+          <dd class="col-5" id="stat_segments_count">—</dd>
+          <dt class="col-7">Обнаружений</dt>
+          <dd class="col-5" id="stat_detections_count">—</dd>
+          <dt class="col-7">Качество данных</dt>
+          <dd class="col-5" id="stat_data_quality">—</dd>
+          <dt class="col-7">Версия аналитики</dt>
+          <dd class="col-5" id="stat_analytics_version">—</dd>
         </dl>
+        <div id="stat_run_link" class="mt-2 small" style="display:none">
+          <a id="stat_run_a" href="#" target="_blank">Открыть прогон →</a>
+        </div>
       </div>
     </div>
 
@@ -175,8 +184,9 @@ let _agentText  = '';
 const STAGES = [
     {id:'history', label:'История аналогов'},
     {id:'enum',    label:'Периоды состояний'},
-    {id:'fault',   label:'События'},
-    {id:'build',   label:'Сборка MD-пакета'},
+    {id:'fault',   label:'События и неисправности'},
+    {id:'gaps',    label:'Пропуски связи'},
+    {id:'build',   label:'Сегментация и диагностика'},
 ];
 
 // ── localStorage: сохранение и восстановление выбора ─────────────────────────
@@ -327,14 +337,31 @@ function onCollectError(message) {
 function initResult(r) {
     _raw = r.markdown;
 
-    // Статистика
-    _el('stat_history_rows').textContent       = r.history_rows;
-    _el('stat_registers_count').textContent    = r.registers_count;
-    _el('stat_enum_periods_count').textContent = r.enum_periods_count;
+    // Статистика — данные загрузки
+    _el('stat_history_rows').textContent = r.history_rows ?? '—';
+    _el('stat_enum_count').textContent   = r.enum_count   ?? '—';
 
-    const fe = _el('stat_fault_periods_count');
-    fe.textContent = r.fault_periods_count;
-    fe.className   = 'col-5' + (r.fault_periods_count > 0 ? ' text-danger fw-semibold' : '');
+    const fe = _el('stat_fault_count');
+    const fc = r.fault_count ?? 0;
+    fe.textContent = fc;
+    fe.className   = 'col-5' + (fc > 0 ? ' text-danger fw-semibold' : '');
+
+    // Статистика — результат аналитики
+    _el('stat_segments_count').textContent  = r.segments_count  ?? '—';
+    const de = _el('stat_detections_count');
+    const dc = r.detections_count ?? 0;
+    de.textContent = dc;
+    de.className   = 'col-5' + (dc > 0 ? ' fw-semibold' : '');
+
+    const dq = r.data_quality_avg;
+    _el('stat_data_quality').textContent = dq != null ? Math.round(dq * 100) + '%' : '—';
+    _el('stat_analytics_version').textContent = r.analytics_version ?? '—';
+
+    // Ссылка на прогон в БД
+    if (r.run_id) {
+        _el('stat_run_a').href = '/analysis/' + r.run_id;
+        _el('stat_run_link').style.display = '';
+    }
 
     // Тулбар
     _el('toolbar_ts_from').textContent = (r.ts_from_local || '').replace('T', ' ');

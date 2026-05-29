@@ -58,16 +58,27 @@ def _fmt_duration(sec: float) -> str:
     return " ".join(parts)
 
 
-def _fmt_ts(iso: str | None) -> str:
+def _fmt_ts(iso: str | None, tz=None) -> str:
+    """Форматировать ISO-метку в читаемую строку с учётом часового пояса."""
     if not iso:
         return "—"
     try:
         dt = datetime.fromisoformat(iso)
         if dt.tzinfo:
-            dt = dt.astimezone(timezone.utc)
-        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+            target = tz if tz is not None else timezone.utc
+            dt = dt.astimezone(target)
+            label = getattr(tz, "key", "UTC") if tz is not None else "UTC"
+            return dt.strftime(f"%Y-%m-%d %H:%M:%S {label}")
+        return iso
     except ValueError:
         return iso
+
+
+def _make_fmt_ts(tz):
+    """Вернуть замыкание _fmt_ts с захваченным часовым поясом."""
+    def _f(iso: str | None) -> str:
+        return _fmt_ts(iso, tz)
+    return _f
 
 
 def _as_dict(d: Any) -> dict:
@@ -120,15 +131,21 @@ def to_markdown(
     ts_from: datetime,
     ts_to: datetime,
     analytics_version: str = "2.0.0",
+    tz=None,
 ) -> str:
-    """Сформировать Markdown-отчёт."""
+    """Сформировать Markdown-отчёт.
+
+    tz — объект часового пояса (например, из config.get_tz()); None → UTC.
+    """
+    fmt_ts = _make_fmt_ts(tz)
+
     lines: list[str] = []
     a = lines.append
 
     # ── Заголовок ──
     a(f"# Аналитический отчёт — ДГУ `{router_sn}` / панель {panel_id}")
     a(f"")
-    a(f"**Период анализа:** {_fmt_ts(ts_from.isoformat())} — {_fmt_ts(ts_to.isoformat())}")
+    a(f"**Период анализа:** {fmt_ts(ts_from.isoformat())} — {fmt_ts(ts_to.isoformat())}")
     a(f"**Тип оборудования:** {equip_type}")
     a(f"**Версия аналитики:** {analytics_version}")
     a(f"")
@@ -179,7 +196,7 @@ def to_markdown(
         a("")
         for d in alarm_detections:
             emoji = _SEVERITY_EMOJI.get(d["severity"], "")
-            ts_str = _fmt_ts(d.get("t_detected"))
+            ts_str = fmt_ts(d.get("t_detected"))
             a(f"- {emoji} **{d['scenario']}** @ {ts_str}: {d['trigger']}")
         a("")
 
@@ -188,12 +205,12 @@ def to_markdown(
     a("")
 
     for seg_idx, seg in enumerate(segments, 1):
-        _append_segment(lines, seg, seg_idx)
+        _append_segment(lines, seg, seg_idx, fmt_ts)
 
     return "\n".join(lines)
 
 
-def _append_segment(lines: list[str], seg: Segment, idx: int) -> None:
+def _append_segment(lines: list[str], seg: Segment, idx: int, fmt_ts) -> None:
     a = lines.append
     state_label = (
         seg.run_state_label
@@ -207,8 +224,8 @@ def _append_segment(lines: list[str], seg: Segment, idx: int) -> None:
 
     a(f"### Сегмент {idx} — {state_label} (RUN_STATE={seg.run_state})")
     a("")
-    a(f"- **Начало:** {_fmt_ts(seg.t_start)}")
-    a(f"- **Конец:** {_fmt_ts(seg.t_end)}")
+    a(f"- **Начало:** {fmt_ts(seg.t_start)}")
+    a(f"- **Конец:** {fmt_ts(seg.t_end)}")
     a(f"- **Длительность:** {dur_str}{hours_str}")
     a(f"- **Качество данных:** {dq_str}")
     a(f"- **Причина открытия:** {seg.cause_open}")
@@ -225,7 +242,7 @@ def _append_segment(lines: list[str], seg: Segment, idx: int) -> None:
         for ev in seg.events:
             sev = ev.get("severity") or "?"
             name = ev.get("name_ru") or ev.get("name") or "Unknown"
-            t = _fmt_ts(ev.get("t"))
+            t = fmt_ts(ev.get("t"))
             dur = ev.get("duration_sec")
             dur_s = f" ({_fmt_duration(dur)})" if dur else ""
             a(f"- {_SEVERITY_EMOJI.get(sev, '')} `{name}` @ {t}{dur_s}")
@@ -246,7 +263,7 @@ def _append_segment(lines: list[str], seg: Segment, idx: int) -> None:
         a("")
 
     for sub_idx, sub in enumerate(seg.subsegments, 1):
-        _append_subsegment(lines, sub, idx, sub_idx, short=(len(seg.subsegments) == 1))
+        _append_subsegment(lines, sub, idx, sub_idx, fmt_ts, short=(len(seg.subsegments) == 1))
 
 
 def _append_subsegment(
@@ -254,6 +271,7 @@ def _append_subsegment(
     sub: Subsegment,
     seg_idx: int,
     sub_idx: int,
+    fmt_ts,
     short: bool = False,
 ) -> None:
     a = lines.append
@@ -265,8 +283,8 @@ def _append_subsegment(
         a("")
         a(f"| | |")
         a(f"|-|-|")
-        a(f"| Начало | {_fmt_ts(sub.t_start)} |")
-        a(f"| Конец | {_fmt_ts(sub.t_end)} |")
+        a(f"| Начало | {fmt_ts(sub.t_start)} |")
+        a(f"| Конец | {fmt_ts(sub.t_end)} |")
         a(f"| Длительность | {dur_str} |")
         a(f"| Качество данных | {sub.data_quality:.0%} |")
         a(f"| Причина открытия | {sub.cause_open} |")

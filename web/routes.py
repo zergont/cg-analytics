@@ -218,20 +218,29 @@ async def analyze_stream(
                 ts_from=ts_from_utc,
                 ts_to=ts_to_utc,
             )
-            md = to_markdown(segments, router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc)
+            from analytics.runner import ANALYTICS_VERSION as _AV
+            md = to_markdown(
+                segments, router_sn, equip_type, panel_id,
+                ts_from_utc, ts_to_utc, _AV, tz=tz,
+            )
             summary = build_run_summary(segments)
-            yield _evt({"stage": "build", "status": "done"})
+            yield _evt({"stage": "build", "status": "done",
+                        "segments": summary["segments_count"],
+                        "detections": summary["detections_count"]})
 
             # Сохранение в БД (не блокируем стрим)
             run_id = None
             try:
                 from analytics.serializer import to_json as _to_json
                 from db.analytics import save_analysis_run as _save
-                seg_json = _to_json(segments, router_sn, equip_type, panel_id, ts_from_utc, ts_to_utc)
+                seg_json = _to_json(
+                    segments, router_sn, equip_type, panel_id,
+                    ts_from_utc, ts_to_utc, _AV,
+                )
                 run_id = await _save({
                     "router_sn": router_sn, "equip_type": equip_type, "panel_id": panel_id,
                     "engine_sn": engine_sn, "ts_from": ts_from_utc, "ts_to": ts_to_utc,
-                    "analytics_version": "2.0.0",
+                    "analytics_version": _AV,
                     "segments_json": seg_json, "report_md": md,
                     **summary,
                 })
@@ -243,6 +252,10 @@ async def analyze_stream(
                 "result": {
                     "markdown":          md,
                     "run_id":            run_id,
+                    "history_rows":      len(history),
+                    "enum_count":        len(enum_periods),
+                    "fault_count":       len(fault_periods),
+                    "gaps_count":        len(gaps),
                     "segments_count":    summary["segments_count"],
                     "detections_count":  summary["detections_count"],
                     "max_severity":      summary.get("max_severity"),
@@ -250,6 +263,7 @@ async def analyze_stream(
                     "ts_from_local":     ts_from_local,
                     "ts_to_local":       ts_to_local,
                     "tz_name":           tz.key,
+                    "analytics_version": _AV,
                 },
             })
         except Exception as e:
@@ -370,6 +384,7 @@ async def _run_analysis(
         ts_from=ts_from_utc,
         ts_to=ts_to_utc,
         kb_path=kb_path,
+        tz=tz,
     )
 
     if result.get("error"):
