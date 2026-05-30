@@ -66,7 +66,13 @@ class CharacteristicDiscrete:
 @dataclass
 class DerivedMetrics:
     """Вычисляемые метрики подсегмента (агрегаты и экстремумы)."""
-    current_imbalance_pct_max: Optional[float] = None
+    # ── Ток обратной последовательности I₂ (Negative Sequence, Метод А) ──────
+    # Физически корректная метрика несимметрии. Заводская защита PCC3300 (12%).
+    neg_seq_i2_pct_max: Optional[float] = None      # I₂% макс в подсегменте
+    neg_seq_i2_pct_med: Optional[float] = None      # I₂% медиана
+    neg_seq_i2_duration_sec: Optional[float] = None  # время I₂% > порога приближения
+    # ── Справочные метрики несимметрии (НЕ основа детектора) ────────────────
+    current_imbalance_pct_max: Optional[float] = None   # грубый перекос токов (справочно)
     current_imbalance_pct_med: Optional[float] = None
     power_imbalance_pct_max: Optional[float] = None
     imbalance_duration_sec: Optional[float] = None

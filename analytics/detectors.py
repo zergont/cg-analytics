@@ -40,8 +40,12 @@ def run_all_detectors(
     if cfg.det("LOAD_STEP", "enabled", default=True) and run_state == 3:
         detections.extend(_detect_load_step(derived, seg_start, seg_end, cfg))
 
-    if cfg.det("PHASE_IMBALANCE", "enabled", default=True):
-        detections.extend(_detect_phase_imbalance(derived, seg_start, cfg))
+    # NEGATIVE_SEQUENCE заменяет PHASE_IMBALANCE (Addendum v1.5):
+    # - физически корректная величина I₂ вместо грубого перекоса |I_k - I_avg|
+    # - тот же gate: RUN_STATE=3 (задан в valid_run_states конфига)
+    _ns_valid = set(cfg.det("NEGATIVE_SEQUENCE", "valid_run_states", default=[3]) or [3])
+    if cfg.det("NEGATIVE_SEQUENCE", "enabled", default=True) and run_state in _ns_valid:
+        detections.extend(_detect_negative_sequence(derived, seg_start, cfg))
 
     if cfg.det("COOLING_FAILURE", "enabled", default=True):
         detections.extend(_detect_cooling_failure(characteristics, derived, run_state, seg_start, seg_end, cfg))
@@ -163,41 +167,60 @@ def _detect_load_step(
     )]
 
 
-# ── PHASE_IMBALANCE ──────────────────────────────────────────────────────────
+# ── NEGATIVE_SEQUENCE ────────────────────────────────────────────────────────
 
-def _detect_phase_imbalance(
+def _detect_negative_sequence(
     derived: DerivedMetrics,
     seg_start: datetime,
     cfg: AnalyticsConfig,
 ) -> list[Detection]:
-    imb = derived.current_imbalance_pct_max
-    dur = derived.imbalance_duration_sec
-    if imb is None:
+    """Детектор тока обратной последовательности I₂ (Addendum v1.5).
+
+    Физически корректная метрика несимметрии фаз.
+    Заводская защита PCC3300 (Neg Seq Overcurrent) реагирует на I₂%, а НЕ на
+    грубый перекос |I_k - I_avg|/I_avg (расхождение ~в 6-8 раз).
+
+    Предупреждаем с зазором 10% (до заводского порога 12%).
+    Gate: RUN_STATE=3 (проверяется в run_all_detectors).
+    """
+    i2_pct = derived.neg_seq_i2_pct_max
+    dur = derived.neg_seq_i2_duration_sec
+
+    if i2_pct is None:
         return []
 
-    thr_pct = float(cfg.det("PHASE_IMBALANCE", "current_imbalance_warning_pct", default=12.0))
-    dur_thr = float(cfg.det("PHASE_IMBALANCE", "duration_warning_sec", default=60.0))
+    prox_thr = float(cfg.det("NEGATIVE_SEQUENCE", "i2_proximity_warning_pct", default=10.0))
+    dur_thr = float(cfg.det("NEGATIVE_SEQUENCE", "duration_warning_sec", default=60.0))
+    factory_thr = float(cfg.det("NEGATIVE_SEQUENCE", "factory_threshold_pct", default=12.0))
 
-    if imb < thr_pct:
+    if i2_pct < prox_thr:
         return []
     if dur is None or dur < dur_thr:
         return []
 
     return [Detection(
-        scenario="PHASE_IMBALANCE",
-        severity=cfg.det("PHASE_IMBALANCE", "severity_default", default="WARNING"),
+        scenario="NEGATIVE_SEQUENCE",
+        severity=cfg.det("NEGATIVE_SEQUENCE", "severity_default", default="WARNING"),
         t_detected=_iso(seg_start),
         source="METRIC_RULE",
-        trigger=(f"current_imbalance_pct_max={imb:.1f}% > {thr_pct}% "
-                 f"на протяжении {dur:.0f}с > {dur_thr}с"),
-        related_roles=["CURRENT_L1", "CURRENT_L2", "CURRENT_L3", "CURRENT_AVG"],
+        trigger=(
+            f"I₂={i2_pct:.1f}% > {prox_thr:.0f}% "
+            f"(заводской порог PCC3300: {factory_thr:.0f}%) "
+            f"за {dur:.0f}с > {dur_thr:.0f}с"
+        ),
+        related_roles=[
+            "CURRENT_L1", "CURRENT_L2", "CURRENT_L3",
+            "ACTIVE_POWER_L1", "ACTIVE_POWER_L2", "ACTIVE_POWER_L3",
+            "REACTIVE_POWER_L1", "REACTIVE_POWER_L2", "REACTIVE_POWER_L3",
+        ],
         fault_codes=[],
-        description_key="PHASE_IMBALANCE.current_unbalance",
+        description_key="NEGATIVE_SEQUENCE.approaching_factory_threshold",
         values={
-            "current_imbalance_pct_max": imb,
-            "imbalance_duration_sec": dur,
-            "threshold_pct": thr_pct,
-            "duration_threshold_sec": dur_thr,
+            "i2_pct_max": i2_pct,
+            "i2_pct_med": derived.neg_seq_i2_pct_med,
+            "duration_sec": dur,
+            "proximity_threshold_pct": prox_thr,
+            "factory_threshold_pct": factory_thr,
         },
     )]
 

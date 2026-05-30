@@ -41,6 +41,38 @@ registers:
     description: Активная мощность фаза L3
     _source: PASSPORT_РЭ
 
+  40025:
+    role: VOLTAGE_LL_AVG
+    group: LOAD
+    unit: Vac
+    kind: analog
+    description: Среднее линейное напряжение (LL) — используется для расчёта I_номинального
+    _source: PASSPORT_РЭ
+
+  40035:
+    role: REACTIVE_POWER_L1
+    group: LOAD
+    unit: kVAR
+    kind: analog
+    description: Реактивная мощность фаза L1 — нужна для угла φ_L1 (метод A, I₂)
+    _source: PASSPORT_РЭ
+
+  40036:
+    role: REACTIVE_POWER_L2
+    group: LOAD
+    unit: kVAR
+    kind: analog
+    description: Реактивная мощность фаза L2 — нужна для угла φ_L2 (метод A, I₂)
+    _source: PASSPORT_РЭ
+
+  40037:
+    role: REACTIVE_POWER_L3
+    group: LOAD
+    unit: kVAR
+    kind: analog
+    description: Реактивная мощность фаза L3 — нужна для угла φ_L3 (метод A, I₂)
+    _source: PASSPORT_РЭ
+
   40038:
     role: REACTIVE_POWER_TOTAL
     group: LOAD

@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import cmath
 import math
 from datetime import datetime, timezone
 from typing import Any
@@ -246,24 +247,89 @@ def compute_derived_metrics(
 
     power_imbalance_pct_max = max(power_imbalances) if power_imbalances else None
 
-    # Длительность с перекосом выше порога
-    imb_thr = float(cfg.det("PHASE_IMBALANCE", "current_imbalance_warning_pct", default=12.0))
+    # Длительность с грубым перекосом выше порога (справочно; БАГ исправлен:
+    # теперь используем уже вычисленные i1/i2/i3, а не повторные _rows_in)
+    imb_ref_thr = float(cfg.det("NEGATIVE_SEQUENCE", "factory_threshold_pct", default=12.0))
     imbalance_duration_sec: float | None = None
-    if imbalances and i1:
-        i1d = {ts: v for ts, v in i1}
-        i2d = {ts: v for ts, v in _rows_in(_addr("CURRENT_L2") or 0)}
-        i3d = {ts: v for ts, v in _rows_in(_addr("CURRENT_L3") or 0)}
-        common_ts_sorted = sorted(set(i1d) & set(i2d) & set(i3d))
+    if imbalances and i1 and i2 and i3:
+        i1d_map = {ts: v for ts, v in i1}
+        i2d_map = {ts: v for ts, v in i2}
+        i3d_map = {ts: v for ts, v in i3}
+        common_ts_sorted = sorted(set(i1d_map) & set(i2d_map) & set(i3d_map))
         dur_above = 0.0
         for j, ts in enumerate(common_ts_sorted[:-1]):
-            v1, v2, v3 = i1d[ts], i2d[ts], i3d[ts]
+            v1, v2, v3 = i1d_map[ts], i2d_map[ts], i3d_map[ts]
             i_avg = (v1 + v2 + v3) / 3
             if i_avg > 1e-6:
                 imb = max(abs(v1 - i_avg), abs(v2 - i_avg), abs(v3 - i_avg)) / i_avg * 100
-                if imb > imb_thr:
+                if imb > imb_ref_thr:
                     dt = (common_ts_sorted[j + 1] - ts).total_seconds()
                     dur_above += dt
         imbalance_duration_sec = dur_above if dur_above > 0 else None
+
+    # ── Ток обратной последовательности I₂ (Метод А, Addendum v1.5) ──────────
+    # Физически корректная метрика: именно на неё реагирует заводская защита PCC3300.
+    # Требует пофазных Q (40035/36/37), добавленных в whitelist.
+    q1_rows = _rows_in(_addr("REACTIVE_POWER_L1") or 0) if _addr("REACTIVE_POWER_L1") else []
+    q2_rows = _rows_in(_addr("REACTIVE_POWER_L2") or 0) if _addr("REACTIVE_POWER_L2") else []
+    q3_rows = _rows_in(_addr("REACTIVE_POWER_L3") or 0) if _addr("REACTIVE_POWER_L3") else []
+
+    # Номинальный ток для нормировки I₂%
+    i_nominal_cfg = float(cfg.det("NEGATIVE_SEQUENCE", "i_nominal_a", default=0) or 0)
+    i_nominal_a: float = i_nominal_cfg
+    if i_nominal_a <= 0:
+        rating_kw_rows = _rows_in(_addr("RATING_KW") or 0) if _addr("RATING_KW") else []
+        rating_kw = _median([v for _, v in rating_kw_rows]) or 0.0
+        u_ll = float(cfg.det("NEGATIVE_SEQUENCE", "u_nominal_v", default=400.0))
+        pf_n = float(cfg.det("NEGATIVE_SEQUENCE", "pf_nominal", default=0.8))
+        if rating_kw > 0 and u_ll > 0 and pf_n > 0:
+            i_nominal_a = rating_kw * 1000.0 / (math.sqrt(3) * u_ll * pf_n)
+
+    neg_seq_i2_pct_max: float | None = None
+    neg_seq_i2_pct_med: float | None = None
+    neg_seq_i2_duration_sec: float | None = None
+
+    if i_nominal_a > 0 and i1 and i2 and i3 and p1 and p2 and p3 and q1_rows and q2_rows and q3_rows:
+        i1d_ns = {ts: v for ts, v in i1}
+        i2d_ns = {ts: v for ts, v in i2}
+        i3d_ns = {ts: v for ts, v in i3}
+        p1d_ns = {ts: v for ts, v in p1}
+        p2d_ns = {ts: v for ts, v in p2}
+        p3d_ns = {ts: v for ts, v in p3}
+        q1d_ns = {ts: v for ts, v in q1_rows}
+        q2d_ns = {ts: v for ts, v in q2_rows}
+        q3d_ns = {ts: v for ts, v in q3_rows}
+
+        ns_common = sorted(
+            set(i1d_ns) & set(i2d_ns) & set(i3d_ns) &
+            set(p1d_ns) & set(p2d_ns) & set(p3d_ns) &
+            set(q1d_ns) & set(q2d_ns) & set(q3d_ns)
+        )
+
+        i2_pct_series: list[tuple[datetime, float]] = []
+        for ts in ns_common:
+            i2_abs = _compute_neg_seq_i2(
+                i1d_ns[ts], p1d_ns[ts], q1d_ns[ts],
+                i2d_ns[ts], p2d_ns[ts], q2d_ns[ts],
+                i3d_ns[ts], p3d_ns[ts], q3d_ns[ts],
+            )
+            if i2_abs is not None:
+                i2_pct_series.append((ts, i2_abs / i_nominal_a * 100))
+
+        if i2_pct_series:
+            pcts = [pct for _, pct in i2_pct_series]
+            neg_seq_i2_pct_max = max(pcts)
+            neg_seq_i2_pct_med = _median(pcts)
+
+            # Суммарное время I₂% > порога приближения к заводской защите
+            i2_prox = float(cfg.det("NEGATIVE_SEQUENCE", "i2_proximity_warning_pct", default=10.0))
+            dur = 0.0
+            for j in range(len(i2_pct_series) - 1):
+                ts_j, pct_j = i2_pct_series[j]
+                ts_next, _ = i2_pct_series[j + 1]
+                if pct_j > i2_prox:
+                    dur += (ts_next - ts_j).total_seconds()
+            neg_seq_i2_duration_sec = dur if dur > 0 else None
 
     # S-consistency: |√(P²+Q²) - S_тег|
     p_total = _rows_in(_addr("ACTIVE_POWER_TOTAL") or 0) if _addr("ACTIVE_POWER_TOTAL") else []
@@ -367,6 +433,9 @@ def compute_derived_metrics(
     coolant_asymptote_c = _estimate_thermal_asymptote(cool_t_real)
 
     return DerivedMetrics(
+        neg_seq_i2_pct_max=_r(neg_seq_i2_pct_max),
+        neg_seq_i2_pct_med=_r(neg_seq_i2_pct_med),
+        neg_seq_i2_duration_sec=_r(neg_seq_i2_duration_sec),
         current_imbalance_pct_max=_r(current_imbalance_pct_max),
         current_imbalance_pct_med=_r(current_imbalance_pct_med),
         power_imbalance_pct_max=_r(power_imbalance_pct_max),
@@ -472,6 +541,49 @@ def _time_below(
         if v < threshold:
             total += (_tz(next_ts) - _tz(ts)).total_seconds()
     return total if total > 0 else None
+
+
+def _compute_neg_seq_i2(
+    i1_mag: float, p1: float, q1: float,
+    i2_mag: float, p2: float, q2: float,
+    i3_mag: float, p3: float, q3: float,
+) -> float | None:
+    """Ток обратной последовательности I₂ — Метод А (через пофазный Q).
+
+    Возвращает |I₂| в тех же единицах что входные токи (А).
+
+    Алгоритм (преобразование Фортескью):
+      1. φ_k = atan2(Q_k, P_k)          — точный угол со знаком
+      2. I_Lk = |I_k| · e^(j·(θ_U_k − φ_k))  — ток-вектор (напряжения симметричны)
+      3. I₂ = (1/3)·|I_L1 + a²·I_L2 + a·I_L3|,  a = e^(j·2π/3)
+    """
+    # Углы со знаком (atan2 = None если и P и Q → 0)
+    def phase_angle(p: float, q: float) -> float | None:
+        if abs(p) < 1e-4 and abs(q) < 1e-4:
+            return None
+        return math.atan2(q, p)
+
+    phi1 = phase_angle(p1, q1)
+    phi2 = phase_angle(p2, q2)
+    phi3 = phase_angle(p3, q3)
+
+    if phi1 is None or phi2 is None or phi3 is None:
+        return None
+    if i1_mag < 1e-3 or i2_mag < 1e-3 or i3_mag < 1e-3:
+        return None  # нулевые токи — I₂ нестабилен
+
+    # Углы напряжений (симметричная 3-фазная система: 0°, −120°, +120°)
+    TWO_PI_3 = 2 * math.pi / 3
+    cIL1 = i1_mag * cmath.exp(1j * (0           - phi1))
+    cIL2 = i2_mag * cmath.exp(1j * (-TWO_PI_3   - phi2))
+    cIL3 = i3_mag * cmath.exp(1j * (+TWO_PI_3   - phi3))
+
+    # Оператор поворота a = e^(j·2π/3)
+    a = cmath.exp(1j * TWO_PI_3)
+
+    # Отрицательная последовательность: I₂ = (1/3)·(IL1 + a²·IL2 + a·IL3)
+    I2 = (cIL1 + a**2 * cIL2 + a * cIL3) / 3
+    return abs(I2)
 
 
 def _estimate_thermal_asymptote(
