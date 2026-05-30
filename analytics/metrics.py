@@ -38,13 +38,17 @@ def _mad(values: list[float]) -> float | None:
     return _median([abs(v - med) for v in values])
 
 
-def _linear_slope_per_hour(points: list[tuple[datetime, float]]) -> float | None:
-    """Наклон линейного тренда в ед./час по реальным device-timestamp."""
+def _linear_slope_per_second(points: list[tuple[datetime, float]]) -> float | None:
+    """Наклон линейного тренда в ед./с по реальным device-timestamp.
+
+    Единица /с выбрана для всех внутрисегментных/переходных метрик (Addendum v1.4):
+    исключает абсурдные числа на коротких переходных сегментах
+    (RPM/ч, Гц/ч при шаге 20с — нечитаемы; RPM/с и Гц/с — вменяемы).
+    """
     if len(points) < 2:
         return None
     t0 = _tz(points[0][0])
-    # Преобразуем время в часы от t0
-    xs = [((_tz(ts) - t0).total_seconds() / 3600) for ts, _ in points]
+    xs = [(_tz(ts) - t0).total_seconds() for ts, _ in points]  # в секундах
     ys = [v for _, v in points]
     n = len(xs)
     sum_x = sum(xs)
@@ -133,7 +137,7 @@ def compute_characteristics(
         mad_v = _mad(vals)
         # Slope считается только по реальным измерениям — ff-копии не вносят
         # ложных ступенек при экстраполяции тренда.
-        slope = _linear_slope_per_hour(window_real if window_real else window)
+        slope = _linear_slope_per_second(window_real if window_real else window)
 
         char = Characteristic(
             role=role,
@@ -323,8 +327,9 @@ def compute_derived_metrics(
     # dRPM_dt_max
     dRPM_dt_max = _max_speed(rpm_rows_real, gaps, heartbeat, max_mult, absolute=True)
 
-    # dCoolant_dt_max (°C/час) — максимальная скорость роста Т ОЖ
-    dCoolant_dt_max = _max_speed_per_hour(cool_t_real, gaps, heartbeat, max_mult, positive=True)
+    # dCoolant_dt_max (°C/с) — максимальная мгновенная скорость роста Т ОЖ.
+    # Класс B — справочная метрика для LLM Stage 2. Детекторы используют slope.
+    dCoolant_dt_max = _max_speed_per_second(cool_t_real, gaps, heartbeat, max_mult, positive=True)
 
     # dOil_press_dt_min (кПа/с) — максимальная скорость ПАДЕНИЯ давления масла (отрицательная)
     dOil_press_dt_min = _min_speed(oil_press_real, gaps, heartbeat, max_mult)
@@ -334,14 +339,32 @@ def compute_derived_metrics(
     coolant_below_60_sec = _time_below(cool_t, below_c)
 
     # ── Переходные процессы по ГОСТ ISO 8528-5 (Класс A, freq transient) ──────
-    # freq_dip_pct / freq_rise_pct / freq_recovery_sec — для LOAD_STEP детектора.
-    # Вычисляются из реального ряда частоты (без forward-fill).
+    # freq_dip/rise/recovery — для LOAD_STEP детектора. Только реальные измерения.
+    # Gate (Addendum v1.4 п.3): если RPM упали ниже rpm_min_pct% от максимума —
+    # это штатный останов/переход на ХХ, а НЕ нагрузочный переходный процесс.
+    # Без gate: при остановке freq_dip_pct = 100% (артефакт).
     freq_nominal = float(cfg.det("LOAD_STEP", "freq_nominal_hz", default=50.0))
     freq_settled_pct = float(cfg.det("LOAD_STEP", "freq_settled_pct", default=0.5))
     freq_rows_real = _rows_in(_addr("FREQUENCY") or 0, real_only=True) if _addr("FREQUENCY") else []
-    freq_dip_pct, freq_rise_pct, freq_recovery_sec = _freq_transient_metrics(
-        freq_rows_real, freq_nominal, freq_settled_pct, t_start
-    )
+
+    rpm_for_freq_gate = _rows_in(_addr("RPM") or 0, real_only=True) if _addr("RPM") else []
+    rpm_min_pct = float(cfg.det("LOAD_STEP", "rpm_min_pct_for_freq_metrics", default=50.0))
+    _rpm_vals = [v for _, v in rpm_for_freq_gate]
+    _rpm_max = max(_rpm_vals) if _rpm_vals else 0.0
+    _rpm_min = min(_rpm_vals) if _rpm_vals else 0.0
+    rpm_stays_working = (_rpm_max <= 0 or _rpm_min >= _rpm_max * rpm_min_pct / 100)
+
+    if rpm_stays_working:
+        freq_dip_pct, freq_rise_pct, freq_recovery_sec = _freq_transient_metrics(
+            freq_rows_real, freq_nominal, freq_settled_pct, t_start
+        )
+    else:
+        freq_dip_pct = freq_rise_pct = freq_recovery_sec = None
+
+    # ── Предиктор асимптоты прогрева ОЖ (Класс B, Phase 1 COOLING_FAILURE) ────
+    # Оценивает T_равн для растущего ряда — используется в _detect_cooling_failure
+    # чтобы обнаружить «нацеленность на перегрев» ещё до достижения опасной T.
+    coolant_asymptote_c = _estimate_thermal_asymptote(cool_t_real)
 
     return DerivedMetrics(
         current_imbalance_pct_max=_r(current_imbalance_pct_max),
@@ -362,6 +385,7 @@ def compute_derived_metrics(
         dCoolant_dt_max=_r(dCoolant_dt_max),
         dOil_press_dt_min=_r(dOil_press_dt_min),
         coolant_below_60_sec=_r(coolant_below_60_sec),
+        coolant_asymptote_c=_r(coolant_asymptote_c, decimals=1),
     )
 
 
@@ -389,24 +413,24 @@ def _max_speed(
     return max(speeds) if speeds else None
 
 
-def _max_speed_per_hour(
+def _max_speed_per_second(
     series: list[tuple[datetime, float]],
     gaps: list[dict],
     heartbeat: float,
     max_mult: float,
     positive: bool = False,
 ) -> float | None:
-    """Максимальная скорость изменения параметра (ед./час), только позитивная если positive=True."""
+    """Максимальная скорость изменения параметра (ед./с), только позитивная если positive=True."""
     speeds: list[float] = []
     for i in range(len(series) - 1):
         ts1, v1 = series[i]
         ts2, v2 = series[i + 1]
         if _is_gap_between(ts1, ts2, gaps, heartbeat, max_mult):
             continue
-        dt_h = (_tz(ts2) - _tz(ts1)).total_seconds() / 3600
-        if dt_h < 1e-9:
+        dt = (_tz(ts2) - _tz(ts1)).total_seconds()
+        if dt < 1e-6:
             continue
-        speed = (v2 - v1) / dt_h
+        speed = (v2 - v1) / dt
         if positive and speed <= 0:
             continue
         speeds.append(speed)
@@ -448,6 +472,56 @@ def _time_below(
         if v < threshold:
             total += (_tz(next_ts) - _tz(ts)).total_seconds()
     return total if total > 0 else None
+
+
+def _estimate_thermal_asymptote(
+    series: list[tuple[datetime, float]],
+) -> float | None:
+    """Оценить асимптотическую температуру для фазы нагрева (предиктор COOLING_FAILURE Фаза 1).
+
+    Алгоритм: геометрический ряд последовательных приращений температуры.
+    Если приращения убывают (r < 1) → сумма геометрического ряда даёт оценку
+    оставшегося подъёма и, следовательно, асимптоты T_равн.
+
+    Требует ≥ 3 реальных точек на монотонно растущей серии.
+    Возвращает None если данных недостаточно или серия не на прогреве.
+    """
+    if len(series) < 3:
+        return None
+
+    vals = [v for _, v in series]
+
+    # Серия должна быть в целом растущей
+    if vals[-1] <= vals[0]:
+        return None
+
+    # Положительные приращения
+    deltas = [vals[i + 1] - vals[i] for i in range(len(vals) - 1)]
+    pos_deltas = [d for d in deltas if d > 0.1]  # порог 0.1°C — фильтруем шум
+    if len(pos_deltas) < 2:
+        return None
+
+    # Коэффициент затухания r = d_{i+1} / d_i (медиана пар)
+    ratios = []
+    for i in range(len(pos_deltas) - 1):
+        r = pos_deltas[i + 1] / pos_deltas[i]
+        if 0.0 < r < 0.99:  # затухает, но не мгновенно
+            ratios.append(r)
+
+    last_d = pos_deltas[-1]
+
+    if not ratios:
+        # Нет явного затухания — консервативная оценка: плюс ещё один шаг
+        return round(vals[-1] + last_d, 1)
+
+    r_med = sorted(ratios)[len(ratios) // 2]  # медиана
+
+    if r_med >= 1.0:
+        return None  # ускоряется — не экспоненциальный прогрев
+
+    # Оставшийся подъём через геометрический ряд: S = last_d * r / (1 - r)
+    remaining = last_d * r_med / (1.0 - r_med)
+    return round(vals[-1] + remaining, 1)
 
 
 def _freq_transient_metrics(

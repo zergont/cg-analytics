@@ -57,6 +57,10 @@ coolant_temperature:
   tunable:
     below_60_risk_threshold_c: 60  # Т ОЖ < 60°C → риск wet stacking / закоксовки (РЭ)
     proximity_warning_pct: 10      # % от controller.warning_c
+    # Параметры двухфазного COOLING_FAILURE (Addendum v1.4)
+    working_range_low_c: 80        # нижняя граница рабочего диапазона ОЖ (термостат открывается, °C)
+    working_range_high_c: 90       # верхняя граница рабочего диапазона ОЖ (прогрев завершён, °C)
+    asymptote_norm_max_c: 92       # максимально допустимая асимптота прогрева (выше → риск перегрева, °C)
     _source: TUNABLE
 
 # ─── НАПРЯЖЕНИЕ АКБ ─────────────────────────────────────────────────────────

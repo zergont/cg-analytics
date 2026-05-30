@@ -21,6 +21,10 @@ LOAD_STEP:
   load_class_iso: G3
   freq_nominal_hz: 50.0            # номинальная частота
   freq_settled_pct: 0.5            # коридор «частота восстановлена», % от номинала (±0.25 Гц)
+  # Gate для freq_dip/rise/recovery: если RPM упали ниже этого % от максимума в подсегменте,
+  # то это штатный останов/переход на ХХ, а не нагрузочный переходный процесс.
+  # Артефакт freq_dip_pct=100% при остановке движка (Addendum v1.4, п.3) исключается.
+  rpm_min_pct_for_freq_metrics: 50  # если min(RPM) < max(RPM)*50% → freq_dip не вычислять
 
   # Нормативы ГОСТ ISO 8528-5 по классам.
   # ВНИМАНИЕ: значения требуют сверки с официальным текстом ГОСТ!
@@ -71,6 +75,15 @@ COOLING_FAILURE:
   cooling_slope_alarm_c_per_h:   40.0   # Устойчивый тренд > 40 °C/ч → ALARM
   # Минимальная длительность подсегмента для применения детектора
   min_segment_duration_sec: 300         # Короткие сегменты (< 5 мин) игнорируем
+  # Двухфазная логика (Addendum v1.4):
+  # Фаза 1 — прогрев (T < working_range_low): предиктор асимптоты.
+  #   Параметры рабочего диапазона и нормы асимптоты — из thresholds.yaml:
+  #   coolant_temperature.tunable.working_range_low_c = 80
+  #   coolant_temperature.tunable.asymptote_norm_max_c = 92
+  # Фаза 2 — рабочий режим (T >= working_range_low): прямой детектор по slope.
+  #   Пороги ниже — в ед./с (Addendum v1.4: внутрисегментные метрики → /сек).
+  cooling_slope_warning_c_per_s: 0.006  # ~20 °C/ч (slope > этого → WARNING)
+  cooling_slope_alarm_c_per_s:   0.011  # ~40 °C/ч (slope > этого → ALARM)
   # Гейт по режиму: только RUN_STATE=3 (установившаяся работа)
   # valid_run_states: задаётся неявно в коде (run_state != 3 → return [])
   # Приближение к порогу HCT Warning (вторичная проверка по max-значению)
@@ -179,6 +192,16 @@ LIMIT_PROXIMITY:
   # COOLANT_TEMP → coolant_temperature.controller.shutdown_c
   # OIL_TEMP → oil_temperature.controller.shutdown_c
   severity_default: WARNING
+  _source: TUNABLE
+
+# ─── STOP_PROFILE: Диагностика профиля останова ──────────────────────────────
+# Срабатывает на сегментах RUN_STATE=0 (Stop).
+# Проверяет: обороты снизились до нуля в пределах T_stop_max?
+# Если нет → подозрение на отказ клапана отсечки топлива (пожароопасно!).
+# T_stop_max берётся из segmentation.yaml → transitions.T_stop_max_sec.
+STOP_PROFILE:
+  enabled: true
+  severity_default: ALARM   # отказ клапана отсечки — критичный дефект безопасности
   _source: TUNABLE
 
 # ─── CONTROLLER_FAULT: Активная неисправность контроллера ───────────────────

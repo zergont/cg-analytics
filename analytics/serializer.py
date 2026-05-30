@@ -296,7 +296,7 @@ def _append_subsegment(
     if sub.characteristics:
         a("**Характеристики:**")
         a("")
-        a("| Роль | Ед. | Медиана | Мин | Макс | Тренд/ч |")
+        a("| Роль | Ед. | Медиана | Мин | Макс | Тренд/с |")
         a("|------|-----|---------|-----|------|---------|")
         for role, ch in sub.characteristics.items():
             med = _fmt_val(ch.get("median"))

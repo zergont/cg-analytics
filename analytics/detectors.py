@@ -212,41 +212,83 @@ def _detect_cooling_failure(
     seg_end: datetime,
     cfg: AnalyticsConfig,
 ) -> list[Detection]:
-    """Детектор отказа охлаждения.
+    """Детектор отказа охлаждения — двухфазный (Addendum v1.4).
 
-    Критерии (все должны выполняться):
-    1. RUN_STATE = 3 (установившаяся работа, не переходный режим)
-    2. Длительность подсегмента >= min_segment_duration_sec
-    3. Устойчивый slope Т ОЖ (°C/ч) превышает порог
+    ФАЗА 1 — прогрев (T стартовала ниже рабочего диапазона, к концу вошла):
+      Предиктор асимптоты T_asymptote (из DerivedMetrics.coolant_asymptote_c).
+      Если T_asymptote > asymptote_norm_max → двигатель нацелен выше нормы → WARNING.
+      Пока T < working_range_low — молчим (холодно, не опасно). Тревога — только
+      в точке входа в рабочий диапазон.
 
-    Slope из характеристик (линейная регрессия) отражает ТРЕНД за весь
-    подсегмент и нечувствителен к мгновенным качкам. dCoolant_dt_max
-    (мгновенный максимум на коротком интервале) для этого детектора НЕ
-    применяется — он вызывал ложные ALARM на нормальной тепловой качке.
+    ФАЗА 2 — рабочий режим (T была в рабочем диапазоне с самого начала подсегмента):
+      Прямой детектор по устойчивому slope (°C/с). Slope < warn → доп. проверка
+      приближения к HCT Warning по max-значению.
+
+    Gate: только RUN_STATE=3 и длительность >= min_segment_duration_sec.
     """
     results: list[Detection] = []
 
-    # Gate 1: только в установившейся работе
     if run_state != 3:
         return []
 
-    # Gate 2: минимальная длительность
     duration_sec = (_tz(seg_end) - _tz(seg_start)).total_seconds()
     min_dur = float(cfg.det("COOLING_FAILURE", "min_segment_duration_sec", default=300.0))
     if duration_sec < min_dur:
         return []
 
-    # Slope Т ОЖ (°C/ч) из Characteristic.slope (линейная регрессия по реальным точкам)
     cool_char = chars.get("COOLANT_TEMP", {})
-    slope = cool_char.get("slope")  # °C/ч; None если < 2 реальных точек
+    t_start_val = cool_char.get("value_start")
+    t_end_val = cool_char.get("value_end")
+    t_median = cool_char.get("median")
+    slope = cool_char.get("slope")  # °C/с
+
+    working_low = float(cfg.thr("coolant_temperature", "tunable", "working_range_low_c", default=80.0))
+    asym_norm = float(cfg.thr("coolant_temperature", "tunable", "asymptote_norm_max_c", default=92.0))
+    warn_thr = float(cfg.det("COOLING_FAILURE", "cooling_slope_warning_c_per_s", default=0.006))
+    alarm_thr = float(cfg.det("COOLING_FAILURE", "cooling_slope_alarm_c_per_s", default=0.011))
+
+    # ── Фаза 1: пересечение нижней границы рабочего диапазона ──────────────
+    # Условие: начинали ниже working_low, к концу подсегмента вошли
+    warming_crossing = (
+        t_start_val is not None
+        and t_end_val is not None
+        and t_start_val < working_low <= t_end_val
+    )
+    if warming_crossing:
+        T_asym = derived.coolant_asymptote_c
+        if T_asym is not None and T_asym > asym_norm:
+            results.append(Detection(
+                scenario="COOLING_FAILURE",
+                severity="WARNING",
+                t_detected=_iso(seg_start),
+                source="METRIC_RULE",
+                trigger=(
+                    f"T_асимпт={T_asym:.1f}°C > {asym_norm:.1f}°C "
+                    f"— прогрев нацелен выше нормы при входе в рабочий диапазон"
+                ),
+                related_roles=["COOLANT_TEMP"],
+                fault_codes=[144],
+                description_key="COOLING_FAILURE.warmup_asymptote_above_norm",
+                values={
+                    "coolant_asymptote_c": T_asym,
+                    "asymptote_norm_c": asym_norm,
+                    "working_range_low_c": working_low,
+                    "coolant_t_end": t_end_val,
+                },
+            ))
+        return results  # Фаза 1 завершена — дальше не проверяем
+
+    # ── Фаза 2: прямой детектор (T уже была в рабочем диапазоне) ───────────
+    # Подсегмент начался когда T уже >= working_low (не фаза прогрева)
+    in_working = t_start_val is not None and t_start_val >= working_low
+    if not in_working:
+        return []  # ещё греемся снизу и Phase 1 не поймала — молчим
+
     if slope is None:
         return []
 
-    alarm_thr = float(cfg.det("COOLING_FAILURE", "cooling_slope_alarm_c_per_h", default=40.0))
-    warn_thr = float(cfg.det("COOLING_FAILURE", "cooling_slope_warning_c_per_h", default=20.0))
-
     if slope < warn_thr:
-        # Проверяем ещё приближение к порогу HCT Warning по max-значению
+        # Slope в норме — проверяем приближение к HCT Warning
         cool_max = cool_char.get("max")
         hct_warn = float(cfg.thr("coolant_temperature", "controller", "warning_c", default=97.8))
         prox_pct = float(cfg.det("COOLING_FAILURE", "proximity_warning_pct", default=10.0))
@@ -257,16 +299,11 @@ def _detect_cooling_failure(
                 severity="WARNING",
                 t_detected=_iso(seg_start),
                 source="PASSPORT_THRESHOLD",
-                trigger=(f"coolant_temp_max={cool_max:.1f}°C в пределах "
-                         f"{prox_pct:.0f}% от HCT Warning {hct_warn}°C"),
+                trigger=f"coolant_max={cool_max:.1f}°C в пределах {prox_pct:.0f}% от HCT Warning {hct_warn}°C",
                 related_roles=["COOLANT_TEMP"],
                 fault_codes=[144],
                 description_key="COOLING_FAILURE.approaching_hct_limit",
-                values={
-                    "coolant_temp_max": cool_max,
-                    "hct_warning_c": hct_warn,
-                    "proximity_threshold_c": prox_thr,
-                },
+                values={"coolant_temp_max": cool_max, "hct_warning_c": hct_warn, "proximity_threshold_c": prox_thr},
             ))
         return results
 
@@ -277,17 +314,19 @@ def _detect_cooling_failure(
         t_detected=_iso(seg_start),
         source="METRIC_RULE",
         trigger=(
-            f"coolant_slope={slope:.1f} °C/ч > {warn_thr:.1f} °C/ч "
-            f"(устойчивый тренд за {duration_sec:.0f}с)"
+            f"coolant_slope={slope:.5f} °C/с > {warn_thr:.5f} °C/с "
+            f"(устойчивый тренд за {duration_sec:.0f}с в рабочем диапазоне)"
         ),
         related_roles=["COOLANT_TEMP"],
         fault_codes=[144],
         description_key="COOLING_FAILURE.sustained_overheating_trend",
         values={
-            "coolant_slope_c_per_h": slope,
-            "warn_threshold_c_per_h": warn_thr,
-            "alarm_threshold_c_per_h": alarm_thr,
+            "coolant_slope_c_per_s": slope,
+            "warn_threshold_c_per_s": warn_thr,
+            "alarm_threshold_c_per_s": alarm_thr,
             "segment_duration_sec": duration_sec,
+            "coolant_t_start": t_start_val,
+            "working_range_low_c": working_low,
         },
     ))
     return results

@@ -544,19 +544,128 @@ def _sequence_checks(
 
 # ── Межсегментные проверки ────────────────────────────────────────────────────
 
+def _check_stop_profile(
+    stop_seg: Segment,
+    all_by_addr: dict[int, list[dict]],
+    cfg: AnalyticsConfig,
+    Detection: type,
+) -> None:
+    """Диагностика профиля останова: обороты должны упасть до нуля за T_stop_max.
+
+    Если RPM не достигли порога rpm_stopped_threshold за T_stop_max секунд —
+    подозрение на отказ клапана отсечки топлива (пожароопасно!).
+    """
+    from datetime import datetime as _DT
+
+    rpm_addr = cfg.role_to_addr("RPM")
+    if rpm_addr is None:
+        return
+
+    t0 = _tz(_DT.fromisoformat(stop_seg.t_start))
+    t_end_raw = stop_seg.t_end
+    if t_end_raw is None:
+        return
+    t1 = _tz(_DT.fromisoformat(t_end_raw))
+
+    T_stop_max = float(cfg.seg("transitions", "T_stop_max_sec", default=30.0))
+    rpm_thr = float(cfg.seg("transitions", "rpm_stopped_threshold", default=50.0))
+
+    # RPM-ряд в сегменте останова (только реальные измерения)
+    rpm_rows = sorted(
+        (
+            (_tz(r["ts"]), float(r["value"]))
+            for r in all_by_addr.get(rpm_addr, [])
+            if t0 <= _tz(r["ts"]) < t1
+            and r.get("value") is not None
+            and not r.get("is_carried_forward", False)
+        ),
+        key=lambda x: x[0],
+    )
+
+    if not rpm_rows:
+        return  # нет данных RPM — не можем проверить
+
+    seg_dur = (t1 - t0).total_seconds()
+
+    # Найти первый момент, когда RPM упали ниже порога
+    stop_time: float | None = None
+    for ts, v in rpm_rows:
+        if v < rpm_thr:
+            stop_time = (ts - t0).total_seconds()
+            break
+
+    if stop_time is not None:
+        # RPM упали — проверяем время
+        if stop_time <= T_stop_max:
+            stop_seg.sequence_checks.append({
+                "check": "rpm_stop_profile",
+                "passed": True,
+                "stop_time_sec": stop_time,
+                "T_stop_max_sec": T_stop_max,
+                "details": f"ok: RPM упали до порога за {stop_time:.0f}с <= {T_stop_max:.0f}с",
+            })
+        else:
+            # Медленный останов — просто информируем, не ALARM
+            stop_seg.sequence_checks.append({
+                "check": "rpm_stop_profile",
+                "passed": True,
+                "stop_time_sec": stop_time,
+                "T_stop_max_sec": T_stop_max,
+                "details": f"замедленный останов: RPM упали за {stop_time:.0f}с > {T_stop_max:.0f}с",
+            })
+    else:
+        # RPM так и не упали — клапан отсечки подозревается
+        rpm_min = min(v for _, v in rpm_rows)
+        stop_seg.sequence_checks.append({
+            "check": "rpm_stop_profile",
+            "passed": False,
+            "stop_time_sec": None,
+            "rpm_min_observed": rpm_min,
+            "seg_duration_sec": seg_dur,
+            "T_stop_max_sec": T_stop_max,
+            "details": (
+                f"НАРУШЕНИЕ: RPM не достигли {rpm_thr:.0f} rpm за {seg_dur:.0f}с "
+                f"(минимум {rpm_min:.0f} rpm) — подозрение на отказ клапана отсечки!"
+            ),
+        })
+        if stop_seg.subsegments:
+            stop_seg.subsegments[0].detections.append(Detection(
+                scenario="STOP_PROFILE",
+                severity=cfg.det("STOP_PROFILE", "severity_default", default="ALARM"),
+                t_detected=stop_seg.t_start,
+                source="METRIC_RULE",
+                trigger=(
+                    f"RPM не достигли {rpm_thr:.0f} rpm за {seg_dur:.0f}с "
+                    f"(норматив {T_stop_max:.0f}с) — клапан отсечки топлива?"
+                ),
+                related_roles=["RPM"],
+                fault_codes=[],
+                description_key="STOP_PROFILE.rpm_not_zero_fuel_shutoff_suspect",
+                values={
+                    "rpm_min_observed": rpm_min,
+                    "seg_duration_sec": seg_dur,
+                    "T_stop_max_sec": T_stop_max,
+                    "rpm_stopped_threshold": rpm_thr,
+                },
+            ))
+
+
 def _inter_segment_checks(
     segments: list[Segment],
+    all_by_addr: dict[int, list[dict]],
     cfg: AnalyticsConfig,
 ) -> None:
     """Второй проход по готовому списку сегментов: проверяет переходы между ними.
 
     Мутирует sequence_checks и detections сегментов/подсегментов на месте.
     Вызывается после основного цикла в segment(), перед возвратом результата.
+    all_by_addr нужен для STOP_PROFILE (доступ к сырому RPM-ряду останова).
     """
     from .contract import Detection
 
     warmup_en = bool(cfg.det("WARMUP_VIOLATION", "enabled", default=True))
     cooldown_en = bool(cfg.det("COOLDOWN_VIOLATION", "enabled", default=True))
+    stop_profile_en = bool(cfg.det("STOP_PROFILE", "enabled", default=True))
 
     for i, seg in enumerate(segments):
         prev_segs = segments[:i]
@@ -568,6 +677,10 @@ def _inter_segment_checks(
         # COOLDOWN_CHECK: Stop-сегмент проверяет наличие охлаждения
         if seg.run_state == 0 and cooldown_en:
             _check_cooldown_transition(seg, prev_segs, cfg, Detection)
+
+        # STOP_PROFILE: диагностика профиля останова (клапан отсечки топлива)
+        if seg.run_state == 0 and stop_profile_en:
+            _check_stop_profile(seg, all_by_addr, cfg, Detection)
 
 
 def _check_warmup_transition(
@@ -673,10 +786,15 @@ def _check_cooldown_transition(
     cfg: AnalyticsConfig,
     Detection: type,
 ) -> None:
-    """Проверить наличие охлаждения после работы в зоне высокой нагрузки.
+    """Проверить наличие охлаждения после работы под нагрузкой (Addendum v1.4, п.4.2).
 
-    Добавляет cooldown_after_elevated в sequence_checks.
-    При нарушении добавляет Detection COOLDOWN_VIOLATION в первый подсегмент.
+    ИСПРАВЛЕННАЯ логика: горячий останов без охлаждения → ВСЕГДА нарушение.
+    Причина останова НЕ подавляет тревогу — аварийная УСИЛИВАЕТ (риск заклинивания!).
+
+    severity:
+    - останов с ELEVATED/OVERLOAD → ALARM (риск заклинивания/коробления турбины)
+    - останов с NORMAL/LOW → WARNING
+    Аварийный останов (SHUTDOWN-fault в сегменте) добавляет контекст в trigger.
     """
     required_after = cfg.det("COOLDOWN_VIOLATION", "required_after_zone", default="ELEVATED")
     min_cooldown = float(cfg.det("COOLDOWN_VIOLATION", "min_cooldown_sec", default=0.0))
@@ -692,20 +810,22 @@ def _check_cooldown_transition(
     if last_running is None:
         return  # нечего проверять
 
-    # Была ли высокая нагрузка?
-    elevated_zones = {required_after, "OVERLOAD"}
+    # Была ли нагрузка (любая, не только ELEVATED)?
+    elevated_zones = {"ELEVATED", "OVERLOAD"}
     had_elevated = any(sub.load_zone in elevated_zones for sub in last_running.subsegments)
+    had_any_load = any(
+        sub.load_zone not in ("NA",)
+        for sub in last_running.subsegments
+    )
 
-    if not had_elevated:
-        return  # охлаждение не требуется
+    if not had_any_load:
+        return  # не было нагрузки — охлаждение не требуется
 
-    # Была ли фаза охлаждения (RUN_STATE 4/5) между running-сегментом и текущим stop?
+    # Была ли фаза охлаждения (RUN_STATE 4/5) между running и stop?
     segs_between = prev_segs[last_running_idx + 1:]
     cooldown_dur = sum(s.duration_sec for s in segs_between if s.run_state in (4, 5))
     had_cooldown_phase = cooldown_dur > 0
 
-    # Проверка: при min_cooldown_sec = 0 требуем лишь наличие cooldown-фазы (любой длины).
-    # При min_cooldown_sec > 0 требуем конкретную длительность.
     if min_cooldown <= 0:
         passed = had_cooldown_phase
     else:
@@ -719,33 +839,45 @@ def _check_cooldown_transition(
         "had_elevated": had_elevated,
         "had_cooldown_phase": had_cooldown_phase,
         "details": (
-            f"ok: охлаждение {cooldown_dur:.0f}с после {required_after}"
+            f"ok: охлаждение {cooldown_dur:.0f}с"
             if passed
             else (
-                f"НАРУШЕНИЕ: нет фазы охлаждения RUN_STATE=4/5 после зоны {required_after}"
+                f"НАРУШЕНИЕ: нет фазы охлаждения RUN_STATE=4/5"
                 if not had_cooldown_phase
-                else f"НАРУШЕНИЕ: cooldown={cooldown_dur:.0f}с < {min_cooldown:.0f}с требуемых"
+                else f"НАРУШЕНИЕ: cooldown={cooldown_dur:.0f}с < {min_cooldown:.0f}с"
             )
         ),
     })
 
     if not passed and stop_seg.subsegments:
+        # Severity: ALARM если была высокая нагрузка, иначе WARNING
+        severity = "ALARM" if had_elevated else "WARNING"
+
+        # Контекст аварийного останова (SHUTDOWN-fault в сегменте останова)
+        has_shutdown_fault = any(
+            e.get("type") == "FAULT" and e.get("severity") in ("shutdown", "SHUTDOWN")
+            for e in stop_seg.events
+        )
+        emergency_prefix = "АВАРИЙНЫЙ ОСТАНОВ — " if has_shutdown_fault else ""
+
         stop_seg.subsegments[0].detections.append(Detection(
             scenario="COOLDOWN_VIOLATION",
-            severity=cfg.det("COOLDOWN_VIOLATION", "severity_default", default="WARNING"),
+            severity=severity,
             t_detected=stop_seg.t_start,
             source="PASSPORT_THRESHOLD",
             trigger=(
-                f"Останов без охлаждения после зоны {required_after} "
-                f"(cooldown={cooldown_dur:.0f}с, требуется {min_cooldown:.0f}с)"
+                f"{emergency_prefix}Останов без охлаждения "
+                f"({'ELEVATED/OVERLOAD' if had_elevated else 'под нагрузкой'}) "
+                f"— риск {'заклинивания двигателя!' if had_elevated else 'теплового удара'}"
             ),
-            related_roles=["COOLANT_TEMP"],
+            related_roles=["COOLANT_TEMP", "RPM"],
             fault_codes=[611],
             description_key="COOLDOWN_VIOLATION.no_cooldown_after_elevated",
             values={
                 "cooldown_duration_sec": cooldown_dur,
                 "required_sec": min_cooldown,
-                "previous_zone": required_after,
+                "had_elevated": had_elevated,
+                "emergency_stop": has_shutdown_fault,
             },
         ))
 
@@ -928,7 +1060,7 @@ def segment(
         )
         segments.append(seg)
 
-    # Второй проход: межсегментные проверки (warmup / cooldown / cold_start)
-    _inter_segment_checks(segments, cfg)
+    # Второй проход: межсегментные проверки (warmup / cooldown / cold_start / stop_profile)
+    _inter_segment_checks(segments, all_by_addr, cfg)
 
     return segments

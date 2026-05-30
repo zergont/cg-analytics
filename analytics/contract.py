@@ -23,7 +23,7 @@ class Characteristic:
     max: Optional[float]
     value_start: Optional[float]
     value_end: Optional[float]
-    slope: Optional[float]              # ед./час, по реальным device-timestamp
+    slope: Optional[float]              # ед./с, по реальным device-timestamp (Addendum v1.4)
     baseline_resid: None = None         # Этап 1.5 — отклонение от модели нормы
     baseline_z: None = None             # Этап 1.5 — нормированное отклонение
 
@@ -84,9 +84,10 @@ class DerivedMetrics:
     freq_rise_pct: Optional[float] = None      # заброс частоты при сбросе, % от 50 Гц
     freq_recovery_sec: Optional[float] = None  # время возврата частоты в коридор ±settled%, сек
     # ── Класс B (медленные/инерционные) — СПРАВОЧНЫЕ (детекторы используют slope из chars) ──
-    dCoolant_dt_max: Optional[float] = None    # °C/час  — для LLM Stage 2, не для детекторов
-    dOil_press_dt_min: Optional[float] = None  # кПа/с   — для LLM Stage 2, не для детекторов
+    dCoolant_dt_max: Optional[float] = None    # °C/с    — Class B, для LLM Stage 2
+    dOil_press_dt_min: Optional[float] = None  # кПа/с   — Class B, для LLM Stage 2
     coolant_below_60_sec: Optional[float] = None
+    coolant_asymptote_c: Optional[float] = None  # °C — оценка асимптоты прогрева (Phase 1 predictor)
 
     def to_dict(self) -> dict[str, Any]:
         return {k: v for k, v in self.__dict__.items()}
