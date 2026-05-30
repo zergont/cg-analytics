@@ -36,7 +36,8 @@ def run_all_detectors(
     """Запустить все включённые детекторы, вернуть список сработавших Detection."""
     detections: list[Detection] = []
 
-    if cfg.det("LOAD_STEP", "enabled", default=True):
+    # LOAD_STEP: Класс A (быстрые/электрические) — только в RUN_STATE=3
+    if cfg.det("LOAD_STEP", "enabled", default=True) and run_state == 3:
         detections.extend(_detect_load_step(derived, seg_start, seg_end, cfg))
 
     if cfg.det("PHASE_IMBALANCE", "enabled", default=True):
@@ -83,37 +84,81 @@ def _detect_load_step(
     seg_end: datetime,
     cfg: AnalyticsConfig,
 ) -> list[Detection]:
+    """Детектор наброса/сброса нагрузки с классификацией по ГОСТ ISO 8528-5.
+
+    Класс A (быстрые/электрические): мгновенная скорость dP_dt_max валидна.
+    Gate: только RUN_STATE=3 (проверяется в run_all_detectors).
+
+    Классификация результата:
+    - INFO  — штатный рампинг (плавное изменение в окне рампинга PCC)
+    - INFO  — переходный процесс в пределах нормы выбранного класса ISO
+    - WARNING — превышение нормы класса (просадка/заброс/время восстановления)
+    """
     if derived.dP_dt_max is None:
         return []
+
     thr = float(cfg.det("LOAD_STEP", "dP_dt_threshold_kw_per_s", default=50.0))
     if derived.dP_dt_max <= thr:
         return []
 
-    freq_dip = derived.freq_stability_mad  # используем как прокси просадки
+    # Параметры ISO 8528-5
+    load_class = cfg.det("LOAD_STEP", "load_class_iso", default="G3")
+    iso_classes = cfg.det("LOAD_STEP", "iso_classes", default={}) or {}
+    class_norm = iso_classes.get(load_class, {})
+    freq_drop_norm = float(class_norm.get("freq_drop_pct", 7.0))
+    freq_rise_norm = float(class_norm.get("freq_rise_pct", 10.0))
+    recovery_norm = float(class_norm.get("freq_recovery_sec", 3.0))
 
-    warn_hz = float(cfg.det("LOAD_STEP", "freq_dip_warning_hz", default=1.5))
-    alarm_hz = float(cfg.det("LOAD_STEP", "freq_dip_alarm_hz", default=2.5))
+    # Фактические значения переходного процесса
+    dip = derived.freq_dip_pct
+    rise = derived.freq_rise_pct
+    rec = derived.freq_recovery_sec
 
-    if freq_dip is not None and freq_dip >= alarm_hz:
-        severity = "ALARM"
-    elif freq_dip is not None and freq_dip >= warn_hz:
+    # Нарушения нормативов ISO
+    violations: list[str] = []
+    if dip is not None and dip > freq_drop_norm:
+        violations.append(f"freq_dip={dip:.1f}% > {load_class}:{freq_drop_norm:.1f}%")
+    if rise is not None and rise > freq_rise_norm:
+        violations.append(f"freq_rise={rise:.1f}% > {load_class}:{freq_rise_norm:.1f}%")
+    if rec is not None and rec > recovery_norm:
+        violations.append(f"recovery={rec:.1f}с > {load_class}:{recovery_norm:.1f}с")
+
+    if violations:
         severity = "WARNING"
+        trigger = (
+            f"dP_dt_max={derived.dP_dt_max:.2f} кВт/с; "
+            f"нарушение {load_class}: {'; '.join(violations)}"
+        )
+        description_key = "LOAD_STEP.iso_norm_exceeded"
     else:
         severity = cfg.det("LOAD_STEP", "severity_default", default="INFO")
+        parts = [f"dP_dt_max={derived.dP_dt_max:.2f} кВт/с"]
+        if dip is not None:
+            parts.append(f"freq_dip={dip:.1f}%")
+        if rec is not None:
+            parts.append(f"recovery={rec:.1f}с")
+        trigger = f"{'; '.join(parts)} (в пределах {load_class})"
+        description_key = "LOAD_STEP.iso_norm_ok"
 
     return [Detection(
         scenario="LOAD_STEP",
         severity=severity,
         t_detected=_iso(seg_start),
         source="METRIC_RULE",
-        trigger=f"dP_dt_max={derived.dP_dt_max:.2f} кВт/с > {thr} кВт/с",
+        trigger=trigger,
         related_roles=["ACTIVE_POWER_TOTAL", "FREQUENCY", "RPM"],
         fault_codes=[],
-        description_key="LOAD_STEP.rapid_power_change",
+        description_key=description_key,
         values={
             "dP_dt_max_kw_per_s": derived.dP_dt_max,
-            "freq_stability_mad": freq_dip,
-            "threshold_kw_per_s": thr,
+            "freq_dip_pct": dip,
+            "freq_rise_pct": rise,
+            "freq_recovery_sec": rec,
+            "load_class_iso": load_class,
+            "norm_freq_drop_pct": freq_drop_norm,
+            "norm_freq_rise_pct": freq_rise_norm,
+            "norm_recovery_sec": recovery_norm,
+            "violations": violations,
         },
     )]
 

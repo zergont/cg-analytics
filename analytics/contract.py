@@ -76,10 +76,16 @@ class DerivedMetrics:
     oil_coolant_delta_max: Optional[float] = None
     rpm_stability_mad: Optional[float] = None
     freq_stability_mad: Optional[float] = None
-    dP_dt_max: Optional[float] = None          # кВт/с
-    dRPM_dt_max: Optional[float] = None        # об/мин/с
-    dCoolant_dt_max: Optional[float] = None    # °C/час
-    dOil_press_dt_min: Optional[float] = None  # кПа/с (отрицательная)
+    # ── Класс A (быстрые/электрические, RUN_STATE=3) ──
+    dP_dt_max: Optional[float] = None          # кВт/с   — скорость изменения мощности
+    dRPM_dt_max: Optional[float] = None        # об/мин/с — быстрый отклик оборотов
+    # Переходный процесс по ГОСТ ISO 8528-5 (вычисляются при наличии LOAD_STEP)
+    freq_dip_pct: Optional[float] = None       # просадка частоты при набросе, % от 50 Гц
+    freq_rise_pct: Optional[float] = None      # заброс частоты при сбросе, % от 50 Гц
+    freq_recovery_sec: Optional[float] = None  # время возврата частоты в коридор ±settled%, сек
+    # ── Класс B (медленные/инерционные) — СПРАВОЧНЫЕ (детекторы используют slope из chars) ──
+    dCoolant_dt_max: Optional[float] = None    # °C/час  — для LLM Stage 2, не для детекторов
+    dOil_press_dt_min: Optional[float] = None  # кПа/с   — для LLM Stage 2, не для детекторов
     coolant_below_60_sec: Optional[float] = None
 
     def to_dict(self) -> dict[str, Any]:

@@ -333,6 +333,16 @@ def compute_derived_metrics(
     below_c = float(cfg.thr("coolant_temperature", "tunable", "below_60_risk_threshold_c", default=60.0))
     coolant_below_60_sec = _time_below(cool_t, below_c)
 
+    # ── Переходные процессы по ГОСТ ISO 8528-5 (Класс A, freq transient) ──────
+    # freq_dip_pct / freq_rise_pct / freq_recovery_sec — для LOAD_STEP детектора.
+    # Вычисляются из реального ряда частоты (без forward-fill).
+    freq_nominal = float(cfg.det("LOAD_STEP", "freq_nominal_hz", default=50.0))
+    freq_settled_pct = float(cfg.det("LOAD_STEP", "freq_settled_pct", default=0.5))
+    freq_rows_real = _rows_in(_addr("FREQUENCY") or 0, real_only=True) if _addr("FREQUENCY") else []
+    freq_dip_pct, freq_rise_pct, freq_recovery_sec = _freq_transient_metrics(
+        freq_rows_real, freq_nominal, freq_settled_pct, t_start
+    )
+
     return DerivedMetrics(
         current_imbalance_pct_max=_r(current_imbalance_pct_max),
         current_imbalance_pct_med=_r(current_imbalance_pct_med),
@@ -346,6 +356,9 @@ def compute_derived_metrics(
         freq_stability_mad=_r(freq_stability_mad),
         dP_dt_max=_r(dP_dt_max),
         dRPM_dt_max=_r(dRPM_dt_max),
+        freq_dip_pct=_r(freq_dip_pct),
+        freq_rise_pct=_r(freq_rise_pct),
+        freq_recovery_sec=_r(freq_recovery_sec),
         dCoolant_dt_max=_r(dCoolant_dt_max),
         dOil_press_dt_min=_r(dOil_press_dt_min),
         coolant_below_60_sec=_r(coolant_below_60_sec),
@@ -435,6 +448,64 @@ def _time_below(
         if v < threshold:
             total += (_tz(next_ts) - _tz(ts)).total_seconds()
     return total if total > 0 else None
+
+
+def _freq_transient_metrics(
+    freq_series: list[tuple[datetime, float]],
+    nominal_hz: float,
+    settled_pct: float,
+    t_start: datetime,
+) -> tuple[float | None, float | None, float | None]:
+    """Вычислить метрики переходного процесса частоты по ГОСТ ISO 8528-5.
+
+    Возвращает (freq_dip_pct, freq_rise_pct, freq_recovery_sec).
+
+    freq_dip_pct   — максимальная просадка ниже номинала, % (наброс нагрузки)
+    freq_rise_pct  — максимальный заброс выше номинала, % (сброс нагрузки)
+    freq_recovery_sec — время от минимума частоты до первого входа в коридор
+                        ±settled_pct от номинала, сек
+
+    Все три = None если рядов < 2 или нет отклонений от номинала.
+    """
+    if len(freq_series) < 2 or nominal_hz <= 0:
+        return None, None, None
+
+    vals = [v for _, v in freq_series]
+    f_min = min(vals)
+    f_max = max(vals)
+
+    freq_dip_pct = max(0.0, (nominal_hz - f_min) / nominal_hz * 100)
+    freq_rise_pct = max(0.0, (f_max - nominal_hz) / nominal_hz * 100)
+
+    # Нет заметных отклонений — нет переходного процесса
+    if freq_dip_pct < 0.1 and freq_rise_pct < 0.1:
+        return None, None, None
+
+    # Время восстановления: от момента наддира до входа в settled-коридор
+    settled_hz = nominal_hz * settled_pct / 100  # e.g. 50 * 0.5/100 = 0.25 Гц
+
+    # Найти наддир (минимальную точку)
+    nadir_ts: datetime | None = None
+    for ts, v in freq_series:
+        if v == f_min:
+            nadir_ts = ts
+            break
+
+    freq_recovery_sec: float | None = None
+    if nadir_ts is not None:
+        # Первый момент после наддира, когда |f - nominal| ≤ settled_hz
+        post_nadir = [(ts, v) for ts, v in freq_series if ts >= nadir_ts]
+        for ts, v in post_nadir:
+            if abs(v - nominal_hz) <= settled_hz:
+                dt = (_tz(ts) - _tz(t_start)).total_seconds()
+                freq_recovery_sec = max(0.0, dt)
+                break
+
+    return (
+        round(freq_dip_pct, 2) if freq_dip_pct > 0.1 else None,
+        round(freq_rise_pct, 2) if freq_rise_pct > 0.1 else None,
+        round(freq_recovery_sec, 1) if freq_recovery_sec is not None else None,
+    )
 
 
 def _r(v: float | None, decimals: int = 3) -> float | None:
