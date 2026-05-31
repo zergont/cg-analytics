@@ -237,7 +237,7 @@ def _append_segment(lines: list[str], seg: Segment, idx: int, fmt_ts) -> None:
 
     # Fault-события
     if seg.events:
-        a("**События (fault):**")
+        a("**События журнала:**")
         a("")
         for ev in seg.events:
             sev = ev.get("severity") or "?"
