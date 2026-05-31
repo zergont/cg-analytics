@@ -321,7 +321,6 @@ function onCollectEvent(msg) {
         }
     }
     if (msg.stage === 'complete') {
-        _el('progressCard').style.display = 'none';
         _el('submitBtn').disabled = false;
         initResult(msg.result);
     }
