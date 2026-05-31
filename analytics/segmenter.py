@@ -230,17 +230,17 @@ def _compute_data_quality(
     gaps: list[dict],
     cfg: AnalyticsConfig,
 ) -> float:
-    """Оценка качества данных [0.0, 1.0] за окно [t_start, t_end)."""
+    """Качество связи [0.0, 1.0] = 1 - (суммарное время gap / длительность окна).
+
+    Единственный источник истины — таблица data_gaps. Каждый gap обрезается
+    по границам окна; незакрытый gap (gap_end IS NULL) считается до t_end.
+    """
     t0 = _tz(t_start)
     t1 = _tz(t_end)
     duration_sec = (t1 - t0).total_seconds()
     if duration_sec <= 0:
         return 1.0
 
-    heartbeat = float(cfg.seg("data_quality", "heartbeat_nominal_sec", default=30))
-    max_mult = float(cfg.seg("data_quality", "heartbeat_max_multiplier", default=3))
-
-    # Вычитаем время пропусков связи
     gap_sec = 0.0
     for g in gaps:
         gs = max(_tz(g["gap_start"]), t0)
@@ -249,45 +249,7 @@ def _compute_data_quality(
         if ge > gs:
             gap_sec += (ge - gs).total_seconds()
 
-    effective_sec = max(0.0, duration_sec - gap_sec)
-    if heartbeat <= 0:
-        return 1.0
-    expected_per_addr = effective_sec / heartbeat
-
-    # Приоритет 1: регистр-пинг (heartbeat_addr) — меняется при каждом опросе,
-    # поэтому его плотность = прямой индикатор качества связи.
-    # Большинство остальных регистров работают «report-by-exception» и почти
-    # не меняются в стабильном режиме — их считать нельзя.
-    hb_addr = cfg.seg("data_quality", "heartbeat_addr", default=None)
-    if hb_addr is not None:
-        try:
-            hb_addr = int(hb_addr)
-        except (TypeError, ValueError):
-            hb_addr = None
-
-    if hb_addr and hb_addr in by_addr and expected_per_addr > 0:
-        actual = len([r for r in by_addr[hb_addr] if t0 <= _tz(r["ts"]) < t1])
-        return round(min(1.0, actual / expected_per_addr), 3)
-
-    # Fallback: нет пинг-регистра — считаем по активным аналоговым регистрам
-    # (тем, у которых есть хоть одна строка в окне).
-    analog_addrs = [
-        addr for addr, meta in cfg.register_map.items()
-        if meta.get("kind") == "analog"
-    ]
-    active_addrs = [
-        addr for addr in analog_addrs
-        if any(t0 <= _tz(r["ts"]) < t1 for r in by_addr.get(addr, []))
-    ]
-    if not active_addrs or expected_per_addr <= 0:
-        return 1.0
-
-    total_expected = len(active_addrs) * expected_per_addr
-    total_actual = sum(
-        len([r for r in by_addr.get(addr, []) if t0 <= _tz(r["ts"]) < t1])
-        for addr in active_addrs
-    )
-    return round(min(1.0, total_actual / total_expected), 3)
+    return round(max(0.0, 1.0 - gap_sec / duration_sec), 3)
 
 
 # ── Построение подсегментов ───────────────────────────────────────────────────
