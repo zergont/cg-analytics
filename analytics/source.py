@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from typing import Any
 
@@ -15,9 +16,31 @@ import asyncpg
 
 from config import settings
 
+_pool: asyncpg.Pool | None = None
+_QUERY_TIMEOUT_SEC = 30
 
-async def _connect() -> asyncpg.Connection:
-    return await asyncpg.connect(settings.source_db_url)
+
+async def init_source_pool() -> None:
+    global _pool
+    _pool = await asyncpg.create_pool(
+        settings.source_db_url,
+        min_size=1,
+        max_size=3,
+        command_timeout=_QUERY_TIMEOUT_SEC,
+    )
+
+
+async def close_source_pool() -> None:
+    global _pool
+    if _pool:
+        await _pool.close()
+        _pool = None
+
+
+def _get_pool() -> asyncpg.Pool:
+    if _pool is None:
+        raise RuntimeError("Пул соединений с БД не инициализирован")
+    return _pool
 
 
 async def get_whitelist_history(
@@ -36,8 +59,7 @@ async def get_whitelist_history(
     if not whitelist_addrs:
         return []
 
-    conn = await _connect()
-    try:
+    async with _get_pool().acquire() as conn:
         rows = await conn.fetch(
             """
             SELECT addr, ts, value, raw, name_ru, unit
@@ -54,9 +76,7 @@ async def get_whitelist_history(
             list(whitelist_addrs),
             ts_from, ts_to,
         )
-        return [dict(r) for r in rows]
-    finally:
-        await conn.close()
+    return [dict(r) for r in rows]
 
 
 async def get_enum_periods(
@@ -76,8 +96,7 @@ async def get_enum_periods(
     if addrs is None:
         addrs = [40011, 40010]
 
-    conn = await _connect()
-    try:
+    async with _get_pool().acquire() as conn:
         rows = await conn.fetch(
             """
             SELECT
@@ -105,9 +124,7 @@ async def get_enum_periods(
             addrs,
             ts_from, ts_to,
         )
-        return [dict(r) for r in rows]
-    finally:
-        await conn.close()
+    return [dict(r) for r in rows]
 
 
 async def get_fault_periods(
@@ -127,8 +144,7 @@ async def get_fault_periods(
     if fault_addrs is None:
         fault_addrs = frozenset(range(40400, 40416))
 
-    conn = await _connect()
-    try:
+    async with _get_pool().acquire() as conn:
         rows = await conn.fetch(
             """
             SELECT
@@ -157,9 +173,7 @@ async def get_fault_periods(
             list(fault_addrs),
             ts_from, ts_to,
         )
-        return [dict(r) for r in rows]
-    finally:
-        await conn.close()
+    return [dict(r) for r in rows]
 
 
 async def get_data_gaps(
@@ -172,26 +186,30 @@ async def get_data_gaps(
     """Пропуски связи из data_gaps, пересекающиеся с [ts_from, ts_to).
 
     Колонки: gap_start, gap_end (gap_end IS NULL → активен).
-    При ошибке (таблица недоступна / другая структура) возвращает [].
+    При таймауте — пробрасывает RuntimeError с просьбой уменьшить интервал.
+    При других ошибках (таблица недоступна и т.п.) возвращает [].
     """
-    conn = await _connect()
     try:
-        rows = await conn.fetch(
-            """
-            SELECT gap_start, gap_end
-            FROM data_gaps
-            WHERE router_sn  = $1
-              AND (equip_type = $2 OR equip_type IS NULL)
-              AND (panel_id   = $3 OR panel_id   IS NULL)
-              AND gap_start < $5
-              AND (gap_end IS NULL OR gap_end > $4)
-            ORDER BY gap_start ASC
-            """,
-            router_sn, equip_type, panel_id,
-            ts_from, ts_to,
-        )
+        async with _get_pool().acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT gap_start, gap_end
+                FROM data_gaps
+                WHERE router_sn  = $1
+                  AND equip_type = $2
+                  AND panel_id   = $3
+                  AND gap_start < $5
+                  AND (gap_end IS NULL OR gap_end > $4)
+                ORDER BY gap_start ASC
+                """,
+                router_sn, equip_type, panel_id,
+                ts_from, ts_to,
+            )
         return [dict(r) for r in rows]
+    except asyncio.TimeoutError:
+        raise RuntimeError(
+            f"Запрос пропусков связи превысил {_QUERY_TIMEOUT_SEC} с. "
+            "Уменьшите временной интервал анализа."
+        )
     except Exception:
         return []
-    finally:
-        await conn.close()
