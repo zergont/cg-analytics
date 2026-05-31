@@ -5,10 +5,39 @@ from collections.abc import AsyncIterator
 
 import httpx
 
-from config import settings
 from llm.prompts import ANALYSIS_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
+
+# ── In-memory конфигурация LLM (применяется при старте и через веб-морду) ──────
+_cfg: dict = {
+    "base_url":    "http://localhost:11434",
+    "model":       "qwen2.5:14b",
+    "temperature": 0.1,
+    "num_ctx":     16384,
+    "prompt":      ANALYSIS_SYSTEM_PROMPT,
+}
+
+
+def apply_llm_settings(
+    base_url: str,
+    model: str,
+    temperature: float,
+    num_ctx: int,
+    prompt: str,
+) -> None:
+    """Обновить конфигурацию LLM в памяти (вступает в силу немедленно)."""
+    _cfg["base_url"]    = base_url.rstrip("/")
+    _cfg["model"]       = model.strip()
+    _cfg["temperature"] = float(temperature)
+    _cfg["num_ctx"]     = int(num_ctx)
+    _cfg["prompt"]      = prompt.strip()
+    logger.info("LLM настройки обновлены: model=%s url=%s", _cfg["model"], _cfg["base_url"])
+
+
+def get_llm_settings() -> dict:
+    """Вернуть копию текущей конфигурации LLM."""
+    return dict(_cfg)
 
 
 async def stream_analysis(md_packet: str) -> AsyncIterator[str]:
@@ -21,25 +50,25 @@ async def stream_analysis(md_packet: str) -> AsyncIterator[str]:
         Строки-токены по мере генерации.
     """
     payload = {
-        "model": settings.llm_model,
+        "model": _cfg["model"],
         "messages": [
-            {"role": "system", "content": ANALYSIS_SYSTEM_PROMPT},
+            {"role": "system", "content": _cfg["prompt"]},
             {"role": "user",   "content": md_packet},
         ],
         "stream": True,
         "options": {
-            "temperature": settings.llm_temperature,
-            "num_ctx":     settings.llm_num_ctx,
+            "temperature": _cfg["temperature"],
+            "num_ctx":     _cfg["num_ctx"],
         },
     }
 
     logger.info("LLM запрос: model=%s, ctx=%d, prompt_len=%d",
-                settings.llm_model, settings.llm_num_ctx, len(md_packet))
+                _cfg["model"], _cfg["num_ctx"], len(md_packet))
 
     async with httpx.AsyncClient(timeout=600.0) as client:
         async with client.stream(
             "POST",
-            f"{settings.llm_base_url}/api/chat",
+            f"{_cfg['base_url']}/api/chat",
             json=payload,
         ) as response:
             response.raise_for_status()

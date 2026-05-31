@@ -882,6 +882,7 @@ async def kb_delete_file(kb_path: str, filename: str = Form(...)):
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
     from config import settings as cfg, TIMEZONE_CHOICES, get_tz
+    from llm.client import get_llm_settings
     registry = await analytics.get_equipment_registry()
     kb_list = _list_kb_paths(cfg.knowledge_base_path / "equipment")
     return templates.TemplateResponse(request, "settings.html", {
@@ -890,7 +891,28 @@ async def settings_page(request: Request):
         "kb_list": kb_list,
         "timezone_choices": TIMEZONE_CHOICES,
         "current_timezone": get_tz().key,
+        "llm": get_llm_settings(),
     })
+
+
+@router.post("/settings/llm")
+async def update_llm_settings(
+    llm_base_url:       str   = Form(...),
+    llm_model:          str   = Form(...),
+    llm_temperature:    float = Form(...),
+    llm_num_ctx:        int   = Form(...),
+    llm_system_prompt:  str   = Form(...),
+):
+    """Сохранить настройки LLM и применить без перезапуска."""
+    from llm.client import apply_llm_settings
+    apply_llm_settings(llm_base_url, llm_model, llm_temperature, llm_num_ctx, llm_system_prompt)
+    await analytics.set_app_setting("llm_base_url",     llm_base_url)
+    await analytics.set_app_setting("llm_model",        llm_model)
+    await analytics.set_app_setting("llm_temperature",  str(llm_temperature))
+    await analytics.set_app_setting("llm_num_ctx",      str(llm_num_ctx))
+    await analytics.set_app_setting("llm_system_prompt", llm_system_prompt)
+    logger.info("LLM настройки сохранены: model=%s", llm_model)
+    return RedirectResponse(url="/settings", status_code=303)
 
 
 @router.post("/settings/timezone")

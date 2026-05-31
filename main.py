@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from config import settings
 from db.analytics import init_db, get_app_setting
 from analytics.source import init_source_pool, close_source_pool
+from llm.client import apply_llm_settings, get_llm_settings
 from scheduler import start_scheduler, stop_scheduler
 from web.routes import router, _apply_tz
 
@@ -34,6 +35,15 @@ async def lifespan(app: FastAPI):
     saved_tz = await get_app_setting("timezone", settings.timezone_name)
     _apply_tz(saved_tz)   # обновляет config.get_tz() и глобал Jinja2
     logger.info("Часовой пояс: %s", saved_tz)
+    # Загружаем настройки LLM из БД
+    _defaults = get_llm_settings()
+    apply_llm_settings(
+        base_url    = await get_app_setting("llm_base_url",    _defaults["base_url"]),
+        model       = await get_app_setting("llm_model",       _defaults["model"]),
+        temperature = float(await get_app_setting("llm_temperature", str(_defaults["temperature"]))),
+        num_ctx     = int(await get_app_setting("llm_num_ctx",       str(_defaults["num_ctx"]))),
+        prompt      = await get_app_setting("llm_system_prompt",     _defaults["prompt"]),
+    )
     start_scheduler()
     yield
     stop_scheduler()
