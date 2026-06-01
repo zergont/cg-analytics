@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, File
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+from analytics.serializer import RUN_STATE_RU as _RUN_STATE_LABELS
 from db import analytics, source
 
 logger = logging.getLogger(__name__)
@@ -1095,15 +1096,6 @@ async def analytics_config_upload(kb_path: str, file: UploadFile = File(...)):
 
 # ── Онлайн-мониторинг ────────────────────────────────────────────────────────
 
-_RUN_STATE_LABELS = {
-    0: "Стоп",
-    1: "Задержка пуска",
-    2: "Прогрев",
-    3: "Работа",
-    4: "Разгрузка",
-    5: "Охлаждение на х.х.",
-    6: "Переход на х.х.",
-}
 
 _COKING_COLORS = {"GREEN": "success", "YELLOW": "warning", "RED": "danger"}
 _CAUSE_CLOSE_RU = {

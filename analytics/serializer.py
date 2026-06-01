@@ -29,7 +29,7 @@ _ZONE_RU = {
     "NA": "Н/Д",
 }
 
-_RUN_STATE_RU: dict[int, str] = {
+RUN_STATE_RU: dict[int, str] = {
     0: "Стоп",
     1: "Задержка пуска",
     2: "Прогрев",
@@ -221,7 +221,7 @@ def _append_segment(
     a = lines.append
     state_label = (
         seg.run_state_label
-        or _RUN_STATE_RU.get(seg.run_state, f"RUN_STATE={seg.run_state}")
+        or RUN_STATE_RU.get(seg.run_state, f"RUN_STATE={seg.run_state}")
     )
     dq_str = f"{seg.data_quality:.0%}"
     dur_str = _fmt_duration(seg.duration_sec)
@@ -240,7 +240,7 @@ def _append_segment(
         if prev_seg is not None:
             prev_label = (
                 prev_seg.run_state_label
-                or _RUN_STATE_RU.get(prev_seg.run_state, f"RUN_STATE={prev_seg.run_state}")
+                or RUN_STATE_RU.get(prev_seg.run_state, f"RUN_STATE={prev_seg.run_state}")
             )
             a(f"- **Предыдущее состояние:** ← {prev_label} (RUN_STATE={prev_seg.run_state})")
         else:
