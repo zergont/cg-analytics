@@ -105,18 +105,39 @@
       </div>
     </div>
 
-    {# Продолжения (DAILY_BOUNDARY) #}
-    {% if seg.continued_from or seg.continues_to %}
+    {# Навигация ← / → между соседними сегментами #}
+    {% if prev_nav or next_nav %}
     <div class="card mb-3">
-      <div class="card-header fw-semibold py-2">Цепочка DAILY_BOUNDARY</div>
-      <div class="card-body py-2 px-3" style="font-size:.85rem">
-        {% if seg.continued_from %}
-        <div>↩ <a href="/online/segment/{{ seg.continued_from }}">Предыдущая часть #{{ seg.continued_from }}</a></div>
+      <div class="card-body py-2 px-2 d-flex gap-1">
+        {% if prev_nav %}
+        <a href="/online/segment/{{ prev_nav.id }}"
+           class="btn btn-sm btn-outline-secondary flex-fill text-start"
+           style="font-size:.75rem;white-space:normal">
+          ‹ {{ prev_nav.label }}
+        </a>
+        {% else %}
+        <span class="flex-fill"></span>
         {% endif %}
-        {% if seg.continues_to %}
-        <div>↪ <a href="/online/segment/{{ seg.continues_to }}">Следующая часть #{{ seg.continues_to }}</a></div>
+        {% if next_nav %}
+        <a href="/online/segment/{{ next_nav.id }}"
+           class="btn btn-sm btn-outline-secondary flex-fill text-end"
+           style="font-size:.75rem;white-space:normal">
+          {{ next_nav.label }} ›
+        </a>
         {% endif %}
       </div>
+      {# DAILY_BOUNDARY: дополнительные ссылки если сегмент разрезан по суткам #}
+      {% if seg.continued_from or seg.continues_to %}
+      <div class="card-footer py-1 px-3" style="font-size:.75rem;background:#f8f9fa">
+        {% if seg.continued_from %}
+        <a href="/online/segment/{{ seg.continued_from }}">↩ продолжение #{{ seg.continued_from }}</a>
+        {% endif %}
+        {% if seg.continues_to %}
+        {% if seg.continued_from %} · {% endif %}
+        <a href="/online/segment/{{ seg.continues_to }}">продолжается в #{{ seg.continues_to }} ↪</a>
+        {% endif %}
+      </div>
+      {% endif %}
     </div>
     {% endif %}
 

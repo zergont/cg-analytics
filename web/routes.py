@@ -1298,11 +1298,36 @@ async def online_segment_detail(request: Request, seg_id: int):
     active_dets  = _pj(seg.get("active_detections_json"))
     coking_risk  = _pj(seg.get("coking_risk_json"))
 
-    # Предыдущий сегмент — для отображения «← откуда пришли»
+    # Предыдущий / следующий сегменты — для навигации и «← откуда пришли»
     prev_seg_raw = await odb.get_segment_before(
         seg["router_sn"], seg["equip_type"], seg["panel_id"],
         seg["t_start"],
     ) if seg.get("t_start") else None
+    next_seg_raw = await odb.get_segment_after(
+        seg["router_sn"], seg["equip_type"], seg["panel_id"],
+        seg["t_start"],
+    ) if seg.get("t_start") else None
+
+    def _nav_label(s: dict | None) -> str | None:
+        """Короткая метка для кнопки навигации: 'Работа · 4ч 12м'."""
+        if not s:
+            return None
+        rs = s.get("run_state")
+        chars = _pj(s.get("characteristics_json")) if "characteristics_json" in s else None
+        label = (chars.get("run_state_label") if chars else None) or _RUN_STATE_LABELS.get(rs, f"RS={rs}")
+        t_start = s.get("t_start")
+        t_end   = s.get("t_end")
+        if t_start and t_end:
+            dur_s = int((t_end - t_start).total_seconds())
+            if dur_s < 60:   dur = f"{dur_s}с"
+            elif dur_s < 3600: dur = f"{dur_s//60}м {dur_s%60}с"
+            else:              dur = f"{dur_s//3600}ч {(dur_s%3600)//60}м"
+            return f"{label} · {dur}"
+        return label
+
+    prev_nav = {"id": prev_seg_raw["id"], "label": _nav_label(prev_seg_raw)} if prev_seg_raw else None
+    next_nav = {"id": next_seg_raw["id"], "label": _nav_label(next_seg_raw)} if next_seg_raw else None
+
     prev_seg_chars = _pj(prev_seg_raw.get("characteristics_json")) if prev_seg_raw else None
     prev_run_state_label = None
     if prev_seg_chars and isinstance(prev_seg_chars, dict):
@@ -1322,6 +1347,8 @@ async def online_segment_detail(request: Request, seg_id: int):
             "active_detections": active_dets,
             "coking_risk": coking_risk,
             "prev_run_state_label": prev_run_state_label,
+            "prev_nav": prev_nav,
+            "next_nav": next_nav,
             "run_state_labels": _RUN_STATE_LABELS,
             "coking_colors": _COKING_COLORS,
             "cause_close_ru": _CAUSE_CLOSE_RU,
@@ -1376,6 +1403,8 @@ async def online_segment_detail(request: Request, seg_id: int):
         "seg": seg, "is_open": False,
         "run": run,
         "prev_run_state_label": prev_run_state_label,
+        "prev_nav": prev_nav,
+        "next_nav": next_nav,
         "run_state_labels": _RUN_STATE_LABELS,
         "coking_colors": _COKING_COLORS,
         "cause_close_ru": _CAUSE_CLOSE_RU,

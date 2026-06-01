@@ -312,6 +312,26 @@ async def delete_segment_by_id(seg_id: int) -> None:
         await conn.close()
 
 
+async def get_segment_after(
+    router_sn: str, equip_type: str, panel_id: int,
+    after_t_start: datetime,
+) -> dict[str, Any] | None:
+    """Следующий сегмент после after_t_start (для навигации ‹ / ›)."""
+    conn = await _connect()
+    try:
+        row = await conn.fetchrow("""
+            SELECT id, t_start, t_end, run_state
+            FROM auto_segments
+            WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
+              AND t_start > $4
+            ORDER BY t_start ASC
+            LIMIT 1
+        """, router_sn, equip_type, panel_id, after_t_start)
+        return dict(row) if row else None
+    finally:
+        await conn.close()
+
+
 async def get_segment_by_id(seg_id: int) -> dict[str, Any] | None:
     conn = await _connect()
     try:
