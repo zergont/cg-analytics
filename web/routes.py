@@ -1396,7 +1396,11 @@ async def online_clear(
     from datetime import datetime
 
     if not confirm:
-        raise HTTPException(status_code=400, detail="Требуется подтверждение")
+        # Возвращаемся в календарь — без подтверждения ничего не удаляем
+        return RedirectResponse(
+            url=f"/online/calendar/{router_sn}/{equip_type}/{panel_id}",
+            status_code=303,
+        )
 
     tz = get_tz()
     fmt = "%Y-%m-%dT%H:%M"

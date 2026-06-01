@@ -202,14 +202,17 @@
           </div>
           <div class="form-check">
             <input class="form-check-input" type="checkbox" id="confirmClear"
-                   onchange="document.getElementById('confirmInput').value=this.checked?'yes':''">
+                   onchange="
+                     document.getElementById('confirmInput').value = this.checked ? 'yes' : '';
+                     document.getElementById('clearSubmitBtn').disabled = !this.checked;
+                   ">
             <label class="form-check-label" for="confirmClear">Подтверждаю удаление</label>
           </div>
           <input type="hidden" name="confirm" id="confirmInput" value="">
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
-          <button type="submit" class="btn btn-danger">Удалить</button>
+          <button type="submit" id="clearSubmitBtn" class="btn btn-danger" disabled>Удалить</button>
         </div>
       </form>
     </div>
