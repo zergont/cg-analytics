@@ -36,6 +36,19 @@ def _tz_utc(ts: datetime) -> datetime:
     return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
 
 
+def _make_seg_hint(db_row: dict):
+    """Duck-typed хинт для prev_seg в to_markdown: извлекает run_state и run_state_label из DB-строки."""
+    from types import SimpleNamespace
+    chars = db_row.get("characteristics_json")
+    if isinstance(chars, str):
+        try:
+            import json as _j; chars = _j.loads(chars)
+        except Exception:
+            chars = None
+    label = (chars.get("run_state_label") if isinstance(chars, dict) else None)
+    return SimpleNamespace(run_state=db_row.get("run_state"), run_state_label=label)
+
+
 def _coking_from_json(d) -> CokingRisk:
     """Десериализовать CokingRisk из dict или JSON-строки (asyncpg отдаёт JSONB как str)."""
     if not d:
@@ -237,6 +250,8 @@ class OnlinePollEngine:
         self.prev_poll_ts: datetime | None        = None
         # Куда дошли в последнем цикле (обновляется внутри цикла — для прогресс-бара)
         self.last_processed_to: datetime | None  = None
+        # Последний закрытый сегмент как duck-typed хинт для prev_seg в отчётах
+        self._prev_seg_hint = None
 
         self._running = False
         self._task: asyncio.Task | None = None
@@ -255,6 +270,7 @@ class OnlinePollEngine:
         if last:
             self.cursor_ts = _tz_utc(last["t_end"])
             self.inherited_coking_risk = _coking_from_json(last.get("coking_risk_json"))
+            self._prev_seg_hint = _make_seg_hint(last)
             if last.get("cause_close") == "DAILY_BOUNDARY":
                 ff = last.get("forward_fill_json")
                 if isinstance(ff, str):
@@ -414,13 +430,16 @@ class OnlinePollEngine:
             seg_dict["t_end"] = seg_t_end.isoformat()
             seg_dict["cause_close"] = seg_cause_close
 
+            # prev_seg для отчёта: предыдущий в текущем батче или хинт из движка
+            ps = segments[i - 1] if i > 0 else self._prev_seg_hint
+
             # Генерация Markdown-отчёта для закрытого сегмента
             try:
                 from analytics.serializer import to_markdown as _to_md
                 report_md = _to_md(
                     [seg], self.router_sn, self.equip_type, self.panel_id,
                     _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end,
-                    ANALYTICS_VERSION, tz=self.tz,
+                    ANALYTICS_VERSION, tz=self.tz, prev_seg=ps,
                 )
             except Exception:
                 report_md = None
@@ -443,6 +462,7 @@ class OnlinePollEngine:
             })
             # ← await выше = event loop обслужил API. Сигналим прогресс сразу.
             self.last_processed_to = seg_t_end
+            self._prev_seg_hint = seg
 
             if is_last:
                 last_saved_id = db_id
@@ -490,15 +510,16 @@ class OnlinePollEngine:
             )
             # Первый закрытый сегмент в окне может быть продолжением после DAILY_BOUNDARY
             carry_continued_from = self.continued_from_id
-            for seg in closed_segs:
+            for ci, seg in enumerate(closed_segs):
                 coking_risk = _extract_coking_risk_from_segments([seg])
                 seg_t_end_rs = _tz_utc(datetime.fromisoformat(seg.t_end))
+                ps_rs = closed_segs[ci - 1] if ci > 0 else self._prev_seg_hint
                 try:
                     from analytics.serializer import to_markdown as _to_md
                     report_md_rs = _to_md(
                         [seg], self.router_sn, self.equip_type, self.panel_id,
                         _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end_rs,
-                        ANALYTICS_VERSION, tz=self.tz,
+                        ANALYTICS_VERSION, tz=self.tz, prev_seg=ps_rs,
                     )
                 except Exception:
                     report_md_rs = None
@@ -522,6 +543,7 @@ class OnlinePollEngine:
                 self.last_processed_to = seg_t_end_rs
                 self.cursor_ts = _tz_utc(datetime.fromisoformat(seg.t_end))
                 self.inherited_coking_risk = coking_risk
+                self._prev_seg_hint = seg
                 carry_continued_from = None   # только первый сегмент несёт ссылку
                 self.continued_from_id = None
                 self.forward_fill_memory = None

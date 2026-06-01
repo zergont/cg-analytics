@@ -132,6 +132,7 @@ def to_markdown(
     ts_to: datetime,
     analytics_version: str = "2.0.0",
     tz=None,
+    prev_seg=None,
 ) -> str:
     """Сформировать Markdown-отчёт.
 
@@ -205,8 +206,8 @@ def to_markdown(
     a("")
 
     for seg_idx, seg in enumerate(segments, 1):
-        prev_seg = segments[seg_idx - 2] if seg_idx >= 2 else None
-        _append_segment(lines, seg, seg_idx, fmt_ts, prev_seg=prev_seg)
+        ps = segments[seg_idx - 2] if seg_idx >= 2 else prev_seg
+        _append_segment(lines, seg, seg_idx, fmt_ts, prev_seg=ps)
 
     return "\n".join(lines)
 
