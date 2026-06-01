@@ -226,7 +226,8 @@ def _append_segment(
     dq_str = f"{seg.data_quality:.0%}"
     dur_str = _fmt_duration(seg.duration_sec)
     hours_str = (
-        f" | Мото-часы: {seg.engine_hours_start:.1f}" if seg.engine_hours_start is not None else ""
+        f" | Мото-часы: {seg.engine_hours_start:.0f} с ({seg.engine_hours_start / 3600:.0f} ч)"
+        if seg.engine_hours_start is not None else ""
     )
 
     a(f"### Сегмент {idx} — {state_label} (RUN_STATE={seg.run_state})")

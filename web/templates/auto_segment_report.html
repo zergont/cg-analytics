@@ -108,6 +108,9 @@
     {# Навигация ← / → между соседними сегментами #}
     {% if prev_nav or next_nav %}
     <div class="card mb-3">
+      <div class="card-header py-1 px-3" style="font-size:.72rem;color:#6c757d;background:#f8f9fa">
+        Соседние сегменты
+      </div>
       <div class="card-body py-2 px-2 d-flex gap-1">
         {% if prev_nav %}
         <a href="/online/segment/{{ prev_nav.id }}"
