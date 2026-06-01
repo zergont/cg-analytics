@@ -336,16 +336,17 @@ class OnlinePollEngine:
             self.cursor_ts, process_to, self.daily_hour, tz
         )
 
-        # ОДНА граница за один цикл → равномерный прогресс (~1 день/30 с)
         pending = [b for b in boundaries if self.cursor_ts < b < process_to]
 
-        if pending:
-            await self._close_window(self.cursor_ts, pending[0], "DAILY_BOUNDARY")
-            self.last_processed_to = pending[0]
-        else:
-            # Все границы обработаны → обновить открытый сегмент
-            await self._update_open_window(self.cursor_ts, process_to)
-            self.last_processed_to = process_to
+        # Обрабатываем ВСЕ границы подряд — batch-добор идёт быстро.
+        # last_processed_to обновляется внутри _close_window после каждого сегмента,
+        # т.к. там есть await-точки между которыми event loop обслуживает API.
+        for boundary in pending:
+            await self._close_window(self.cursor_ts, boundary, "DAILY_BOUNDARY")
+
+        # Открытое окно — всегда в конце (после всех границ или сразу если их нет)
+        await self._update_open_window(self.cursor_ts, process_to)
+        self.last_processed_to = process_to
 
     # ── Закрытие окна (DAILY_BOUNDARY) ────────────────────────────────────────
 
@@ -440,6 +441,8 @@ class OnlinePollEngine:
                 "characteristics_json": seg_dict,
                 "report_md":          report_md,
             })
+            # ← await выше = event loop обслужил API. Сигналим прогресс сразу.
+            self.last_processed_to = seg_t_end
 
             if is_last:
                 last_saved_id = db_id
@@ -515,6 +518,8 @@ class OnlinePollEngine:
                     "characteristics_json": seg.to_dict(),
                     "report_md":          report_md_rs,
                 })
+                # ← await выше = прогресс обновляется на каждой смене RUN_STATE
+                self.last_processed_to = seg_t_end_rs
                 self.cursor_ts = _tz_utc(datetime.fromisoformat(seg.t_end))
                 self.inherited_coking_risk = coking_risk
                 carry_continued_from = None   # только первый сегмент несёт ссылку
