@@ -1,0 +1,185 @@
+{% extends "base.html" %}
+{% block title %}Онлайн-мониторинг — cg-analytics{% endblock %}
+
+{% block content %}
+<div class="d-flex align-items-center gap-3 mb-3">
+  <h4 class="mb-0">Онлайн-мониторинг</h4>
+  <span class="text-muted" style="font-size:0.8rem" id="status-ts"></span>
+</div>
+
+{% if observations %}
+<div class="table-responsive mb-4">
+  <table class="table table-hover align-middle">
+    <thead class="table-dark">
+      <tr>
+        <th>Машина</th>
+        <th>Статус</th>
+        <th>Режим</th>
+        <th>Закоксовка</th>
+        <th>Старт наблюд.</th>
+        <th>Интервал, с</th>
+        <th>Действия</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for obs in observations %}
+    {% set key = obs.router_sn ~ "|" ~ obs.equip_type ~ "|" ~ obs.panel_id %}
+    {% set seg = open_segs.get(key) %}
+    <tr data-key="{{ key }}">
+      <td>
+        <div class="fw-semibold">{{ obs.name or obs.router_sn }}</div>
+        <small class="text-muted">{{ obs.equip_type }} / панель {{ obs.panel_id }}</small>
+        {% if obs.model %}
+        <br><small class="text-muted">{{ obs.manufacturer or "" }} {{ obs.model }}</small>
+        {% endif %}
+      </td>
+      <td>
+        {% if obs.status == "running" %}
+          <span class="badge bg-success">● Работает</span>
+        {% else %}
+          <span class="badge bg-secondary">Остановлен</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if seg %}
+          {% set rs = seg.run_state %}
+          <span class="badge
+            {%- if rs == 3 %} bg-primary
+            {%- elif rs in [2,5] %} bg-info text-dark
+            {%- elif rs == 4 %} bg-danger
+            {%- else %} bg-secondary{% endif %}">
+            {{ run_state_labels.get(rs, rs) if rs is not none else "—" }}
+          </span>
+          {% if seg.t_start %}
+          <br><small class="text-muted" title="t_start открытого сегмента">
+            с {{ seg.t_start.strftime("%d.%m %H:%M") }}
+          </small>
+          {% endif %}
+        {% else %}
+          <span class="text-muted">—</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if seg and seg.coking_risk_json %}
+          {% set cr = seg.coking_risk_json if seg.coking_risk_json is mapping else {} %}
+          {% set level = cr.get("risk_level", "GREEN") %}
+          <span class="badge bg-{{ coking_colors.get(level, 'secondary') }}">{{ level }}</span>
+        {% else %}
+          <span class="text-muted">—</span>
+        {% endif %}
+      </td>
+      <td>
+        <small>{{ obs.start_date.strftime("%d.%m.%Y %H:%M") if obs.start_date else "—" }}</small>
+      </td>
+      <td>{{ obs.poll_interval_sec }}</td>
+      <td>
+        <div class="d-flex gap-1 flex-wrap">
+          <a href="/online/calendar/{{ obs.router_sn }}/{{ obs.equip_type }}/{{ obs.panel_id }}"
+             class="btn btn-sm btn-outline-primary">Календарь</a>
+          {% if obs.status == "running" %}
+            <form method="post" action="/online/stop" class="d-inline">
+              <input type="hidden" name="router_sn"  value="{{ obs.router_sn }}">
+              <input type="hidden" name="equip_type" value="{{ obs.equip_type }}">
+              <input type="hidden" name="panel_id"   value="{{ obs.panel_id }}">
+              <button type="submit" class="btn btn-sm btn-warning"
+                onclick="return confirm('Остановить наблюдение за {{ obs.name or obs.router_sn }}?')">
+                Стоп
+              </button>
+            </form>
+          {% else %}
+            <form method="post" action="/online/start" class="d-inline">
+              <input type="hidden" name="router_sn"        value="{{ obs.router_sn }}">
+              <input type="hidden" name="equip_type"       value="{{ obs.equip_type }}">
+              <input type="hidden" name="panel_id"         value="{{ obs.panel_id }}">
+              <input type="hidden" name="start_date_local" value="{{ now_local }}">
+              <input type="hidden" name="poll_interval_sec" value="{{ obs.poll_interval_sec }}">
+              <button type="submit" class="btn btn-sm btn-success">Пуск</button>
+            </form>
+          {% endif %}
+        </div>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="alert alert-info">Нет активных наблюдений. Добавьте машину ниже.</div>
+{% endif %}
+
+<!-- ── Новое наблюдение ────────────────────────────────────────────────── -->
+<div class="card" style="max-width:580px">
+  <div class="card-header fw-semibold">Запустить наблюдение</div>
+  <div class="card-body">
+    <form method="post" action="/online/start">
+      <div class="mb-3">
+        <label class="form-label">Машина</label>
+        <select name="router_sn" id="eq-select" class="form-select" required
+                onchange="fillEquipFields(this)">
+          <option value="">— выберите —</option>
+          {% for eq in equipment %}
+          <option value="{{ eq.router_sn }}"
+                  data-type="{{ eq.equip_type }}"
+                  data-panel="{{ eq.panel_id }}">
+            {{ eq.name or eq.router_sn }} ({{ eq.equip_type }}/{{ eq.panel_id }})
+          </option>
+          {% endfor %}
+        </select>
+        <input type="hidden" name="equip_type" id="eq-type">
+        <input type="hidden" name="panel_id"   id="eq-panel">
+      </div>
+      <div class="mb-3">
+        <label class="form-label">Стартовая дата <small class="text-muted">(batch-добор с этой точки)</small></label>
+        <input type="datetime-local" name="start_date_local" class="form-control"
+               value="{{ now_local }}" required>
+        <div class="form-text text-warning">
+          Если у машины уже есть сегменты — дата игнорируется, продолжение с последней точки.
+          Для рестарта с новой даты сначала очистите сегменты в разделе «Календарь».
+        </div>
+      </div>
+      <div class="mb-3">
+        <label class="form-label">Интервал опроса, с</label>
+        <input type="number" name="poll_interval_sec" class="form-control"
+               value="30" min="5" max="300" style="width:120px">
+      </div>
+      <button type="submit" class="btn btn-success">Пуск онлайн</button>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function fillEquipFields(sel) {
+  const opt = sel.options[sel.selectedIndex];
+  document.getElementById('eq-type').value  = opt.dataset.type  || '';
+  document.getElementById('eq-panel').value = opt.dataset.panel || '';
+}
+
+// Авто-обновление статусов каждые 15 с
+async function refreshStatus() {
+  try {
+    const r = await fetch('/api/online/status');
+    const data = await r.json();
+    const now = new Date().toLocaleTimeString('ru-RU');
+    document.getElementById('status-ts').textContent = 'обновлено ' + now;
+    data.forEach(item => {
+      const row = document.querySelector(`tr[data-key="${item.key}"]`);
+      if (!row) return;
+      const cells = row.cells;
+      // статус (ячейка 1)
+      cells[1].innerHTML = item.status === 'running'
+        ? '<span class="badge bg-success">● Работает</span>'
+        : '<span class="badge bg-secondary">Остановлен</span>';
+      // coking_risk (ячейка 3)
+      const cr = item.coking_risk;
+      const colorMap = {GREEN:'success', YELLOW:'warning', RED:'danger'};
+      cells[3].innerHTML = cr
+        ? `<span class="badge bg-${colorMap[cr]||'secondary'}">${cr}</span>`
+        : '<span class="text-muted">—</span>';
+    });
+  } catch(e) {}
+}
+setInterval(refreshStatus, 15000);
+</script>
+{% endblock %}

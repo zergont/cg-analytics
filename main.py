@@ -12,6 +12,7 @@ from analytics.source import init_source_pool, close_source_pool
 from llm.client import apply_llm_settings, get_llm_settings
 from scheduler import start_scheduler, stop_scheduler
 from web.routes import router, _apply_tz
+import online.manager as _online_mgr
 
 logging.basicConfig(
     level=settings.log_level,
@@ -45,8 +46,12 @@ async def lifespan(app: FastAPI):
         prompt      = await get_app_setting("llm_system_prompt",     _defaults["prompt"]),
     )
     start_scheduler()
+    # Запустить онлайн-мониторинг (Этап 1.5)
+    mgr = _online_mgr.init_manager()
+    await mgr.start_all_running()
     yield
     stop_scheduler()
+    await _online_mgr.stop_manager()
     await close_source_pool()
     logger.info("═══ cg-analytics остановлен ═══")
 

@@ -1093,6 +1093,304 @@ async def analytics_config_upload(kb_path: str, file: UploadFile = File(...)):
     return RedirectResponse(url="/knowledge", status_code=303)
 
 
+# ── Онлайн-мониторинг ────────────────────────────────────────────────────────
+
+_RUN_STATE_LABELS = {
+    0: "Ожидание",
+    1: "Запуск",
+    2: "Прогрев",
+    3: "Работа",
+    4: "Аварийный останов",
+    5: "Охлаждение",
+    6: "Останов охлаждения",
+}
+
+_COKING_COLORS = {"GREEN": "success", "YELLOW": "warning", "RED": "danger"}
+_CAUSE_CLOSE_RU = {
+    "RUN_STATE_CHANGE": "Смена режима",
+    "DAILY_BOUNDARY":   "Суточный рез",
+    "OPERATOR_STOP":    "Стоп оператором",
+}
+
+
+@router.get("/online", response_class=HTMLResponse)
+async def online_monitor(request: Request):
+    from config import get_tz
+    from online import db as odb
+    from datetime import datetime, timedelta
+
+    observations = await odb.list_observations()
+
+    # Для каждого наблюдения — открытый сегмент (если есть)
+    open_segs: dict[str, dict] = {}
+    for obs in observations:
+        seg = await odb.get_open_segment(obs["router_sn"], obs["equip_type"], obs["panel_id"])
+        if seg:
+            open_segs[f"{obs['router_sn']}|{obs['equip_type']}|{obs['panel_id']}"] = seg
+
+    equipment = await analytics.get_equipment_registry()
+    tz = get_tz()
+    now_local = datetime.now(tz).strftime("%Y-%m-%dT%H:%M")
+
+    return templates.TemplateResponse(request, "online_monitor.html", {
+        "observations":      observations,
+        "open_segs":         open_segs,
+        "equipment":         equipment,
+        "now_local":         now_local,
+        "run_state_labels":  _RUN_STATE_LABELS,
+        "coking_colors":     _COKING_COLORS,
+        "cause_close_ru":    _CAUSE_CLOSE_RU,
+    })
+
+
+@router.post("/online/start")
+async def online_start(
+    request: Request,
+    router_sn:        str = Form(...),
+    equip_type:       str = Form(...),
+    panel_id:         int = Form(...),
+    start_date_local: str = Form(...),   # YYYY-MM-DDTHH:MM
+    poll_interval_sec: int = Form(30),
+):
+    from config import get_tz
+    from online.manager import get_manager
+    from datetime import datetime
+
+    tz = get_tz()
+    fmt = "%Y-%m-%dT%H:%M"
+    start_date = datetime.strptime(start_date_local, fmt).replace(tzinfo=tz)
+
+    try:
+        mgr = get_manager()
+        await mgr.start_machine(
+            router_sn, equip_type, panel_id,
+            start_date, poll_interval_sec,
+        )
+    except Exception as e:
+        logger.exception("Ошибка ПУСК ОНЛАЙН: %s", e)
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return RedirectResponse(url="/online", status_code=303)
+
+
+@router.post("/online/stop")
+async def online_stop(
+    router_sn:  str = Form(...),
+    equip_type: str = Form(...),
+    panel_id:   int = Form(...),
+):
+    from online.manager import get_manager
+    try:
+        mgr = get_manager()
+        await mgr.stop_machine(router_sn, equip_type, panel_id)
+    except Exception as e:
+        logger.exception("Ошибка СТОП ОНЛАЙН: %s", e)
+        raise HTTPException(status_code=400, detail=str(e))
+    return RedirectResponse(url="/online", status_code=303)
+
+
+@router.get("/online/calendar/{router_sn}/{equip_type}/{panel_id}", response_class=HTMLResponse)
+async def online_calendar(
+    request: Request,
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+):
+    from config import get_tz
+    from online import db as odb
+    from datetime import datetime
+    import json as _json
+
+    tz = get_tz()
+    daily_hour = 9  # TODO: из app_settings
+
+    segments = await odb.get_segments_for_calendar(router_sn, equip_type, panel_id)
+
+    # Группируем по операционным суткам [09:00, 09:00)
+    from collections import defaultdict
+    days: dict[str, list[dict]] = defaultdict(list)
+    for seg in segments:
+        t_start = seg["t_start"]
+        if t_start:
+            local = t_start.astimezone(tz)
+            # Если час < daily_hour — это ещё предыдущие сутки
+            if local.hour < daily_hour:
+                from datetime import timedelta
+                day_key = (local.date() - timedelta(days=1)).isoformat()
+            else:
+                day_key = local.date().isoformat()
+        else:
+            day_key = "unknown"
+        days[day_key].append(dict(seg))
+
+    days_sorted = sorted(days.items(), key=lambda x: x[0], reverse=True)
+
+    # Метаданные оборудования
+    registry = await analytics.get_equipment_registry()
+    eq_meta = next(
+        (e for e in registry
+         if e["router_sn"] == router_sn
+         and e["equip_type"] == equip_type
+         and str(e["panel_id"]) == str(panel_id)),
+        {},
+    )
+    obs = await odb.get_observation(router_sn, equip_type, panel_id)
+
+    return templates.TemplateResponse(request, "online_calendar.html", {
+        "router_sn":         router_sn,
+        "equip_type":        equip_type,
+        "panel_id":          panel_id,
+        "eq_meta":           eq_meta,
+        "days":              days_sorted,
+        "tz_name":           tz.key,
+        "daily_hour":        daily_hour,
+        "run_state_labels":  _RUN_STATE_LABELS,
+        "coking_colors":     _COKING_COLORS,
+        "cause_close_ru":    _CAUSE_CLOSE_RU,
+        "observation":       obs,
+    })
+
+
+@router.get("/online/segment/{seg_id}", response_class=HTMLResponse)
+async def online_segment_detail(request: Request, seg_id: int):
+    from online import db as odb
+    from config import get_tz
+    import json as _json
+
+    seg = await odb.get_segment_by_id(seg_id)
+    if not seg:
+        raise HTTPException(status_code=404, detail="Сегмент не найден")
+
+    tz = get_tz()
+
+    # Парсим JSON-поля
+    def _parse_json(val):
+        if val is None:
+            return None
+        if isinstance(val, str):
+            try:
+                return _json.loads(val)
+            except Exception:
+                return None
+        return val  # asyncpg уже распарсил jsonb
+
+    characteristics = _parse_json(seg.get("characteristics_json"))
+    current_values  = _parse_json(seg.get("current_values_json"))
+    active_dets     = _parse_json(seg.get("active_detections_json"))
+    coking_risk     = _parse_json(seg.get("coking_risk_json"))
+
+    return templates.TemplateResponse(request, "auto_segment_detail.html", {
+        "seg":               seg,
+        "characteristics":   characteristics,
+        "current_values":    current_values,
+        "active_detections": active_dets,
+        "coking_risk":       coking_risk,
+        "tz_name":           tz.key,
+        "run_state_labels":  _RUN_STATE_LABELS,
+        "coking_colors":     _COKING_COLORS,
+        "cause_close_ru":    _CAUSE_CLOSE_RU,
+    })
+
+
+@router.post("/online/clear")
+async def online_clear(
+    request: Request,
+    router_sn:  str = Form(...),
+    equip_type: str = Form(...),
+    panel_id:   int = Form(...),
+    ts_from_local: str = Form(""),
+    ts_to_local:   str = Form(""),
+    confirm:    str = Form(""),
+):
+    """Очистка авто-сегментов с фильтром. Полная очистка требует confirm='yes'."""
+    from config import get_tz
+    from online import db as odb
+    from datetime import datetime
+
+    if not confirm:
+        raise HTTPException(status_code=400, detail="Требуется подтверждение")
+
+    tz = get_tz()
+    fmt = "%Y-%m-%dT%H:%M"
+
+    ts_from = None
+    ts_to   = None
+    if ts_from_local:
+        try:
+            ts_from = datetime.strptime(ts_from_local, fmt).replace(tzinfo=tz)
+        except ValueError:
+            pass
+    if ts_to_local:
+        try:
+            ts_to = datetime.strptime(ts_to_local, fmt).replace(tzinfo=tz)
+        except ValueError:
+            pass
+
+    # Остановить движок перед очисткой
+    try:
+        from online.manager import get_manager
+        mgr = get_manager()
+        if mgr.is_running(router_sn, equip_type, panel_id):
+            await mgr.stop_machine(router_sn, equip_type, panel_id)
+    except Exception:
+        pass
+
+    deleted = await odb.clear_segments(router_sn, equip_type, panel_id, ts_from, ts_to)
+    logger.info(
+        "Очистка авто-сегментов %s/%s/%s: удалено %d, ts_from=%s, ts_to=%s",
+        router_sn, equip_type, panel_id, deleted, ts_from, ts_to,
+    )
+    return RedirectResponse(
+        url=f"/online/calendar/{router_sn}/{equip_type}/{panel_id}",
+        status_code=303,
+    )
+
+
+@router.get("/api/online/status", response_class=JSONResponse)
+async def api_online_status():
+    """Текущий статус всех наблюдений + открытых сегментов (для JS-поллинга)."""
+    from online import db as odb
+    try:
+        from online.manager import get_manager
+        mgr = get_manager()
+        running_keys = mgr.running_keys()
+    except RuntimeError:
+        running_keys = []
+
+    observations = await odb.list_observations()
+    result = []
+    for obs in observations:
+        key = f"{obs['router_sn']}|{obs['equip_type']}|{obs['panel_id']}"
+        open_seg = await odb.get_open_segment(
+            obs["router_sn"], obs["equip_type"], obs["panel_id"]
+        )
+        cr = None
+        run_state = None
+        if open_seg and open_seg.get("coking_risk_json"):
+            import json as _j
+            cr_data = open_seg["coking_risk_json"]
+            if isinstance(cr_data, str):
+                cr_data = _j.loads(cr_data)
+            cr = cr_data.get("risk_level") if isinstance(cr_data, dict) else None
+        if open_seg:
+            run_state = open_seg.get("run_state")
+        result.append({
+            "key":        key,
+            "router_sn":  obs["router_sn"],
+            "equip_type": obs["equip_type"],
+            "panel_id":   obs["panel_id"],
+            "status":     obs["status"],
+            "engine_live": key in running_keys,
+            "run_state":   run_state,
+            "coking_risk": cr,
+            "t_start_open": (
+                open_seg["t_start"].isoformat()
+                if open_seg and open_seg.get("t_start") else None
+            ),
+        })
+    return JSONResponse(result)
+
+
 def _count_lines(path) -> int:
     if not path or not path.exists():
         return 0

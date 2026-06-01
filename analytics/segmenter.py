@@ -858,12 +858,17 @@ def segment(
     engine_sn: str,
     ts_from: datetime,
     ts_to: datetime,
+    initial_coking_risk=None,  # CokingRisk | None — для онлайн-режима (п. 5.1 ТЗ)
 ) -> list[Segment]:
     """Главная точка входа: преобразует сырые данные в список сегментов.
 
     Входные данные должны быть загружены runner-ом из БД через analytics.source.
     Обработка строго каузальная (от старых к новым).
+
+    initial_coking_risk: если передан — инициализирует coking_risk аккумулятор
+    начальным состоянием из предыдущего закрытого сегмента (ТЗ Этап 1.5, раздел 5.1).
     """
+    import copy as _copy
     tf = _tz(ts_from)
     tt = _tz(ts_to)
 
@@ -881,6 +886,8 @@ def segment(
 
     segments: list[Segment] = []
     accumulators = RiskAccumulators()
+    if initial_coking_risk is not None:
+        accumulators.coking_risk = _copy.deepcopy(initial_coking_risk)
 
     for period in run_state_periods:
         p_start = _tz(period["state_start"])

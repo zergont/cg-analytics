@@ -17,17 +17,16 @@ async def _connect() -> asyncpg.Connection:
 
 
 async def init_db() -> None:
-    """Создание таблиц при первом запуске (применяет schema.sql)."""
-    schema = (settings.knowledge_base_path.parent / "db" / "schema.sql").resolve()
-    # Путь относительно рабочей директории проекта
+    """Создание таблиц при первом запуске (применяет schema.sql + online_schema.sql)."""
     import pathlib
-    schema_path = pathlib.Path(__file__).parent / "schema.sql"
-    sql = schema_path.read_text(encoding="utf-8")
+    db_dir = pathlib.Path(__file__).parent
 
     conn = await _connect()
     try:
-        await conn.execute(sql)
-        logger.info("Схема аналитической БД применена.")
+        for schema_file in ("schema.sql", "online_schema.sql"):
+            sql = (db_dir / schema_file).read_text(encoding="utf-8")
+            await conn.execute(sql)
+        logger.info("Схема аналитической БД применена (schema + online).")
     finally:
         await conn.close()
 
