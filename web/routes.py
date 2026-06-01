@@ -1096,13 +1096,13 @@ async def analytics_config_upload(kb_path: str, file: UploadFile = File(...)):
 # ── Онлайн-мониторинг ────────────────────────────────────────────────────────
 
 _RUN_STATE_LABELS = {
-    0: "Ожидание",
-    1: "Запуск",
+    0: "Стоп",
+    1: "Задержка пуска",
     2: "Прогрев",
     3: "Работа",
-    4: "Останов (RUN_STATE=4)",   # нейтрально; точная метка берётся из KB оборудования
-    5: "Охлаждение",
-    6: "Останов охлаждения",
+    4: "Разгрузка",
+    5: "Охлаждение на х.х.",
+    6: "Переход на х.х.",
 }
 
 _COKING_COLORS = {"GREEN": "success", "YELLOW": "warning", "RED": "danger"}
@@ -1215,6 +1215,23 @@ async def online_calendar(
     segments = await odb.get_segments_for_calendar(router_sn, equip_type, panel_id)
 
     # Группируем по операционному дню (сутки = 09:00 local → следующие 09:00)
+    _SEV_RANK = {"INFO": 1, "WARNING": 2, "ALARM": 3, "SHUTDOWN": 3}
+
+    def _violation_level(characteristics_json) -> str | None:
+        """None = нет данных/открытый; 'ok'; 'warning'; 'alarm'."""
+        if not characteristics_json or not isinstance(characteristics_json, dict):
+            return None
+        checks = characteristics_json.get("sequence_checks") or []
+        if not any(isinstance(c, dict) for c in checks):
+            return None
+        if not any(not c.get("passed", True) for c in checks if isinstance(c, dict)):
+            return "ok"
+        max_rank = 0
+        for sub in (characteristics_json.get("subsegments") or []):
+            for det in (sub.get("detections") or []):
+                max_rank = max(max_rank, _SEV_RANK.get(det.get("severity", ""), 0))
+        return "alarm" if max_rank >= 3 else "warning"
+
     segs_by_day: dict[date, list] = defaultdict(list)
     for seg in segments:
         t = seg["t_start"]
@@ -1222,7 +1239,9 @@ async def online_calendar(
             continue
         local = t.astimezone(tz)
         op_date = (local - timedelta(hours=daily_hour)).date()
-        segs_by_day[op_date].append(dict(seg))
+        s = dict(seg)
+        s["violation_level"] = _violation_level(s.get("characteristics_json"))
+        segs_by_day[op_date].append(s)
 
     # Сетка месяца (недели с Пн)
     _cal.setfirstweekday(0)

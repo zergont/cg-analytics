@@ -369,7 +369,7 @@ async def get_segments_for_calendar(
             SELECT id, t_start, t_end, run_state, cause_close,
                    split_reason, continued_from, continues_to,
                    coking_risk_json, analytics_version,
-                   active_detections_json
+                   active_detections_json, characteristics_json
             FROM auto_segments
             WHERE {where}
             ORDER BY t_start ASC

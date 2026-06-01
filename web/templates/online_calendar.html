@@ -14,9 +14,14 @@
 .cal-day-num.today-num { color:#0d6efd; }
 .seg-event { border-radius:3px; padding:2px 5px; margin-bottom:2px;
              font-size:.72rem; line-height:1.3; cursor:pointer;
-             text-decoration:none; display:block; }
+             text-decoration:none; display:block; position:relative; }
 .seg-event:hover { opacity:.85; filter:brightness(.95); }
 .seg-event-open { border-left:3px solid #0d6efd !important; }
+.seg-vicon { position:absolute; top:2px; right:4px; font-size:.65rem;
+             font-weight:700; line-height:1; }
+.seg-vicon-ok      { color:#198754; }
+.seg-vicon-warning { color:#856404; }
+.seg-vicon-alarm   { color:#dc3545; }
 /* run_state цвета */
 .rs-0  { background:#e9ecef; color:#495057; border-left:3px solid #adb5bd; }
 .rs-1  { background:#fff3cd; color:#664d03; border-left:3px solid #ffc107; }
@@ -120,8 +125,17 @@
     {% set cr = cr_j if cr_j is mapping else {} %}
     {% set cr_lv = cr.get("risk_level","GREEN") if cr else "GREEN" %}
 
+    {% set vlv = seg.violation_level %}
     <a href="/online/segment/{{ seg.id }}"
        class="seg-event rs-{{ rs if rs is not none else 'na' }}{% if is_open %} seg-event-open{% endif %}">
+      {# Иконка статуса нарушений #}
+      {% if vlv == "ok" %}
+        <span class="seg-vicon seg-vicon-ok" title="Норма — нарушений не выявлено">✓</span>
+      {% elif vlv == "warning" %}
+        <span class="seg-vicon seg-vicon-warning" title="Выявлены нарушения (WARNING)">⚠</span>
+      {% elif vlv == "alarm" %}
+        <span class="seg-vicon seg-vicon-alarm" title="Выявлены нарушения (ALARM)">❗</span>
+      {% endif %}
       {# Время #}
       <div>
         🕐
@@ -167,13 +181,16 @@
 
 {# Легенда #}
 <div class="d-flex gap-2 flex-wrap mt-2" style="font-size:.75rem">
-  <span class="px-2 py-1 rounded rs-0">Ожидание</span>
-  <span class="px-2 py-1 rounded rs-1">Запуск</span>
+  <span class="px-2 py-1 rounded rs-0">Стоп</span>
+  <span class="px-2 py-1 rounded rs-1">Задержка пуска</span>
   <span class="px-2 py-1 rounded rs-2">Прогрев</span>
   <span class="px-2 py-1 rounded rs-3">Работа</span>
-  <span class="px-2 py-1 rounded rs-4">Аварийный останов</span>
-  <span class="px-2 py-1 rounded rs-5">Охлаждение</span>
+  <span class="px-2 py-1 rounded rs-4">Разгрузка</span>
+  <span class="px-2 py-1 rounded rs-5">Охлаждение на х.х.</span>
   <span class="px-2 py-1 rounded seg-event-open" style="background:#e8f0fe;color:#084298">↖ Открытый</span>
+  <span class="ms-3 text-success fw-bold">✓</span><span style="color:#6c757d"> Норма</span>
+  <span class="text-warning fw-bold">⚠</span><span style="color:#6c757d"> Нарушение</span>
+  <span class="text-danger fw-bold">❗</span><span style="color:#6c757d"> Авария</span>
 </div>
 
 {# Модальное окно очистки #}
