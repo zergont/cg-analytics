@@ -36,8 +36,17 @@ def _tz_utc(ts: datetime) -> datetime:
     return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
 
 
-def _coking_from_json(d: dict | None) -> CokingRisk:
+def _coking_from_json(d) -> CokingRisk:
+    """Десериализовать CokingRisk из dict или JSON-строки (asyncpg отдаёт JSONB как str)."""
     if not d:
+        return CokingRisk()
+    if isinstance(d, str):
+        try:
+            import json as _json
+            d = _json.loads(d)
+        except Exception:
+            return CokingRisk()
+    if not isinstance(d, dict):
         return CokingRisk()
     return CokingRisk(
         idle_low_rpm_sec=float(d.get("idle_low_rpm_sec", 0.0)),
@@ -247,7 +256,14 @@ class OnlinePollEngine:
             self.cursor_ts = _tz_utc(last["t_end"])
             self.inherited_coking_risk = _coking_from_json(last.get("coking_risk_json"))
             if last.get("cause_close") == "DAILY_BOUNDARY":
-                self.forward_fill_memory = last.get("forward_fill_json")
+                ff = last.get("forward_fill_json")
+                if isinstance(ff, str):
+                    try:
+                        import json as _json
+                        ff = _json.loads(ff)
+                    except Exception:
+                        ff = None
+                self.forward_fill_memory = ff
                 self.continued_from_id = last["id"]
             else:
                 self.forward_fill_memory = None

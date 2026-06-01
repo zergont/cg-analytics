@@ -69,7 +69,8 @@
 
       <td>
         {% if seg and seg.coking_risk_json %}
-          {% set cr = seg.coking_risk_json if seg.coking_risk_json is mapping else {} %}
+          {% set _cr_raw = seg.coking_risk_json %}
+          {% set cr = _cr_raw if _cr_raw is mapping else {} %}
           {% set level = cr.get("risk_level", "GREEN") %}
           <span class="badge bg-{{ coking_colors.get(level, 'secondary') }} coking-badge">{{ level }}</span>
         {% else %}
