@@ -1236,6 +1236,9 @@ async def online_calendar(
         local = t.astimezone(tz)
         op_date = (local - timedelta(hours=daily_hour)).date()
         s = dict(seg)
+        s["t_start"] = local
+        if s.get("t_end"):
+            s["t_end"] = s["t_end"].astimezone(tz)
         s["violation_level"] = _violation_level(s.get("characteristics_json"))
         segs_by_day[op_date].append(s)
 
