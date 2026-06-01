@@ -8,6 +8,7 @@
               padding:4px 0; font-size:.8rem; font-weight:600; border-radius:3px; }
 .cal-cell { min-height:110px; border:1px solid #dee2e6; border-radius:4px;
             padding:4px; background:#fff; vertical-align:top; }
+.cal-cell.empty-cell { min-height:28px; }
 .cal-cell.other-month { background:#f8f9fa; opacity:.5; }
 .cal-cell.today-cell { border-color:#0d6efd; background:#f0f5ff; }
 .cal-day-num { font-size:.8rem; font-weight:600; color:#495057; margin-bottom:3px; }
@@ -107,7 +108,7 @@
     <div class="cal-cell other-month"></div>
   {% else %}
   {% set is_today = (cell.date == today) %}
-  <div class="cal-cell {% if is_today %}today-cell{% endif %}">
+  <div class="cal-cell {% if is_today %}today-cell{% endif %}{% if not cell.segments %} empty-cell{% endif %}">
     <div class="cal-day-num {% if is_today %}today-num{% endif %}">
       {{ cell.date.day }}
     </div>

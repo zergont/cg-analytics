@@ -1211,6 +1211,10 @@ async def online_calendar(
 
     def _violation_level(characteristics_json) -> str | None:
         """None = нет данных/открытый; 'ok'; 'warning'; 'alarm'."""
+        import json as _json
+        if isinstance(characteristics_json, str):
+            try: characteristics_json = _json.loads(characteristics_json)
+            except: return None
         if not characteristics_json or not isinstance(characteristics_json, dict):
             return None
         checks = characteristics_json.get("sequence_checks") or []

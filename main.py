@@ -22,9 +22,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from web.log_buffer import BufferHandler as _BufHandler
-_bh = _BufHandler()
-_bh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"))
-logging.getLogger().addHandler(_bh)
+_root_logger = logging.getLogger()
+if not any(isinstance(h, _BufHandler) for h in _root_logger.handlers):
+    _bh = _BufHandler()
+    _bh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"))
+    _root_logger.addHandler(_bh)
 
 
 @asynccontextmanager
