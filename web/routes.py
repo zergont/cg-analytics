@@ -1379,7 +1379,7 @@ async def api_online_status():
         if open_seg:
             run_state = open_seg.get("run_state")
 
-        # cursor_ts: из живого движка (точнее) или из последнего открытого сегмента
+        # cursor_ts: последний ЗАФИКСИРОВАННЫЙ рубеж (t_end последнего закрытого сегмента)
         cursor_ts = None
         if mgr:
             ct = mgr.get_cursor_ts(obs["router_sn"], obs["equip_type"], obs["panel_id"])
@@ -1388,32 +1388,42 @@ async def api_online_status():
         if not cursor_ts and open_seg and open_seg.get("t_start"):
             cursor_ts = open_seg["t_start"].isoformat()
 
-        # lag_sec: сколько секунд cursor отстаёт от now
+        # processed_to: куда дошли в последнем цикле (= cursor в текущем N+1 окне)
+        processed_to = None
+        if mgr:
+            pt = mgr.get_last_processed_to(obs["router_sn"], obs["equip_type"], obs["panel_id"])
+            if pt:
+                processed_to = pt.isoformat()
+        if not processed_to:
+            processed_to = cursor_ts  # fallback
+
+        # lag_sec: отставание processed_to от now
         lag_sec = None
-        if cursor_ts:
+        if processed_to:
             try:
-                ct_dt = datetime.fromisoformat(cursor_ts)
-                if ct_dt.tzinfo is None:
-                    ct_dt = ct_dt.replace(tzinfo=timezone.utc)
-                lag_sec = (now_utc - ct_dt).total_seconds()
+                pt_dt = datetime.fromisoformat(processed_to)
+                if pt_dt.tzinfo is None:
+                    pt_dt = pt_dt.replace(tzinfo=timezone.utc)
+                lag_sec = (now_utc - pt_dt).total_seconds()
             except Exception:
                 pass
 
         start_date_iso = obs["start_date"].isoformat() if obs.get("start_date") else None
 
         result.append({
-            "key":          key,
-            "router_sn":    obs["router_sn"],
-            "equip_type":   obs["equip_type"],
-            "panel_id":     obs["panel_id"],
-            "status":       obs["status"],
-            "engine_live":  key in running_keys,
-            "run_state":    run_state,
-            "coking_risk":  cr,
+            "key":              key,
+            "router_sn":        obs["router_sn"],
+            "equip_type":       obs["equip_type"],
+            "panel_id":         obs["panel_id"],
+            "status":           obs["status"],
+            "engine_live":      key in running_keys,
+            "run_state":        run_state,
+            "coking_risk":      cr,
             "poll_interval_sec": obs.get("poll_interval_sec", 30),
-            "start_date":   start_date_iso,
-            "cursor_ts":    cursor_ts,
-            "lag_sec":      lag_sec,
+            "start_date":       start_date_iso,
+            "cursor_ts":        cursor_ts,    # зафиксированный рубеж (t_end последнего закр. сег.)
+            "processed_to":     processed_to, # куда дошли в последнем цикле (для прогресс-бара)
+            "lag_sec":          lag_sec,       # отставание processed_to от now
             "t_start_open": (
                 open_seg["t_start"].isoformat()
                 if open_seg and open_seg.get("t_start") else None

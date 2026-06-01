@@ -288,3 +288,9 @@ class OnlineManager:
         key = f"{router_sn}|{equip_type}|{panel_id}"
         engine = self._engines.get(key)
         return engine.cursor_ts if engine else None
+
+    def get_last_processed_to(self, router_sn: str, equip_type: str, panel_id: int):
+        """Куда дошёл движок в последнем цикле — для прогресс-бара."""
+        key = f"{router_sn}|{equip_type}|{panel_id}"
+        engine = self._engines.get(key)
+        return engine.last_processed_to if engine else None

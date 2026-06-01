@@ -191,8 +191,9 @@ async function refreshStatus() {
     data.forEach(item => {
       const row = document.querySelector(`tr[data-key="${item.key}"]`);
       if (!row) return;
-      const startMs = item.start_date ? new Date(item.start_date).getTime() : null;
-      const cursorMs = item.cursor_ts ? new Date(item.cursor_ts).getTime() : null;
+      const startMs     = item.start_date   ? new Date(item.start_date).getTime()   : null;
+      const processedMs = item.processed_to ? new Date(item.processed_to).getTime() : null;
+      const cursorMs    = item.cursor_ts    ? new Date(item.cursor_ts).getTime()    : null;
       const lagSec  = item.lag_sec ?? null;
       const poll    = item.poll_interval_sec || 30;
       const onlineThreshold = Math.max(poll * 3, 120); // 3 интервала или 2 мин
@@ -235,14 +236,16 @@ async function refreshStatus() {
       if (lagSec !== null && lagSec <= onlineThreshold) {
         // ── ОНЛАЙН ──
         if (statusBadge) { statusBadge.className = 'badge bg-success status-badge'; statusBadge.textContent = '● Онлайн'; }
-        if (cursorLabel) cursorLabel.textContent = 'срез: ' + fmtTs(item.cursor_ts);
+        if (cursorLabel) cursorLabel.textContent = 'срез: ' + fmtTs(item.processed_to || item.cursor_ts);
         if (progBar) progBar.style.display = 'none';
         if (progLabel) progLabel.textContent = 'отставание: ' + fmtDur(lagSec);
 
-      } else if (cursorMs !== null && startMs !== null) {
+      } else if (processedMs !== null && startMs !== null) {
         // ── BATCH-ДОБОР ──
+        // processed_to = куда дошли в этом цикле (обновляется после каждой суточной границы)
+        // cursor_ts    = зафиксированный рубеж (для отображения "checkpoint")
         const totalMs = now - startMs;
-        const doneMs  = cursorMs - startMs;
+        const doneMs  = processedMs - startMs;
         const pct = totalMs > 0 ? Math.min(99, Math.max(1, doneMs / totalMs * 100)) : 1;
         const remaining = lagSec !== null ? fmtDur(lagSec) : '?';
 
@@ -250,13 +253,18 @@ async function refreshStatus() {
         if (cursorLabel) cursorLabel.textContent = '';
         if (progBar) { progBar.style.display = ''; }
         if (progFill) { progFill.style.width = pct.toFixed(1) + '%'; }
+        // Показываем processed_to (живой курсор) и cursor_ts (зафиксировано в БД)
+        const committedPart = cursorMs && cursorMs !== processedMs
+          ? ' · зафикс. ' + fmtTs(item.cursor_ts)
+          : '';
         if (progLabel) progLabel.textContent =
-          fmtTs(item.cursor_ts) + ' · осталось ~' + remaining;
+          fmtTs(item.processed_to) + committedPart + ' · осталось ~' + remaining;
 
       } else {
-        // неизвестно
-        if (statusBadge) { statusBadge.className = 'badge bg-success status-badge'; statusBadge.textContent = '● Работает'; }
+        // неизвестно (движок только стартовал, первый цикл ещё не завершён)
+        if (statusBadge) { statusBadge.className = 'badge bg-info text-dark status-badge'; statusBadge.textContent = '⏳ Инициализация…'; }
         if (progBar) progBar.style.display = 'none';
+        if (progLabel) progLabel.textContent = 'первый цикл ещё не завершён';
       }
     });
   } catch(e) {}

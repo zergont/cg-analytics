@@ -226,6 +226,8 @@ class OnlinePollEngine:
         self.forward_fill_memory: dict | None    = None
         self.continued_from_id: int | None       = None  # предок в DAILY_BOUNDARY цепочке
         self.prev_poll_ts: datetime | None        = None
+        # Куда дошли в последнем цикле (обновляется внутри цикла — для прогресс-бара)
+        self.last_processed_to: datetime | None  = None
 
         self._running = False
         self._task: asyncio.Task | None = None
@@ -325,9 +327,11 @@ class OnlinePollEngine:
             if boundary_ts <= self.cursor_ts:
                 continue
             await self._close_window(self.cursor_ts, boundary_ts, "DAILY_BOUNDARY")
+            self.last_processed_to = boundary_ts   # прогресс обновляется после каждой границы
 
         # Обработать открытое окно [cursor_ts, process_to]
         await self._update_open_window(self.cursor_ts, process_to)
+        self.last_processed_to = process_to        # финальная отметка
 
     # ── Закрытие окна (DAILY_BOUNDARY) ────────────────────────────────────────
 
