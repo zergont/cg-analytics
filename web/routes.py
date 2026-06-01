@@ -1195,59 +1195,81 @@ async def online_calendar(
     router_sn: str,
     equip_type: str,
     panel_id: int,
+    year: int = None,
+    month: int = None,
 ):
+    import calendar as _cal
     from config import get_tz
     from online import db as odb
-    from datetime import datetime
-    import json as _json
+    from datetime import date, timedelta
+    from collections import defaultdict
 
     tz = get_tz()
-    daily_hour = 9  # TODO: из app_settings
+    daily_hour = 9
+
+    today = date.today()
+    if not year or not month:
+        year, month = today.year, today.month
+    year, month = int(year), int(month)
 
     segments = await odb.get_segments_for_calendar(router_sn, equip_type, panel_id)
 
-    # Группируем по операционным суткам [09:00, 09:00)
-    from collections import defaultdict
-    days: dict[str, list[dict]] = defaultdict(list)
+    # Группируем по операционному дню (сутки = 09:00 local → следующие 09:00)
+    segs_by_day: dict[date, list] = defaultdict(list)
     for seg in segments:
-        t_start = seg["t_start"]
-        if t_start:
-            local = t_start.astimezone(tz)
-            # Если час < daily_hour — это ещё предыдущие сутки
-            if local.hour < daily_hour:
-                from datetime import timedelta
-                day_key = (local.date() - timedelta(days=1)).isoformat()
+        t = seg["t_start"]
+        if not t:
+            continue
+        local = t.astimezone(tz)
+        op_date = (local - timedelta(hours=daily_hour)).date()
+        segs_by_day[op_date].append(dict(seg))
+
+    # Сетка месяца (недели с Пн)
+    _cal.setfirstweekday(0)
+    weeks = _cal.monthcalendar(year, month)
+    grid = []
+    for week in weeks:
+        row = []
+        for day_num in week:
+            if day_num == 0:
+                row.append(None)
             else:
-                day_key = local.date().isoformat()
-        else:
-            day_key = "unknown"
-        days[day_key].append(dict(seg))
+                d = date(year, month, day_num)
+                row.append({"date": d, "segments": segs_by_day.get(d, [])})
+        grid.append(row)
 
-    days_sorted = sorted(days.items(), key=lambda x: x[0], reverse=True)
+    prev_y, prev_m = (year - 1, 12) if month == 1 else (year, month - 1)
+    next_y, next_m = (year + 1, 1)  if month == 12 else (year, month + 1)
 
-    # Метаданные оборудования
+    _MONTH_RU = ["","Январь","Февраль","Март","Апрель","Май","Июнь",
+                 "Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"]
+
     registry = await analytics.get_equipment_registry()
     eq_meta = next(
         (e for e in registry
-         if e["router_sn"] == router_sn
-         and e["equip_type"] == equip_type
-         and str(e["panel_id"]) == str(panel_id)),
-        {},
+         if e["router_sn"] == router_sn and e["equip_type"] == equip_type
+         and str(e["panel_id"]) == str(panel_id)), {},
     )
     obs = await odb.get_observation(router_sn, equip_type, panel_id)
 
     return templates.TemplateResponse(request, "online_calendar.html", {
-        "router_sn":         router_sn,
-        "equip_type":        equip_type,
-        "panel_id":          panel_id,
-        "eq_meta":           eq_meta,
-        "days":              days_sorted,
-        "tz_name":           tz.key,
-        "daily_hour":        daily_hour,
-        "run_state_labels":  _RUN_STATE_LABELS,
-        "coking_colors":     _COKING_COLORS,
-        "cause_close_ru":    _CAUSE_CLOSE_RU,
-        "observation":       obs,
+        "router_sn":        router_sn,
+        "equip_type":       equip_type,
+        "panel_id":         panel_id,
+        "eq_meta":          eq_meta,
+        "observation":      obs,
+        "grid":             grid,
+        "year":             year,
+        "month":            month,
+        "month_name":       _MONTH_RU[month],
+        "today":            today,
+        "prev_y": prev_y,   "prev_m": prev_m,
+        "next_y": next_y,   "next_m": next_m,
+        "tz_name":          tz.key,
+        "daily_hour":       daily_hour,
+        "run_state_labels": _RUN_STATE_LABELS,
+        "coking_colors":    _COKING_COLORS,
+        "cause_close_ru":   _CAUSE_CLOSE_RU,
     })
 
 
@@ -1262,34 +1284,100 @@ async def online_segment_detail(request: Request, seg_id: int):
         raise HTTPException(status_code=404, detail="Сегмент не найден")
 
     tz = get_tz()
+    is_open = seg["t_end"] is None
 
-    # Парсим JSON-поля
-    def _parse_json(val):
-        if val is None:
-            return None
+    def _pj(val):
+        if val is None: return None
         if isinstance(val, str):
-            try:
-                return _json.loads(val)
-            except Exception:
-                return None
-        return val  # asyncpg уже распарсил jsonb
+            try: return _json.loads(val)
+            except: return None
+        return val
 
-    characteristics = _parse_json(seg.get("characteristics_json"))
-    current_values  = _parse_json(seg.get("current_values_json"))
-    active_dets     = _parse_json(seg.get("active_detections_json"))
-    coking_risk     = _parse_json(seg.get("coking_risk_json"))
+    chars_dict   = _pj(seg.get("characteristics_json"))
+    current_vals = _pj(seg.get("current_values_json"))
+    active_dets  = _pj(seg.get("active_detections_json"))
+    coking_risk  = _pj(seg.get("coking_risk_json"))
 
-    return templates.TemplateResponse(request, "auto_segment_detail.html", {
-        "seg":               seg,
-        "characteristics":   characteristics,
-        "current_values":    current_values,
-        "active_detections": active_dets,
-        "coking_risk":       coking_risk,
-        "tz_name":           tz.key,
-        "run_state_labels":  _RUN_STATE_LABELS,
-        "coking_colors":     _COKING_COLORS,
-        "cause_close_ru":    _CAUSE_CLOSE_RU,
+    if is_open:
+        # Открытый сегмент: показать текущие значения
+        return templates.TemplateResponse(request, "auto_segment_report.html", {
+            "seg": seg, "is_open": True,
+            "current_values": current_vals,
+            "active_detections": active_dets,
+            "coking_risk": coking_risk,
+            "run_state_labels": _RUN_STATE_LABELS,
+            "coking_colors": _COKING_COLORS,
+            "cause_close_ru": _CAUSE_CLOSE_RU,
+            "tz_name": tz.key,
+        })
+
+    # Закрытый сегмент — строим run-like dict для рендера как аналитический прогон
+    detections, dq_pairs = [], []
+    if chars_dict:
+        for sub in chars_dict.get("subsegments", []):
+            detections.extend(sub.get("detections", []))
+            dq = sub.get("data_quality")
+            dur = sub.get("duration_sec", 0)
+            if dq is not None:
+                dq_pairs.append((dq, dur))
+
+    sev_rank = {"SHUTDOWN": 4, "ALARM": 3, "WARNING": 2, "INFO": 1}
+    max_sev = max((d.get("severity") for d in detections), key=lambda s: sev_rank.get(s, 0), default=None)
+    total_dur = sum(w for _, w in dq_pairs)
+    dq_avg = sum(q * w for q, w in dq_pairs) / total_dur if total_dur > 0 else None
+
+    # Форматируем ts как строки с учётом TZ для шаблона
+    def _fmt_ts(dt):
+        if dt is None: return "—"
+        return dt.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+    run = {
+        "id":               str(seg_id),
+        "router_sn":        seg["router_sn"],
+        "equip_type":       seg["equip_type"],
+        "panel_id":         seg["panel_id"],
+        "engine_sn":        "—",
+        "ts_from":          _fmt_ts(seg.get("t_start")),
+        "ts_to":            _fmt_ts(seg.get("t_end")),
+        "analytics_version": seg.get("analytics_version", "—"),
+        "report_md":        seg.get("report_md"),
+        "error":            None,
+        "max_severity":     max_sev,
+        "segments_count":   1,
+        "detections_count": len(detections),
+        "data_quality_avg": dq_avg,
+        "duration_ms":      None,
+        "created_at":       _fmt_ts(seg.get("created_at")),
+        # для хлебных крошек
+        "_is_auto_seg":     True,
+        "_seg_id":          seg_id,
+        "_calendar_url": (
+            f"/online/calendar/{seg['router_sn']}/{seg['equip_type']}/{seg['panel_id']}"
+        ),
+    }
+    return templates.TemplateResponse(request, "auto_segment_report.html", {
+        "seg": seg, "is_open": False,
+        "run": run,
+        "run_state_labels": _RUN_STATE_LABELS,
+        "coking_colors": _COKING_COLORS,
+        "cause_close_ru": _CAUSE_CLOSE_RU,
+        "tz_name": tz.key,
     })
+
+
+@router.get("/online/segment/{seg_id}/md")
+async def online_segment_md(seg_id: int):
+    """Скачать Markdown-отчёт авто-сегмента."""
+    from online import db as odb
+    from fastapi.responses import Response
+    seg = await odb.get_segment_by_id(seg_id)
+    if not seg or not seg.get("report_md"):
+        raise HTTPException(status_code=404, detail="Отчёт не найден")
+    return Response(
+        content=seg["report_md"].encode("utf-8"),
+        media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="segment_{seg_id}.md"'},
+    )
 
 
 @router.post("/online/clear")

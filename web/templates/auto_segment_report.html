@@ -1,0 +1,338 @@
+{% extends "base.html" %}
+{% block title %}Сегмент #{{ seg.id }} — cg-analytics{% endblock %}
+
+{% block content %}
+{% set is_open = seg.t_end is none %}
+{% set run_state = seg.run_state %}
+{% set cr_raw = seg.coking_risk_json %}
+{% set cr = cr_raw if cr_raw is mapping else {} %}
+{% set cr_level = cr.get("risk_level","GREEN") if cr else "GREEN" %}
+
+<style>
+  #mdContent h1 { font-size:1.4rem;font-weight:700;margin-top:.5rem; }
+  #mdContent h2 { font-size:1.1rem;font-weight:600;margin-top:1rem;border-bottom:1px solid #dee2e6;padding-bottom:.2rem; }
+  #mdContent h3 { font-size:.95rem;font-weight:600;margin-top:.8rem; }
+  #mdContent table { width:100%;font-size:.82rem;border-collapse:collapse;margin-bottom:.5rem; }
+  #mdContent th,#mdContent td { border:1px solid #dee2e6;padding:3px 8px; }
+  #mdContent th { background:#f8f9fa; }
+  #mdContent p,#mdContent li { font-size:.88rem;margin-bottom:.2rem; }
+  #agentContent h1 { font-size:1.4rem;font-weight:700;margin-top:.5rem; }
+  #agentContent h2 { font-size:1.1rem;font-weight:600;margin-top:1rem;border-bottom:1px solid #dee2e6;padding-bottom:.2rem; }
+  #agentContent h3 { font-size:.95rem;font-weight:600;margin-top:.8rem; }
+  #agentContent table { width:100%;font-size:.82rem;border-collapse:collapse;margin-bottom:.5rem; }
+  #agentContent th,#agentContent td { border:1px solid #dee2e6;padding:3px 8px; }
+  #agentContent th { background:#f8f9fa; }
+  #agentContent p,#agentContent li { font-size:.88rem;margin-bottom:.2rem; }
+  .streaming-cursor::after{content:"▋";animation:blink .7s step-end infinite;}
+  @keyframes blink{50%{opacity:0;}}
+</style>
+
+{# Хлебные крошки #}
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="/online">Мониторинг</a></li>
+    <li class="breadcrumb-item">
+      <a href="/online/calendar/{{ seg.router_sn }}/{{ seg.equip_type }}/{{ seg.panel_id }}">Календарь</a>
+    </li>
+    <li class="breadcrumb-item active">Сегмент #{{ seg.id }}</li>
+  </ol>
+</nav>
+
+<div class="row g-2" style="height:calc(100vh - 140px);overflow:hidden">
+
+  {# ── Левая панель ── #}
+  <div class="col-md-4 col-lg-3 overflow-y-auto h-100">
+
+    {# Шапка сегмента #}
+    <div class="card mb-3">
+      <div class="card-header fw-semibold d-flex align-items-center gap-2">
+        <span class="badge
+          {%- if run_state == 3 %} bg-primary
+          {%- elif run_state in [2,5] %} bg-info text-dark
+          {%- elif run_state == 4 %} bg-danger
+          {%- elif run_state == 0 %} bg-secondary
+          {%- else %} bg-light text-dark{% endif %}">
+          {{ run_state_labels.get(run_state, run_state) if run_state is not none else "—" }}
+        </span>
+        {% if is_open %}<span class="badge bg-primary">Открытый</span>{% endif %}
+      </div>
+      <div class="card-body p-0">
+        <table class="table table-sm mb-0">
+          <tbody>
+            <tr><td class="text-muted">Машина</td>
+                <td><small>{{ seg.router_sn }}/{{ seg.equip_type }}/{{ seg.panel_id }}</small></td></tr>
+            <tr><td class="text-muted">Начало</td>
+                <td><small>{{ seg.t_start.strftime("%d.%m.%Y %H:%M:%S") if seg.t_start else "—" }}</small></td></tr>
+            <tr><td class="text-muted">Конец</td>
+                <td><small>
+                  {% if is_open %}<span class="text-primary">открытый</span>
+                  {% else %}{{ seg.t_end.strftime("%d.%m.%Y %H:%M:%S") if seg.t_end else "—" }}{% endif %}
+                </small></td></tr>
+            {% if not is_open and seg.t_start and seg.t_end %}
+            {% set dur = (seg.t_end - seg.t_start).total_seconds()|int %}
+            <tr><td class="text-muted">Длит.</td>
+                <td><small>
+                  {% if dur < 60 %}{{ dur }} с
+                  {% elif dur < 3600 %}{{ dur // 60 }} мин {{ dur % 60 }} с
+                  {% else %}{{ dur // 3600 }} ч {{ (dur % 3600) // 60 }} мин{% endif %}
+                </small></td></tr>
+            {% endif %}
+            <tr><td class="text-muted">Закрыт</td>
+                <td><small>{{ cause_close_ru.get(seg.cause_close, seg.cause_close or "—") }}</small></td></tr>
+            <tr><td class="text-muted">Версия</td>
+                <td><code style="font-size:.75rem">{{ seg.analytics_version or "—" }}</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    {# Риск закоксовки #}
+    <div class="card mb-3">
+      <div class="card-header fw-semibold py-2">Риск закоксовки</div>
+      <div class="card-body py-2 px-3">
+        <span class="badge bg-{{ coking_colors.get(cr_level,'secondary') }} fs-6 mb-2">{{ cr_level }}</span>
+        {% if cr %}
+        <div style="font-size:.8rem" class="text-muted">
+          Хол. ход: {{ "%.0f"|format(cr.get("idle_low_rpm_sec",0)) }} с |
+          Низк. нагр.: {{ "%.0f"|format(cr.get("low_load_zone_sec",0)) }} с |
+          Т охл. &lt;60°C: {{ "%.0f"|format(cr.get("coolant_below_60_sec",0)) }} с
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    {# Продолжения (DAILY_BOUNDARY) #}
+    {% if seg.continued_from or seg.continues_to %}
+    <div class="card mb-3">
+      <div class="card-header fw-semibold py-2">Цепочка DAILY_BOUNDARY</div>
+      <div class="card-body py-2 px-3" style="font-size:.85rem">
+        {% if seg.continued_from %}
+        <div>↩ <a href="/online/segment/{{ seg.continued_from }}">Предыдущая часть #{{ seg.continued_from }}</a></div>
+        {% endif %}
+        {% if seg.continues_to %}
+        <div>↪ <a href="/online/segment/{{ seg.continues_to }}">Следующая часть #{{ seg.continues_to }}</a></div>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+
+    {% if not is_open %}
+    {# ИИ-анализ (только для закрытых) #}
+    <div class="card border-success">
+      <div class="card-header fw-semibold bg-success-subtle py-2">🤖 ИИ-анализ</div>
+      <div class="card-body py-2">
+        <p class="small text-muted mb-2">Отправить отчёт сегмента локальной LLM.</p>
+        <button class="btn btn-success btn-sm w-100" id="agentBtn" onclick="runAgent()">
+          Отправить агенту →
+        </button>
+        <div id="agentStatus" class="mt-2 small text-muted" style="display:none"></div>
+      </div>
+    </div>
+    {% endif %}
+
+  </div>
+
+  {# ── Правая панель ── #}
+  <div class="col-md-8 col-lg-9 d-flex flex-column h-100">
+
+    {% if is_open %}
+    {# ── Открытый: текущие значения ── #}
+    <h6 class="text-muted mb-2">Текущие параметры (обновлено на последнем цикле опроса)</h6>
+    {% if current_values and current_values.get("values") %}
+    <div class="border rounded p-3 bg-white overflow-auto flex-grow-1">
+      <div class="mb-2">
+        <span class="badge
+          {%- if run_state == 3 %} bg-primary
+          {%- elif run_state in [2,5] %} bg-info text-dark
+          {%- else %} bg-secondary{% endif %}">
+          {{ current_values.get("run_state_label","") }}
+        </span>
+        <small class="text-muted ms-2">{{ current_values.get("ts","")[:19].replace("T"," ") }} UTC</small>
+      </div>
+      <table class="table table-sm table-bordered" style="font-size:.85rem">
+        <thead class="table-light"><tr><th>Параметр</th><th>Значение</th><th>Медиана</th><th>Ед.</th></tr></thead>
+        <tbody>
+        {% for role, v in current_values.values.items() %}
+        {% if v is mapping %}
+        <tr>
+          <td>{{ role }}</td>
+          <td class="fw-semibold">{% if v.value is not none %}{{ "%.2f"|format(v.value) }}{% else %}—{% endif %}</td>
+          <td class="text-muted">{% if v.median is not none %}{{ "%.2f"|format(v.median) }}{% else %}—{% endif %}</td>
+          <td class="text-muted">{{ v.unit or "" }}</td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+        </tbody>
+      </table>
+      {% if active_detections %}
+      <h6 class="mt-3">Активные детекции</h6>
+      {% for det in active_detections %}
+      {% set sev = det.get("severity","INFO") %}
+      <div class="alert {% if sev in ['SHUTDOWN','ALARM'] %}alert-danger{% elif sev=='WARNING' %}alert-warning{% else %}alert-info{% endif %} py-1 mb-1" style="font-size:.85rem">
+        <strong>{{ det.get("scenario","?") }}</strong>
+        <span class="badge {% if sev in ['SHUTDOWN','ALARM'] %}bg-danger{% elif sev=='WARNING' %}bg-warning text-dark{% else %}bg-info text-dark{% endif %} ms-1">{{ sev }}</span>
+        — {{ det.get("trigger","") }}
+      </div>
+      {% endfor %}
+      {% endif %}
+    </div>
+
+    {% else %}
+    <div class="alert alert-secondary">Данные ещё не получены. Дождитесь первого цикла опроса.</div>
+    {% endif %}
+
+    {% else %}
+    {# ── Закрытый: Markdown-отчёт с табами ── #}
+    {% if run %}
+    {# Статус-баннер #}
+    {% set max_sev = run.get("max_severity") %}
+    {% if max_sev == "SHUTDOWN" %}
+      <div class="alert alert-danger py-2 mb-2">🔴 <strong>SHUTDOWN</strong> — аварийный останов</div>
+    {% elif max_sev == "ALARM" %}
+      <div class="alert alert-danger py-2 mb-2">🟠 <strong>ALARM</strong> — требуется внимание</div>
+    {% elif max_sev == "WARNING" %}
+      <div class="alert alert-warning py-2 mb-2">🟡 <strong>WARNING</strong> — предупреждения зафиксированы</div>
+    {% else %}
+      <div class="alert alert-success py-2 mb-2">🟢 <strong>Норма</strong> — нарушений не выявлено</div>
+    {% endif %}
+
+    {# Тулбар #}
+    <div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
+      <div class="text-muted small">
+        {{ run.ts_from }} — {{ run.ts_to }}
+        <span class="badge bg-secondary ms-1">{{ tz_name }}</span>
+      </div>
+      <div class="ms-auto d-flex gap-2">
+        <button class="btn btn-sm btn-outline-secondary active" onclick="showPanel('md')" id="tabMd">
+          📄 Аналитика
+        </button>
+        <button class="btn btn-sm btn-outline-secondary" onclick="showPanel('raw')" id="tabRaw">
+          Сырой текст
+        </button>
+        <button class="btn btn-sm btn-outline-success" onclick="showPanel('agent')" id="tabAgent" disabled>
+          🤖 Заключение
+        </button>
+        <button class="btn btn-sm btn-outline-secondary" onclick="copyMd()">
+          📋 Копировать
+        </button>
+        <a href="/online/segment/{{ seg.id }}/md" class="btn btn-sm btn-outline-primary">
+          ↓ MD
+        </a>
+      </div>
+    </div>
+
+    {# Панели #}
+    <div id="mdRendered" class="border rounded p-3 bg-white overflow-auto flex-grow-1">
+      <div id="mdContent"></div>
+    </div>
+    <div id="rawBlock" class="flex-grow-1" style="display:none">
+      <textarea id="rawMd" class="form-control font-monospace w-100 h-100"
+                style="font-size:.78rem;resize:none;white-space:pre-wrap" readonly></textarea>
+    </div>
+    <div id="agentBlock" class="border rounded p-3 bg-white overflow-auto flex-grow-1" style="display:none">
+      <div id="agentContent"></div>
+    </div>
+
+    {# Скрытый источник MD для JS #}
+    <script id="reportMdSrc" type="text/plain">{{ run.report_md or "" }}</script>
+    {% endif %}
+    {% endif %}
+
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{% if not is_open %}
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script>
+const _md = document.getElementById('reportMdSrc').textContent;
+
+function showPanel(p) {
+  document.getElementById('mdRendered').style.display  = p === 'md'    ? '' : 'none';
+  document.getElementById('rawBlock').style.display    = p === 'raw'   ? '' : 'none';
+  document.getElementById('agentBlock').style.display  = p === 'agent' ? '' : 'none';
+  ['tabMd','tabRaw','tabAgent'].forEach(id => document.getElementById(id).classList.remove('active'));
+  document.getElementById('tab' + p.charAt(0).toUpperCase() + p.slice(1)).classList.add('active');
+}
+
+function copyMd() {
+  navigator.clipboard.writeText(_md).then(() => {
+    const btn = event.target;
+    btn.textContent = '✓ Скопировано';
+    setTimeout(() => btn.textContent = '📋 Копировать', 1500);
+  });
+}
+
+// Рендер Markdown при загрузке
+window.addEventListener('DOMContentLoaded', () => {
+  if (typeof marked !== 'undefined' && _md.trim()) {
+    marked.setOptions({breaks: true, gfm: true});
+    document.getElementById('mdContent').innerHTML = marked.parse(_md);
+    document.getElementById('rawMd').value = _md;
+  } else {
+    document.getElementById('mdContent').innerHTML =
+      '<pre style="white-space:pre-wrap;font-size:.85rem">' +
+      _md.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</pre>';
+  }
+});
+
+// ── ИИ-анализ ──────────────────────────────────────────────────────────────
+async function runAgent() {
+  const btn = document.getElementById('agentBtn');
+  const status = document.getElementById('agentStatus');
+  btn.disabled = true;
+  btn.textContent = '⏳ Анализ…';
+  status.style.display = '';
+  status.textContent = 'Подключение к LLM…';
+  showPanel('agent');
+  document.getElementById('tabAgent').disabled = false;
+
+  const ac = document.getElementById('agentContent');
+  ac.innerHTML = '<span class="streaming-cursor"></span>';
+  let text = '';
+
+  try {
+    const resp = await fetch('/analyze/run', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({markdown: _md}),
+    });
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const d = JSON.parse(line.slice(6));
+          if (d.token) {
+            text += d.token;
+            ac.innerHTML = (typeof marked !== 'undefined'
+              ? marked.parse(text)
+              : '<pre>' + text + '</pre>') + '<span class="streaming-cursor"></span>';
+          }
+          if (d.done) {
+            ac.innerHTML = typeof marked !== 'undefined' ? marked.parse(text) : '<pre>' + text + '</pre>';
+            status.textContent = 'Готово.';
+          }
+          if (d.error) { ac.innerHTML = '<div class="alert alert-danger">' + d.error + '</div>'; }
+        } catch {}
+      }
+    }
+  } catch(e) {
+    ac.innerHTML = '<div class="alert alert-danger">Ошибка: ' + e.message + '</div>';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Отправить агенту →';
+  }
+}
+</script>
+{% endif %}
+{% endblock %}

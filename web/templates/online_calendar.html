@@ -1,155 +1,182 @@
 {% extends "base.html" %}
-{% block title %}Календарь — {{ eq_meta.name or router_sn }} — cg-analytics{% endblock %}
+{% block title %}{{ month_name }} {{ year }} — {{ eq_meta.name or router_sn }} — cg-analytics{% endblock %}
 
 {% block content %}
-<nav aria-label="breadcrumb" class="mb-3">
-  <ol class="breadcrumb">
+<style>
+.cal-grid { display:grid; grid-template-columns:repeat(7,1fr); gap:2px; }
+.cal-header { background:#343a40; color:#fff; text-align:center;
+              padding:4px 0; font-size:.8rem; font-weight:600; border-radius:3px; }
+.cal-cell { min-height:110px; border:1px solid #dee2e6; border-radius:4px;
+            padding:4px; background:#fff; vertical-align:top; }
+.cal-cell.other-month { background:#f8f9fa; opacity:.5; }
+.cal-cell.today-cell { border-color:#0d6efd; background:#f0f5ff; }
+.cal-day-num { font-size:.8rem; font-weight:600; color:#495057; margin-bottom:3px; }
+.cal-day-num.today-num { color:#0d6efd; }
+.seg-event { border-radius:3px; padding:2px 5px; margin-bottom:2px;
+             font-size:.72rem; line-height:1.3; cursor:pointer;
+             text-decoration:none; display:block; }
+.seg-event:hover { opacity:.85; filter:brightness(.95); }
+.seg-event-open { border-left:3px solid #0d6efd !important; }
+/* run_state цвета */
+.rs-0  { background:#e9ecef; color:#495057; border-left:3px solid #adb5bd; }
+.rs-1  { background:#fff3cd; color:#664d03; border-left:3px solid #ffc107; }
+.rs-2  { background:#d1ecf1; color:#0c5460; border-left:3px solid #17a2b8; }
+.rs-3  { background:#cfe2ff; color:#084298; border-left:3px solid #0d6efd; }
+.rs-4  { background:#f8d7da; color:#842029; border-left:3px solid #dc3545; }
+.rs-5  { background:#d1ecf1; color:#0c5460; border-left:3px solid #6c757d; }
+.rs-na { background:#f8f9fa; color:#6c757d; border-left:3px solid #dee2e6; }
+</style>
+
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb mb-1">
     <li class="breadcrumb-item"><a href="/online">Мониторинг</a></li>
     <li class="breadcrumb-item active">{{ eq_meta.name or router_sn }}</li>
   </ol>
 </nav>
 
-<div class="d-flex align-items-start gap-3 flex-wrap mb-3">
+{# Заголовок + управление #}
+<div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
   <div>
-    <h4 class="mb-0">{{ eq_meta.name or router_sn }}</h4>
+    <h5 class="mb-0">{{ eq_meta.name or router_sn }}</h5>
     <small class="text-muted">
       {{ eq_meta.manufacturer or "" }} {{ eq_meta.model or "" }}
       &nbsp;|&nbsp; {{ equip_type }} / панель {{ panel_id }}
-      {% if eq_meta.engine_sn %}&nbsp;|&nbsp; s/n {{ eq_meta.engine_sn }}{% endif %}
     </small>
   </div>
-  {% if observation %}
-  <div class="ms-auto d-flex gap-2">
-    {% if observation.status == "running" %}
-      <span class="badge bg-success align-self-center">● Наблюдение активно</span>
-      <form method="post" action="/online/stop" class="d-inline">
-        <input type="hidden" name="router_sn"  value="{{ router_sn }}">
-        <input type="hidden" name="equip_type" value="{{ equip_type }}">
-        <input type="hidden" name="panel_id"   value="{{ panel_id }}">
-        <button class="btn btn-sm btn-warning"
-          onclick="return confirm('Остановить наблюдение?')">Стоп</button>
-      </form>
-    {% else %}
-      <span class="badge bg-secondary align-self-center">Остановлено</span>
-      <form method="post" action="/online/start" class="d-inline">
-        <input type="hidden" name="router_sn"        value="{{ router_sn }}">
-        <input type="hidden" name="equip_type"       value="{{ equip_type }}">
-        <input type="hidden" name="panel_id"         value="{{ panel_id }}">
-        <input type="hidden" name="start_date_local" id="resume-dt" value="">
-        <input type="hidden" name="poll_interval_sec" value="{{ observation.poll_interval_sec }}">
-        <button class="btn btn-sm btn-success"
-          onclick="document.getElementById('resume-dt').value=new Date().toISOString().slice(0,16)">
-          Пуск (продолжить)
-        </button>
-      </form>
+
+  {# Навигация по месяцу #}
+  <div class="d-flex align-items-center gap-2 ms-auto">
+    <a href="/online/calendar/{{ router_sn }}/{{ equip_type }}/{{ panel_id }}?year={{ prev_y }}&month={{ prev_m }}"
+       class="btn btn-sm btn-outline-secondary">‹</a>
+    <span class="fw-semibold" style="min-width:130px;text-align:center">
+      {{ month_name }} {{ year }}
+    </span>
+    <a href="/online/calendar/{{ router_sn }}/{{ equip_type }}/{{ panel_id }}?year={{ next_y }}&month={{ next_m }}"
+       class="btn btn-sm btn-outline-secondary">›</a>
+    <a href="/online/calendar/{{ router_sn }}/{{ equip_type }}/{{ panel_id }}"
+       class="btn btn-sm btn-outline-primary ms-2">Сегодня</a>
+  </div>
+
+  {# СТОП/ПУСК #}
+  <div class="d-flex gap-2">
+    {% if observation %}
+      {% if observation.status == "running" %}
+        <form method="post" action="/online/stop" class="d-inline">
+          <input type="hidden" name="router_sn"  value="{{ router_sn }}">
+          <input type="hidden" name="equip_type" value="{{ equip_type }}">
+          <input type="hidden" name="panel_id"   value="{{ panel_id }}">
+          <button class="btn btn-sm btn-warning"
+            onclick="return confirm('Остановить наблюдение?')">Стоп</button>
+        </form>
+      {% else %}
+        <form method="post" action="/online/start" class="d-inline">
+          <input type="hidden" name="router_sn"        value="{{ router_sn }}">
+          <input type="hidden" name="equip_type"       value="{{ equip_type }}">
+          <input type="hidden" name="panel_id"         value="{{ panel_id }}">
+          <input type="hidden" name="start_date_local" id="resume-dt" value="">
+          <input type="hidden" name="poll_interval_sec" value="{{ observation.poll_interval_sec }}">
+          <button class="btn btn-sm btn-success"
+            onclick="document.getElementById('resume-dt').value=new Date().toISOString().slice(0,16)">
+            Пуск
+          </button>
+        </form>
+      {% endif %}
     {% endif %}
-    <!-- Очистка -->
     <button class="btn btn-sm btn-outline-danger" data-bs-toggle="modal" data-bs-target="#clearModal">
       Очистить…
     </button>
   </div>
+</div>
+
+{# Сетка #}
+<div class="cal-grid mb-1">
+  {% for d in ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"] %}
+  <div class="cal-header">{{ d }}</div>
+  {% endfor %}
+</div>
+
+<div class="cal-grid">
+{% for week in grid %}
+  {% for cell in week %}
+  {% if cell is none %}
+    <div class="cal-cell other-month"></div>
+  {% else %}
+  {% set is_today = (cell.date == today) %}
+  <div class="cal-cell {% if is_today %}today-cell{% endif %}">
+    <div class="cal-day-num {% if is_today %}today-num{% endif %}">
+      {{ cell.date.day }}
+    </div>
+
+    {% if cell.segments %}
+    {% set seg_count = cell.segments|length %}
+    {% if seg_count > 1 %}
+    <div class="text-muted" style="font-size:.68rem;margin-bottom:2px">{{ seg_count }} сегментов</div>
+    {% endif %}
+
+    {% for seg in cell.segments %}
+    {% set rs = seg.run_state %}
+    {% set is_open = seg.t_end is none %}
+    {% set cr_j = seg.coking_risk_json %}
+    {% set cr = cr_j if cr_j is mapping else {} %}
+    {% set cr_lv = cr.get("risk_level","GREEN") if cr else "GREEN" %}
+
+    <a href="/online/segment/{{ seg.id }}"
+       class="seg-event rs-{{ rs if rs is not none else 'na' }}{% if is_open %} seg-event-open{% endif %}">
+      {# Время #}
+      <div>
+        🕐
+        {{ seg.t_start.strftime("%H:%M") if seg.t_start else "?" }}
+        →
+        {% if is_open %}
+          <span class="text-primary">сейчас</span>
+        {% else %}
+          {{ seg.t_end.strftime("%H:%M") if seg.t_end else "?" }}
+        {% endif %}
+      </div>
+      {# Режим #}
+      <div><strong>{{ run_state_labels.get(rs, "RS=" ~ rs) if rs is not none else "—" }}</strong></div>
+      {# Длительность #}
+      {% if not is_open and seg.t_start and seg.t_end %}
+      {% set dur = (seg.t_end - seg.t_start).total_seconds()|int %}
+      <div class="text-muted">
+        {% if dur < 60 %}{{ dur }} с
+        {% elif dur < 3600 %}{{ dur // 60 }}м {{ dur % 60 }}с
+        {% else %}{{ dur // 3600 }}ч {{ (dur % 3600) // 60 }}м{% endif %}
+      </div>
+      {% else %}
+      <div class="text-muted">активно</div>
+      {% endif %}
+      {# Риск закоксовки (только не GREEN) #}
+      {% if cr_lv != "GREEN" %}
+      <div>
+        <span style="font-size:.65rem;font-weight:700;
+          color:{% if cr_lv=='RED' %}#dc3545{% else %}#856404{% endif %}">
+          ⚠ {{ cr_lv }}
+        </span>
+      </div>
+      {% endif %}
+    </a>
+    {% endfor %}
+    {% endif %}
+
+  </div>
   {% endif %}
-</div>
-
-{% if not days %}
-<div class="alert alert-info">Нет сегментов. Запустите наблюдение.</div>
-{% else %}
-
-{% for day_key, segs in days %}
-<div class="card mb-3">
-  <div class="card-header bg-light fw-semibold py-2">
-    {{ day_key }} &nbsp;<small class="text-muted fw-normal">({{ daily_hour }}:00 → +24 ч, {{ tz_name }})</small>
-    <span class="float-end badge bg-secondary">{{ segs|length }} сегментов</span>
-  </div>
-  <div class="card-body p-0">
-    <table class="table table-sm mb-0 align-middle">
-      <thead class="table-light">
-        <tr>
-          <th style="width:140px">Начало</th>
-          <th style="width:140px">Конец</th>
-          <th>Длит.</th>
-          <th>Режим</th>
-          <th>Закрыт</th>
-          <th>Закоксовка</th>
-          <th>Версия</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-      {% for seg in segs %}
-      {% set is_open = seg.t_end is none %}
-      {% set run_state = seg.run_state %}
-      {% set cr_raw = seg.get("coking_risk_json") if seg is mapping else seg.coking_risk_json %}
-      {% set cr = cr_raw if cr_raw is mapping else {} %}
-      {% set cr_level = cr.get("risk_level", "GREEN") if cr else "GREEN" %}
-      <tr class="{% if is_open %}table-primary{% endif %}">
-        <td>
-          <span title="{{ seg.t_start }}">
-            {{ seg.t_start.astimezone().strftime("%d.%m %H:%M:%S") if seg.t_start else "—" }}
-          </span>
-          {% if seg.continued_from %}
-          <span class="badge bg-info text-dark" title="Продолжение сегмента #{{ seg.continued_from }}">↩</span>
-          {% endif %}
-        </td>
-        <td>
-          {% if is_open %}
-            <span class="badge bg-primary">открытый</span>
-          {% else %}
-            <span title="{{ seg.t_end }}">
-              {{ seg.t_end.astimezone().strftime("%d.%m %H:%M:%S") if seg.t_end else "—" }}
-            </span>
-            {% if seg.continues_to %}
-            <span class="badge bg-info text-dark" title="Продолжается в #{{ seg.continues_to }}">↪</span>
-            {% endif %}
-          {% endif %}
-        </td>
-        <td>
-          {% if not is_open and seg.t_start and seg.t_end %}
-            {% set dur = (seg.t_end - seg.t_start).total_seconds()|int %}
-            {% if dur < 60 %}{{ dur }} с
-            {% elif dur < 3600 %}{{ dur // 60 }} мин {{ dur % 60 }} с
-            {% else %}{{ dur // 3600 }} ч {{ (dur % 3600) // 60 }} мин{% endif %}
-          {% else %}
-            <em class="text-muted">активно</em>
-          {% endif %}
-        </td>
-        <td>
-          <span class="badge
-            {%- if run_state == 3 %} bg-primary
-            {%- elif run_state in [2,5] %} bg-info text-dark
-            {%- elif run_state == 4 %} bg-danger
-            {%- elif run_state == 0 %} bg-secondary
-            {%- else %} bg-light text-dark{% endif %}">
-            {{ run_state_labels.get(run_state, run_state) if run_state is not none else "—" }}
-          </span>
-        </td>
-        <td>
-          {% if is_open %}
-            —
-          {% else %}
-            <small class="text-muted">{{ cause_close_ru.get(seg.cause_close, seg.cause_close or "—") }}</small>
-          {% endif %}
-        </td>
-        <td>
-          <span class="badge bg-{{ coking_colors.get(cr_level, 'secondary') }}">{{ cr_level }}</span>
-        </td>
-        <td><small class="text-muted">{{ seg.analytics_version or "—" }}</small></td>
-        <td>
-          <a href="/online/segment/{{ seg.id }}" class="btn btn-xs btn-outline-secondary btn-sm">
-            Открыть
-          </a>
-        </td>
-      </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</div>
+  {% endfor %}
 {% endfor %}
+</div>
 
-{% endif %}
+{# Легенда #}
+<div class="d-flex gap-2 flex-wrap mt-2" style="font-size:.75rem">
+  <span class="px-2 py-1 rounded rs-0">Ожидание</span>
+  <span class="px-2 py-1 rounded rs-1">Запуск</span>
+  <span class="px-2 py-1 rounded rs-2">Прогрев</span>
+  <span class="px-2 py-1 rounded rs-3">Работа</span>
+  <span class="px-2 py-1 rounded rs-4">Аварийный останов</span>
+  <span class="px-2 py-1 rounded rs-5">Охлаждение</span>
+  <span class="px-2 py-1 rounded seg-event-open" style="background:#e8f0fe;color:#084298">↖ Открытый</span>
+</div>
 
-<!-- ── Модальное окно очистки ─────────────────────────────────────────── -->
+{# Модальное окно очистки #}
 <div class="modal fade" id="clearModal" tabindex="-1">
   <div class="modal-dialog">
     <div class="modal-content">
@@ -175,10 +202,8 @@
           </div>
           <div class="form-check">
             <input class="form-check-input" type="checkbox" id="confirmClear"
-                   onchange="document.getElementById('confirmInput').value = this.checked ? 'yes' : ''">
-            <label class="form-check-label" for="confirmClear">
-              Подтверждаю удаление
-            </label>
+                   onchange="document.getElementById('confirmInput').value=this.checked?'yes':''">
+            <label class="form-check-label" for="confirmClear">Подтверждаю удаление</label>
           </div>
           <input type="hidden" name="confirm" id="confirmInput" value="">
         </div>

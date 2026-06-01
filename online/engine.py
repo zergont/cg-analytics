@@ -336,18 +336,16 @@ class OnlinePollEngine:
             self.cursor_ts, process_to, self.daily_hour, tz
         )
 
-        # Закрыть по каждой суточной границе
-        for boundary_ts in boundaries:
-            if boundary_ts >= process_to:
-                break
-            if boundary_ts <= self.cursor_ts:
-                continue
-            await self._close_window(self.cursor_ts, boundary_ts, "DAILY_BOUNDARY")
-            self.last_processed_to = boundary_ts   # прогресс обновляется после каждой границы
+        # ОДНА граница за один цикл → равномерный прогресс (~1 день/30 с)
+        pending = [b for b in boundaries if self.cursor_ts < b < process_to]
 
-        # Обработать открытое окно [cursor_ts, process_to]
-        await self._update_open_window(self.cursor_ts, process_to)
-        self.last_processed_to = process_to        # финальная отметка
+        if pending:
+            await self._close_window(self.cursor_ts, pending[0], "DAILY_BOUNDARY")
+            self.last_processed_to = pending[0]
+        else:
+            # Все границы обработаны → обновить открытый сегмент
+            await self._update_open_window(self.cursor_ts, process_to)
+            self.last_processed_to = process_to
 
     # ── Закрытие окна (DAILY_BOUNDARY) ────────────────────────────────────────
 
@@ -415,6 +413,17 @@ class OnlinePollEngine:
             seg_dict["t_end"] = seg_t_end.isoformat()
             seg_dict["cause_close"] = seg_cause_close
 
+            # Генерация Markdown-отчёта для закрытого сегмента
+            try:
+                from analytics.serializer import to_markdown as _to_md
+                report_md = _to_md(
+                    [seg], self.router_sn, self.equip_type, self.panel_id,
+                    _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end,
+                    ANALYTICS_VERSION, tz=self.tz,
+                )
+            except Exception:
+                report_md = None
+
             db_id = await online_db.insert_closed_segment({
                 "router_sn":          self.router_sn,
                 "equip_type":         self.equip_type,
@@ -424,13 +433,12 @@ class OnlinePollEngine:
                 "run_state":          seg.run_state,
                 "cause_close":        seg_cause_close,
                 "split_reason":       "DAILY_BOUNDARY" if seg_cause_close == "DAILY_BOUNDARY" else None,
-                # continued_from = None здесь: это PRE-boundary сегмент.
-                # Ссылка continues_to будет добавлена когда сохранится POST-boundary сегмент.
                 "continued_from":     None,
                 "coking_risk_json":   coking_risk.to_dict(),
                 "forward_fill_json":  ff_json,
                 "analytics_version":  ANALYTICS_VERSION,
                 "characteristics_json": seg_dict,
+                "report_md":          report_md,
             })
 
             if is_last:
@@ -481,12 +489,23 @@ class OnlinePollEngine:
             carry_continued_from = self.continued_from_id
             for seg in closed_segs:
                 coking_risk = _extract_coking_risk_from_segments([seg])
+                seg_t_end_rs = _tz_utc(datetime.fromisoformat(seg.t_end))
+                try:
+                    from analytics.serializer import to_markdown as _to_md
+                    report_md_rs = _to_md(
+                        [seg], self.router_sn, self.equip_type, self.panel_id,
+                        _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end_rs,
+                        ANALYTICS_VERSION, tz=self.tz,
+                    )
+                except Exception:
+                    report_md_rs = None
+
                 await online_db.insert_closed_segment({
                     "router_sn":          self.router_sn,
                     "equip_type":         self.equip_type,
                     "panel_id":           self.panel_id,
                     "t_start":            _tz_utc(datetime.fromisoformat(seg.t_start)),
-                    "t_end":              _tz_utc(datetime.fromisoformat(seg.t_end)),
+                    "t_end":              seg_t_end_rs,
                     "run_state":          seg.run_state,
                     "cause_close":        "RUN_STATE_CHANGE",
                     "split_reason":       None,
@@ -494,6 +513,7 @@ class OnlinePollEngine:
                     "coking_risk_json":   coking_risk.to_dict(),
                     "analytics_version":  ANALYTICS_VERSION,
                     "characteristics_json": seg.to_dict(),
+                    "report_md":          report_md_rs,
                 })
                 self.cursor_ts = _tz_utc(datetime.fromisoformat(seg.t_end))
                 self.inherited_coking_risk = coking_risk
