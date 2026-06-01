@@ -205,12 +205,19 @@ def to_markdown(
     a("")
 
     for seg_idx, seg in enumerate(segments, 1):
-        _append_segment(lines, seg, seg_idx, fmt_ts)
+        prev_seg = segments[seg_idx - 2] if seg_idx >= 2 else None
+        _append_segment(lines, seg, seg_idx, fmt_ts, prev_seg=prev_seg)
 
     return "\n".join(lines)
 
 
-def _append_segment(lines: list[str], seg: Segment, idx: int, fmt_ts) -> None:
+def _append_segment(
+    lines: list[str],
+    seg: Segment,
+    idx: int,
+    fmt_ts,
+    prev_seg: "Segment | None" = None,
+) -> None:
     a = lines.append
     state_label = (
         seg.run_state_label
@@ -228,6 +235,18 @@ def _append_segment(lines: list[str], seg: Segment, idx: int, fmt_ts) -> None:
     a(f"- **Конец:** {fmt_ts(seg.t_end)}")
     a(f"- **Длительность:** {dur_str}{hours_str}")
     a(f"- **Качество данных:** {dq_str}")
+    # Предыдущее состояние
+    if seg.cause_open == "RUN_STATE_CHANGE":
+        if prev_seg is not None:
+            prev_label = (
+                prev_seg.run_state_label
+                or _RUN_STATE_RU.get(prev_seg.run_state, f"RUN_STATE={prev_seg.run_state}")
+            )
+            a(f"- **Предыдущее состояние:** ← {prev_label} (RUN_STATE={prev_seg.run_state})")
+        else:
+            a(f"- **Предыдущее состояние:** ← неизвестно (вне окна анализа)")
+    elif seg.cause_open == "REPORT_START":
+        a(f"- **Предыдущее состояние:** ← начало окна анализа")
     a(f"- **Причина открытия:** {seg.cause_open}")
     if seg.cause_close:
         a(f"- **Причина закрытия:** {seg.cause_close}")

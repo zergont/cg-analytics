@@ -1298,6 +1298,22 @@ async def online_segment_detail(request: Request, seg_id: int):
     active_dets  = _pj(seg.get("active_detections_json"))
     coking_risk  = _pj(seg.get("coking_risk_json"))
 
+    # Предыдущий сегмент — для отображения «← откуда пришли»
+    prev_seg_raw = await odb.get_segment_before(
+        seg["router_sn"], seg["equip_type"], seg["panel_id"],
+        seg["t_start"],
+    ) if seg.get("t_start") else None
+    prev_seg_chars = _pj(prev_seg_raw.get("characteristics_json")) if prev_seg_raw else None
+    prev_run_state_label = None
+    if prev_seg_chars and isinstance(prev_seg_chars, dict):
+        prev_run_state_label = (
+            prev_seg_chars.get("run_state_label")
+            or _RUN_STATE_LABELS.get(prev_seg_chars.get("run_state"))
+        )
+    elif prev_seg_raw:
+        rs = prev_seg_raw.get("run_state")
+        prev_run_state_label = _RUN_STATE_LABELS.get(rs, f"RUN_STATE={rs}") if rs is not None else None
+
     if is_open:
         # Открытый сегмент: показать текущие значения
         return templates.TemplateResponse(request, "auto_segment_report.html", {
@@ -1305,6 +1321,7 @@ async def online_segment_detail(request: Request, seg_id: int):
             "current_values": current_vals,
             "active_detections": active_dets,
             "coking_risk": coking_risk,
+            "prev_run_state_label": prev_run_state_label,
             "run_state_labels": _RUN_STATE_LABELS,
             "coking_colors": _COKING_COLORS,
             "cause_close_ru": _CAUSE_CLOSE_RU,
@@ -1358,6 +1375,7 @@ async def online_segment_detail(request: Request, seg_id: int):
     return templates.TemplateResponse(request, "auto_segment_report.html", {
         "seg": seg, "is_open": False,
         "run": run,
+        "prev_run_state_label": prev_run_state_label,
         "run_state_labels": _RUN_STATE_LABELS,
         "coking_colors": _COKING_COLORS,
         "cause_close_ru": _CAUSE_CLOSE_RU,

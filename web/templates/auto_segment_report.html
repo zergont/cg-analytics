@@ -77,6 +77,10 @@
                   {% else %}{{ dur // 3600 }} ч {{ (dur % 3600) // 60 }} мин{% endif %}
                 </small></td></tr>
             {% endif %}
+            {% if prev_run_state_label %}
+            <tr><td class="text-muted">Предыдущий</td>
+                <td><small>← {{ prev_run_state_label }}</small></td></tr>
+            {% endif %}
             <tr><td class="text-muted">Закрыт</td>
                 <td><small>{{ cause_close_ru.get(seg.cause_close, seg.cause_close or "—") }}</small></td></tr>
             <tr><td class="text-muted">Версия</td>
