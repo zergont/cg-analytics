@@ -60,7 +60,13 @@ class OnlineManager:
         observations = await online_db.list_observations()
         running = [o for o in observations if o.get("status") == "running"]
         logger.info("OnlineManager: активных наблюдений %d", len(running))
+        seen: set[str] = set()
         for obs in running:
+            key = f"{obs['router_sn']}|{obs['equip_type']}|{obs['panel_id']}"
+            if key in seen:
+                logger.warning("OnlineManager: пропуск дублирующейся записи %s", key)
+                continue
+            seen.add(key)
             try:
                 engine = await self._build_engine(obs)
                 if engine is None:
@@ -276,3 +282,9 @@ class OnlineManager:
 
     def running_keys(self) -> list[str]:
         return list(self._engines.keys())
+
+    def get_cursor_ts(self, router_sn: str, equip_type: str, panel_id: int):
+        """Вернуть cursor_ts живого движка (datetime | None)."""
+        key = f"{router_sn}|{equip_type}|{panel_id}"
+        engine = self._engines.get(key)
+        return engine.cursor_ts if engine else None

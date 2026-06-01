@@ -1350,13 +1350,18 @@ async def online_clear(
 async def api_online_status():
     """Текущий статус всех наблюдений + открытых сегментов (для JS-поллинга)."""
     from online import db as odb
+    from datetime import datetime, timezone
+    import json as _j
+
     try:
         from online.manager import get_manager
         mgr = get_manager()
         running_keys = mgr.running_keys()
     except RuntimeError:
+        mgr = None
         running_keys = []
 
+    now_utc = datetime.now(timezone.utc)
     observations = await odb.list_observations()
     result = []
     for obs in observations:
@@ -1367,22 +1372,48 @@ async def api_online_status():
         cr = None
         run_state = None
         if open_seg and open_seg.get("coking_risk_json"):
-            import json as _j
             cr_data = open_seg["coking_risk_json"]
             if isinstance(cr_data, str):
                 cr_data = _j.loads(cr_data)
             cr = cr_data.get("risk_level") if isinstance(cr_data, dict) else None
         if open_seg:
             run_state = open_seg.get("run_state")
+
+        # cursor_ts: из живого движка (точнее) или из последнего открытого сегмента
+        cursor_ts = None
+        if mgr:
+            ct = mgr.get_cursor_ts(obs["router_sn"], obs["equip_type"], obs["panel_id"])
+            if ct:
+                cursor_ts = ct.isoformat()
+        if not cursor_ts and open_seg and open_seg.get("t_start"):
+            cursor_ts = open_seg["t_start"].isoformat()
+
+        # lag_sec: сколько секунд cursor отстаёт от now
+        lag_sec = None
+        if cursor_ts:
+            try:
+                ct_dt = datetime.fromisoformat(cursor_ts)
+                if ct_dt.tzinfo is None:
+                    ct_dt = ct_dt.replace(tzinfo=timezone.utc)
+                lag_sec = (now_utc - ct_dt).total_seconds()
+            except Exception:
+                pass
+
+        start_date_iso = obs["start_date"].isoformat() if obs.get("start_date") else None
+
         result.append({
-            "key":        key,
-            "router_sn":  obs["router_sn"],
-            "equip_type": obs["equip_type"],
-            "panel_id":   obs["panel_id"],
-            "status":     obs["status"],
-            "engine_live": key in running_keys,
-            "run_state":   run_state,
-            "coking_risk": cr,
+            "key":          key,
+            "router_sn":    obs["router_sn"],
+            "equip_type":   obs["equip_type"],
+            "panel_id":     obs["panel_id"],
+            "status":       obs["status"],
+            "engine_live":  key in running_keys,
+            "run_state":    run_state,
+            "coking_risk":  cr,
+            "poll_interval_sec": obs.get("poll_interval_sec", 30),
+            "start_date":   start_date_iso,
+            "cursor_ts":    cursor_ts,
+            "lag_sec":      lag_sec,
             "t_start_open": (
                 open_seg["t_start"].isoformat()
                 if open_seg and open_seg.get("t_start") else None

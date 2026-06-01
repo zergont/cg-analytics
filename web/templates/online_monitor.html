@@ -13,10 +13,9 @@
     <thead class="table-dark">
       <tr>
         <th>Машина</th>
-        <th>Статус</th>
+        <th>Прогресс / статус</th>
         <th>Режим</th>
         <th>Закоксовка</th>
-        <th>Старт наблюд.</th>
         <th>Интервал, с</th>
         <th>Действия</th>
       </tr>
@@ -25,53 +24,61 @@
     {% for obs in observations %}
     {% set key = obs.router_sn ~ "|" ~ obs.equip_type ~ "|" ~ obs.panel_id %}
     {% set seg = open_segs.get(key) %}
-    <tr data-key="{{ key }}">
+    <tr data-key="{{ key }}"
+        data-start="{{ obs.start_date.isoformat() if obs.start_date else '' }}"
+        data-poll="{{ obs.poll_interval_sec }}">
       <td>
         <div class="fw-semibold">{{ obs.name or obs.router_sn }}</div>
         <small class="text-muted">{{ obs.equip_type }} / панель {{ obs.panel_id }}</small>
-        {% if obs.model %}
-        <br><small class="text-muted">{{ obs.manufacturer or "" }} {{ obs.model }}</small>
-        {% endif %}
+        {% if obs.model %}<br><small class="text-muted">{{ obs.manufacturer or "" }} {{ obs.model }}</small>{% endif %}
       </td>
-      <td>
+
+      <!-- Прогресс / статус (обновляется JS) -->
+      <td style="min-width:200px">
         {% if obs.status == "running" %}
-          <span class="badge bg-success">● Работает</span>
+          <div class="progress-cell">
+            <div class="d-flex align-items-center gap-2 mb-1">
+              <span class="badge bg-success status-badge">● Работает</span>
+              <small class="text-muted cursor-label" style="font-size:0.75rem"></small>
+            </div>
+            <div class="progress" style="height:8px; display:none" id="pb-{{ loop.index }}">
+              <div class="progress-bar progress-bar-striped progress-bar-animated bg-info"
+                   role="progressbar" style="width:0%"></div>
+            </div>
+            <small class="text-muted progress-label" style="font-size:0.72rem"></small>
+          </div>
         {% else %}
           <span class="badge bg-secondary">Остановлен</span>
         {% endif %}
       </td>
+
       <td>
         {% if seg %}
           {% set rs = seg.run_state %}
-          <span class="badge
+          <span class="badge run-state-badge
             {%- if rs == 3 %} bg-primary
             {%- elif rs in [2,5] %} bg-info text-dark
             {%- elif rs == 4 %} bg-danger
             {%- else %} bg-secondary{% endif %}">
             {{ run_state_labels.get(rs, rs) if rs is not none else "—" }}
           </span>
-          {% if seg.t_start %}
-          <br><small class="text-muted" title="t_start открытого сегмента">
-            с {{ seg.t_start.strftime("%d.%m %H:%M") }}
-          </small>
-          {% endif %}
         {% else %}
-          <span class="text-muted">—</span>
+          <span class="text-muted run-state-badge">—</span>
         {% endif %}
       </td>
+
       <td>
         {% if seg and seg.coking_risk_json %}
           {% set cr = seg.coking_risk_json if seg.coking_risk_json is mapping else {} %}
           {% set level = cr.get("risk_level", "GREEN") %}
-          <span class="badge bg-{{ coking_colors.get(level, 'secondary') }}">{{ level }}</span>
+          <span class="badge bg-{{ coking_colors.get(level, 'secondary') }} coking-badge">{{ level }}</span>
         {% else %}
-          <span class="text-muted">—</span>
+          <span class="text-muted coking-badge">—</span>
         {% endif %}
       </td>
-      <td>
-        <small>{{ obs.start_date.strftime("%d.%m.%Y %H:%M") if obs.start_date else "—" }}</small>
-      </td>
+
       <td>{{ obs.poll_interval_sec }}</td>
+
       <td>
         <div class="d-flex gap-1 flex-wrap">
           <a href="/online/calendar/{{ obs.router_sn }}/{{ obs.equip_type }}/{{ obs.panel_id }}"
@@ -156,30 +163,106 @@ function fillEquipFields(sel) {
   document.getElementById('eq-panel').value = opt.dataset.panel || '';
 }
 
-// Авто-обновление статусов каждые 15 с
+const RUN_STATE_LABELS = {{ run_state_labels | tojson }};
+const COKING_COLORS    = {{ coking_colors    | tojson }};
+
+function fmtDur(sec) {
+  sec = Math.round(sec);
+  if (sec < 0) return '0 с';
+  if (sec < 60) return sec + ' с';
+  if (sec < 3600) return Math.floor(sec/60) + ' мин ' + (sec%60) + ' с';
+  return Math.floor(sec/3600) + ' ч ' + Math.floor((sec%3600)/60) + ' мин';
+}
+
+function fmtTs(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleString('ru-RU', {day:'2-digit',month:'2-digit',year:'2-digit',
+                                    hour:'2-digit',minute:'2-digit',second:'2-digit'});
+}
+
 async function refreshStatus() {
   try {
     const r = await fetch('/api/online/status');
     const data = await r.json();
-    const now = new Date().toLocaleTimeString('ru-RU');
-    document.getElementById('status-ts').textContent = 'обновлено ' + now;
+    const now = Date.now();
+    document.getElementById('status-ts').textContent = 'обновлено ' + new Date().toLocaleTimeString('ru-RU');
+
     data.forEach(item => {
       const row = document.querySelector(`tr[data-key="${item.key}"]`);
       if (!row) return;
-      const cells = row.cells;
-      // статус (ячейка 1)
-      cells[1].innerHTML = item.status === 'running'
-        ? '<span class="badge bg-success">● Работает</span>'
-        : '<span class="badge bg-secondary">Остановлен</span>';
-      // coking_risk (ячейка 3)
-      const cr = item.coking_risk;
-      const colorMap = {GREEN:'success', YELLOW:'warning', RED:'danger'};
-      cells[3].innerHTML = cr
-        ? `<span class="badge bg-${colorMap[cr]||'secondary'}">${cr}</span>`
-        : '<span class="text-muted">—</span>';
+      const startMs = item.start_date ? new Date(item.start_date).getTime() : null;
+      const cursorMs = item.cursor_ts ? new Date(item.cursor_ts).getTime() : null;
+      const lagSec  = item.lag_sec ?? null;
+      const poll    = item.poll_interval_sec || 30;
+      const onlineThreshold = Math.max(poll * 3, 120); // 3 интервала или 2 мин
+
+      // ── Режим (run_state) ──
+      const rsCell = row.querySelector('.run-state-badge');
+      if (rsCell && item.run_state !== null && item.run_state !== undefined) {
+        const rs = item.run_state;
+        const label = RUN_STATE_LABELS[rs] || String(rs);
+        let cls = 'badge bg-secondary';
+        if (rs === 3) cls = 'badge bg-primary';
+        else if (rs === 2 || rs === 5) cls = 'badge bg-info text-dark';
+        else if (rs === 4) cls = 'badge bg-danger';
+        rsCell.className = cls + ' run-state-badge';
+        rsCell.textContent = label;
+      }
+
+      // ── Закоксовка ──
+      const crCell = row.querySelector('.coking-badge');
+      if (crCell && item.coking_risk) {
+        const colorMap = {GREEN:'success', YELLOW:'warning', RED:'danger'};
+        crCell.className = `badge bg-${colorMap[item.coking_risk]||'secondary'} coking-badge`;
+        crCell.textContent = item.coking_risk;
+      }
+
+      if (item.status !== 'running') return;
+
+      // ── Прогресс / онлайн статус ──
+      const statusBadge  = row.querySelector('.status-badge');
+      const cursorLabel  = row.querySelector('.cursor-label');
+      const progBar      = row.querySelector('.progress');
+      const progFill     = progBar ? progBar.querySelector('.progress-bar') : null;
+      const progLabel    = row.querySelector('.progress-label');
+
+      if (!item.engine_live) {
+        if (statusBadge) { statusBadge.className = 'badge bg-warning text-dark status-badge'; statusBadge.textContent = '⚠ Движок не запущен'; }
+        return;
+      }
+
+      if (lagSec !== null && lagSec <= onlineThreshold) {
+        // ── ОНЛАЙН ──
+        if (statusBadge) { statusBadge.className = 'badge bg-success status-badge'; statusBadge.textContent = '● Онлайн'; }
+        if (cursorLabel) cursorLabel.textContent = 'срез: ' + fmtTs(item.cursor_ts);
+        if (progBar) progBar.style.display = 'none';
+        if (progLabel) progLabel.textContent = 'отставание: ' + fmtDur(lagSec);
+
+      } else if (cursorMs !== null && startMs !== null) {
+        // ── BATCH-ДОБОР ──
+        const totalMs = now - startMs;
+        const doneMs  = cursorMs - startMs;
+        const pct = totalMs > 0 ? Math.min(99, Math.max(1, doneMs / totalMs * 100)) : 1;
+        const remaining = lagSec !== null ? fmtDur(lagSec) : '?';
+
+        if (statusBadge) { statusBadge.className = 'badge bg-info text-dark status-badge'; statusBadge.textContent = '⏳ Исторические данные'; }
+        if (cursorLabel) cursorLabel.textContent = '';
+        if (progBar) { progBar.style.display = ''; }
+        if (progFill) { progFill.style.width = pct.toFixed(1) + '%'; }
+        if (progLabel) progLabel.textContent =
+          fmtTs(item.cursor_ts) + ' · осталось ~' + remaining;
+
+      } else {
+        // неизвестно
+        if (statusBadge) { statusBadge.className = 'badge bg-success status-badge'; statusBadge.textContent = '● Работает'; }
+        if (progBar) progBar.style.display = 'none';
+      }
     });
   } catch(e) {}
 }
-setInterval(refreshStatus, 15000);
+
+refreshStatus();
+setInterval(refreshStatus, 10000);
 </script>
 {% endblock %}
