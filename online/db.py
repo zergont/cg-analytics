@@ -37,17 +37,23 @@ async def upsert_observation(data: dict[str, Any]) -> None:
     try:
         await conn.execute("""
             INSERT INTO online_observations
-                (router_sn, equip_type, panel_id, start_date, status, poll_interval_sec, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, now())
+                (router_sn, equip_type, panel_id, start_date, status,
+                 poll_interval_sec, batch_end_ts, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, now())
             ON CONFLICT (router_sn, equip_type, panel_id) DO UPDATE SET
                 start_date        = EXCLUDED.start_date,
                 status            = EXCLUDED.status,
                 poll_interval_sec = EXCLUDED.poll_interval_sec,
+                -- batch_end_ts фиксируется ОДИН РАЗ при первом старте,
+                -- при повторном ПУСК (resume) не перезаписывается
+                batch_end_ts      = COALESCE(online_observations.batch_end_ts,
+                                             EXCLUDED.batch_end_ts),
                 updated_at        = now()
         """,
             data["router_sn"], data["equip_type"], data["panel_id"],
             data["start_date"], data.get("status", "stopped"),
             data.get("poll_interval_sec", 30),
+            data.get("batch_end_ts"),
         )
     finally:
         await conn.close()

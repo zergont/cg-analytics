@@ -193,6 +193,7 @@ async function refreshStatus() {
       const row = document.querySelector(`tr[data-key="${item.key}"]`);
       if (!row) return;
       const startMs     = item.start_date   ? new Date(item.start_date).getTime()   : null;
+      const batchEndMs  = item.batch_end_ts ? new Date(item.batch_end_ts).getTime() : null;
       const processedMs = item.processed_to ? new Date(item.processed_to).getTime() : null;
       const cursorMs    = item.cursor_ts    ? new Date(item.cursor_ts).getTime()    : null;
       const lagSec  = item.lag_sec ?? null;
@@ -243,9 +244,9 @@ async function refreshStatus() {
 
       } else if (processedMs !== null && startMs !== null) {
         // ── BATCH-ДОБОР ──
-        // processed_to = куда дошли в этом цикле (обновляется после каждой суточной границы)
-        // cursor_ts    = зафиксированный рубеж (для отображения "checkpoint")
-        const totalMs = now - startMs;
+        // Знаменатель = batch_end_ts - start_date (фиксирован при старте)
+        // Числитель   = processed_to - start_date (растёт с каждым циклом)
+        const totalMs = batchEndMs ? (batchEndMs - startMs) : (now - startMs);
         const doneMs  = processedMs - startMs;
         const pct = totalMs > 0 ? Math.min(99, Math.max(1, doneMs / totalMs * 100)) : 1;
         const remaining = lagSec !== null ? fmtDur(lagSec) : '?';

@@ -1500,7 +1500,8 @@ async def api_online_status():
             except Exception:
                 pass
 
-        start_date_iso = obs["start_date"].isoformat() if obs.get("start_date") else None
+        start_date_iso  = obs["start_date"].isoformat()  if obs.get("start_date")  else None
+        batch_end_iso   = obs["batch_end_ts"].isoformat() if obs.get("batch_end_ts") else None
 
         result.append({
             "key":              key,
@@ -1513,6 +1514,7 @@ async def api_online_status():
             "coking_risk":      cr,
             "poll_interval_sec": obs.get("poll_interval_sec", 30),
             "start_date":       start_date_iso,
+            "batch_end_ts":     batch_end_iso, # фиксированный правый край batch-добора (знаменатель)
             "cursor_ts":        cursor_ts,    # зафиксированный рубеж (t_end последнего закр. сег.)
             "processed_to":     processed_to, # куда дошли в последнем цикле (для прогресс-бара)
             "lag_sec":          lag_sec,       # отставание processed_to от now

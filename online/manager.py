@@ -102,7 +102,7 @@ class OnlineManager:
         if key in self._engines:
             await self._stop_engine(key)
 
-        # Сохранить/обновить наблюдение в БД
+        # batch_end_ts = момент нажатия «Пуск» (фиксируется один раз, не обновляется при resume)
         await online_db.upsert_observation({
             "router_sn":         router_sn,
             "equip_type":        equip_type,
@@ -110,6 +110,7 @@ class OnlineManager:
             "start_date":        _tz_utc(start_date),
             "status":            "running",
             "poll_interval_sec": poll_interval_sec,
+            "batch_end_ts":      datetime.now(timezone.utc),
         })
 
         obs = await online_db.get_observation(router_sn, equip_type, panel_id)

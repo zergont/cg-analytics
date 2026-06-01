@@ -79,3 +79,7 @@ CREATE INDEX IF NOT EXISTS idx_auto_seg_time
 CREATE UNIQUE INDEX IF NOT EXISTS idx_auto_seg_closed_t_start
     ON auto_segments (router_sn, equip_type, panel_id, t_start)
     WHERE t_end IS NOT NULL;
+
+-- Миграция v2.2.6: фиксированная правая граница batch-добора
+ALTER TABLE online_observations
+    ADD COLUMN IF NOT EXISTS batch_end_ts TIMESTAMPTZ;
