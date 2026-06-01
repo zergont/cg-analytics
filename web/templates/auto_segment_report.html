@@ -156,7 +156,7 @@
       <table class="table table-sm table-bordered" style="font-size:.85rem">
         <thead class="table-light"><tr><th>Параметр</th><th>Значение</th><th>Медиана</th><th>Ед.</th></tr></thead>
         <tbody>
-        {% for role, v in current_values.values.items() %}
+        {% for role, v in current_values["values"].items() %}
         {% if v is mapping %}
         <tr>
           <td>{{ role }}</td>
