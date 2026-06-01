@@ -150,6 +150,8 @@ async def analyze_stream(
 
     async def _stream():
         try:
+            import time as _time
+            _t0 = _time.monotonic()
             tz = get_tz()
             fmt = "%Y-%m-%dT%H:%M"
             ts_from_utc = datetime.strptime(ts_from_local, fmt).replace(tzinfo=tz).astimezone(_tz_mod.utc)
@@ -242,6 +244,7 @@ async def analyze_stream(
                     "engine_sn": engine_sn, "ts_from": ts_from_utc, "ts_to": ts_to_utc,
                     "analytics_version": _AV,
                     "segments_json": seg_json, "report_md": md,
+                    "duration_ms": int((_time.monotonic() - _t0) * 1000),
                     **summary,
                 })
             except Exception as _db_err:
@@ -302,21 +305,49 @@ async def analysis_run_md(run_id: str):
     )
 
 
-@router.get("/history-v2/{router_sn}/{equip_type}/{panel_id}", response_class=HTMLResponse)
+@router.get("/history", response_class=HTMLResponse)
+async def history_index(request: Request):
+    """Главная страница истории: список оборудования с прогонами."""
+    equipment = await analytics.list_equipment_with_runs()
+    return templates.TemplateResponse(request, "history_index.html", {
+        "equipment": equipment,
+    })
+
+
+@router.get("/history/{router_sn}/{equip_type}/{panel_id}", response_class=HTMLResponse)
 async def analysis_history(
     request: Request,
     router_sn: str,
     equip_type: str,
     panel_id: int,
 ):
-    """История аналитических прогонов v2 для одной ГУ."""
-    runs = await analytics.list_analysis_runs(router_sn, equip_type, panel_id, limit=50)
+    """История аналитических прогонов для одной ГУ."""
+    runs = await analytics.list_analysis_runs(router_sn, equip_type, panel_id, limit=100)
     return templates.TemplateResponse(request, "analysis_history.html", {
         "router_sn": router_sn,
         "equip_type": equip_type,
         "panel_id": panel_id,
         "runs": runs,
     })
+
+
+@router.post("/history/delete/{run_id}")
+async def delete_analysis_run(run_id: str, request: Request):
+    """Удалить прогон и вернуться в историю оборудования."""
+    # Читаем router_sn/equip_type/panel_id из формы чтобы вернуться на нужную страницу
+    form = await request.form()
+    back = form.get("back", "/history")
+    await analytics.delete_analysis_run(run_id)
+    return RedirectResponse(url=back, status_code=303)
+
+
+# Обратная совместимость: старый URL /history-v2/... → редирект на новый
+@router.get("/history-v2/{router_sn}/{equip_type}/{panel_id}", response_class=HTMLResponse)
+async def analysis_history_compat(
+    request: Request, router_sn: str, equip_type: str, panel_id: int,
+):
+    from fastapi.responses import RedirectResponse as _RR
+    return _RR(url=f"/history/{router_sn}/{equip_type}/{panel_id}", status_code=301)
 
 
 @router.get("/log", response_class=HTMLResponse)

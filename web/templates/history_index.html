@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}История прогонов — cg-analytics{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="mb-0">История аналитических прогонов</h5>
+    <a href="/analyze" class="btn btn-sm btn-outline-primary">+ Новый анализ</a>
+</div>
+
+{% if equipment %}
+<div class="card">
+    <div class="card-body p-0">
+        <table class="table table-hover table-sm mb-0">
+            <thead class="table-light">
+                <tr>
+                    <th>Оборудование</th>
+                    <th class="text-center">Прогонов</th>
+                    <th class="text-center">С обнаружениями</th>
+                    <th>Последний прогон</th>
+                    <th>Данные по</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for eq in equipment %}
+                <tr>
+                    <td>
+                        <span class="fw-semibold">{{ eq.name or eq.router_sn }}</span><br>
+                        <small class="text-muted">{{ eq.router_sn }} / {{ eq.equip_type }} / {{ eq.panel_id }}</small>
+                    </td>
+                    <td class="text-center">{{ eq.runs_count }}</td>
+                    <td class="text-center">
+                        {% if eq.runs_with_detections > 0 %}
+                            <span class="fw-semibold text-warning">{{ eq.runs_with_detections }}</span>
+                        {% else %}
+                            <span class="text-muted">0</span>
+                        {% endif %}
+                    </td>
+                    <td><small>{{ eq.last_run_at }}</small></td>
+                    <td><small>{{ eq.last_period_to }}</small></td>
+                    <td>
+                        <a href="/history/{{ eq.router_sn }}/{{ eq.equip_type }}/{{ eq.panel_id }}"
+                           class="btn btn-sm btn-outline-primary">Прогоны</a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% else %}
+<div class="alert alert-secondary">
+    Прогонов не найдено. <a href="/analyze">Запустить анализ</a>.
+</div>
+{% endif %}
+{% endblock %}

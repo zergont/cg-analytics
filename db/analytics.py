@@ -418,3 +418,38 @@ async def list_analysis_runs(
         return [{**dict(r), "id": str(r["id"])} for r in rows]
     finally:
         await conn.close()
+
+
+async def delete_analysis_run(run_id: str) -> bool:
+    """Удалить прогон по UUID. Возвращает True если запись была найдена и удалена."""
+    conn = await _connect()
+    try:
+        result = await conn.execute("DELETE FROM analysis_runs WHERE id = $1", run_id)
+        return result == "DELETE 1"
+    finally:
+        await conn.close()
+
+
+async def list_equipment_with_runs() -> list[dict[str, Any]]:
+    """Список оборудования у которого есть прогоны, с кратким резюме."""
+    conn = await _connect()
+    try:
+        rows = await conn.fetch("""
+            SELECT
+                r.router_sn, r.equip_type, r.panel_id,
+                e.name,
+                COUNT(*)                        AS runs_count,
+                MAX(r.created_at)               AS last_run_at,
+                MAX(r.ts_to)                    AS last_period_to,
+                SUM(CASE WHEN r.detections_count > 0 THEN 1 ELSE 0 END) AS runs_with_detections
+            FROM analysis_runs r
+            LEFT JOIN equipment_registry e
+                ON e.router_sn = r.router_sn
+               AND e.equip_type = r.equip_type
+               AND e.panel_id   = r.panel_id
+            GROUP BY r.router_sn, r.equip_type, r.panel_id, e.name
+            ORDER BY MAX(r.created_at) DESC
+        """)
+        return [dict(row) for row in rows]
+    finally:
+        await conn.close()

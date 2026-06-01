@@ -4,10 +4,13 @@
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-3">
     <h5 class="mb-0">
-        История аналитических прогонов
+        История прогонов
         <small class="text-muted fw-normal">/ {{ router_sn }} / {{ equip_type }} / {{ panel_id }}</small>
     </h5>
-    <a href="/analyze" class="btn btn-sm btn-outline-secondary">← Новый анализ</a>
+    <div class="d-flex gap-2">
+        <a href="/history" class="btn btn-sm btn-outline-secondary">← История</a>
+        <a href="/analyze" class="btn btn-sm btn-outline-primary">+ Новый анализ</a>
+    </div>
 </div>
 
 {% if runs %}
@@ -59,13 +62,19 @@
                             {{ "%.1f" | format(run.duration_ms / 1000) }}с
                         {% else %}—{% endif %}
                     </td>
-                    <td>{{ run.created_at }}</td>
-                    <td>
+                    <td><small>{{ run.created_at }}</small></td>
+                    <td class="text-end" style="white-space:nowrap">
                         {% if not run.error %}
                             <a href="/analysis/{{ run.id }}" class="btn btn-sm btn-outline-primary">Отчёт</a>
                         {% else %}
-                            <span class="text-muted small">{{ run.error[:60] }}…</span>
+                            <span class="text-muted small" title="{{ run.error }}">Ошибка</span>
                         {% endif %}
+                        <form method="post" action="/history/delete/{{ run.id }}" class="d-inline"
+                              onsubmit="return confirm('Удалить этот прогон?')">
+                            <input type="hidden" name="back"
+                                   value="/history/{{ router_sn }}/{{ equip_type }}/{{ panel_id }}">
+                            <button type="submit" class="btn btn-sm btn-outline-danger">🗑</button>
+                        </form>
                     </td>
                 </tr>
                 {% endfor %}
@@ -75,7 +84,7 @@
 </div>
 {% else %}
 <div class="alert alert-secondary">
-    Прогонов аналитики не найдено. <a href="/analyze">Запустить анализ</a>.
+    Прогонов не найдено. <a href="/analyze">Запустить анализ</a>.
 </div>
 {% endif %}
 {% endblock %}
