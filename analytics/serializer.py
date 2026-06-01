@@ -248,7 +248,14 @@ def _append_segment(
         else:
             a(f"- **Предыдущее состояние:** ← неизвестно (вне окна анализа)")
     elif seg.cause_open == "REPORT_START":
-        a(f"- **Предыдущее состояние:** ← начало окна анализа")
+        if prev_seg is not None:
+            prev_label = (
+                prev_seg.run_state_label
+                or RUN_STATE_RU.get(prev_seg.run_state, f"RUN_STATE={prev_seg.run_state}")
+            )
+            a(f"- **Предыдущее состояние:** ← {prev_label} (RUN_STATE={prev_seg.run_state}) [суточный рез]")
+        else:
+            a(f"- **Предыдущее состояние:** ← начало окна анализа")
     a(f"- **Причина открытия:** {seg.cause_open}")
     if seg.cause_close:
         a(f"- **Причина закрытия:** {seg.cause_close}")
