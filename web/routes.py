@@ -1431,7 +1431,12 @@ async def online_segment_detail(request: Request, seg_id: int):
     if not is_open:
         try:
             from corpus.db import get_analysis as _get_analysis
+            from corpus.humanizer import _extract_block2 as _exb2
             claude_analysis = await _get_analysis(seg_id)
+            # Извлекаем только Блок 2 (аналитика Claude без мета-шапок) — для qwen
+            if claude_analysis and claude_analysis.get("conclusion_md"):
+                claude_analysis = dict(claude_analysis)
+                claude_analysis["conclusion_block2"] = _exb2(claude_analysis["conclusion_md"])
         except Exception as _ce:
             logger.debug("corpus: анализ для #%d недоступен: %s", seg_id, _ce)
 

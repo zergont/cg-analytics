@@ -354,8 +354,10 @@
 const _md = document.getElementById('reportMdSrc').textContent;
 {% if claude_analysis and claude_analysis.status == 'done' and claude_analysis.conclusion_md %}
 const _conclusionMd = {{ claude_analysis.conclusion_md | tojson }};
+const _block2Md = {{ (claude_analysis.conclusion_block2 or claude_analysis.conclusion_md) | tojson }};
 {% else %}
 const _conclusionMd = null;
+const _block2Md = null;
 {% endif %}
 {% if claude_analysis and claude_analysis.status == 'done' and claude_analysis.humanized_md %}
 const _humanizedMd = {{ claude_analysis.humanized_md | tojson }};
@@ -417,7 +419,7 @@ window.addEventListener('DOMContentLoaded', () => {
 async function sendToQwen() {
   const btn    = document.getElementById('qwenBtn');
   const status = document.getElementById('qwenStatus');
-  if (!_conclusionMd) return;
+  if (!_block2Md) return;
 
   btn.disabled = true;
   btn.textContent = '⏳ Отправляю…';
@@ -433,7 +435,7 @@ async function sendToQwen() {
     const resp = await fetch('/analyze/run', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({markdown: _conclusionMd}),
+      body: JSON.stringify({markdown: _block2Md}),
     });
     const reader = resp.body.getReader();
     const dec    = new TextDecoder();
