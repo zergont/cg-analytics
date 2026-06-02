@@ -910,6 +910,30 @@ async def kb_delete_file(kb_path: str, filename: str = Form(...)):
     return RedirectResponse(url="/knowledge", status_code=303)
 
 
+@router.get("/knowledge/{kb_path}/search", response_class=JSONResponse)
+async def kb_search(kb_path: str, q: str = ""):
+    """Тестовый поиск по RAG-индексу. Возвращает топ-5 результатов."""
+    _kb_base(kb_path)  # валидация пути
+    if not q.strip():
+        return JSONResponse({"results": [], "error": None})
+    try:
+        from knowledge.retriever import search_manual_docs
+        import asyncio as _asyncio
+        # Поиск синхронный (LlamaIndex) — выносим в executor чтобы не блокировать event loop
+        raw = await _asyncio.get_event_loop().run_in_executor(
+            None, lambda: search_manual_docs(q.strip(), kb_path, top_k=5)
+        )
+        # Разбиваем склеенный текст обратно на отдельные результаты
+        if raw:
+            chunks = [c.strip() for c in raw.split("\n\n---\n\n") if c.strip()]
+        else:
+            chunks = []
+        return JSONResponse({"results": chunks, "error": None})
+    except Exception as e:
+        logger.warning("kb_search ошибка: %s", e)
+        return JSONResponse({"results": [], "error": str(e)})
+
+
 # ── Настройки ─────────────────────────────────────────────────────────────────
 
 @router.get("/settings", response_class=HTMLResponse)
