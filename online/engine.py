@@ -397,6 +397,23 @@ class OnlinePollEngine:
             self.cursor_ts = _tz_utc(t_to)
             return
 
+        # Сразу сеем новый открытый сегмент, чтобы не было gap'а между
+        # delete и финальным upsert_open_segment в _update_open_window.
+        # _update_open_window перезапишет его актуальными данными.
+        _seed_cv, _seed_dets = _extract_open_segment_data(segments[-1])
+        await online_db.upsert_open_segment({
+            "router_sn":              self.router_sn,
+            "equip_type":             self.equip_type,
+            "panel_id":               self.panel_id,
+            "t_start":                _tz_utc(t_to),
+            "run_state":              segments[-1].run_state,
+            "coking_risk_json":       self.inherited_coking_risk.to_dict(),
+            "analytics_version":      ANALYTICS_VERSION,
+            "current_values_json":    _seed_cv or None,
+            "active_detections_json": _seed_dets,
+            "continued_from":         None,
+        })
+
         last_saved_id: int | None = None
         for i, seg in enumerate(segments):
             is_last = (i == len(segments) - 1)

@@ -353,7 +353,8 @@ async def analysis_history_compat(
 
 @router.get("/log", response_class=HTMLResponse)
 async def log_page(request: Request):
-    return templates.TemplateResponse(request, "log.html", {})
+    from config import get_tz
+    return templates.TemplateResponse(request, "log.html", {"tz_name": get_tz().key})
 
 
 @router.get("/api/log")
@@ -1297,9 +1298,25 @@ async def online_segment_detail(request: Request, seg_id: int):
     from config import get_tz
     import json as _json
 
-    seg = await odb.get_segment_by_id(seg_id)
+    try:
+        seg = await odb.get_segment_by_id(seg_id)
+    except Exception as _e:
+        logger.warning("online_segment_detail #%d: ошибка загрузки: %s", seg_id, _e)
+        seg = None
+
     if not seg:
-        raise HTTPException(status_code=404, detail="Сегмент не найден")
+        # Сегмент временно отсутствует (gap при суточном резе) — авто-повтор
+        return HTMLResponse(
+            content=(
+                f'<html><head>'
+                f'<meta http-equiv="refresh" content="3;url=/online/segment/{seg_id}">'
+                f'<style>body{{font-family:sans-serif;padding:2rem;color:#555}}</style>'
+                f'</head><body>'
+                f'<p>⏳ Сегмент #{seg_id} обновляется, страница перезагрузится автоматически…</p>'
+                f'</body></html>'
+            ),
+            status_code=503,
+        )
 
     tz = get_tz()
     is_open = seg["t_end"] is None
