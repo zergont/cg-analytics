@@ -264,6 +264,51 @@ function renderKbFiles(kbPath, data) {
                  + Добавить PDF
              </button>`;
 
+    // YAML-конфиги аналитики
+    html += '<h6 class="fw-semibold mb-2">YAML-конфиги аналитики</h6>';
+    html += '<table class="table table-sm table-bordered mb-3"><thead class="table-light"><tr><th>Файл</th><th class="text-end">Размер</th><th></th></tr></thead><tbody>';
+    for (const f of (data.analytics_files || [])) {
+        const sizeCell = f.exists
+            ? `<span class="text-success">${f.size_fmt}</span>`
+            : '<span class="text-muted fst-italic">отсутствует</span>';
+        const dlBtn = f.exists
+            ? `<a href="/knowledge/${enc}/analytics-config/download/${encodeURIComponent(f.name)}"
+                  class="btn btn-sm btn-outline-secondary me-1" download>⬇</a>`
+            : '';
+        html += `<tr>
+            <td><code>${f.name}</code></td>
+            <td class="text-end">${sizeCell}</td>
+            <td class="text-end text-nowrap">
+                ${dlBtn}
+                <button class="btn btn-sm btn-outline-primary"
+                        onclick="showAnalyticsUploadForm('${kbPath}','${f.name}')">
+                    ⬆ Загрузить
+                </button>
+            </td>
+        </tr>`;
+    }
+    html += '</tbody></table>';
+
+    // Форма загрузки analytics config (скрыта)
+    html += `<div id="analyticsUploadBlock" style="display:none" class="border rounded p-3 bg-light mb-3">
+        <h6 id="analyticsUploadTitle" class="mb-2"></h6>
+        <form method="post" action="/knowledge/${enc}/analytics-config/upload"
+              enctype="multipart/form-data" id="analyticsUploadForm">
+            <div class="input-group input-group-sm">
+                <input type="file" name="file" id="analyticsUploadInput" class="form-control"
+                       required accept=".yaml,.yml">
+                <button type="submit" class="btn btn-primary">Загрузить</button>
+                <button type="button" class="btn btn-secondary"
+                        onclick="document.getElementById('analyticsUploadBlock').style.display='none'">
+                    Отмена
+                </button>
+            </div>
+            <div class="form-text mt-1 text-warning">
+                ⚠ Изменение конфигов аналитики влияет на все последующие прогоны. Делай бэкап перед заменой.
+            </div>
+        </form>
+    </div>`;
+
     // Форма загрузки (скрыта)
     html += `<div id="uploadBlock" style="display:none" class="border rounded p-3 bg-light">
         <h6 id="uploadTitle" class="mb-2"></h6>
@@ -336,6 +381,14 @@ async function doSearch() {
     btn.disabled = false;
     btn.textContent = 'Найти';
   }
+}
+
+function showAnalyticsUploadForm(kbPath, filename) {
+    const block = document.getElementById('analyticsUploadBlock');
+    const title = document.getElementById('analyticsUploadTitle');
+    block.style.display = 'block';
+    title.textContent = 'Заменить конфиг: ' + filename;
+    block.scrollIntoView({ behavior: 'smooth' });
 }
 
 function showUploadForm(kbPath, filename, isPdf) {

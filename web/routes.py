@@ -843,7 +843,17 @@ async def kb_files(kb_path: str):
         for pdf in sorted(docs_dir.glob("*.pdf")):
             pdf_files.append({"name": pdf.name, "size_fmt": _fmt_size(pdf.stat().st_size)})
 
-    return JSONResponse({"data_files": data_files, "pdf_files": pdf_files})
+    analytics_files = []
+    analytics_dir = base / "analytics"
+    for name in _ANALYTICS_CONFIG_FILES:
+        p = analytics_dir / name
+        analytics_files.append({
+            "name": name,
+            "exists": p.exists(),
+            "size_fmt": _fmt_size(p.stat().st_size) if p.exists() else None,
+        })
+
+    return JSONResponse({"data_files": data_files, "pdf_files": pdf_files, "analytics_files": analytics_files})
 
 
 @router.get("/knowledge/{kb_path}/download/{filename}")
