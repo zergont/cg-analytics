@@ -150,6 +150,23 @@ async def get_segment_row(seg_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+async def get_analyses_for_segments(seg_ids: list[int]) -> dict[int, dict]:
+    """Загрузить статусы анализа для списка сегментов одним запросом (для календаря)."""
+    if not seg_ids:
+        return {}
+    conn = await _connect()
+    try:
+        rows = await conn.fetch(
+            """SELECT auto_segment_id, status, verdict, alarm_level
+               FROM segment_analyses
+               WHERE auto_segment_id = ANY($1)""",
+            seg_ids,
+        )
+    finally:
+        await conn.close()
+    return {r["auto_segment_id"]: dict(r) for r in rows}
+
+
 async def get_equipment_kb_path(
     router_sn: str, equip_type: str, panel_id: int
 ) -> str | None:

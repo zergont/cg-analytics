@@ -56,9 +56,13 @@ async def lifespan(app: FastAPI):
     from corpus.worker import init_worker as _init_worker
     _corpus_worker = _init_worker()
     _corpus_worker._task = _asyncio.create_task(_corpus_worker.run())
-    pending = await _corpus_worker.enqueue_pending()
-    if pending:
-        logger.info("corpus: %d исторических сегментов добавлено в очередь", pending)
+    _corpus_auto = await get_app_setting("corpus_auto_analyze", "false")
+    if _corpus_auto == "true":
+        pending = await _corpus_worker.enqueue_pending()
+        if pending:
+            logger.info("corpus: авто-старт — %d сегментов добавлено в очередь", pending)
+    else:
+        logger.info("corpus: авто-анализ выключен (включить в Настройки → ИИ-конвейер)")
     yield
     stop_scheduler()
     await _online_mgr.stop_manager()

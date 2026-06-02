@@ -942,6 +942,7 @@ async def settings_page(request: Request):
     from llm.client import get_llm_settings
     registry = await analytics.get_equipment_registry()
     kb_list = _list_kb_paths(cfg.knowledge_base_path / "equipment")
+    corpus_auto = await analytics.get_app_setting("corpus_auto_analyze", "false")
     return templates.TemplateResponse(request, "settings.html", {
         "settings": cfg,
         "registry": registry,
@@ -949,6 +950,7 @@ async def settings_page(request: Request):
         "timezone_choices": TIMEZONE_CHOICES,
         "current_timezone": get_tz().key,
         "llm": get_llm_settings(),
+        "corpus_auto_analyze": corpus_auto == "true",
     })
 
 
@@ -969,6 +971,15 @@ async def update_llm_settings(
     await analytics.set_app_setting("llm_num_ctx",      str(llm_num_ctx))
     await analytics.set_app_setting("llm_system_prompt", llm_system_prompt)
     logger.info("LLM настройки сохранены: model=%s", llm_model)
+    return RedirectResponse(url="/settings", status_code=303)
+
+
+@router.post("/settings/corpus-toggle")
+async def corpus_toggle(enabled: str = Form("off")):
+    """Включить / выключить авто-анализ Claude-конвейера."""
+    value = "true" if enabled == "on" else "false"
+    await analytics.set_app_setting("corpus_auto_analyze", value)
+    logger.info("corpus авто-анализ: %s", "включён" if value == "true" else "выключен")
     return RedirectResponse(url="/settings", status_code=303)
 
 
@@ -1295,6 +1306,22 @@ async def online_calendar(
     )
     obs = await odb.get_observation(router_sn, equip_type, panel_id)
 
+    # Загружаем статусы Claude-анализа для всех сегментов месяца одним запросом
+    all_seg_ids = [
+        seg["id"]
+        for row in grid for cell in row
+        if cell is not None
+        for seg in cell.get("segments", [])
+        if seg.get("id") is not None
+    ]
+    ai_statuses: dict[int, dict] = {}
+    if all_seg_ids:
+        try:
+            from corpus.db import get_analyses_for_segments
+            ai_statuses = await get_analyses_for_segments(all_seg_ids)
+        except Exception as _ae:
+            logger.debug("corpus статусы недоступны: %s", _ae)
+
     return templates.TemplateResponse(request, "online_calendar.html", {
         "router_sn":        router_sn,
         "equip_type":       equip_type,
@@ -1313,6 +1340,7 @@ async def online_calendar(
         "run_state_labels": _RUN_STATE_LABELS,
         "coking_colors":    _COKING_COLORS,
         "cause_close_ru":   _CAUSE_CLOSE_RU,
+        "ai_statuses":      ai_statuses,
     })
 
 

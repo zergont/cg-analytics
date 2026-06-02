@@ -23,6 +23,17 @@
 .seg-vicon-ok      { color:#198754; }
 .seg-vicon-warning { color:#856404; }
 .seg-vicon-alarm   { color:#dc3545; }
+/* AI-кружок */
+.ai-badge { position:absolute; bottom:3px; right:4px;
+            width:16px; height:16px; border-radius:50%;
+            font-size:.55rem; font-weight:700; line-height:16px;
+            text-align:center; color:#fff; }
+.ai-norm    { background:#198754; }
+.ai-warn    { background:#856404; }
+.ai-alarm   { background:#dc3545; }
+.ai-proc    { background:#6c757d; animation:ai-pulse .9s ease-in-out infinite; }
+.ai-err     { background:#dc3545; opacity:.6; }
+@keyframes ai-pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
 /* run_state цвета */
 .rs-0  { background:#e9ecef; color:#495057; border-left:3px solid #adb5bd; }
 .rs-1  { background:#fff3cd; color:#664d03; border-left:3px solid #ffc107; }
@@ -127,6 +138,7 @@
     {% set cr_lv = cr.get("risk_level","GREEN") if cr else "GREEN" %}
 
     {% set vlv = seg.violation_level %}
+    {% set ai = ai_statuses.get(seg.id) if ai_statuses else none %}
     <a href="/online/segment/{{ seg.id }}"
        class="seg-event rs-{{ rs if rs is not none else 'na' }}{% if is_open %} seg-event-open{% endif %}">
       {# Иконка статуса нарушений #}
@@ -136,6 +148,22 @@
         <span class="seg-vicon seg-vicon-warning" title="Выявлены нарушения (WARNING)">⚠</span>
       {% elif vlv == "alarm" %}
         <span class="seg-vicon seg-vicon-alarm" title="Выявлены нарушения (ALARM)">❗</span>
+      {% endif %}
+      {# AI-кружок #}
+      {% if ai %}
+        {% if ai.status == 'done' %}
+          {% if ai.alarm_level in ['ALARM','SHUTDOWN'] %}
+            <span class="ai-badge ai-alarm" title="Claude: {{ ai.verdict }}">AI</span>
+          {% elif ai.alarm_level == 'WARNING' %}
+            <span class="ai-badge ai-warn" title="Claude: {{ ai.verdict }}">AI</span>
+          {% else %}
+            <span class="ai-badge ai-norm" title="Claude: норма">AI</span>
+          {% endif %}
+        {% elif ai.status in ['queued','processing'] %}
+          <span class="ai-badge ai-proc" title="Claude: анализируется…">AI</span>
+        {% elif ai.status == 'error' %}
+          <span class="ai-badge ai-err" title="Claude: ошибка">AI</span>
+        {% endif %}
       {% endif %}
       {# Время #}
       <div>

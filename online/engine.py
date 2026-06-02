@@ -39,17 +39,33 @@ def _tz_utc(ts: datetime) -> datetime:
 def _enqueue_segment(seg_id: int | None) -> None:
     """Добавить закрытый сегмент в очередь Claude-анализа (Этап 2).
 
-    Fire-and-forget: если воркер не запущен — молча пропускаем.
+    Fire-and-forget: если воркер не запущен или авто-анализ выключен — молча пропускаем.
     """
     if seg_id is None:
         return
     try:
+        import asyncio as _aio
         from corpus.worker import get_worker, PRIORITY_NORMAL
+
         worker = get_worker()
-        if worker:
-            worker.enqueue(seg_id, PRIORITY_NORMAL)
+        if not worker:
+            return
+
+        # Проверяем флаг авто-анализа (асинхронно в текущем event loop)
+        async def _check_and_enqueue():
+            try:
+                from db.analytics import get_app_setting
+                flag = await get_app_setting("corpus_auto_analyze", "false")
+                if flag == "true":
+                    worker.enqueue(seg_id, PRIORITY_NORMAL)
+            except Exception:
+                pass
+
+        loop = _aio.get_event_loop()
+        if loop.is_running():
+            _aio.ensure_future(_check_and_enqueue())
     except Exception:
-        pass  # corpus модуль может отсутствовать в тестовом окружении
+        pass
 
 
 def _make_seg_hint(db_row: dict):

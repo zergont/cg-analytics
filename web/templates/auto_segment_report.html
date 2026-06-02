@@ -163,12 +163,22 @@
       </div>
       <div class="card-body py-2">
         {% if ca_status == 'done' %}
-          <div class="small text-muted mb-2">
-            <span title="Токены">🔢 {{ ca.tokens_used or '—' }}</span> ·
-            <span title="Вызовов тулов">🔧 {{ ca.tool_calls_count or 0 }}</span> ·
-            <span title="Время генерации">⏱ {{ "%.1f"|format(ca.generation_time_sec or 0) }}с</span>
-          </div>
-          <button class="btn btn-primary btn-sm w-100 mb-1" onclick="showPanel('agent')">
+          <table class="table table-sm mb-2" style="font-size:.75rem">
+            <tr><td class="text-muted py-0">Вердикт</td>
+                <td class="py-0 fw-semibold">{{ ca.verdict or '—' }}</td></tr>
+            <tr><td class="text-muted py-0">Уровень</td>
+                <td class="py-0">{{ ca.alarm_level or 'нет' }}</td></tr>
+            <tr><td class="text-muted py-0">Токены</td>
+                <td class="py-0">
+                  {% set dbg = ca.debug_json if ca.debug_json is mapping else {} %}
+                  {{ dbg.get('tokens_input', '—') }} вх / {{ dbg.get('tokens_output', '—') }} вых
+                </td></tr>
+            <tr><td class="text-muted py-0">Тулы / петли</td>
+                <td class="py-0">{{ ca.tool_calls_count or 0 }} / {{ ca.loops_count or 1 }}</td></tr>
+            <tr><td class="text-muted py-0">Время</td>
+                <td class="py-0">{{ "%.1f"|format(ca.generation_time_sec or 0) }} с</td></tr>
+          </table>
+          <button class="btn btn-primary btn-sm w-100 mb-1" onclick="showPanel('claude')">
             Показать заключение
           </button>
           <form method="post" action="/online/segment/{{ seg.id }}/analyze">
@@ -200,15 +210,23 @@
       </div>
     </div>
 
-    {# ── qwen ИИ-анализ (локальный, потоковый) ── #}
+    {# ── qwen — очеловечивание заключения Claude ── #}
+    {% set has_claude = claude_analysis and claude_analysis.status == 'done' and claude_analysis.conclusion_md %}
     <div class="card border-success mt-2">
       <div class="card-header fw-semibold bg-success-subtle py-2">🤖 qwen (локальный)</div>
       <div class="card-body py-2">
-        <p class="small text-muted mb-2">Прямой стриминг через локальную LLM.</p>
-        <button class="btn btn-success btn-sm w-100" id="agentBtn" onclick="runAgent()">
-          Отправить агенту →
-        </button>
-        <div id="agentStatus" class="mt-2 small text-muted" style="display:none"></div>
+        {% if has_claude %}
+          <p class="small text-muted mb-2">Переписать заключение Claude в прозу для оператора.</p>
+          <button class="btn btn-success btn-sm w-100" id="qwenBtn" onclick="sendToQwen()">
+            Отправить в qwen →
+          </button>
+        {% else %}
+          <p class="small text-muted mb-2">Сначала запустите Claude-анализ.</p>
+          <button class="btn btn-success btn-sm w-100" disabled>
+            Отправить в qwen →
+          </button>
+        {% endif %}
+        <div id="qwenStatus" class="mt-2 small text-muted" style="display:none"></div>
       </div>
     </div>
     {% endif %}
@@ -292,13 +310,17 @@
         <button class="btn btn-sm btn-outline-secondary" onclick="showPanel('raw')" id="tabRaw">
           Сырой текст
         </button>
-        <button class="btn btn-sm btn-outline-success" onclick="showPanel('agent')" id="tabAgent" disabled>
-          🤖 Заключение
+        <button class="btn btn-sm btn-outline-primary" onclick="showPanel('claude')" id="tabClaude"
+          {% if not (claude_analysis and claude_analysis.status == 'done' and claude_analysis.humanized_md) %}disabled{% endif %}>
+          ✨ Claude
+        </button>
+        <button class="btn btn-sm btn-outline-success" onclick="showPanel('qwen')" id="tabQwen">
+          🤖 qwen
         </button>
         <button class="btn btn-sm btn-outline-secondary" onclick="copyMd()">
           📋 Копировать
         </button>
-        <a href="/online/segment/{{ seg.id }}/md" class="btn btn-sm btn-outline-primary">
+        <a href="/online/segment/{{ seg.id }}/md" class="btn btn-sm btn-outline-secondary">
           ↓ MD
         </a>
       </div>
@@ -312,8 +334,11 @@
       <textarea id="rawMd" class="form-control font-monospace w-100 h-100"
                 style="font-size:.78rem;resize:none;white-space:pre-wrap" readonly></textarea>
     </div>
-    <div id="agentBlock" class="border rounded p-3 bg-white overflow-auto flex-grow-1" style="display:none">
-      <div id="agentContent"></div>
+    <div id="claudeBlock" class="border rounded p-3 bg-white overflow-auto flex-grow-1" style="display:none">
+      <div id="claudeContent" class="text-muted fst-italic">Заключение Claude не загружено.</div>
+    </div>
+    <div id="qwenBlock" class="border rounded p-3 bg-white overflow-auto flex-grow-1" style="display:none">
+      <div id="qwenContent" class="text-muted fst-italic">Нажмите «Отправить в qwen» в левой панели.</div>
     </div>
 
     {# Скрытый источник MD для JS #}
@@ -330,13 +355,40 @@
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script>
 const _md = document.getElementById('reportMdSrc').textContent;
+{% if claude_analysis and claude_analysis.status == 'done' and claude_analysis.conclusion_md %}
+const _conclusionMd = {{ claude_analysis.conclusion_md | tojson }};
+{% else %}
+const _conclusionMd = null;
+{% endif %}
+{% if claude_analysis and claude_analysis.status == 'done' and claude_analysis.humanized_md %}
+const _humanizedMd = {{ claude_analysis.humanized_md | tojson }};
+{% else %}
+const _humanizedMd = null;
+{% endif %}
+
+// ── Рендер Markdown ──────────────────────────────────────────────────────
+function _renderMd(text) {
+  if (!text) return '';
+  return typeof marked !== 'undefined'
+    ? marked.parse(text)
+    : '<pre style="white-space:pre-wrap;font-size:.85rem">' + text.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</pre>';
+}
+
+// ── Переключение панелей ─────────────────────────────────────────────────
+const _panels = {
+  md:     {block: 'mdRendered', tab: 'tabMd'},
+  raw:    {block: 'rawBlock',   tab: 'tabRaw'},
+  claude: {block: 'claudeBlock',tab: 'tabClaude'},
+  qwen:   {block: 'qwenBlock',  tab: 'tabQwen'},
+};
 
 function showPanel(p) {
-  document.getElementById('mdRendered').style.display  = p === 'md'    ? '' : 'none';
-  document.getElementById('rawBlock').style.display    = p === 'raw'   ? '' : 'none';
-  document.getElementById('agentBlock').style.display  = p === 'agent' ? '' : 'none';
-  ['tabMd','tabRaw','tabAgent'].forEach(id => document.getElementById(id).classList.remove('active'));
-  document.getElementById('tab' + p.charAt(0).toUpperCase() + p.slice(1)).classList.add('active');
+  Object.entries(_panels).forEach(([key, ids]) => {
+    const block = document.getElementById(ids.block);
+    const tab   = document.getElementById(ids.tab);
+    if (block) block.style.display = key === p ? '' : 'none';
+    if (tab)   tab.classList.toggle('active', key === p);
+  });
 }
 
 function copyMd() {
@@ -347,60 +399,47 @@ function copyMd() {
   });
 }
 
-// Рендер Markdown при загрузке
+// ── Инициализация при загрузке ───────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
-  if (typeof marked !== 'undefined' && _md.trim()) {
-    marked.setOptions({breaks: true, gfm: true});
-    document.getElementById('mdContent').innerHTML = marked.parse(_md);
-    document.getElementById('rawMd').value = _md;
-  } else {
-    document.getElementById('mdContent').innerHTML =
-      '<pre style="white-space:pre-wrap;font-size:.85rem">' +
-      _md.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</pre>';
-  }
+  // Аналитика
+  document.getElementById('mdContent').innerHTML = _renderMd(_md);
+  document.getElementById('rawMd').value = _md;
 
-  // Claude-анализ: заполнить вкладку «Заключение» если есть humanized_md
-  {% if claude_analysis and claude_analysis.status == 'done' and claude_analysis.humanized_md %}
-  const _claudeMd = {{ claude_analysis.humanized_md | tojson }};
-  const tabAgent = document.getElementById('tabAgent');
-  if (tabAgent) tabAgent.disabled = false;
-  const agentContent = document.getElementById('agentContent');
-  if (agentContent && _claudeMd) {
-    agentContent.innerHTML = typeof marked !== 'undefined'
-      ? marked.parse(_claudeMd)
-      : '<pre style="white-space:pre-wrap">' + _claudeMd.replace(/</g,'&lt;') + '</pre>';
+  // Claude-заключение (humanized_md)
+  if (_humanizedMd) {
+    document.getElementById('claudeContent').innerHTML = _renderMd(_humanizedMd);
   }
-  {% endif %}
 
   // Автообновление пока идёт анализ
   {% if claude_analysis and claude_analysis.status in ['queued', 'processing'] %}
-  setTimeout(function() { location.reload(); }, 4000);
+  setTimeout(() => location.reload(), 4000);
   {% endif %}
 });
 
-// ── ИИ-анализ ──────────────────────────────────────────────────────────────
-async function runAgent() {
-  const btn = document.getElementById('agentBtn');
-  const status = document.getElementById('agentStatus');
-  btn.disabled = true;
-  btn.textContent = '⏳ Анализ…';
-  status.style.display = '';
-  status.textContent = 'Подключение к LLM…';
-  showPanel('agent');
-  document.getElementById('tabAgent').disabled = false;
+// ── qwen стриминг ────────────────────────────────────────────────────────
+async function sendToQwen() {
+  const btn    = document.getElementById('qwenBtn');
+  const status = document.getElementById('qwenStatus');
+  if (!_conclusionMd) return;
 
-  const ac = document.getElementById('agentContent');
-  ac.innerHTML = '<span class="streaming-cursor"></span>';
+  btn.disabled = true;
+  btn.textContent = '⏳ Отправляю…';
+  status.style.display = '';
+  status.textContent = 'Подключение к qwen…';
+  showPanel('qwen');
+
+  const qc = document.getElementById('qwenContent');
+  qc.innerHTML = '<span class="streaming-cursor"></span>';
   let text = '';
 
   try {
     const resp = await fetch('/analyze/run', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({markdown: _md}),
+      body: JSON.stringify({markdown: _conclusionMd}),
     });
     const reader = resp.body.getReader();
-    const dec = new TextDecoder();
+    const dec    = new TextDecoder();
     let buf = '';
 
     while (true) {
@@ -415,23 +454,21 @@ async function runAgent() {
           const d = JSON.parse(line.slice(6));
           if (d.token) {
             text += d.token;
-            ac.innerHTML = (typeof marked !== 'undefined'
-              ? marked.parse(text)
-              : '<pre>' + text + '</pre>') + '<span class="streaming-cursor"></span>';
+            qc.innerHTML = _renderMd(text) + '<span class="streaming-cursor"></span>';
           }
           if (d.done) {
-            ac.innerHTML = typeof marked !== 'undefined' ? marked.parse(text) : '<pre>' + text + '</pre>';
+            qc.innerHTML = _renderMd(text);
             status.textContent = 'Готово.';
           }
-          if (d.error) { ac.innerHTML = '<div class="alert alert-danger">' + d.error + '</div>'; }
+          if (d.error) { qc.innerHTML = '<div class="alert alert-danger">' + d.error + '</div>'; }
         } catch {}
       }
     }
   } catch(e) {
-    ac.innerHTML = '<div class="alert alert-danger">Ошибка: ' + e.message + '</div>';
+    qc.innerHTML = '<div class="alert alert-danger">Ошибка: ' + e.message + '</div>';
   } finally {
     btn.disabled = false;
-    btn.textContent = 'Отправить агенту →';
+    btn.textContent = 'Отправить в qwen →';
   }
 }
 </script>

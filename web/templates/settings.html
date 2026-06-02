@@ -28,6 +28,42 @@
         </div>
 
         <div class="card mb-3">
+            <div class="card-header fw-semibold d-flex align-items-center gap-2">
+                ✨ ИИ-конвейер (Claude API)
+            </div>
+            <div class="card-body">
+                <p class="small text-muted mb-3">
+                    При включённом авто-анализе каждый закрытый сегмент автоматически
+                    отправляется в очередь Claude API. При выключённом — только ручной прогон
+                    с кнопки на странице сегмента.
+                </p>
+                <form method="post" action="/settings/corpus-toggle" class="d-flex align-items-center gap-3">
+                    <div class="form-check form-switch mb-0">
+                        <input class="form-check-input" type="checkbox" role="switch"
+                               name="enabled" value="on" id="corpusAutoSwitch"
+                               {% if corpus_auto_analyze %}checked{% endif %}
+                               onchange="this.form.submit()">
+                        <label class="form-check-label" for="corpusAutoSwitch">
+                            {% if corpus_auto_analyze %}
+                                <span class="text-success fw-semibold">Авто-анализ включён</span>
+                            {% else %}
+                                <span class="text-muted">Авто-анализ выключен</span>
+                            {% endif %}
+                        </label>
+                    </div>
+                </form>
+                <div class="text-muted small mt-2">
+                    Модель: <code>{{ settings.anthropic_model }}</code> ·
+                    Макс. тулов: {{ settings.max_tool_calls }} ·
+                    Макс. токенов ответа: {{ settings.max_tokens }}
+                    {% if settings.anthropic_proxy %}
+                    · Прокси: <code>{{ settings.anthropic_proxy.split('@')[-1] if '@' in settings.anthropic_proxy else settings.anthropic_proxy }}</code>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <div class="card mb-3">
             <div class="card-header fw-semibold">🕐 Часовой пояс суток</div>
             <div class="card-body">
                 <p class="small text-muted mb-2">

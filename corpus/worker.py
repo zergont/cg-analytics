@@ -136,7 +136,7 @@ async def _process_segment(seg_id: int) -> None:
 
     if result["error"]:
         logger.error(
-            "corpus/worker: ошибка Claude-анализа #%d: %s", seg_id, result["error"]
+            "corpus API ERROR: сегмент #%d | ошибка=%s", seg_id, result["error"]
         )
         await corpus_db.upsert_analysis(seg_id, {**result, "status": "error"})
         return
@@ -155,8 +155,17 @@ async def _process_segment(seg_id: int) -> None:
     })
 
     logger.info(
-        "corpus/worker: сегмент #%d обработан ✓ (токены=%d, тулы=%d)",
-        seg_id, result.get("tokens_used", 0), result.get("tool_calls_count", 0),
+        "corpus API OK: сегмент #%d | вердикт=%s | уровень=%s | "
+        "токены=%d (вх=%d вых=%d) | тулы=%d | петли=%d | %.1fс",
+        seg_id,
+        result.get("verdict", "—"),
+        result.get("alarm_level", "—"),
+        result.get("tokens_used", 0),
+        result.get("debug_json", {}).get("tokens_input", 0),
+        result.get("debug_json", {}).get("tokens_output", 0),
+        result.get("tool_calls_count", 0),
+        result.get("loops_count", 0),
+        result.get("generation_time_sec", 0),
     )
 
 
