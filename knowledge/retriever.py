@@ -105,3 +105,48 @@ def invalidate_cache(kb_path: str | None = None) -> None:
         _index_cache.pop(kb_path.lower(), None)
     else:
         _index_cache.clear()
+
+
+def search_manual_docs(query: str, kb_path: str, top_k: int = 4) -> str:
+    """Семантический поиск по PDF-документации оборудования.
+
+    В отличие от retrieve_context(), формирует осмысленный текстовый запрос
+    и возвращает только чанки типа 'manual' (из PDF).
+    Используется инструментом search_manual в corpus/executor.py.
+    """
+    if not query or not kb_path:
+        return ""
+
+    try:
+        index = _get_index(kb_path)
+    except Exception as e:
+        logger.warning("search_manual_docs: индекс недоступен для %s: %s", kb_path, e)
+        return ""
+
+    try:
+        retriever = index.as_retriever(similarity_top_k=top_k * 3)  # берём с запасом, потом фильтруем
+        nodes = retriever.retrieve(query)
+
+        if not nodes:
+            return ""
+
+        sections = []
+        for node in nodes:
+            meta = node.metadata or {}
+            # Только документация (PDF-чанки), не регистры и не fault-биты
+            if meta.get("type") != "manual":
+                continue
+            content = html.unescape(node.get_content()).strip()
+            if not content:
+                continue
+            source = meta.get("source", "")
+            page = meta.get("page", "")
+            sections.append(f"[{source}, стр. {page}]\n{content}")
+            if len(sections) >= top_k:
+                break
+
+        return "\n\n---\n\n".join(sections) if sections else ""
+
+    except Exception as e:
+        logger.warning("search_manual_docs ошибка запроса: %s", e)
+        return ""

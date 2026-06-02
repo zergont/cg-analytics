@@ -36,6 +36,22 @@ def _tz_utc(ts: datetime) -> datetime:
     return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
 
 
+def _enqueue_segment(seg_id: int | None) -> None:
+    """Добавить закрытый сегмент в очередь Claude-анализа (Этап 2).
+
+    Fire-and-forget: если воркер не запущен — молча пропускаем.
+    """
+    if seg_id is None:
+        return
+    try:
+        from corpus.worker import get_worker, PRIORITY_NORMAL
+        worker = get_worker()
+        if worker:
+            worker.enqueue(seg_id, PRIORITY_NORMAL)
+    except Exception:
+        pass  # corpus модуль может отсутствовать в тестовом окружении
+
+
 def _make_seg_hint(db_row: dict):
     """Duck-typed хинт для prev_seg в to_markdown: извлекает run_state и run_state_label из DB-строки."""
     from types import SimpleNamespace
@@ -478,6 +494,7 @@ class OnlinePollEngine:
                 "report_md":          report_md,
             })
             # ← await выше = event loop обслужил API. Сигналим прогресс сразу.
+            _enqueue_segment(db_id)
             self.last_processed_to = seg_t_end
             self._prev_seg_hint = seg
 
@@ -541,7 +558,7 @@ class OnlinePollEngine:
                 except Exception:
                     report_md_rs = None
 
-                await online_db.insert_closed_segment({
+                _rs_db_id = await online_db.insert_closed_segment({
                     "router_sn":          self.router_sn,
                     "equip_type":         self.equip_type,
                     "panel_id":           self.panel_id,
@@ -557,6 +574,7 @@ class OnlinePollEngine:
                     "report_md":          report_md_rs,
                 })
                 # ← await выше = прогресс обновляется на каждой смене RUN_STATE
+                _enqueue_segment(_rs_db_id)
                 self.last_processed_to = seg_t_end_rs
                 self.cursor_ts = _tz_utc(datetime.fromisoformat(seg.t_end))
                 self.inherited_coking_risk = coking_risk

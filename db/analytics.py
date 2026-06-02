@@ -23,10 +23,12 @@ async def init_db() -> None:
 
     conn = await _connect()
     try:
-        for schema_file in ("schema.sql", "online_schema.sql"):
-            sql = (db_dir / schema_file).read_text(encoding="utf-8")
-            await conn.execute(sql)
-        logger.info("Схема аналитической БД применена (schema + online).")
+        for schema_file in ("schema.sql", "online_schema.sql", "corpus_schema.sql"):
+            schema_path = db_dir / schema_file
+            if schema_path.exists():
+                sql = schema_path.read_text(encoding="utf-8")
+                await conn.execute(sql)
+        logger.info("Схема аналитической БД применена (schema + online + corpus).")
     finally:
         await conn.close()
 

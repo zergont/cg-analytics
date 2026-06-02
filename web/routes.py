@@ -1374,6 +1374,15 @@ async def online_segment_detail(request: Request, seg_id: int):
         rs = prev_seg_raw.get("run_state")
         prev_run_state_label = _RUN_STATE_LABELS.get(rs, f"RUN_STATE={rs}") if rs is not None else None
 
+    # Загрузить анализ Claude (Этап 2) — только для закрытых сегментов
+    claude_analysis = None
+    if not is_open:
+        try:
+            from corpus.db import get_analysis as _get_analysis
+            claude_analysis = await _get_analysis(seg_id)
+        except Exception as _ce:
+            logger.debug("corpus: анализ для #%d недоступен: %s", seg_id, _ce)
+
     if is_open:
         # Открытый сегмент: показать текущие значения
         return templates.TemplateResponse(request, "auto_segment_report.html", {
@@ -1381,6 +1390,7 @@ async def online_segment_detail(request: Request, seg_id: int):
             "current_values": current_vals,
             "active_detections": active_dets,
             "coking_risk": coking_risk,
+            "claude_analysis": None,
             "prev_run_state_label": prev_run_state_label,
             "prev_nav": prev_nav,
             "next_nav": next_nav,
@@ -1437,6 +1447,7 @@ async def online_segment_detail(request: Request, seg_id: int):
     return templates.TemplateResponse(request, "auto_segment_report.html", {
         "seg": seg, "is_open": False,
         "run": run,
+        "claude_analysis": claude_analysis,
         "prev_run_state_label": prev_run_state_label,
         "prev_nav": prev_nav,
         "next_nav": next_nav,
@@ -1445,6 +1456,32 @@ async def online_segment_detail(request: Request, seg_id: int):
         "cause_close_ru": _CAUSE_CLOSE_RU,
         "tz_name": tz.key,
     })
+
+
+@router.post("/online/segment/{seg_id}/analyze")
+async def online_segment_analyze(seg_id: int):
+    """Поставить сегмент в очередь на ручной Claude-анализ (приоритетный)."""
+    from corpus.worker import get_worker, PRIORITY_MANUAL
+    from corpus.db import set_status as _set_status
+
+    worker = get_worker()
+    if not worker:
+        raise HTTPException(status_code=503, detail="Corpus worker не запущен")
+
+    await _set_status(seg_id, "queued")
+    worker.enqueue(seg_id, priority=PRIORITY_MANUAL)
+    logger.info("corpus: ручной анализ сегмента #%d поставлен в очередь", seg_id)
+    return RedirectResponse(f"/online/segment/{seg_id}", status_code=303)
+
+
+@router.get("/api/corpus/status")
+async def api_corpus_status():
+    """Статус воркера Claude-конвейера."""
+    from corpus.worker import get_worker
+    worker = get_worker()
+    if not worker:
+        return JSONResponse({"running": False, "processing_seg_id": None, "queue_size": 0})
+    return JSONResponse(worker.get_status())
 
 
 @router.get("/online/segment/{seg_id}/md")

@@ -18,6 +18,8 @@ class Settings:
         self.anthropic_model: str = ant.get("model", "claude-sonnet-4-6")
         self.max_tool_calls: int = int(ant.get("max_tool_calls", 10))
         self.max_tokens: int = int(ant.get("max_tokens", 8096))
+        # Опциональный HTTP-прокси для доступа к Anthropic API (например через tinyproxy)
+        self.anthropic_proxy: str | None = ant.get("proxy") or None
 
         sched = data.get("schedule", {})
         self.schedule_hour: int = int(sched.get("hour", 21))

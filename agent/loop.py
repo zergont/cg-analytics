@@ -27,7 +27,9 @@ async def run(ctx: "RunContext") -> dict[str, Any]:
             "tool_calls_count": int,
         }
     """
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    import httpx as _httpx
+    _http = _httpx.Client(proxy=settings.anthropic_proxy) if settings.anthropic_proxy else None
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key, http_client=_http)
 
     # RAG: извлечь релевантные описания регистров и fault-кодов
     active_addrs = list(ctx.history_series.keys())

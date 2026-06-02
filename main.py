@@ -51,9 +51,18 @@ async def lifespan(app: FastAPI):
     # Запустить онлайн-мониторинг (Этап 1.5)
     mgr = _online_mgr.init_manager()
     await mgr.start_all_running()
+    # Запустить Claude-конвейер (Этап 2)
+    import asyncio as _asyncio
+    from corpus.worker import init_worker as _init_worker
+    _corpus_worker = _init_worker()
+    _corpus_worker._task = _asyncio.create_task(_corpus_worker.run())
+    pending = await _corpus_worker.enqueue_pending()
+    if pending:
+        logger.info("corpus: %d исторических сегментов добавлено в очередь", pending)
     yield
     stop_scheduler()
     await _online_mgr.stop_manager()
+    await _corpus_worker.stop()
     await close_source_pool()
     logger.info("═══ cg-analytics остановлен ═══")
 

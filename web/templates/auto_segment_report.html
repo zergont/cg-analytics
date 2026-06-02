@@ -145,11 +145,66 @@
     {% endif %}
 
     {% if not is_open %}
-    {# ИИ-анализ (только для закрытых) #}
-    <div class="card border-success">
-      <div class="card-header fw-semibold bg-success-subtle py-2">🤖 ИИ-анализ</div>
+    {# ── Claude-анализ (Этап 2) ── #}
+    {% set ca = claude_analysis %}
+    {% set ca_status = ca.status if ca else None %}
+    <div class="card border-primary mt-2">
+      <div class="card-header fw-semibold bg-primary-subtle py-2 d-flex align-items-center gap-2">
+        ✨ Claude-анализ
+        {% if ca_status == 'done' %}
+          <span class="badge bg-success ms-auto">✓ Готово</span>
+        {% elif ca_status == 'processing' %}
+          <span class="badge bg-warning text-dark ms-auto">⏳ Анализирую…</span>
+        {% elif ca_status == 'queued' %}
+          <span class="badge bg-secondary ms-auto">⏳ В очереди</span>
+        {% elif ca_status == 'error' %}
+          <span class="badge bg-danger ms-auto">✗ Ошибка</span>
+        {% endif %}
+      </div>
       <div class="card-body py-2">
-        <p class="small text-muted mb-2">Отправить отчёт сегмента локальной LLM.</p>
+        {% if ca_status == 'done' %}
+          <div class="small text-muted mb-2">
+            <span title="Токены">🔢 {{ ca.tokens_used or '—' }}</span> ·
+            <span title="Вызовов тулов">🔧 {{ ca.tool_calls_count or 0 }}</span> ·
+            <span title="Время генерации">⏱ {{ "%.1f"|format(ca.generation_time_sec or 0) }}с</span>
+          </div>
+          <button class="btn btn-primary btn-sm w-100 mb-1" onclick="showPanel('agent')">
+            Показать заключение
+          </button>
+          <form method="post" action="/online/segment/{{ seg.id }}/analyze">
+            <button class="btn btn-outline-secondary btn-sm w-100" type="submit">
+              Перепрогнать
+            </button>
+          </form>
+        {% elif ca_status in ['processing', 'queued'] %}
+          <div class="small text-muted" id="claudePollingMsg">
+            Страница обновится автоматически…
+          </div>
+        {% elif ca_status == 'error' %}
+          <div class="small text-danger mb-2" style="word-break:break-word">
+            {{ ca.error or 'Неизвестная ошибка' }}
+          </div>
+          <form method="post" action="/online/segment/{{ seg.id }}/analyze">
+            <button class="btn btn-outline-primary btn-sm w-100" type="submit">
+              Повторить
+            </button>
+          </form>
+        {% else %}
+          <p class="small text-muted mb-2">Анализ через Claude API с базой знаний.</p>
+          <form method="post" action="/online/segment/{{ seg.id }}/analyze">
+            <button class="btn btn-primary btn-sm w-100" type="submit">
+              Анализировать →
+            </button>
+          </form>
+        {% endif %}
+      </div>
+    </div>
+
+    {# ── qwen ИИ-анализ (локальный, потоковый) ── #}
+    <div class="card border-success mt-2">
+      <div class="card-header fw-semibold bg-success-subtle py-2">🤖 qwen (локальный)</div>
+      <div class="card-body py-2">
+        <p class="small text-muted mb-2">Прямой стриминг через локальную LLM.</p>
         <button class="btn btn-success btn-sm w-100" id="agentBtn" onclick="runAgent()">
           Отправить агенту →
         </button>
@@ -303,6 +358,24 @@ window.addEventListener('DOMContentLoaded', () => {
       '<pre style="white-space:pre-wrap;font-size:.85rem">' +
       _md.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</pre>';
   }
+
+  // Claude-анализ: заполнить вкладку «Заключение» если есть humanized_md
+  {% if claude_analysis and claude_analysis.status == 'done' and claude_analysis.humanized_md %}
+  const _claudeMd = {{ claude_analysis.humanized_md | tojson }};
+  const tabAgent = document.getElementById('tabAgent');
+  if (tabAgent) tabAgent.disabled = false;
+  const agentContent = document.getElementById('agentContent');
+  if (agentContent && _claudeMd) {
+    agentContent.innerHTML = typeof marked !== 'undefined'
+      ? marked.parse(_claudeMd)
+      : '<pre style="white-space:pre-wrap">' + _claudeMd.replace(/</g,'&lt;') + '</pre>';
+  }
+  {% endif %}
+
+  // Автообновление пока идёт анализ
+  {% if claude_analysis and claude_analysis.status in ['queued', 'processing'] %}
+  setTimeout(function() { location.reload(); }, 4000);
+  {% endif %}
 });
 
 // ── ИИ-анализ ──────────────────────────────────────────────────────────────
