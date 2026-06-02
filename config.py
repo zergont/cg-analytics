@@ -12,6 +12,7 @@ class Settings:
         db = data.get("databases", {})
         self.source_db_url: str = db["source"]
         self.analytics_db_url: str = db["analytics"]
+        self.source_query_timeout: int = int(db.get("source_query_timeout", 120))
 
         ant = data.get("anthropic", {})
         self.anthropic_api_key: str = ant["api_key"]

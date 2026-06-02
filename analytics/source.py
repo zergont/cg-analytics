@@ -17,11 +17,12 @@ import asyncpg
 from config import settings
 
 _pool: asyncpg.Pool | None = None
-_QUERY_TIMEOUT_SEC = 120  # увеличен: catch-up окна в 2+ суток по WireGuard
+_QUERY_TIMEOUT_SEC: int = 120  # переопределяется из config при init_source_pool()
 
 
 async def init_source_pool() -> None:
-    global _pool
+    global _pool, _QUERY_TIMEOUT_SEC
+    _QUERY_TIMEOUT_SEC = settings.source_query_timeout
     _pool = await asyncpg.create_pool(
         settings.source_db_url,
         min_size=1,

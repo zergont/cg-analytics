@@ -10,6 +10,8 @@ databases:
   source: postgresql://user:pass@192.168.1.10:5432/telemetry
   # Аналитическая БД (отдельный инстанс PostgreSQL + pgvector)
   analytics: postgresql://analytics:pass@localhost:5432/analytics
+  # Таймаут запросов к source БД (сек). Увеличьте при catch-up окнах >1 суток через WAN/VPN.
+  source_query_timeout: 120
 
 # ── Anthropic API ─────────────────────────────────────────────────────────────
 anthropic:
