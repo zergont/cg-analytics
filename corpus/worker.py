@@ -141,16 +141,11 @@ async def _process_segment(seg_id: int) -> None:
         await corpus_db.upsert_analysis(seg_id, {**result, "status": "error"})
         return
 
-    # 5. Очеловечить через qwen (некритично — при ошибке пустая строка)
-    humanized = ""
-    if result["conclusion_md"]:
-        humanized = await humanize(result["conclusion_md"])
-
-    # 6. Сохранить финальный результат
+    # 5. Сохранить результат (qwen-очеловечивание — только по кнопке из UI)
     await corpus_db.upsert_analysis(seg_id, {
         **result,
         "status":             "done",
-        "humanized_md":       humanized,
+        "humanized_md":       None,
         "analytics_version":  ANALYTICS_VERSION,
     })
 

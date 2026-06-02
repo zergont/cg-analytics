@@ -169,10 +169,7 @@
             <tr><td class="text-muted py-0">Уровень</td>
                 <td class="py-0">{{ ca.alarm_level or 'нет' }}</td></tr>
             <tr><td class="text-muted py-0">Токены</td>
-                <td class="py-0">
-                  {% set dbg = ca.debug_json if ca.debug_json is mapping else {} %}
-                  {{ dbg.get('tokens_input', '—') }} вх / {{ dbg.get('tokens_output', '—') }} вых
-                </td></tr>
+                <td class="py-0">{{ ca.tokens_used or '—' }}</td></tr>
             <tr><td class="text-muted py-0">Тулы / петли</td>
                 <td class="py-0">{{ ca.tool_calls_count or 0 }} / {{ ca.loops_count or 1 }}</td></tr>
             <tr><td class="text-muted py-0">Время</td>
