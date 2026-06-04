@@ -7,6 +7,54 @@
   <span class="text-muted" style="font-size:0.8rem" id="status-ts"></span>
 </div>
 
+<!-- ── ИИ-конвейер ─────────────────────────────────────────────────────── -->
+<div class="card mb-3">
+  <div class="card-body py-2">
+    <div class="d-flex align-items-center gap-4 flex-wrap">
+      <span class="fw-semibold text-muted" style="font-size:0.85rem">⚡ ИИ-конвейер:</span>
+
+      <!-- Claude -->
+      <form method="post" action="/online/corpus-toggle" class="d-inline mb-0">
+        <div class="form-check form-switch mb-0 d-inline-flex align-items-center gap-2">
+          <input class="form-check-input" type="checkbox" role="switch"
+                 name="enabled" value="on" id="monCorpusSwitch"
+                 {% if corpus_auto_analyze %}checked{% endif %}
+                 onchange="this.form.submit()">
+          <label class="form-check-label" for="monCorpusSwitch" style="font-size:0.85rem">
+            {% if corpus_auto_analyze %}
+              <span class="text-success fw-semibold">Claude — вкл</span>
+            {% else %}
+              <span class="text-muted">Claude — выкл</span>
+            {% endif %}
+          </label>
+        </div>
+      </form>
+      <small class="text-muted" id="claude-status-badge">—</small>
+
+      <div class="vr"></div>
+
+      <!-- Qwen -->
+      <form method="post" action="/online/qwen-toggle" class="d-inline mb-0">
+        <div class="form-check form-switch mb-0 d-inline-flex align-items-center gap-2">
+          <input class="form-check-input" type="checkbox" role="switch"
+                 name="enabled" value="on" id="monQwenSwitch"
+                 {% if qwen_auto_analyze %}checked{% endif %}
+                 onchange="this.form.submit()">
+          <label class="form-check-label" for="monQwenSwitch" style="font-size:0.85rem">
+            {% if qwen_auto_analyze %}
+              <span class="text-success fw-semibold">Qwen — вкл</span>
+            {% else %}
+              <span class="text-muted">Qwen — выкл</span>
+            {% endif %}
+          </label>
+        </div>
+      </form>
+      <small class="text-muted" id="qwen-status-badge">—</small>
+    </div>
+  </div>
+</div>
+
+<!-- ── Таблица наблюдений ─────────────────────────────────────────────── -->
 {% if observations %}
 <div class="table-responsive mb-4">
   <table class="table table-hover align-middle">
@@ -33,7 +81,6 @@
         {% if obs.model %}<br><small class="text-muted">{{ obs.manufacturer or "" }} {{ obs.model }}</small>{% endif %}
       </td>
 
-      <!-- Прогресс / статус (обновляется JS) -->
       <td style="min-width:200px">
         {% if obs.status == "running" %}
           <div class="progress-cell">
@@ -112,61 +159,143 @@
   </table>
 </div>
 {% else %}
-<div class="alert alert-info">Нет активных наблюдений. Добавьте машину ниже.</div>
+<div class="alert alert-info mb-4">Нет активных наблюдений. Добавьте машины ниже.</div>
 {% endif %}
 
-<!-- ── Новое наблюдение ────────────────────────────────────────────────── -->
-<div class="card" style="max-width:580px">
-  <div class="card-header fw-semibold">Запустить наблюдение</div>
+<!-- ── Запустить наблюдение ───────────────────────────────────────────── -->
+{% set active_eq = equipment | selectattr("active") | list %}
+{% set running_keys = observations | selectattr("status", "equalto", "running")
+     | map(attribute="router_sn") | list %}
+
+<div class="card" style="max-width:680px">
+  <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
+    Запустить наблюдение
+    {% if active_eq %}
+    <div class="d-flex gap-2">
+      <button type="button" class="btn btn-sm btn-outline-secondary" onclick="selectAllMachines(true)">Выбрать все</button>
+      <button type="button" class="btn btn-sm btn-outline-secondary" onclick="selectAllMachines(false)">Снять</button>
+    </div>
+    {% endif %}
+  </div>
   <div class="card-body">
-    <form method="post" action="/online/start">
-      <div class="mb-3">
-        <label class="form-label">Машина</label>
-        <select name="router_sn" id="eq-select" class="form-select" required
-                onchange="fillEquipFields(this)">
-          <option value="">— выберите —</option>
-          {% for eq in equipment %}
-          <option value="{{ eq.router_sn }}"
-                  data-type="{{ eq.equip_type }}"
-                  data-panel="{{ eq.panel_id }}">
-            {{ eq.name or eq.router_sn }} ({{ eq.equip_type }}/{{ eq.panel_id }})
-          </option>
-          {% endfor %}
-        </select>
-        <input type="hidden" name="equip_type" id="eq-type">
-        <input type="hidden" name="panel_id"   id="eq-panel">
+    {% if not active_eq %}
+      <p class="text-muted small mb-0">Нет активных машин в реестре. Включите оборудование в разделе «Настройки».</p>
+    {% else %}
+      <!-- Список машин -->
+      <div class="mb-3" id="machine-list">
+        {% for eq in active_eq %}
+        {% set eq_key = eq.router_sn ~ "|" ~ eq.equip_type ~ "|" ~ eq.panel_id %}
+        {% set is_running = observations | selectattr("router_sn", "equalto", eq.router_sn)
+               | selectattr("equip_type", "equalto", eq.equip_type)
+               | selectattr("status", "equalto", "running") | list | length > 0 %}
+        <div class="form-check mb-1">
+          <input class="form-check-input machine-cb" type="checkbox"
+                 id="eq-{{ loop.index }}"
+                 data-sn="{{ eq.router_sn }}"
+                 data-type="{{ eq.equip_type }}"
+                 data-panel="{{ eq.panel_id }}"
+                 {% if is_running %}disabled title="Уже запущено"{% endif %}>
+          <label class="form-check-label" for="eq-{{ loop.index }}"
+                 style="font-size:0.9rem{% if is_running %}; color:#6c757d{% endif %}">
+            {{ eq.name or eq.router_sn }}
+            <small class="text-muted">{{ eq.equip_type }}/{{ eq.panel_id }}
+              {% if eq.manufacturer %} · {{ eq.manufacturer }} {{ eq.model or "" }}{% endif %}
+            </small>
+            {% if is_running %}<span class="badge bg-success ms-1" style="font-size:0.7rem">● работает</span>{% endif %}
+          </label>
+        </div>
+        {% endfor %}
       </div>
-      <div class="mb-3">
-        <label class="form-label">Стартовая дата <small class="text-muted">(batch-добор с этой точки)</small></label>
-        <input type="datetime-local" name="start_date_local" class="form-control"
-               value="{{ now_local }}" required>
-        <div class="form-text text-warning">
-          Если у машины уже есть сегменты — дата игнорируется, продолжение с последней точки.
-          Для рестарта с новой даты сначала очистите сегменты в разделе «Календарь».
+
+      <div class="row g-3 align-items-end">
+        <div class="col-sm-7">
+          <label class="form-label small fw-semibold mb-1">
+            Стартовая дата
+            <span class="text-muted fw-normal">(batch-добор с этой точки)</span>
+          </label>
+          <input type="datetime-local" id="start-date-input" class="form-control form-control-sm"
+                 value="{{ now_local }}" required>
+          <div class="form-text text-warning" style="font-size:0.75rem">
+            Если у машины уже есть сегменты — дата игнорируется, продолжение с последней точки.
+          </div>
+        </div>
+        <div class="col-sm-3">
+          <label class="form-label small fw-semibold mb-1">Интервал опроса, с</label>
+          <input type="number" id="poll-interval-input" class="form-control form-control-sm"
+                 value="30" min="5" max="300">
+        </div>
+        <div class="col-sm-2">
+          <button type="button" class="btn btn-success btn-sm w-100" onclick="startSelected()">
+            Пуск онлайн
+          </button>
         </div>
       </div>
-      <div class="mb-3">
-        <label class="form-label">Интервал опроса, с</label>
-        <input type="number" name="poll_interval_sec" class="form-control"
-               value="30" min="5" max="300" style="width:120px">
-      </div>
-      <button type="submit" class="btn btn-success">Пуск онлайн</button>
-    </form>
+      <div id="start-multi-result" class="mt-2" style="display:none"></div>
+    {% endif %}
   </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-function fillEquipFields(sel) {
-  const opt = sel.options[sel.selectedIndex];
-  document.getElementById('eq-type').value  = opt.dataset.type  || '';
-  document.getElementById('eq-panel').value = opt.dataset.panel || '';
-}
-
 const RUN_STATE_LABELS = {{ run_state_labels | tojson }};
 const COKING_COLORS    = {{ coking_colors    | tojson }};
 
+// ── Запуск нескольких машин ──────────────────────────────────────────────
+function selectAllMachines(state) {
+  document.querySelectorAll('.machine-cb:not(:disabled)').forEach(cb => cb.checked = state);
+}
+
+async function startSelected() {
+  const checked = [...document.querySelectorAll('.machine-cb:checked:not(:disabled)')];
+  if (!checked.length) {
+    alert('Выберите хотя бы одну машину.');
+    return;
+  }
+  const startDate   = document.getElementById('start-date-input').value;
+  const pollInterval = parseInt(document.getElementById('poll-interval-input').value) || 30;
+
+  const machines = checked.map(cb => ({
+    router_sn:  cb.dataset.sn,
+    equip_type: cb.dataset.type,
+    panel_id:   cb.dataset.panel,
+  }));
+
+  const btn = document.querySelector('[onclick="startSelected()"]');
+  btn.disabled = true;
+  btn.textContent = 'Запуск…';
+
+  try {
+    const resp = await fetch('/online/start-multi', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        machines,
+        start_date_local:  startDate,
+        poll_interval_sec: pollInterval,
+      }),
+    });
+    const result = await resp.json();
+    const div = document.getElementById('start-multi-result');
+    if (result.errors && result.errors.length) {
+      div.innerHTML = `<div class="alert alert-warning alert-sm py-1 px-2 mb-0" style="font-size:0.8rem">
+        Запущено: ${result.started}. Ошибки: ${result.errors.join('; ')}</div>`;
+      div.style.display = '';
+    }
+    if (result.started > 0) {
+      setTimeout(() => location.reload(), 800);
+    } else {
+      btn.disabled = false;
+      btn.textContent = 'Пуск онлайн';
+    }
+  } catch(e) {
+    alert('Ошибка запроса: ' + e);
+    btn.disabled = false;
+    btn.textContent = 'Пуск онлайн';
+  }
+}
+
+// ── Утилиты ──────────────────────────────────────────────────────────────
 function fmtDur(sec) {
   sec = Math.round(sec);
   if (sec < 0) return '0 с';
@@ -182,6 +311,41 @@ function fmtTs(iso) {
                                     hour:'2-digit',minute:'2-digit',second:'2-digit'});
 }
 
+// ── Статус воркеров ───────────────────────────────────────────────────────
+async function refreshPipelineStatus() {
+  try {
+    const r = await fetch('/api/pipeline/status');
+    const d = await r.json();
+
+    // Claude
+    const cb = document.getElementById('claude-status-badge');
+    if (cb) {
+      const c = d.claude;
+      if (c.processing_seg_id) {
+        cb.innerHTML = `<span class="badge bg-primary" style="font-size:0.72rem">▶ сег. #${c.processing_seg_id}</span>`;
+      } else if (c.queue_size > 0) {
+        cb.innerHTML = `<span class="badge bg-secondary" style="font-size:0.72rem">очередь: ${c.queue_size}</span>`;
+      } else {
+        cb.textContent = 'простаивает';
+      }
+    }
+
+    // Qwen
+    const qb = document.getElementById('qwen-status-badge');
+    if (qb) {
+      const q = d.qwen;
+      if (q.processing_seg_id) {
+        qb.innerHTML = `<span class="badge bg-primary" style="font-size:0.72rem">▶ сег. #${q.processing_seg_id}</span>`;
+      } else if (q.queue_size > 0) {
+        qb.innerHTML = `<span class="badge bg-secondary" style="font-size:0.72rem">очередь: ${q.queue_size}</span>`;
+      } else {
+        qb.textContent = 'простаивает';
+      }
+    }
+  } catch(e) {}
+}
+
+// ── Статус наблюдений ─────────────────────────────────────────────────────
 async function refreshStatus() {
   try {
     const r = await fetch('/api/online/status');
@@ -198,9 +362,9 @@ async function refreshStatus() {
       const cursorMs    = item.cursor_ts    ? new Date(item.cursor_ts).getTime()    : null;
       const lagSec  = item.lag_sec ?? null;
       const poll    = item.poll_interval_sec || 30;
-      const onlineThreshold = Math.max(poll * 3, 120); // 3 интервала или 2 мин
+      const onlineThreshold = Math.max(poll * 3, 120);
 
-      // ── Режим (run_state) ──
+      // Режим (run_state)
       const rsCell = row.querySelector('.run-state-badge');
       if (rsCell && item.run_state !== null && item.run_state !== undefined) {
         const rs = item.run_state;
@@ -213,7 +377,7 @@ async function refreshStatus() {
         rsCell.textContent = label;
       }
 
-      // ── Закоксовка ──
+      // Закоксовка
       const crCell = row.querySelector('.coking-badge');
       if (crCell && item.coking_risk) {
         const colorMap = {GREEN:'success', YELLOW:'warning', RED:'danger'};
@@ -223,12 +387,11 @@ async function refreshStatus() {
 
       if (item.status !== 'running') return;
 
-      // ── Прогресс / онлайн статус ──
-      const statusBadge  = row.querySelector('.status-badge');
-      const cursorLabel  = row.querySelector('.cursor-label');
-      const progBar      = row.querySelector('.progress');
-      const progFill     = progBar ? progBar.querySelector('.progress-bar') : null;
-      const progLabel    = row.querySelector('.progress-label');
+      const statusBadge = row.querySelector('.status-badge');
+      const cursorLabel = row.querySelector('.cursor-label');
+      const progBar     = row.querySelector('.progress');
+      const progFill    = progBar ? progBar.querySelector('.progress-bar') : null;
+      const progLabel   = row.querySelector('.progress-label');
 
       if (!item.engine_live) {
         if (statusBadge) { statusBadge.className = 'badge bg-warning text-dark status-badge'; statusBadge.textContent = '⚠ Движок не запущен'; }
@@ -236,16 +399,12 @@ async function refreshStatus() {
       }
 
       if (lagSec !== null && lagSec <= onlineThreshold) {
-        // ── ОНЛАЙН ──
         if (statusBadge) { statusBadge.className = 'badge bg-success status-badge'; statusBadge.textContent = '● Онлайн'; }
         if (cursorLabel) cursorLabel.textContent = 'срез: ' + fmtTs(item.processed_to || item.cursor_ts);
         if (progBar) progBar.style.display = 'none';
         if (progLabel) progLabel.textContent = 'отставание: ' + fmtDur(lagSec);
 
       } else if (processedMs !== null && startMs !== null) {
-        // ── BATCH-ДОБОР ──
-        // Знаменатель = batch_end_ts - start_date (фиксирован при старте)
-        // Числитель   = processed_to - start_date (растёт с каждым циклом)
         const totalMs = batchEndMs ? (batchEndMs - startMs) : (now - startMs);
         const doneMs  = processedMs - startMs;
         const pct = totalMs > 0 ? Math.min(99, Math.max(1, doneMs / totalMs * 100)) : 1;
@@ -255,15 +414,12 @@ async function refreshStatus() {
         if (cursorLabel) cursorLabel.textContent = '';
         if (progBar) { progBar.style.display = ''; }
         if (progFill) { progFill.style.width = pct.toFixed(1) + '%'; }
-        // Показываем processed_to (живой курсор) и cursor_ts (зафиксировано в БД)
         const committedPart = cursorMs && cursorMs !== processedMs
-          ? ' · зафикс. ' + fmtTs(item.cursor_ts)
-          : '';
+          ? ' · зафикс. ' + fmtTs(item.cursor_ts) : '';
         if (progLabel) progLabel.textContent =
           fmtTs(item.processed_to) + committedPart + ' · осталось ~' + remaining;
 
       } else {
-        // неизвестно (движок только стартовал, первый цикл ещё не завершён)
         if (statusBadge) { statusBadge.className = 'badge bg-info text-dark status-badge'; statusBadge.textContent = '⏳ Инициализация…'; }
         if (progBar) progBar.style.display = 'none';
         if (progLabel) progLabel.textContent = 'первый цикл ещё не завершён';
@@ -273,6 +429,8 @@ async function refreshStatus() {
 }
 
 refreshStatus();
+refreshPipelineStatus();
 setInterval(refreshStatus, 10000);
+setInterval(refreshPipelineStatus, 10000);
 </script>
 {% endblock %}

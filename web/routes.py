@@ -1206,7 +1206,7 @@ _CAUSE_CLOSE_RU = {
 async def online_monitor(request: Request):
     from config import get_tz
     from online import db as odb
-    from datetime import datetime, timedelta
+    from datetime import datetime
 
     observations = await odb.list_observations()
 
@@ -1220,15 +1220,19 @@ async def online_monitor(request: Request):
     equipment = await analytics.get_equipment_registry()
     tz = get_tz()
     now_local = datetime.now(tz).strftime("%Y-%m-%dT%H:%M")
+    corpus_auto = await analytics.get_app_setting("corpus_auto_analyze", "false")
+    qwen_auto   = await analytics.get_app_setting("qwen_auto_analyze",   "false")
 
     return templates.TemplateResponse(request, "online_monitor.html", {
-        "observations":      observations,
-        "open_segs":         open_segs,
-        "equipment":         equipment,
-        "now_local":         now_local,
-        "run_state_labels":  _RUN_STATE_LABELS,
-        "coking_colors":     _COKING_COLORS,
-        "cause_close_ru":    _CAUSE_CLOSE_RU,
+        "observations":        observations,
+        "open_segs":           open_segs,
+        "equipment":           equipment,
+        "now_local":           now_local,
+        "run_state_labels":    _RUN_STATE_LABELS,
+        "coking_colors":       _COKING_COLORS,
+        "cause_close_ru":      _CAUSE_CLOSE_RU,
+        "corpus_auto_analyze": corpus_auto == "true",
+        "qwen_auto_analyze":   qwen_auto   == "true",
     })
 
 
@@ -1276,6 +1280,81 @@ async def online_stop(
         logger.exception("Ошибка СТОП ОНЛАЙН: %s", e)
         raise HTTPException(status_code=400, detail=str(e))
     return RedirectResponse(url="/online", status_code=303)
+
+
+@router.post("/online/corpus-toggle")
+async def online_corpus_toggle(enabled: str = Form("off")):
+    """Тоггл авто-анализа Claude прямо со страницы мониторинга."""
+    value = "true" if enabled == "on" else "false"
+    await analytics.set_app_setting("corpus_auto_analyze", value)
+    logger.info("corpus авто-анализ (online): %s", "включён" if value == "true" else "выключен")
+    return RedirectResponse(url="/online", status_code=303)
+
+
+@router.post("/online/qwen-toggle")
+async def online_qwen_toggle(enabled: str = Form("off")):
+    """Тоггл авто-анализа Qwen прямо со страницы мониторинга."""
+    value = "true" if enabled == "on" else "false"
+    await analytics.set_app_setting("qwen_auto_analyze", value)
+    logger.info("qwen авто-анализ (online): %s", "включён" if value == "true" else "выключен")
+    return RedirectResponse(url="/online", status_code=303)
+
+
+@router.post("/online/start-multi")
+async def online_start_multi(request: Request):
+    """Запустить мониторинг сразу для нескольких машин (JSON-тело)."""
+    from config import get_tz
+    from online.manager import get_manager
+    from datetime import datetime
+
+    data = await request.json()
+    machines:          list[dict] = data.get("machines", [])
+    start_date_local:  str        = data.get("start_date_local", "")
+    poll_interval_sec: int        = int(data.get("poll_interval_sec", 30))
+
+    tz = get_tz()
+    try:
+        start_date = datetime.strptime(start_date_local, "%Y-%m-%dT%H:%M").replace(tzinfo=tz)
+    except ValueError as e:
+        return JSONResponse({"started": 0, "errors": [f"Неверная дата: {e}"]}, status_code=400)
+
+    mgr = get_manager()
+    started, errors = 0, []
+    for m in machines:
+        try:
+            await mgr.start_machine(
+                m["router_sn"], m["equip_type"], int(m["panel_id"]),
+                start_date, poll_interval_sec,
+            )
+            started += 1
+        except Exception as e:
+            errors.append(f"{m['router_sn']}/{m['equip_type']}/{m['panel_id']}: {e}")
+
+    logger.info("online/start-multi: запущено %d, ошибок %d", started, len(errors))
+    return JSONResponse({"started": started, "errors": errors})
+
+
+@router.get("/api/pipeline/status")
+async def api_pipeline_status():
+    """Статус обоих воркеров + флаги авто-анализа."""
+    from corpus.worker import get_worker as get_claude_worker
+    from corpus.qwen_worker import get_worker as get_qwen_worker
+
+    cw = get_claude_worker()
+    qw = get_qwen_worker()
+    corpus_auto = await analytics.get_app_setting("corpus_auto_analyze", "false")
+    qwen_auto   = await analytics.get_app_setting("qwen_auto_analyze",   "false")
+
+    return JSONResponse({
+        "claude": {
+            **(cw.get_status() if cw else {"running": False, "processing_seg_id": None, "queue_size": 0}),
+            "auto_analyze": corpus_auto == "true",
+        },
+        "qwen": {
+            **(qw.get_status() if qw else {"running": False, "processing_seg_id": None, "queue_size": 0}),
+            "auto_analyze": qwen_auto == "true",
+        },
+    })
 
 
 @router.get("/online/calendar/{router_sn}/{equip_type}/{panel_id}", response_class=HTMLResponse)
