@@ -10,7 +10,9 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_HUMANIZER_PROMPT = (
+# Дефолтный промпт — используется как fallback если llm_system_prompt в БД пустой.
+# Основной промпт берётся из llm/client._cfg["prompt"] (настройки → LLM → Системный промпт).
+DEFAULT_HUMANIZER_PROMPT = (
     "Ты переписываешь технический отчёт в понятный для оператора текст.\n\n"
     "СТРОГИЕ ПРАВИЛА:\n"
     "- Переформулируй ТОЛЬКО то, что написано во входящем тексте.\n"
@@ -38,10 +40,14 @@ async def humanize(conclusion_md: str) -> str:
     try:
         from llm.client import _cfg
 
+        # Используем промпт из настроек (LLM → Системный промпт).
+        # Если пустой — берём встроенный дефолт.
+        system_prompt = (_cfg.get("prompt") or "").strip() or DEFAULT_HUMANIZER_PROMPT
+
         payload = {
             "model": _cfg["model"],
             "messages": [
-                {"role": "system", "content": _HUMANIZER_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": f"Перепиши для оператора:\n\n{block2_text}"},
             ],
             "stream": False,
