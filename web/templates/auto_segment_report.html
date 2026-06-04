@@ -308,7 +308,7 @@
           Сырой текст
         </button>
         <button class="btn btn-sm btn-outline-primary" onclick="showPanel('claude')" id="tabClaude"
-          {% if not (claude_analysis and claude_analysis.status == 'done' and claude_analysis.humanized_md) %}disabled{% endif %}>
+          {% if not (claude_analysis and claude_analysis.status == 'done' and claude_analysis.conclusion_md) %}disabled{% endif %}>
           ✨ Claude
         </button>
         <button class="btn btn-sm btn-outline-success" onclick="showPanel('qwen')" id="tabQwen">
@@ -404,9 +404,9 @@ window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('mdContent').innerHTML = _renderMd(_md);
   document.getElementById('rawMd').value = _md;
 
-  // Claude-заключение (humanized_md)
-  if (_humanizedMd) {
-    document.getElementById('claudeContent').innerHTML = _renderMd(_humanizedMd);
+  // Claude-заключение: показываем conclusion_md (структурированный markdown от Claude)
+  if (_conclusionMd) {
+    document.getElementById('claudeContent').innerHTML = _renderMd(_conclusionMd);
   }
 
   // Автообновление пока идёт анализ
