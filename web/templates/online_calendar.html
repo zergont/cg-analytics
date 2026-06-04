@@ -23,11 +23,14 @@
 .seg-vicon-ok      { color:#198754; }
 .seg-vicon-warning { color:#856404; }
 .seg-vicon-alarm   { color:#dc3545; }
-/* AI-кружок */
-.ai-badge { position:absolute; bottom:3px; right:4px;
+/* AI/Q-кружки */
+.ai-badge, .q-badge {
+            position:absolute; bottom:3px;
             width:16px; height:16px; border-radius:50%;
             font-size:.55rem; font-weight:700; line-height:16px;
             text-align:center; color:#fff; }
+.ai-badge { right:4px; }
+.q-badge  { right:23px; background:#0dcaf0; color:#000; }
 .ai-norm    { background:#198754; }
 .ai-warn    { background:#856404; }
 .ai-alarm   { background:#dc3545; }
@@ -149,7 +152,11 @@
       {% elif vlv == "alarm" %}
         <span class="seg-vicon seg-vicon-alarm" title="Выявлены нарушения (ALARM)">❗</span>
       {% endif %}
-      {# AI-кружок #}
+      {# Q-кружок (Qwen) #}
+      {% if ai and ai.has_qwen %}
+        <span class="q-badge" title="Qwen: обработано">Q</span>
+      {% endif %}
+      {# AI-кружок (Claude) #}
       {% if ai %}
         {% if ai.status == 'done' %}
           {% if ai.alarm_level in ['ALARM','SHUTDOWN'] %}

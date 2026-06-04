@@ -194,7 +194,8 @@ async def get_analyses_for_segments(seg_ids: list[int]) -> dict[int, dict]:
     conn = await _connect()
     try:
         rows = await conn.fetch(
-            """SELECT auto_segment_id, status, verdict, alarm_level
+            """SELECT auto_segment_id, status, verdict, alarm_level,
+                      (humanized_md IS NOT NULL AND humanized_md <> '') AS has_qwen
                FROM segment_analyses
                WHERE auto_segment_id = ANY($1)""",
             seg_ids,
