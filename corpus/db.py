@@ -131,6 +131,43 @@ async def get_unanalyzed_segments(limit: int = 500) -> list[int]:
     return [r["id"] for r in rows]
 
 
+async def get_unhumanized_segments(limit: int = 500) -> list[int]:
+    """ID сегментов с готовым анализом Claude, но без Qwen-обработки."""
+    conn = await _connect()
+    try:
+        rows = await conn.fetch(
+            """
+            SELECT auto_segment_id
+            FROM segment_analyses
+            WHERE status = 'done'
+              AND conclusion_md IS NOT NULL
+              AND (humanized_md IS NULL OR humanized_md = '')
+            ORDER BY updated_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+    finally:
+        await conn.close()
+    return [r["auto_segment_id"] for r in rows]
+
+
+async def set_humanized_md(auto_segment_id: int, humanized_md: str) -> None:
+    """Сохранить результат Qwen-обработки в существующую запись анализа."""
+    conn = await _connect()
+    try:
+        await conn.execute(
+            """
+            UPDATE segment_analyses
+            SET humanized_md = $2, updated_at = now()
+            WHERE auto_segment_id = $1
+            """,
+            auto_segment_id, humanized_md,
+        )
+    finally:
+        await conn.close()
+
+
 async def get_segment_row(seg_id: int) -> dict | None:
     """Загрузить строку auto_segments с полями, необходимыми для анализа."""
     conn = await _connect()

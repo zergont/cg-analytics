@@ -77,10 +77,22 @@ async def lifespan(app: FastAPI):
             logger.info("corpus: авто-старт — %d сегментов добавлено в очередь", pending)
     else:
         logger.info("corpus: авто-анализ выключен (включить в Настройки → ИИ-конвейер)")
+    # Запустить Qwen-конвейер (очеловечивание Claude-заключений)
+    from corpus.qwen_worker import init_worker as _init_qwen_worker
+    _qwen_worker = _init_qwen_worker()
+    _qwen_worker._task = _asyncio.create_task(_qwen_worker.run())
+    _qwen_auto = await get_app_setting("qwen_auto_analyze", "false")
+    if _qwen_auto == "true":
+        qwen_pending = await _qwen_worker.enqueue_pending()
+        if qwen_pending:
+            logger.info("qwen: авто-старт — %d сегментов добавлено в очередь", qwen_pending)
+    else:
+        logger.info("qwen: авто-анализ выключен (включить в Настройки → ИИ-конвейер)")
     yield
     stop_scheduler()
     await _online_mgr.stop_manager()
     await _corpus_worker.stop()
+    await _qwen_worker.stop()
     await close_source_pool()
     logger.info("═══ cg-analytics остановлен ═══")
 

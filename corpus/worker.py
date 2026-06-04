@@ -141,13 +141,23 @@ async def _process_segment(seg_id: int) -> None:
         await corpus_db.upsert_analysis(seg_id, {**result, "status": "error"})
         return
 
-    # 5. Сохранить результат (qwen-очеловечивание — только по кнопке из UI)
+    # 5. Сохранить результат
     await corpus_db.upsert_analysis(seg_id, {
         **result,
         "status":             "done",
         "humanized_md":       None,
         "analytics_version":  ANALYTICS_VERSION,
     })
+
+    # 6. Если Qwen авто-анализ включён — сразу ставим в очередь Qwen-воркера
+    from db.analytics import get_app_setting
+    qwen_auto = await get_app_setting("qwen_auto_analyze", "false")
+    if qwen_auto == "true":
+        from corpus.qwen_worker import get_worker as get_qwen_worker
+        qwen_w = get_qwen_worker()
+        if qwen_w:
+            qwen_w.enqueue(seg_id)
+            logger.debug("corpus/worker: сегмент #%d передан в очередь Qwen", seg_id)
 
     logger.info(
         "corpus API OK: сегмент #%d | вердикт=%s | уровень=%s | "
