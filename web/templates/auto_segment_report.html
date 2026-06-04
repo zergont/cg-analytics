@@ -208,11 +208,17 @@
     </div>
 
     {# ── qwen — очеловечивание заключения Claude ── #}
-    {% set has_claude = claude_analysis and claude_analysis.status == 'done' and claude_analysis.conclusion_md %}
+    {% set has_claude   = claude_analysis and claude_analysis.status == 'done' and claude_analysis.conclusion_md %}
+    {% set has_humanized = claude_analysis and claude_analysis.humanized_md %}
     <div class="card border-success mt-2">
       <div class="card-header fw-semibold bg-success-subtle py-2">🤖 qwen (локальный)</div>
       <div class="card-body py-2">
-        {% if has_claude %}
+        {% if has_humanized %}
+          <p class="small text-success mb-2">✓ Результат готов.</p>
+          <button class="btn btn-outline-success btn-sm w-100" id="qwenBtn" onclick="sendToQwen()">
+            Перезапустить qwen →
+          </button>
+        {% elif has_claude %}
           <p class="small text-muted mb-2">Переписать заключение Claude в прозу для оператора.</p>
           <button class="btn btn-success btn-sm w-100" id="qwenBtn" onclick="sendToQwen()">
             Отправить в qwen →
@@ -407,6 +413,11 @@ window.addEventListener('DOMContentLoaded', () => {
   // Claude-заключение: показываем conclusion_md (структурированный markdown от Claude)
   if (_conclusionMd) {
     document.getElementById('claudeContent').innerHTML = _renderMd(_conclusionMd);
+  }
+
+  // Qwen-результат: если уже есть в БД — рендерим сразу, не ждём нажатия кнопки
+  if (_humanizedMd) {
+    document.getElementById('qwenContent').innerHTML = _renderMd(_humanizedMd);
   }
 
   // Автообновление пока идёт анализ
