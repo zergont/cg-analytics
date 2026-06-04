@@ -1014,6 +1014,13 @@ async def qwen_toggle(enabled: str = Form("off")):
     """Включить / выключить авто-анализ Qwen-конвейера."""
     value = "true" if enabled == "on" else "false"
     await analytics.set_app_setting("qwen_auto_analyze", value)
+    if value == "true":
+        from corpus.qwen_worker import get_worker as get_qwen_worker
+        w = get_qwen_worker()
+        if w:
+            pending = await w.enqueue_pending()
+            if pending:
+                logger.info("qwen авто-анализ включён: %d сегментов добавлено в очередь", pending)
     logger.info("qwen авто-анализ: %s", "включён" if value == "true" else "выключен")
     return RedirectResponse(url="/settings", status_code=303)
 
@@ -1040,6 +1047,13 @@ async def corpus_toggle(enabled: str = Form("off")):
     """Включить / выключить авто-анализ Claude-конвейера."""
     value = "true" if enabled == "on" else "false"
     await analytics.set_app_setting("corpus_auto_analyze", value)
+    if value == "true":
+        from corpus.worker import get_worker
+        w = get_worker()
+        if w:
+            pending = await w.enqueue_pending()
+            if pending:
+                logger.info("corpus авто-анализ включён: %d сегментов добавлено в очередь", pending)
     logger.info("corpus авто-анализ: %s", "включён" if value == "true" else "выключен")
     return RedirectResponse(url="/settings", status_code=303)
 
@@ -1287,6 +1301,13 @@ async def online_corpus_toggle(enabled: str = Form("off")):
     """Тоггл авто-анализа Claude прямо со страницы мониторинга."""
     value = "true" if enabled == "on" else "false"
     await analytics.set_app_setting("corpus_auto_analyze", value)
+    if value == "true":
+        from corpus.worker import get_worker
+        w = get_worker()
+        if w:
+            pending = await w.enqueue_pending()
+            if pending:
+                logger.info("corpus авто-анализ включён (online): %d сегментов в очередь", pending)
     logger.info("corpus авто-анализ (online): %s", "включён" if value == "true" else "выключен")
     return RedirectResponse(url="/online", status_code=303)
 
@@ -1296,7 +1317,32 @@ async def online_qwen_toggle(enabled: str = Form("off")):
     """Тоггл авто-анализа Qwen прямо со страницы мониторинга."""
     value = "true" if enabled == "on" else "false"
     await analytics.set_app_setting("qwen_auto_analyze", value)
+    if value == "true":
+        from corpus.qwen_worker import get_worker as get_qwen_worker
+        w = get_qwen_worker()
+        if w:
+            pending = await w.enqueue_pending()
+            if pending:
+                logger.info("qwen авто-анализ включён (online): %d сегментов в очередь", pending)
     logger.info("qwen авто-анализ (online): %s", "включён" if value == "true" else "выключен")
+    return RedirectResponse(url="/online", status_code=303)
+
+
+@router.post("/online/clear-claude-analysis")
+async def online_clear_claude_analysis():
+    """Удалить все записи Claude-анализа (segment_analyses)."""
+    from corpus.db import clear_all_analyses
+    n = await clear_all_analyses()
+    logger.warning("Удалён весь Claude-анализ: %d строк", n)
+    return RedirectResponse(url="/online", status_code=303)
+
+
+@router.post("/online/clear-qwen-analysis")
+async def online_clear_qwen_analysis():
+    """Обнулить humanized_md во всех записях (сброс Qwen-анализа)."""
+    from corpus.db import clear_all_humanized
+    n = await clear_all_humanized()
+    logger.warning("Сброшен весь Qwen-анализ: %d строк", n)
     return RedirectResponse(url="/online", status_code=303)
 
 

@@ -50,6 +50,22 @@
         </div>
       </form>
       <small class="text-muted" id="qwen-status-badge">—</small>
+
+      <div class="vr"></div>
+
+      <!-- Кнопки очистки -->
+      <form method="post" action="/online/clear-claude-analysis" class="d-inline"
+            onsubmit="return confirm('Удалить ВЕСЬ анализ Claude? Все сегменты снова станут необработанными.')">
+        <button type="submit" class="btn btn-sm btn-outline-danger" style="font-size:0.8rem">
+          Удалить анализ Claude
+        </button>
+      </form>
+      <form method="post" action="/online/clear-qwen-analysis" class="d-inline"
+            onsubmit="return confirm('Удалить весь анализ Qwen (humanized_md)? Claude-заключения сохранятся.')">
+        <button type="submit" class="btn btn-sm btn-outline-warning" style="font-size:0.8rem">
+          Удалить анализ Qwen
+        </button>
+      </form>
     </div>
   </div>
 </div>

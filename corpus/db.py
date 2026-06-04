@@ -220,3 +220,27 @@ async def get_equipment_kb_path(
     finally:
         await conn.close()
     return row["kb_path"] if row else None
+
+
+async def clear_all_analyses() -> int:
+    """Удалить все записи анализа (Claude + Qwen). Возвращает число удалённых строк."""
+    conn = await _connect()
+    try:
+        result = await conn.execute("DELETE FROM segment_analyses")
+        # asyncpg возвращает строку вида "DELETE N"
+        return int(result.split()[-1])
+    finally:
+        await conn.close()
+
+
+async def clear_all_humanized() -> int:
+    """Обнулить humanized_md во всех записях (сброс Qwen-анализа)."""
+    conn = await _connect()
+    try:
+        result = await conn.execute(
+            "UPDATE segment_analyses SET humanized_md = NULL, updated_at = now()"
+            " WHERE humanized_md IS NOT NULL"
+        )
+        return int(result.split()[-1])
+    finally:
+        await conn.close()
