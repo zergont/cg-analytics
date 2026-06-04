@@ -950,9 +950,11 @@ async def kb_search(kb_path: str, q: str = ""):
 async def settings_page(request: Request):
     from config import settings as cfg, TIMEZONE_CHOICES, get_tz
     from llm.client import get_llm_settings
+    from corpus.settings import get_claude_settings
     registry = await analytics.get_equipment_registry()
     kb_list = _list_kb_paths(cfg.knowledge_base_path / "equipment")
     corpus_auto = await analytics.get_app_setting("corpus_auto_analyze", "false")
+    qwen_auto   = await analytics.get_app_setting("qwen_auto_analyze",   "false")
     return templates.TemplateResponse(request, "settings.html", {
         "settings": cfg,
         "registry": registry,
@@ -960,7 +962,9 @@ async def settings_page(request: Request):
         "timezone_choices": TIMEZONE_CHOICES,
         "current_timezone": get_tz().key,
         "llm": get_llm_settings(),
+        "claude": get_claude_settings(),
         "corpus_auto_analyze": corpus_auto == "true",
+        "qwen_auto_analyze":   qwen_auto   == "true",
     })
 
 
@@ -981,6 +985,53 @@ async def update_llm_settings(
     await analytics.set_app_setting("llm_num_ctx",      str(llm_num_ctx))
     await analytics.set_app_setting("llm_system_prompt", llm_system_prompt)
     logger.info("LLM настройки сохранены: model=%s", llm_model)
+    return RedirectResponse(url="/settings", status_code=303)
+
+
+@router.post("/settings/claude")
+async def update_claude_settings(
+    claude_model:          str = Form(...),
+    claude_max_tool_calls: int = Form(...),
+    claude_max_tokens:     int = Form(...),
+    claude_proxy:          str = Form(""),
+    claude_system_prompt:  str = Form(...),
+):
+    """Сохранить настройки Claude API и применить без перезапуска."""
+    from corpus.settings import apply_claude_settings
+    apply_claude_settings(claude_model, claude_max_tool_calls, claude_max_tokens,
+                          claude_proxy, claude_system_prompt)
+    await analytics.set_app_setting("claude_model",          claude_model)
+    await analytics.set_app_setting("claude_max_tool_calls", str(claude_max_tool_calls))
+    await analytics.set_app_setting("claude_max_tokens",     str(claude_max_tokens))
+    await analytics.set_app_setting("claude_proxy",          claude_proxy)
+    await analytics.set_app_setting("claude_system_prompt",  claude_system_prompt)
+    logger.info("Claude API настройки сохранены: model=%s", claude_model)
+    return RedirectResponse(url="/settings", status_code=303)
+
+
+@router.post("/settings/qwen-toggle")
+async def qwen_toggle(enabled: str = Form("off")):
+    """Включить / выключить авто-анализ Qwen-конвейера."""
+    value = "true" if enabled == "on" else "false"
+    await analytics.set_app_setting("qwen_auto_analyze", value)
+    logger.info("qwen авто-анализ: %s", "включён" if value == "true" else "выключен")
+    return RedirectResponse(url="/settings", status_code=303)
+
+
+@router.post("/settings/rag")
+async def update_rag_settings(
+    embedding_base_url: str = Form(...),
+    embedding_model:    str = Form(...),
+):
+    """Сохранить настройки RAG-модели, сбросить кэш индексов."""
+    from config import settings as cfg
+    from knowledge.retriever import clear_index_cache
+    cfg.embedding_base_url = embedding_base_url.rstrip("/")
+    cfg.embedding_model    = embedding_model.strip()
+    clear_index_cache()
+    await analytics.set_app_setting("embedding_base_url", embedding_base_url)
+    await analytics.set_app_setting("embedding_model",    embedding_model)
+    logger.info("RAG настройки сохранены: model=%s url=%s", embedding_model, embedding_base_url)
     return RedirectResponse(url="/settings", status_code=303)
 
 

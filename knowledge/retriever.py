@@ -11,6 +11,11 @@ logger = logging.getLogger(__name__)
 _index_cache: dict[str, Any] = {}
 
 
+def clear_index_cache() -> None:
+    """Сбросить кэш индексов (вызывается при смене embedding-настроек)."""
+    _index_cache.clear()
+
+
 def retrieve_context(
     kb_path: str,
     active_addrs: list[int],

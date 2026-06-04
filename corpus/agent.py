@@ -8,9 +8,10 @@ import anthropic
 import httpx
 
 from config import settings
+from corpus.settings import get_claude_settings
 from corpus.tools import TOOLS
 from corpus.executor import execute_tool
-from corpus.prompt import SYSTEM_PROMPT, build_user_message
+from corpus.prompt import build_user_message
 from corpus.preprocessor import build_claude_input, extract_verdict_alarm
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ async def analyse_segment(segment_row: dict, kb_path: str | None) -> dict[str, A
     """
     t0 = time.monotonic()
     seg_id = segment_row.get("id")
+    claude_cfg = get_claude_settings()
 
     # Формируем вход и извлекаем вердикт до вызова API
     claude_input = build_claude_input(segment_row)
@@ -41,8 +43,8 @@ async def analyse_segment(segment_row: dict, kb_path: str | None) -> dict[str, A
     }
 
     http_client: httpx.AsyncClient | None = None
-    if settings.anthropic_proxy:
-        http_client = httpx.AsyncClient(proxy=settings.anthropic_proxy)
+    if claude_cfg["proxy"]:
+        http_client = httpx.AsyncClient(proxy=claude_cfg["proxy"])
 
     try:
         client = anthropic.AsyncAnthropic(
@@ -57,15 +59,19 @@ async def analyse_segment(segment_row: dict, kb_path: str | None) -> dict[str, A
         tool_calls_count = 0
         loops_count = 0
         final_text = ""
+        _model          = claude_cfg["model"]
+        _max_tool_calls = claude_cfg["max_tool_calls"]
+        _max_tokens     = claude_cfg["max_tokens"]
+        _system_prompt  = claude_cfg["system_prompt"]
 
-        while tool_calls_count < settings.max_tool_calls:
+        while tool_calls_count < _max_tool_calls:
             loops_count += 1
             iter_info: dict[str, Any] = {"loop": loops_count}
 
             response = await client.messages.create(
-                model=settings.anthropic_model,
-                max_tokens=settings.max_tokens,
-                system=SYSTEM_PROMPT,
+                model=_model,
+                max_tokens=_max_tokens,
+                system=_system_prompt,
                 tools=TOOLS,
                 messages=messages,
             )
@@ -96,7 +102,7 @@ async def analyse_segment(segment_row: dict, kb_path: str | None) -> dict[str, A
                 tool_calls_count += 1
                 logger.info(
                     "corpus/agent seg#%s: тул %s [%d/%d], input: %s",
-                    seg_id, block.name, tool_calls_count, settings.max_tool_calls,
+                    seg_id, block.name, tool_calls_count, _max_tool_calls,
                     str(block.input)[:120],
                 )
                 result = execute_tool(block.name, block.input, kb_path)
@@ -121,7 +127,7 @@ async def analyse_segment(segment_row: dict, kb_path: str | None) -> dict[str, A
             # Лимит тулов — запросить финальный ответ без тулов
             logger.warning(
                 "corpus/agent seg#%s: достигнут лимит тулов (%d), финальный запрос",
-                seg_id, settings.max_tool_calls,
+                seg_id, _max_tool_calls,
             )
             messages.append({
                 "role": "user",
@@ -131,9 +137,9 @@ async def analyse_segment(segment_row: dict, kb_path: str | None) -> dict[str, A
                 ),
             })
             final_resp = await client.messages.create(
-                model=settings.anthropic_model,
-                max_tokens=settings.max_tokens,
-                system=SYSTEM_PROMPT,
+                model=_model,
+                max_tokens=_max_tokens,
+                system=_system_prompt,
                 messages=messages,
             )
             debug["tokens_input"]  += final_resp.usage.input_tokens
@@ -148,7 +154,7 @@ async def analyse_segment(segment_row: dict, kb_path: str | None) -> dict[str, A
             verdict=verdict,
             alarm_level=alarm_level,
             claude_block2=final_text,
-            model=settings.anthropic_model,
+            model=_model,
         )
 
         elapsed = time.monotonic() - t0
@@ -164,7 +170,7 @@ async def analyse_segment(segment_row: dict, kb_path: str | None) -> dict[str, A
             "conclusion_md":      conclusion_md,
             "verdict":            verdict,
             "alarm_level":        alarm_level,
-            "claude_model":       settings.anthropic_model,
+            "claude_model":       _model,
             "tokens_used":        debug["total_tokens"],
             "tool_calls_count":   tool_calls_count,
             "loops_count":        loops_count,
@@ -181,7 +187,7 @@ async def analyse_segment(segment_row: dict, kb_path: str | None) -> dict[str, A
             "conclusion_md":      None,
             "verdict":            verdict,
             "alarm_level":        alarm_level,
-            "claude_model":       settings.anthropic_model,
+            "claude_model":       claude_cfg["model"],
             "tokens_used":        debug["total_tokens"],
             "tool_calls_count":   0,
             "loops_count":        loops_count if "loops_count" in dir() else 0,

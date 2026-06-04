@@ -10,6 +10,8 @@ from config import settings
 from db.analytics import init_db, get_app_setting
 from analytics.source import init_source_pool, close_source_pool
 from llm.client import apply_llm_settings, get_llm_settings
+from corpus.settings import apply_claude_settings, get_claude_settings
+from corpus.prompt import SYSTEM_PROMPT as _CLAUDE_DEFAULT_PROMPT
 from scheduler import start_scheduler, stop_scheduler
 from web.routes import router, _apply_tz
 import online.manager as _online_mgr
@@ -47,6 +49,18 @@ async def lifespan(app: FastAPI):
         num_ctx     = int(await get_app_setting("llm_num_ctx",       str(_defaults["num_ctx"]))),
         prompt      = await get_app_setting("llm_system_prompt",     _defaults["prompt"]),
     )
+    # Загружаем настройки Claude API из БД
+    _claude_defaults = get_claude_settings()
+    apply_claude_settings(
+        model=          await get_app_setting("claude_model",          _claude_defaults["model"]),
+        max_tool_calls= int(await get_app_setting("claude_max_tool_calls", str(_claude_defaults["max_tool_calls"]))),
+        max_tokens=     int(await get_app_setting("claude_max_tokens",     str(_claude_defaults["max_tokens"]))),
+        proxy=          await get_app_setting("claude_proxy",          _claude_defaults["proxy"]),
+        system_prompt=  await get_app_setting("claude_system_prompt",  _CLAUDE_DEFAULT_PROMPT),
+    )
+    # Загружаем настройки RAG из БД
+    settings.embedding_base_url = await get_app_setting("embedding_base_url", settings.embedding_base_url)
+    settings.embedding_model    = await get_app_setting("embedding_model",    settings.embedding_model)
     start_scheduler()
     # Запустить онлайн-мониторинг (Этап 1.5)
     mgr = _online_mgr.init_manager()

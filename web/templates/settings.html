@@ -5,64 +5,11 @@
 <h5 class="mb-3">Настройки</h5>
 
 <div class="row g-3">
+
+    <!-- ─── Левая колонка ──────────────────────────────────────────────── -->
     <div class="col-md-6">
-        <div class="card mb-3">
-            <div class="card-header fw-semibold">Текущая конфигурация</div>
-            <div class="card-body">
-                <dl class="row mb-0" style="font-size:0.85rem">
-                    <dt class="col-5">Модель агента</dt>
-                    <dd class="col-7"><code>{{ settings.anthropic_model }}</code></dd>
-                    <dt class="col-5">Макс. tool calls</dt>
-                    <dd class="col-7">{{ settings.max_tool_calls }}</dd>
-                    <dt class="col-5">Расписание (UTC)</dt>
-                    <dd class="col-7">{{ "%02d:%02d" | format(settings.schedule_hour, settings.schedule_minute) }}</dd>
-                    <dt class="col-5">Embedding модель</dt>
-                    <dd class="col-7"><code>{{ settings.embedding_model }}</code></dd>
-                    <dt class="col-5">Embedding URL</dt>
-                    <dd class="col-7"><code>{{ settings.embedding_base_url }}</code></dd>
-                    <dt class="col-5">Web порт</dt>
-                    <dd class="col-7">{{ settings.web_port }}</dd>
-                </dl>
-                <div class="text-muted small mt-2">Для изменения отредактируйте <code>config.yml</code> и перезапустите сервис.</div>
-            </div>
-        </div>
 
-        <div class="card mb-3">
-            <div class="card-header fw-semibold d-flex align-items-center gap-2">
-                ✨ ИИ-конвейер (Claude API)
-            </div>
-            <div class="card-body">
-                <p class="small text-muted mb-3">
-                    При включённом авто-анализе каждый закрытый сегмент автоматически
-                    отправляется в очередь Claude API. При выключённом — только ручной прогон
-                    с кнопки на странице сегмента.
-                </p>
-                <form method="post" action="/settings/corpus-toggle" class="d-flex align-items-center gap-3">
-                    <div class="form-check form-switch mb-0">
-                        <input class="form-check-input" type="checkbox" role="switch"
-                               name="enabled" value="on" id="corpusAutoSwitch"
-                               {% if corpus_auto_analyze %}checked{% endif %}
-                               onchange="this.form.submit()">
-                        <label class="form-check-label" for="corpusAutoSwitch">
-                            {% if corpus_auto_analyze %}
-                                <span class="text-success fw-semibold">Авто-анализ включён</span>
-                            {% else %}
-                                <span class="text-muted">Авто-анализ выключен</span>
-                            {% endif %}
-                        </label>
-                    </div>
-                </form>
-                <div class="text-muted small mt-2">
-                    Модель: <code>{{ settings.anthropic_model }}</code> ·
-                    Макс. тулов: {{ settings.max_tool_calls }} ·
-                    Макс. токенов ответа: {{ settings.max_tokens }}
-                    {% if settings.anthropic_proxy %}
-                    · Прокси: <code>{{ settings.anthropic_proxy.split('@')[-1] if '@' in settings.anthropic_proxy else settings.anthropic_proxy }}</code>
-                    {% endif %}
-                </div>
-            </div>
-        </div>
-
+        <!-- Часовой пояс -->
         <div class="card mb-3">
             <div class="card-header fw-semibold">🕐 Часовой пояс суток</div>
             <div class="card-body">
@@ -88,24 +35,93 @@
             </div>
         </div>
 
-        <div class="card">
-            <div class="card-header fw-semibold">Синхронизация реестра</div>
+        <!-- ИИ-конвейер -->
+        <div class="card mb-3">
+            <div class="card-header fw-semibold">⚡ ИИ-конвейер</div>
             <div class="card-body">
-                <p class="small text-muted mb-2">
-                    Обновляет список оборудования из основной БД телеметрии.
-                    Запускайте после добавления нового оборудования.
+                <p class="small text-muted mb-3">
+                    При включённом авто-анализе каждый закрытый сегмент автоматически
+                    отправляется на обработку. При выключённом — только ручной прогон
+                    с кнопки на странице сегмента.
                 </p>
-                <form method="post" action="/settings/sync">
-                    <button type="submit" class="btn btn-sm btn-outline-primary">
-                        Синхронизировать с основной БД
-                    </button>
+                <div class="d-flex flex-column gap-2">
+                    <form method="post" action="/settings/corpus-toggle">
+                        <div class="form-check form-switch mb-0">
+                            <input class="form-check-input" type="checkbox" role="switch"
+                                   name="enabled" value="on" id="corpusAutoSwitch"
+                                   {% if corpus_auto_analyze %}checked{% endif %}
+                                   onchange="this.form.submit()">
+                            <label class="form-check-label" for="corpusAutoSwitch">
+                                {% if corpus_auto_analyze %}
+                                    <span class="text-success fw-semibold">Авто-анализ Claude — включён</span>
+                                {% else %}
+                                    <span class="text-muted">Авто-анализ Claude — выключен</span>
+                                {% endif %}
+                            </label>
+                        </div>
+                    </form>
+                    <form method="post" action="/settings/qwen-toggle">
+                        <div class="form-check form-switch mb-0">
+                            <input class="form-check-input" type="checkbox" role="switch"
+                                   name="enabled" value="on" id="qwenAutoSwitch"
+                                   {% if qwen_auto_analyze %}checked{% endif %}
+                                   onchange="this.form.submit()">
+                            <label class="form-check-label" for="qwenAutoSwitch">
+                                {% if qwen_auto_analyze %}
+                                    <span class="text-success fw-semibold">Авто-анализ Qwen — включён</span>
+                                {% else %}
+                                    <span class="text-muted">Авто-анализ Qwen — выключен</span>
+                                {% endif %}
+                            </label>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <!-- RAG — локальная модель -->
+        <div class="card mb-3">
+            <div class="card-header fw-semibold">📡 RAG — локальная модель</div>
+            <div class="card-body">
+                <form method="post" action="/settings/rag">
+                    <div class="row g-2 mb-2">
+                        <div class="col-8">
+                            <label class="form-label small fw-semibold mb-1">URL сервера</label>
+                            <input type="text" name="embedding_base_url" class="form-control form-control-sm"
+                                   value="{{ settings.embedding_base_url }}" required>
+                        </div>
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label small fw-semibold mb-1">Модель</label>
+                        <input type="text" name="embedding_model" class="form-control form-control-sm"
+                               value="{{ settings.embedding_model }}" required
+                               placeholder="nomic-embed-text">
+                    </div>
+                    <button type="submit" class="btn btn-sm btn-primary">Сохранить</button>
+                    <span class="text-muted small ms-2">Сбрасывает кэш RAG-индексов.</span>
                 </form>
+            </div>
+        </div>
+
+        <!-- Конфигурация сервиса (статичная) -->
+        <div class="card">
+            <div class="card-header fw-semibold">⚙️ Конфигурация сервиса</div>
+            <div class="card-body">
+                <dl class="row mb-0" style="font-size:0.85rem">
+                    <dt class="col-6">Расписание (UTC)</dt>
+                    <dd class="col-6">{{ "%02d:%02d" | format(settings.schedule_hour, settings.schedule_minute) }}</dd>
+                    <dt class="col-6">Web порт</dt>
+                    <dd class="col-6">{{ settings.web_port }}</dd>
+                </dl>
+                <div class="text-muted small mt-2">Для изменения отредактируйте <code>config.yml</code> и перезапустите сервис.</div>
             </div>
         </div>
     </div>
 
+    <!-- ─── Правая колонка ─────────────────────────────────────────────── -->
     <div class="col-md-6">
 
+        <!-- LLM — локальная модель (Ollama) -->
         <div class="card mb-3">
             <div class="card-header fw-semibold">🤖 LLM — локальная модель (Ollama)</div>
             <div class="card-body">
@@ -146,15 +162,74 @@
             </div>
         </div>
 
+        <!-- ИИ-аналитика (Claude API) -->
+        <div class="card">
+            <div class="card-header fw-semibold">✨ ИИ-аналитика (Claude API)</div>
+            <div class="card-body">
+                <form method="post" action="/settings/claude">
+                    <div class="row g-2 mb-2">
+                        <div class="col-8">
+                            <label class="form-label small fw-semibold mb-1">Модель</label>
+                            <input type="text" name="claude_model" class="form-control form-control-sm"
+                                   value="{{ claude.model }}" list="claude-models-list" required>
+                            <datalist id="claude-models-list">
+                                <option value="claude-opus-4-8">
+                                <option value="claude-sonnet-4-6">
+                                <option value="claude-haiku-4-5-20251001">
+                            </datalist>
+                        </div>
+                        <div class="col-4">
+                            <label class="form-label small fw-semibold mb-1">Макс. тулов</label>
+                            <input type="number" name="claude_max_tool_calls" class="form-control form-control-sm"
+                                   value="{{ claude.max_tool_calls }}" min="1" max="50" required>
+                        </div>
+                    </div>
+                    <div class="row g-2 mb-2">
+                        <div class="col-8">
+                            <label class="form-label small fw-semibold mb-1">Прокси</label>
+                            <input type="text" name="claude_proxy" class="form-control form-control-sm"
+                                   value="{{ claude.proxy }}"
+                                   placeholder="http://user:pass@host:port">
+                        </div>
+                        <div class="col-4">
+                            <label class="form-label small fw-semibold mb-1">Макс. токенов</label>
+                            <input type="number" name="claude_max_tokens" class="form-control form-control-sm"
+                                   value="{{ claude.max_tokens }}" min="256" max="32000" required>
+                        </div>
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label small fw-semibold mb-1">Системный промпт</label>
+                        <textarea name="claude_system_prompt" class="form-control form-control-sm"
+                                  rows="10" required
+                                  style="font-size:0.8rem;font-family:monospace">{{ claude.system_prompt }}</textarea>
+                    </div>
+                    <button type="submit" class="btn btn-sm btn-primary">Сохранить</button>
+                    <span class="text-muted small ms-2">Вступает в силу немедленно, без перезапуска.</span>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ─── Реестр оборудования (полная ширина) ──────────────────────────── -->
+<div class="row g-3 mt-0">
+    <div class="col-12">
         <div class="card">
             <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
                 Реестр оборудования
-                {% if registry %}
-                <form method="post" action="/settings/equipment/clear"
-                      onsubmit="return confirm('Очистить весь реестр? Это удалит все записи об оборудовании.')">
-                    <button type="submit" class="btn btn-sm btn-outline-danger">Очистить реестр</button>
-                </form>
-                {% endif %}
+                <div class="d-flex gap-2">
+                    <form method="post" action="/settings/sync">
+                        <button type="submit" class="btn btn-sm btn-outline-primary">
+                            Синхронизировать с основной БД
+                        </button>
+                    </form>
+                    {% if registry %}
+                    <form method="post" action="/settings/equipment/clear"
+                          onsubmit="return confirm('Очистить весь реестр? Это удалит все записи об оборудовании.')">
+                        <button type="submit" class="btn btn-sm btn-outline-danger">Очистить реестр</button>
+                    </form>
+                    {% endif %}
+                </div>
             </div>
             <div class="card-body p-0">
                 {% if not registry %}
