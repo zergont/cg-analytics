@@ -21,6 +21,7 @@
             <th>Регистров</th>
             <th>Fault-битов</th>
             <th>Правила работы</th>
+            <th>Справочник кодов</th>
             <th>PDF</th>
             <th></th>
         </tr>
@@ -34,6 +35,14 @@
         <td>
             {% if m.has_rules %}
                 <span class="badge bg-success-subtle text-success-emphasis">есть</span>
+            {% else %}
+                <span class="badge bg-secondary-subtle text-secondary-emphasis">нет</span>
+            {% endif %}
+        </td>
+        <td>
+            {% if m.has_fault_ref %}
+                <span class="badge bg-success-subtle text-success-emphasis"
+                      title="{{ m.fault_ref_codes }} кодов">{{ m.fault_ref_codes }} кодов</span>
             {% else %}
                 <span class="badge bg-secondary-subtle text-secondary-emphasis">нет</span>
             {% endif %}
@@ -67,31 +76,6 @@
 </div>
 {% endif %}
 
-{# ── Тест RAG-поиска ── #}
-{% if models %}
-<hr class="my-4">
-<h6 class="mb-3">🔍 Тест поиска по документации (RAG)</h6>
-<div class="row g-2 mb-3" style="max-width:700px">
-  <div class="col-auto">
-    <select class="form-select form-select-sm" id="searchKbPath">
-      {% for m in models %}
-      <option value="{{ m.kb_path }}">{{ m.kb_path }}</option>
-      {% endfor %}
-    </select>
-  </div>
-  <div class="col">
-    <input type="text" class="form-control form-control-sm" id="searchQuery"
-           placeholder="Например: порог температуры масла"
-           onkeydown="if(event.key==='Enter') doSearch()">
-  </div>
-  <div class="col-auto">
-    <button class="btn btn-sm btn-outline-primary" onclick="doSearch()" id="searchBtn">
-      Найти
-    </button>
-  </div>
-</div>
-<div id="searchResults"></div>
-{% endif %}
 
 {# ── Модальное окно управления файлами ── #}
 <div class="modal fade" id="kbModal" tabindex="-1" aria-labelledby="kbModalLabel" aria-hidden="true">
@@ -330,58 +314,6 @@ function renderKbFiles(kbPath, data) {
     document.getElementById('kbModalBody').innerHTML = html;
 }
 
-// ── RAG-поиск ─────────────────────────────────────────────────────────────
-async function doSearch() {
-  const kb  = document.getElementById('searchKbPath').value;
-  const q   = document.getElementById('searchQuery').value.trim();
-  const btn = document.getElementById('searchBtn');
-  const out = document.getElementById('searchResults');
-
-  if (!q) return;
-
-  btn.disabled = true;
-  btn.textContent = '⏳ Ищу…';
-  out.innerHTML = '';
-
-  try {
-    const resp = await fetch(
-      '/knowledge/' + encodeURIComponent(kb) + '/search?q=' + encodeURIComponent(q)
-    );
-    const data = await resp.json();
-
-    if (data.error) {
-      out.innerHTML = `<div class="alert alert-danger">Ошибка: ${data.error}</div>`;
-      return;
-    }
-    if (!data.results.length) {
-      out.innerHTML = `<div class="alert alert-secondary">Ничего не найдено по запросу <em>${q}</em>. Индекс пуст или PDF не загружены.</div>`;
-      return;
-    }
-
-    let html = `<div class="text-muted small mb-2">${data.results.length} результатов для «${q}»:</div>`;
-    data.results.forEach((chunk, i) => {
-      // Первая строка — заголовок [source, стр. N]
-      const lines = chunk.split('\n');
-      const header = lines[0].startsWith('[') ? lines[0] : '';
-      const body   = header ? lines.slice(1).join('\n').trim() : chunk;
-      html += `
-        <div class="card mb-2">
-          <div class="card-header py-1 px-3 d-flex align-items-center gap-2" style="font-size:.8rem;background:#f8f9fa">
-            <span class="badge bg-primary">${i + 1}</span>
-            <code class="text-muted">${header || 'документ'}</code>
-          </div>
-          <div class="card-body py-2 px-3" style="font-size:.82rem;white-space:pre-wrap;max-height:200px;overflow-y:auto">${body.replace(/</g,'&lt;')}</div>
-        </div>`;
-    });
-    out.innerHTML = html;
-
-  } catch(e) {
-    out.innerHTML = `<div class="alert alert-danger">Ошибка запроса: ${e.message}</div>`;
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Найти';
-  }
-}
 
 function showAnalyticsUploadForm(kbPath, filename) {
     const block = document.getElementById('analyticsUploadBlock');

@@ -721,12 +721,27 @@ async def knowledge_page(request: Request):
             fault_count = _count_lines(kb_dir / "fault_bitmap_map.jsonl")
             has_rules = (kb_dir / "operation_rules.json").exists()
             pdf_count = len(list((kb_dir / "docs").glob("*.pdf"))) if (kb_dir / "docs").exists() else 0
+
+            # Справочник кодов неисправностей
+            fault_ref_path = kb_dir / "pcc3300_fault_codes.json"
+            fault_ref_codes = 0
+            if fault_ref_path.exists():
+                try:
+                    import json as _json
+                    data = _json.loads(fault_ref_path.read_text(encoding="utf-8"))
+                    fault_ref_codes = data.get("statistics", {}).get("total_codes", 0) \
+                                      or len(data.get("fault_codes", []))
+                except Exception:
+                    fault_ref_codes = -1  # файл есть, но не распарсился
+
             models.append({
                 "kb_path": kb_dir.name,
                 "registers": reg_count,
                 "faults": fault_count,
                 "has_rules": has_rules,
                 "pdfs": pdf_count,
+                "has_fault_ref": fault_ref_path.exists(),
+                "fault_ref_codes": fault_ref_codes,
             })
 
     return templates.TemplateResponse(request, "knowledge.html", {
@@ -793,6 +808,7 @@ _KB_DATA_FILES = [
     "fault_bitmap_map.jsonl",
     "enum_map.json",
     "operation_rules.json",
+    "pcc3300_fault_codes.json",   # детерминированный справочник кодов неисправностей
 ]
 _KB_ALLOWED_EXT = {".jsonl", ".json", ".pdf"}
 
@@ -897,6 +913,15 @@ async def kb_upload(kb_path: str, file: UploadFile = File(...)):
         )
 
     content = await file.read()
+
+    # Валидация JSON-файлов (кроме .jsonl — построчные)
+    if suffix == ".json":
+        try:
+            import json as _json
+            _json.loads(content)
+        except Exception as _je:
+            raise HTTPException(status_code=400, detail=f"Невалидный JSON: {_je}")
+
     dest.write_bytes(content)
     logger.info("KB upload: %s / %s (%d байт)", kb_path, filename, len(content))
     return RedirectResponse(url="/knowledge", status_code=303)
