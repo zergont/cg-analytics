@@ -2,7 +2,6 @@
 import asyncio
 import logging
 import re
-import time
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -34,9 +33,6 @@ def _apply_tz(tz_name: str) -> None:
     """Применить новый TZ: обновить in-memory и глобал шаблонов."""
     _set_tz(tz_name)
     templates.env.globals["app_timezone"] = tz_name
-
-# Статус переиндексации KB (kb_path → dict)
-_reindex_status: dict[str, dict] = {}
 
 
 # ── Главная страница ──────────────────────────────────────────────────────────
@@ -744,60 +740,8 @@ async def knowledge_page(request: Request):
                 "fault_ref_codes": fault_ref_codes,
             })
 
-    return templates.TemplateResponse(request, "knowledge.html", {
-        "models": models,
-        "reindex_status": _reindex_status,
-    })
+    return templates.TemplateResponse(request, "knowledge.html", {"models": models})
 
-
-@router.post("/knowledge/reindex")
-async def reindex(kb_path: str = Form(...)):
-    """Запустить переиндексацию в фоне."""
-    _reindex_status[kb_path] = {
-        "status": "running",
-        "step": "Инициализация…",
-        "docs": 0,
-        "started_at": time.time(),
-        "error": None,
-    }
-
-    async def _reindex():
-        from knowledge.indexer import index_equipment
-        from knowledge.retriever import invalidate_cache
-        from knowledge.loader import invalidate_cache as loader_invalidate
-
-        def _cb(step: str, total: int = 0):
-            _reindex_status[kb_path]["step"] = step
-            _reindex_status[kb_path]["docs"] = total
-
-        try:
-            loop = asyncio.get_running_loop()
-            count = await loop.run_in_executor(
-                None, lambda: index_equipment(kb_path, _cb)
-            )
-            invalidate_cache(kb_path)
-            loader_invalidate(kb_path)
-            _reindex_status[kb_path]["status"] = "done"
-            _reindex_status[kb_path]["step"] = f"Готово: {count} документов"
-            _reindex_status[kb_path]["docs"] = count
-            logger.info("Переиндексация завершена: %s, %d документов", kb_path, count)
-        except Exception as e:
-            logger.exception("Ошибка переиндексации: %s", e)
-            _reindex_status[kb_path]["status"] = "error"
-            _reindex_status[kb_path]["error"] = str(e)
-
-    asyncio.create_task(_reindex())
-    return RedirectResponse(url="/knowledge", status_code=303)
-
-
-@router.get("/knowledge/reindex/status", response_class=JSONResponse)
-async def reindex_status_api():
-    """Текущий статус переиндексаций (для JS-поллинга)."""
-    now = time.time()
-    result = {}
-    for kb, s in _reindex_status.items():
-        result[kb] = {**s, "elapsed_s": int(now - s["started_at"])}
-    return JSONResponse(result)
 
 
 # ── KB: управление файлами ────────────────────────────────────────────────────
@@ -944,29 +888,6 @@ async def kb_delete_file(kb_path: str, filename: str = Form(...)):
     logger.info("KB delete PDF: %s / docs/%s", kb_path, filename)
     return RedirectResponse(url="/knowledge", status_code=303)
 
-
-@router.get("/knowledge/{kb_path}/search", response_class=JSONResponse)
-async def kb_search(kb_path: str, q: str = ""):
-    """Тестовый поиск по RAG-индексу. Возвращает топ-5 результатов."""
-    _kb_base(kb_path)  # валидация пути
-    if not q.strip():
-        return JSONResponse({"results": [], "error": None})
-    try:
-        from knowledge.retriever import search_manual_docs
-        import asyncio as _asyncio
-        # Поиск синхронный (LlamaIndex) — выносим в executor чтобы не блокировать event loop
-        raw = await _asyncio.get_event_loop().run_in_executor(
-            None, lambda: search_manual_docs(q.strip(), kb_path, top_k=5)
-        )
-        # Разбиваем склеенный текст обратно на отдельные результаты
-        if raw:
-            chunks = [c.strip() for c in raw.split("\n\n---\n\n") if c.strip()]
-        else:
-            chunks = []
-        return JSONResponse({"results": chunks, "error": None})
-    except Exception as e:
-        logger.warning("kb_search ошибка: %s", e)
-        return JSONResponse({"results": [], "error": str(e)})
 
 
 # ── Настройки ─────────────────────────────────────────────────────────────────

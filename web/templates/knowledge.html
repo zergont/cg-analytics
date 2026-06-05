@@ -4,9 +4,6 @@
 {% block content %}
 <h5 class="mb-3">Knowledge Base — модели оборудования</h5>
 
-{# ── Панель прогресса переиндексации ── #}
-<div id="reindexPanel"></div>
-
 {% if not models %}
 <div class="alert alert-secondary">
     База знаний пуста. Добавьте папку в
@@ -49,33 +46,16 @@
         </td>
         <td>{{ m.pdfs }}</td>
         <td class="text-end">
-            <button class="btn btn-sm btn-outline-info me-1"
+            <button class="btn btn-sm btn-outline-info"
                     onclick="openKbModal('{{ m.kb_path }}')">
                 📁 Файлы
             </button>
-            <form method="post" action="/knowledge/reindex" class="d-inline"
-                  onsubmit="return confirmReindex(this, '{{ m.kb_path }}')">
-                <input type="hidden" name="kb_path" value="{{ m.kb_path }}">
-                <button type="submit" class="btn btn-sm btn-outline-warning"
-                        id="btn-{{ m.kb_path | replace('/', '_') }}"
-                        {% if reindex_status.get(m.kb_path, {}).get('status') == 'running' %}disabled{% endif %}>
-                    {% if reindex_status.get(m.kb_path, {}).get('status') == 'running' %}
-                        <span class="spinner-border spinner-border-sm me-1" role="status"></span>Индексируется…
-                    {% else %}
-                        ⟳ Переиндексировать
-                    {% endif %}
-                </button>
-            </form>
         </td>
     </tr>
     {% endfor %}
     </tbody>
 </table>
-<div class="text-muted small">
-    Первичная индексация: <code>python -m knowledge.indexer --all</code>
-</div>
 {% endif %}
-
 
 {# ── Модальное окно управления файлами ── #}
 <div class="modal fade" id="kbModal" tabindex="-1" aria-labelledby="kbModalLabel" aria-hidden="true">
@@ -100,73 +80,6 @@
 
 {% block scripts %}
 <script>
-// ── Прогресс переиндексации ────────────────────────────────────────────────
-const initialStatus = {{ reindex_status | tojson }};
-
-function confirmReindex(form, kbPath) {
-    return confirm('Пересобрать RAG-индекс для ' + kbPath + '?');
-}
-
-function fmtElapsed(s) {
-    return s < 60 ? s + ' с' : Math.floor(s / 60) + ' м ' + (s % 60) + ' с';
-}
-
-function renderPanel(status) {
-    const panel = document.getElementById('reindexPanel');
-    const entries = Object.entries(status);
-    if (!entries.length) { panel.innerHTML = ''; return; }
-    const cards = entries.map(([kb, s]) => {
-        if (s.status === 'running') return `
-            <div class="alert alert-info d-flex align-items-center gap-3 mb-2">
-                <div class="spinner-border spinner-border-sm text-info flex-shrink-0"></div>
-                <div class="flex-grow-1"><strong>${kb}</strong> — ${s.step}
-                    ${s.docs > 0 ? '<span class="badge bg-info-subtle text-info-emphasis ms-2">' + s.docs + ' docs</span>' : ''}
-                </div>
-                <span class="text-muted small">${fmtElapsed(s.elapsed_s)}</span>
-            </div>`;
-        if (s.status === 'done') return `
-            <div class="alert alert-success d-flex align-items-center gap-3 mb-2">
-                <span>✓</span>
-                <div class="flex-grow-1"><strong>${kb}</strong> — ${s.step}</div>
-                <span class="text-muted small">${fmtElapsed(s.elapsed_s)}</span>
-            </div>`;
-        if (s.status === 'error') return `
-            <div class="alert alert-danger d-flex align-items-center gap-3 mb-2">
-                <span>✗</span>
-                <div class="flex-grow-1"><strong>${kb}</strong> — Ошибка: ${s.error || '?'}</div>
-                <span class="text-muted small">${fmtElapsed(s.elapsed_s)}</span>
-            </div>`;
-        return '';
-    });
-    panel.innerHTML = cards.join('');
-}
-
-let pollTimer = null;
-function poll() {
-    fetch('/knowledge/reindex/status')
-        .then(r => r.json())
-        .then(status => {
-            renderPanel(status);
-            for (const [kb, s] of Object.entries(status)) {
-                const btn = document.getElementById('btn-' + kb.replace(/\//g, '_'));
-                if (!btn) continue;
-                if (s.status === 'running') {
-                    btn.disabled = true;
-                    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Индексируется…';
-                } else {
-                    btn.disabled = false;
-                    btn.innerHTML = '⟳ Переиндексировать';
-                }
-            }
-            const hasRunning = Object.values(status).some(s => s.status === 'running');
-            pollTimer = hasRunning ? setTimeout(poll, 2000) : null;
-        })
-        .catch(() => { pollTimer = null; });
-}
-
-renderPanel(initialStatus);
-if (Object.values(initialStatus).some(s => s.status === 'running')) poll();
-
 // ── Файловый менеджер KB ───────────────────────────────────────────────────
 let _currentKbPath = '';
 
@@ -313,7 +226,6 @@ function renderKbFiles(kbPath, data) {
 
     document.getElementById('kbModalBody').innerHTML = html;
 }
-
 
 function showAnalyticsUploadForm(kbPath, filename) {
     const block = document.getElementById('analyticsUploadBlock');
