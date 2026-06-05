@@ -76,6 +76,14 @@ async def run_analysis(
         logger.error("analytics.runner: ошибка загрузки конфигурации: %s", exc)
         return _error_result(str(exc), int((time.monotonic() - t0) * 1000))
 
+    # Детерминированный справочник кодов неисправностей (заменяет RAG)
+    fault_ref = None
+    try:
+        from .fault_ref import FaultRef
+        fault_ref = FaultRef(kb_path)
+    except Exception as exc:
+        logger.warning("analytics.runner: FaultRef не загружен: %s", exc)
+
     try:
         # ── Загрузка данных из source-БД ──
         history, enum_periods, fault_periods, gaps = await _load_data(
@@ -107,7 +115,8 @@ async def run_analysis(
             segments, router_sn, equip_type, panel_id, tf, tt, ANALYTICS_VERSION
         )
         report_md = to_markdown(
-            segments, router_sn, equip_type, panel_id, tf, tt, ANALYTICS_VERSION, tz=tz
+            segments, router_sn, equip_type, panel_id, tf, tt, ANALYTICS_VERSION,
+            tz=tz, fault_ref=fault_ref,
         )
 
         summary = build_run_summary(segments)

@@ -221,6 +221,14 @@ class OnlineManager:
             )
             return None
 
+        # Детерминированный справочник кодов неисправностей
+        fault_ref = None
+        try:
+            from analytics.fault_ref import FaultRef
+            fault_ref = FaultRef(kb_path)
+        except Exception as e:
+            logger.warning("OnlineManager: FaultRef не загружен для %s: %s", kb_path_rel, e)
+
         # engine_sn из реестра
         registry = await db_analytics.get_equipment_registry()
         eq = next(
@@ -246,6 +254,7 @@ class OnlineManager:
             poll_interval_sec=obs.get("poll_interval_sec", 30),
             daily_hour=daily_hour,
             tz=get_tz(),
+            fault_ref=fault_ref,
         )
 
     def _launch(self, engine: OnlinePollEngine) -> None:

@@ -264,6 +264,7 @@ class OnlinePollEngine:
         poll_interval_sec: int = 30,
         daily_hour: int = 9,
         tz=None,
+        fault_ref=None,
     ) -> None:
         self.router_sn        = router_sn
         self.equip_type       = equip_type
@@ -273,6 +274,7 @@ class OnlinePollEngine:
         self.poll_interval_sec = poll_interval_sec
         self.daily_hour       = daily_hour
         self.tz               = tz
+        self._fault_ref       = fault_ref  # справочник кодов неисправностей
 
         # Изменяемое состояние — переинициализируется из БД при старте
         self.cursor_ts: datetime | None          = None
@@ -489,6 +491,7 @@ class OnlinePollEngine:
                     [seg], self.router_sn, self.equip_type, self.panel_id,
                     _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end,
                     ANALYTICS_VERSION, tz=self.tz, prev_seg=ps,
+                    fault_ref=self._fault_ref,
                 )
             except Exception:
                 report_md = None
@@ -570,6 +573,7 @@ class OnlinePollEngine:
                         [seg], self.router_sn, self.equip_type, self.panel_id,
                         _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end_rs,
                         ANALYTICS_VERSION, tz=self.tz, prev_seg=ps_rs,
+                        fault_ref=self._fault_ref,
                     )
                 except Exception:
                     report_md_rs = None

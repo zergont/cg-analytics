@@ -133,6 +133,7 @@ def to_markdown(
     analytics_version: str = "2.0.0",
     tz=None,
     prev_seg=None,
+    fault_ref=None,
 ) -> str:
     """Сформировать Markdown-отчёт.
 
@@ -207,7 +208,7 @@ def to_markdown(
 
     for seg_idx, seg in enumerate(segments, 1):
         ps = segments[seg_idx - 2] if seg_idx >= 2 else prev_seg
-        _append_segment(lines, seg, seg_idx, fmt_ts, prev_seg=ps)
+        _append_segment(lines, seg, seg_idx, fmt_ts, prev_seg=ps, fault_ref=fault_ref)
 
     return "\n".join(lines)
 
@@ -218,6 +219,7 @@ def _append_segment(
     idx: int,
     fmt_ts,
     prev_seg: "Segment | None" = None,
+    fault_ref=None,
 ) -> None:
     a = lines.append
     state_label = (
@@ -275,6 +277,54 @@ def _append_segment(
             dur_s = f" ({_fmt_duration(dur)})" if dur else ""
             a(f"- {_SEVERITY_EMOJI.get(sev, '')} `{name}` @ {t}{dur_s}")
         a("")
+
+    # Расшифровка кодов неисправностей из справочника (детерминированный lookup)
+    # Источники: LAST_FAULT_CODE (регистр 40012) + fault_codes из обнаружений
+    if fault_ref:
+        codes_to_show: list[int] = []
+        seen_codes: set[int] = set()
+
+        # 1. LAST_FAULT_CODE из характеристик подсегментов
+        for sub in seg.subsegments:
+            lfc = sub.characteristics.get("LAST_FAULT_CODE") or {}
+            raw_val = lfc.get("median") if lfc.get("median") else lfc.get("max")
+            if raw_val is not None:
+                try:
+                    code = int(raw_val)
+                    if code > 0 and code not in seen_codes:
+                        codes_to_show.append(code)
+                        seen_codes.add(code)
+                except (ValueError, TypeError):
+                    pass
+
+        # 2. fault_codes из всех обнаружений
+        for sub in seg.subsegments:
+            for _d in sub.detections:
+                d = _as_dict(_d)
+                for code in d.get("fault_codes") or []:
+                    try:
+                        c = int(code)
+                        if c > 0 and c not in seen_codes:
+                            codes_to_show.append(c)
+                            seen_codes.add(c)
+                    except (ValueError, TypeError):
+                        pass
+
+        if codes_to_show:
+            a("**Справочник кодов неисправностей:**")
+            a("")
+            any_found = False
+            for code in codes_to_show:
+                desc = fault_ref.format_for_report(code)
+                if desc:
+                    for line in desc.split("\n"):
+                        a(line)
+                    a("")
+                    any_found = True
+            if not any_found:
+                # Все коды отсутствуют в справочнике — удаляем пустой заголовок
+                lines.pop()
+                lines.pop()
 
     # Sequence checks
     failed_checks = [c for c in seg.sequence_checks if not c.get("passed")]
