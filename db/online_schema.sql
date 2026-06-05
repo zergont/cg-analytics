@@ -83,3 +83,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_auto_seg_closed_t_start
 -- Миграция v2.2.6: фиксированная правая граница batch-добора
 ALTER TABLE online_observations
     ADD COLUMN IF NOT EXISTS batch_end_ts TIMESTAMPTZ;
+
+-- Миграция v3.3.0: ИИ-оператор Уровень 1 — статус-строка
+ALTER TABLE auto_segments
+    ADD COLUMN IF NOT EXISTS status_text        TEXT,
+    ADD COLUMN IF NOT EXISTS status_hash        TEXT,
+    ADD COLUMN IF NOT EXISTS status_updated_at  TIMESTAMPTZ;

@@ -914,6 +914,9 @@ async def settings_page(request: Request):
     kb_list = _list_kb_paths(cfg.knowledge_base_path / "equipment")
     corpus_auto = await analytics.get_app_setting("corpus_auto_analyze", "false")
     qwen_auto   = await analytics.get_app_setting("qwen_auto_analyze",   "false")
+    status_line_interval_min = int(
+        await analytics.get_app_setting("status_line_interval_min", "5")
+    )
     return templates.TemplateResponse(request, "settings.html", {
         "settings": cfg,
         "registry": registry,
@@ -922,9 +925,19 @@ async def settings_page(request: Request):
         "current_timezone": get_tz().key,
         "llm": get_llm_settings(),
         "claude": get_claude_settings(),
-        "corpus_auto_analyze": corpus_auto == "true",
-        "qwen_auto_analyze":   qwen_auto   == "true",
+        "corpus_auto_analyze":      corpus_auto == "true",
+        "qwen_auto_analyze":        qwen_auto   == "true",
+        "status_line_interval_min": status_line_interval_min,
     })
+
+
+@router.post("/settings/status-line-interval")
+async def update_status_line_interval(interval_min: int = Form(...)):
+    """Сохранить интервал обновления статус-строки ИИ-оператора."""
+    interval_min = max(1, min(60, interval_min))   # зажимаем в [1, 60]
+    await analytics.set_app_setting("status_line_interval_min", str(interval_min))
+    logger.info("ИИ-оператор: интервал статус-строки → %d мин", interval_min)
+    return RedirectResponse(url="/settings", status_code=303)
 
 
 @router.post("/settings/llm")
@@ -1808,6 +1821,27 @@ async def api_online_status():
         start_date_iso  = obs["start_date"].isoformat()  if obs.get("start_date")  else None
         batch_end_iso   = obs["batch_end_ts"].isoformat() if obs.get("batch_end_ts") else None
 
+        # ── ИИ-оператор: статус-строка ──
+        status_text     = None
+        severity_level  = "норма"
+        status_updated  = None
+        if open_seg:
+            status_text = open_seg.get("status_text")
+            if open_seg.get("status_updated_at"):
+                status_updated = open_seg["status_updated_at"].isoformat()
+            # severity_level из active_detections (детерминированно)
+            try:
+                from online.status_assembler import compute_severity_level
+                dets_raw = open_seg.get("active_detections_json")
+                if isinstance(dets_raw, str):
+                    import json as _json
+                    dets = _json.loads(dets_raw) if dets_raw else []
+                else:
+                    dets = dets_raw or []
+                severity_level = compute_severity_level(dets)
+            except Exception:
+                pass
+
         result.append({
             "key":              key,
             "router_sn":        obs["router_sn"],
@@ -1819,14 +1853,18 @@ async def api_online_status():
             "coking_risk":      cr,
             "poll_interval_sec": obs.get("poll_interval_sec", 30),
             "start_date":       start_date_iso,
-            "batch_end_ts":     batch_end_iso, # фиксированный правый край batch-добора (знаменатель)
-            "cursor_ts":        cursor_ts,    # зафиксированный рубеж (t_end последнего закр. сег.)
-            "processed_to":     processed_to, # куда дошли в последнем цикле (для прогресс-бара)
-            "lag_sec":          lag_sec,       # отставание processed_to от now
+            "batch_end_ts":     batch_end_iso,
+            "cursor_ts":        cursor_ts,
+            "processed_to":     processed_to,
+            "lag_sec":          lag_sec,
             "t_start_open": (
                 open_seg["t_start"].isoformat()
                 if open_seg and open_seg.get("t_start") else None
             ),
+            # ИИ-оператор Уровень 1
+            "status_text":    status_text,
+            "severity_level": severity_level,
+            "status_updated": status_updated,
         })
     return JSONResponse(result)
 

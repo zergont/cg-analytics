@@ -52,6 +52,7 @@ class OnlineManager:
     def __init__(self) -> None:
         self._engines: dict[str, OnlinePollEngine] = {}
         self._tasks:   dict[str, asyncio.Task]     = {}
+        self._status_task: asyncio.Task | None     = None
 
     # ── Запуск всех активных наблюдений ───────────────────────────────────────
 
@@ -78,6 +79,12 @@ class OnlineManager:
                     "OnlineManager: ошибка старта движка %s/%s/%s",
                     obs["router_sn"], obs["equip_type"], obs["panel_id"],
                 )
+
+        # Запустить планировщик статус-строк (ИИ-оператор Уровень 1)
+        self._status_task = asyncio.create_task(
+            self._run_status_scheduler(), name="status_line_scheduler"
+        )
+        logger.info("OnlineManager: планировщик статус-строк запущен")
 
     # ── ПУСК ОНЛАЙН ───────────────────────────────────────────────────────────
 
@@ -183,6 +190,15 @@ class OnlineManager:
     # ── Остановка всех ────────────────────────────────────────────────────────
 
     async def stop_all(self) -> None:
+        # Остановить планировщик статус-строк
+        if self._status_task and not self._status_task.done():
+            self._status_task.cancel()
+            try:
+                await self._status_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._status_task = None
+
         for key in list(self._engines.keys()):
             try:
                 await self._stop_engine(key)
@@ -304,3 +320,79 @@ class OnlineManager:
         key = f"{router_sn}|{equip_type}|{panel_id}"
         engine = self._engines.get(key)
         return engine.last_processed_to if engine else None
+
+    # ── Планировщик статус-строк (ИИ-оператор Уровень 1) ─────────────────────
+
+    async def _run_status_scheduler(self) -> None:
+        """Периодически обновляет статус-строки активных машин."""
+        # Начальная задержка — дать движкам инициализироваться
+        await asyncio.sleep(60)
+        logger.info("StatusLineScheduler: первый тик")
+
+        while True:
+            try:
+                from db.analytics import get_app_setting
+                interval_min = int(await get_app_setting("status_line_interval_min", "5"))
+            except Exception:
+                interval_min = 5
+
+            try:
+                await self._tick_status_lines()
+            except Exception:
+                logger.exception("StatusLineScheduler: ошибка тика")
+
+            await asyncio.sleep(interval_min * 60)
+
+    async def _tick_status_lines(self) -> None:
+        """Один тик: проверить статус всех активных машин, обновить при изменении."""
+        from corpus.qwen_worker import get_worker
+        from online.status_assembler import (
+            build_structural_status, compute_status_hash, build_fallback_text,
+        )
+        from online import db as online_db
+
+        worker = get_worker()
+        if not worker:
+            logger.debug("StatusLineScheduler: qwen_worker не запущен, пропуск")
+            return
+
+        for key, engine in list(self._engines.items()):
+            try:
+                seg = await online_db.get_open_segment(
+                    engine.router_sn, engine.equip_type, engine.panel_id
+                )
+                if not seg:
+                    continue
+
+                struct = build_structural_status(seg, engine._fault_ref, engine.tz)
+                new_hash = compute_status_hash(struct)
+                old_hash = seg.get("status_hash")
+
+                if new_hash == old_hash:
+                    logger.debug("StatusLineScheduler[%s]: статус не изменился", key)
+                    continue
+
+                # Статус изменился → сразу записываем fallback (оператор видит немедленно)
+                fallback = build_fallback_text(struct)
+                await online_db.update_open_segment_status(
+                    engine.router_sn, engine.equip_type, engine.panel_id,
+                    status_text=fallback,
+                    status_hash=new_hash,
+                )
+
+                # Ставим в очередь qwen для замены fallback на прозу
+                worker.enqueue_status({
+                    "router_sn":         engine.router_sn,
+                    "equip_type":        engine.equip_type,
+                    "panel_id":          engine.panel_id,
+                    "structural_status": struct,
+                    "status_hash":       new_hash,
+                })
+
+                logger.info(
+                    "StatusLineScheduler[%s]: статус изменился (hash %s → %s), enqueue qwen",
+                    key, old_hash, new_hash,
+                )
+
+            except Exception:
+                logger.exception("StatusLineScheduler: ошибка для %s", key)

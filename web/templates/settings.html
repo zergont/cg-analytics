@@ -76,6 +76,21 @@
                         </div>
                     </form>
                 </div>
+
+                <hr class="my-3">
+
+                <!-- ИИ-оператор Уровень 1: интервал статус-строки -->
+                <div class="d-flex align-items-center gap-2">
+                    <span class="small text-muted me-1">🤖 Статус-строка — интервал обновления:</span>
+                    <form method="post" action="/settings/status-line-interval"
+                          class="d-flex align-items-center gap-2">
+                        <input type="number" name="interval_min"
+                               class="form-control form-control-sm" style="width:70px"
+                               value="{{ status_line_interval_min }}" min="1" max="60" required>
+                        <span class="text-muted small">мин</span>
+                        <button type="submit" class="btn btn-sm btn-outline-secondary">Сохранить</button>
+                    </form>
+                </div>
             </div>
         </div>
 

@@ -58,9 +58,6 @@ async def lifespan(app: FastAPI):
         proxy=          await get_app_setting("claude_proxy",          _claude_defaults["proxy"]),
         system_prompt=  await get_app_setting("claude_system_prompt",  _CLAUDE_DEFAULT_PROMPT),
     )
-    # Загружаем настройки RAG из БД
-    settings.embedding_base_url = await get_app_setting("embedding_base_url", settings.embedding_base_url)
-    settings.embedding_model    = await get_app_setting("embedding_model",    settings.embedding_model)
     start_scheduler()
     # Запустить онлайн-мониторинг (Этап 1.5)
     mgr = _online_mgr.init_manager()

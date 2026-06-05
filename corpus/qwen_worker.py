@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 PRIORITY_MANUAL = 0
 PRIORITY_NORMAL = 1
+PRIORITY_STATUS = 2   # статус-строка — ниже приоритета анализа сегментов
 
 
 class QwenWorker:
@@ -33,6 +34,15 @@ class QwenWorker:
     def enqueue(self, seg_id: int, priority: int = PRIORITY_NORMAL) -> None:
         self._queue.put_nowait((priority, seg_id))
         logger.debug("qwen/worker: enqueue #%d (p=%d)", seg_id, priority)
+
+    def enqueue_status(self, data: dict) -> None:
+        """Поставить задачу генерации статус-строки в очередь (низкий приоритет)."""
+        item = {"type": "status_line", **data}
+        self._queue.put_nowait((PRIORITY_STATUS, item))
+        logger.debug(
+            "qwen/worker: enqueue status для %s/%s/%s",
+            data.get("router_sn"), data.get("equip_type"), data.get("panel_id"),
+        )
 
     async def enqueue_pending(self) -> int:
         """Batch: все сегменты с готовым Claude-анализом без Qwen-обработки."""
@@ -56,30 +66,43 @@ class QwenWorker:
 
         while self._running:
             try:
-                _, seg_id = await asyncio.wait_for(self._queue.get(), timeout=5.0)
+                _, item = await asyncio.wait_for(self._queue.get(), timeout=5.0)
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
 
-            # Проверяем флаг перед каждым сегментом
-            from db.analytics import get_app_setting
-            qwen_auto = await get_app_setting("qwen_auto_analyze", "false")
-            if qwen_auto != "true":
-                self._queue.task_done()
-                logger.debug("qwen/worker: авто-анализ выключен, сегмент #%d пропущен", seg_id)
-                continue
+            # ── Диспетчер по типу задачи ──
+            if isinstance(item, int):
+                # Анализ сегмента (основной поток)
+                seg_id = item
+                from db.analytics import get_app_setting
+                qwen_auto = await get_app_setting("qwen_auto_analyze", "false")
+                if qwen_auto != "true":
+                    self._queue.task_done()
+                    logger.debug("qwen/worker: авто-анализ выключен, сегмент #%d пропущен", seg_id)
+                    continue
+                self._current = seg_id
+                try:
+                    await _process_segment(seg_id)
+                except Exception:
+                    logger.exception("qwen/worker: ошибка обработки сегмента #%d", seg_id)
+                finally:
+                    self._current = None
+                    self._queue.task_done()
 
-            self._current = seg_id
-            try:
-                await _process_segment(seg_id)
-            except Exception:
-                logger.exception(
-                    "qwen/worker: необработанная ошибка при обработке #%d", seg_id
-                )
-            finally:
-                self._current = None
+            elif isinstance(item, dict) and item.get("type") == "status_line":
+                # Генерация статус-строки (ИИ-оператор Уровень 1)
+                try:
+                    await _process_status_line(item)
+                except Exception:
+                    logger.exception("qwen/worker: ошибка генерации статус-строки")
+                finally:
+                    self._queue.task_done()
+
+            else:
                 self._queue.task_done()
+                logger.warning("qwen/worker: неизвестный тип задачи: %s", type(item))
 
         logger.info("qwen/worker: остановлен")
 
@@ -126,6 +149,72 @@ async def _process_segment(seg_id: int) -> None:
 
     await corpus_db.set_humanized_md(seg_id, humanized)
     logger.info("qwen/worker: сегмент #%d обработан (%d символов)", seg_id, len(humanized))
+
+
+# ── Генерация статус-строки ───────────────────────────────────────────────────
+
+async def _process_status_line(job: dict) -> None:
+    """Сгенерировать статус-строку через qwen и сохранить в открытый сегмент."""
+    import httpx
+    from llm.client import _cfg
+    from online.status_assembler import build_status_prompt
+    from online import db as online_db
+
+    router_sn     = job["router_sn"]
+    equip_type    = job["equip_type"]
+    panel_id      = job["panel_id"]
+    struct_status = job["structural_status"]
+    status_hash   = job["status_hash"]
+
+    logger.debug("qwen/worker: статус-строка %s/%s/%s", router_sn, equip_type, panel_id)
+
+    prompt = build_status_prompt(struct_status)
+
+    try:
+        payload = {
+            "model": _cfg["model"],
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты формируешь краткую текстовую сводку состояния дизельного генератора "
+                        "для оператора пульта управления. "
+                        "Используй ТОЛЬКО приведённые факты. "
+                        "НЕ добавляй оценки, предположения, рекомендации, которых нет в фактах. "
+                        "Облеки факты в 1-2 коротких естественных фразы на русском языке."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "stream": False,
+            "options": {
+                "temperature": 0.1,
+                "num_ctx": _cfg.get("num_ctx", 4096),
+            },
+        }
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(f"{_cfg['base_url']}/api/chat", json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            status_text = data.get("message", {}).get("content", "").strip()
+
+        if not status_text:
+            logger.warning("qwen/worker: статус-строка пустая для %s/%s/%s",
+                           router_sn, equip_type, panel_id)
+            return
+
+        await online_db.update_open_segment_status(
+            router_sn, equip_type, panel_id,
+            status_text=status_text,
+            status_hash=status_hash,
+        )
+        logger.info("qwen/worker: статус обновлён %s/%s/%s (%d симв.)",
+                    router_sn, equip_type, panel_id, len(status_text))
+
+    except Exception as exc:
+        logger.warning("qwen/worker: ошибка статус-строки %s/%s/%s: %s",
+                       router_sn, equip_type, panel_id, exc)
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────────
