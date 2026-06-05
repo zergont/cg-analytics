@@ -738,10 +738,23 @@ async def knowledge_page(request: Request):
                 "pdfs": pdf_count,
                 "has_fault_ref": fault_ref_path.exists(),
                 "fault_ref_codes": fault_ref_codes,
+                "has_faultref_html": bool(list(kb_dir.glob("*.html"))),
             })
 
     return templates.TemplateResponse(request, "knowledge.html", {"models": models})
 
+
+
+# ── KB: HTML-справочник кодов неисправностей ─────────────────────────────────
+
+@router.get("/knowledge/{kb_path}/faultref", response_class=HTMLResponse)
+async def kb_faultref(kb_path: str):
+    """Открыть HTML-справочник кодов неисправностей прямо в браузере."""
+    base = _kb_base(kb_path)
+    html_files = sorted(base.glob("*.html"))
+    if not html_files:
+        raise HTTPException(status_code=404, detail="HTML-справочник не найден в этой KB")
+    return HTMLResponse(content=html_files[0].read_text(encoding="utf-8"))
 
 
 # ── KB: управление файлами ────────────────────────────────────────────────────

@@ -46,6 +46,12 @@
         </td>
         <td>{{ m.pdfs }}</td>
         <td class="text-end">
+            {% if m.has_faultref_html %}
+            <a href="/knowledge/{{ m.kb_path }}/faultref" target="_blank"
+               class="btn btn-sm btn-outline-success me-1">
+                📋 Справочник
+            </a>
+            {% endif %}
             <button class="btn btn-sm btn-outline-info"
                     onclick="openKbModal('{{ m.kb_path }}')">
                 📁 Файлы
