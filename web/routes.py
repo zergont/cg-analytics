@@ -984,22 +984,6 @@ async def qwen_toggle(enabled: str = Form("off")):
     return RedirectResponse(url="/settings", status_code=303)
 
 
-@router.post("/settings/rag")
-async def update_rag_settings(
-    embedding_base_url: str = Form(...),
-    embedding_model:    str = Form(...),
-):
-    """Сохранить настройки RAG-модели, сбросить кэш индексов."""
-    from config import settings as cfg
-    from knowledge.retriever import clear_index_cache
-    cfg.embedding_base_url = embedding_base_url.rstrip("/")
-    cfg.embedding_model    = embedding_model.strip()
-    clear_index_cache()
-    await analytics.set_app_setting("embedding_base_url", embedding_base_url)
-    await analytics.set_app_setting("embedding_model",    embedding_model)
-    logger.info("RAG настройки сохранены: model=%s url=%s", embedding_model, embedding_base_url)
-    return RedirectResponse(url="/settings", status_code=303)
-
 
 @router.post("/settings/corpus-toggle")
 async def corpus_toggle(enabled: str = Form("off")):

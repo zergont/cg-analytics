@@ -79,30 +79,6 @@
             </div>
         </div>
 
-        <!-- RAG — локальная модель -->
-        <div class="card mb-3">
-            <div class="card-header fw-semibold">📡 RAG — локальная модель</div>
-            <div class="card-body">
-                <form method="post" action="/settings/rag">
-                    <div class="row g-2 mb-2">
-                        <div class="col-8">
-                            <label class="form-label small fw-semibold mb-1">URL сервера</label>
-                            <input type="text" name="embedding_base_url" class="form-control form-control-sm"
-                                   value="{{ settings.embedding_base_url }}" required>
-                        </div>
-                    </div>
-                    <div class="mb-2">
-                        <label class="form-label small fw-semibold mb-1">Модель</label>
-                        <input type="text" name="embedding_model" class="form-control form-control-sm"
-                               value="{{ settings.embedding_model }}" required
-                               placeholder="nomic-embed-text">
-                    </div>
-                    <button type="submit" class="btn btn-sm btn-primary">Сохранить</button>
-                    <span class="text-muted small ms-2">Сбрасывает кэш RAG-индексов.</span>
-                </form>
-            </div>
-        </div>
-
         <!-- Конфигурация сервиса (статичная) -->
         <div class="card">
             <div class="card-header fw-semibold">⚙️ Конфигурация сервиса</div>
