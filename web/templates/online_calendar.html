@@ -229,46 +229,175 @@
   <span class="text-danger fw-bold">❗</span><span style="color:#6c757d"> Авария</span>
 </div>
 
-{# Модальное окно очистки #}
+{# Модальное окно удаления сегментов #}
 <div class="modal fade" id="clearModal" tabindex="-1">
-  <div class="modal-dialog">
+  <div class="modal-dialog modal-lg">
     <div class="modal-content">
       <div class="modal-header">
-        <h5 class="modal-title">Очистка авто-сегментов</h5>
+        <h5 class="modal-title">Удалить сегменты</h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
-      <form method="post" action="/online/clear">
-        <input type="hidden" name="router_sn"  value="{{ router_sn }}">
-        <input type="hidden" name="equip_type" value="{{ equip_type }}">
-        <input type="hidden" name="panel_id"   value="{{ panel_id }}">
-        <div class="modal-body">
-          <div class="alert alert-warning">
-            Удаляет накопленный корпус сегментов. Действие необратимо.
-          </div>
-          <div class="mb-3">
-            <label class="form-label">С даты (необязательно)</label>
-            <input type="datetime-local" name="ts_from_local" class="form-control">
-          </div>
-          <div class="mb-3">
-            <label class="form-label">По дату (необязательно)</label>
-            <input type="datetime-local" name="ts_to_local" class="form-control">
-          </div>
-          <div class="form-check">
-            <input class="form-check-input" type="checkbox" id="confirmClear"
-                   onchange="
-                     document.getElementById('confirmInput').value = this.checked ? 'yes' : '';
-                     document.getElementById('clearSubmitBtn').disabled = !this.checked;
-                   ">
-            <label class="form-check-label" for="confirmClear">Подтверждаю удаление</label>
-          </div>
-          <input type="hidden" name="confirm" id="confirmInput" value="">
+      <div class="modal-body">
+        <div class="alert alert-warning py-2 mb-3" style="font-size:.85rem">
+          ⚠ Удаление необратимо. Вместе с сегментами удалится ИИ-анализ.
+          После удаления можно перезапустить наблюдение — движок заново добёрет данные.
         </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
-          <button type="submit" id="clearSubmitBtn" class="btn btn-danger" disabled>Удалить</button>
+
+        <!-- Заголовок списка с управлением -->
+        <div class="d-flex justify-content-between align-items-center mb-2">
+          <div id="clearSelCount" class="text-muted small">Загрузка…</div>
+          <div class="d-flex gap-2">
+            <button class="btn btn-sm btn-outline-secondary" onclick="clearSelectAll(true)">Выбрать все</button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="clearSelectAll(false)">Снять все</button>
+          </div>
         </div>
-      </form>
+
+        <!-- Список сегментов -->
+        <div id="clearSegList" style="max-height:340px; overflow-y:auto; border:1px solid #dee2e6; border-radius:4px">
+          <div class="text-center text-muted py-4" id="clearLoading">
+            <div class="spinner-border spinner-border-sm me-2"></div>Загрузка сегментов…
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
+        <button type="button" id="clearDeleteBtn" class="btn btn-danger" disabled
+                onclick="deleteSelectedSegments()">
+          Удалить выбранные
+        </button>
+      </div>
     </div>
   </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const _CLEAR_SN    = {{ router_sn | tojson }};
+const _CLEAR_TYPE  = {{ equip_type | tojson }};
+const _CLEAR_PANEL = {{ panel_id }};
+const _CLEAR_YEAR  = {{ year }};
+const _CLEAR_MONTH = {{ month }};
+
+const RS_LABELS = {{ run_state_labels | tojson }};
+
+// ── Открытие модального окна — загружаем сегменты ─────────────────────────
+document.getElementById('clearModal').addEventListener('show.bs.modal', loadClearSegments);
+
+async function loadClearSegments() {
+  document.getElementById('clearLoading').style.display = '';
+  document.getElementById('clearSegList').innerHTML =
+    '<div class="text-center text-muted py-4" id="clearLoading">' +
+    '<div class="spinner-border spinner-border-sm me-2"></div>Загрузка сегментов…</div>';
+  document.getElementById('clearSelCount').textContent = 'Загрузка…';
+  document.getElementById('clearDeleteBtn').disabled = true;
+
+  try {
+    const url = `/api/machine/${_CLEAR_SN}/${_CLEAR_TYPE}/${_CLEAR_PANEL}/segments` +
+                `?year=${_CLEAR_YEAR}&month=${_CLEAR_MONTH}&limit=200`;
+    const resp = await fetch(url);
+    const segs = await resp.json();
+    renderClearList(segs);
+  } catch(e) {
+    document.getElementById('clearSegList').innerHTML =
+      '<div class="text-danger p-3">Ошибка загрузки: ' + e.message + '</div>';
+  }
+}
+
+function renderClearList(segs) {
+  const list = document.getElementById('clearSegList');
+  if (!segs.length) {
+    list.innerHTML = '<div class="text-muted text-center py-4">Нет сегментов в этом месяце</div>';
+    document.getElementById('clearSelCount').textContent = 'Сегментов нет';
+    return;
+  }
+
+  const sevColors = {SHUTDOWN:'danger', ALARM:'danger', WARNING:'warning', INFO:'info'};
+  const rows = segs.map(seg => {
+    const tStart = seg.t_start ? new Date(seg.t_start).toLocaleString('ru-RU',
+      {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'}) : '—';
+    const tEnd   = seg.t_end   ? new Date(seg.t_end).toLocaleString('ru-RU',
+      {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'}) : 'открытый';
+    const dur = seg.duration_sec
+      ? (seg.duration_sec < 3600
+          ? Math.round(seg.duration_sec / 60) + ' мин'
+          : (seg.duration_sec / 3600).toFixed(1) + ' ч')
+      : '—';
+    const rsLabel = RS_LABELS[seg.run_state] || ('RS=' + seg.run_state);
+    const sevBadge = seg.severity
+      ? `<span class="badge bg-${sevColors[seg.severity]||'secondary'} ms-1" style="font-size:.65rem">${seg.severity}</span>`
+      : '';
+    const aiBadge = seg.has_qwen ? '<span class="ms-1" style="font-size:.7rem">🤖</span>' : '';
+    const openBadge = seg.is_open ? '<span class="badge bg-primary ms-1" style="font-size:.65rem">открытый</span>' : '';
+
+    return `<label class="d-flex align-items-start gap-2 px-3 py-2 border-bottom seg-clear-row"
+                   style="cursor:pointer" onchange="updateClearCount()">
+      <input type="checkbox" class="form-check-input flex-shrink-0 mt-1 seg-clear-cb"
+             value="${seg.id}">
+      <div class="flex-grow-1" style="font-size:.83rem; line-height:1.4">
+        <div>
+          <span class="fw-semibold">#${seg.id}</span>
+          <span class="text-muted ms-2">${tStart} → ${tEnd}</span>
+          ${openBadge}
+        </div>
+        <div class="text-muted">
+          ${rsLabel} · ${dur}${sevBadge}${aiBadge}
+        </div>
+      </div>
+    </label>`;
+  });
+
+  list.innerHTML = rows.join('');
+  updateClearCount();
+}
+
+function updateClearCount() {
+  const cbs  = document.querySelectorAll('.seg-clear-cb');
+  const sel  = document.querySelectorAll('.seg-clear-cb:checked');
+  document.getElementById('clearSelCount').textContent =
+    `Выбрано: ${sel.length} из ${cbs.length}`;
+  document.getElementById('clearDeleteBtn').disabled = sel.length === 0;
+}
+
+function clearSelectAll(state) {
+  document.querySelectorAll('.seg-clear-cb').forEach(cb => cb.checked = state);
+  updateClearCount();
+}
+
+async function deleteSelectedSegments() {
+  const ids = [...document.querySelectorAll('.seg-clear-cb:checked')].map(cb => +cb.value);
+  if (!ids.length) return;
+
+  if (!confirm(`Удалить ${ids.length} сегмент(ов)? Действие необратимо.`)) return;
+
+  const btn = document.getElementById('clearDeleteBtn');
+  btn.disabled = true;
+  btn.textContent = 'Удаление…';
+
+  try {
+    const resp = await fetch('/online/delete-segments', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        router_sn:  _CLEAR_SN,
+        equip_type: _CLEAR_TYPE,
+        panel_id:   _CLEAR_PANEL,
+        seg_ids:    ids,
+      }),
+    });
+    const result = await resp.json();
+    if (resp.ok) {
+      location.reload();
+    } else {
+      alert('Ошибка: ' + (result.error || resp.statusText));
+      btn.disabled = false;
+      btn.textContent = 'Удалить выбранные';
+    }
+  } catch(e) {
+    alert('Ошибка запроса: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'Удалить выбранные';
+  }
+}
+</script>
 {% endblock %}

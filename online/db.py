@@ -389,6 +389,8 @@ async def clear_segments(
 ) -> int:
     """Удалить сегменты с опциональным фильтром по диапазону дат.
 
+    Перед удалением обнуляет self-ссылки (continued_from / continues_to)
+    из сегментов ВНЕ диапазона, чтобы не нарушать FK-ограничения.
     Возвращает число удалённых записей.
     """
     conn = await _connect()
@@ -405,7 +407,31 @@ async def clear_segments(
             params.append(ts_to)
             idx += 1
         where = " AND ".join(conditions)
-        result = await conn.execute(f"DELETE FROM auto_segments WHERE {where}", *params)
+
+        async with conn.transaction():
+            # Собираем id удаляемых сегментов
+            id_rows = await conn.fetch(
+                f"SELECT id FROM auto_segments WHERE {where}", *params
+            )
+            del_ids = [r["id"] for r in id_rows]
+
+            if del_ids:
+                # Обнуляем ссылки из ДРУГИХ сегментов на удаляемые
+                await conn.execute(
+                    "UPDATE auto_segments SET continued_from = NULL"
+                    " WHERE continued_from = ANY($1::bigint[])",
+                    del_ids,
+                )
+                await conn.execute(
+                    "UPDATE auto_segments SET continues_to = NULL"
+                    " WHERE continues_to = ANY($1::bigint[])",
+                    del_ids,
+                )
+
+            result = await conn.execute(
+                f"DELETE FROM auto_segments WHERE {where}", *params
+            )
+
         return int(result.split()[-1])
     finally:
         await conn.close()
@@ -427,6 +453,40 @@ async def update_open_segment_status(
             WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
               AND t_end IS NULL
         """, router_sn, equip_type, panel_id, status_text, status_hash)
+    finally:
+        await conn.close()
+
+
+async def delete_segments_by_ids(seg_ids: list[int]) -> int:
+    """Удалить конкретные сегменты по списку ID.
+
+    Перед удалением обнуляет self-ссылки (continued_from / continues_to)
+    из сегментов вне списка, чтобы не нарушать FK-ограничения.
+    Возвращает число удалённых записей.
+    """
+    if not seg_ids:
+        return 0
+    conn = await _connect()
+    try:
+        async with conn.transaction():
+            # Обнуляем ссылки из ДРУГИХ сегментов на удаляемые
+            await conn.execute(
+                "UPDATE auto_segments SET continued_from = NULL"
+                " WHERE continued_from = ANY($1::bigint[])"
+                "   AND id <> ALL($1::bigint[])",
+                seg_ids,
+            )
+            await conn.execute(
+                "UPDATE auto_segments SET continues_to = NULL"
+                " WHERE continues_to = ANY($1::bigint[])"
+                "   AND id <> ALL($1::bigint[])",
+                seg_ids,
+            )
+            result = await conn.execute(
+                "DELETE FROM auto_segments WHERE id = ANY($1::bigint[])",
+                seg_ids,
+            )
+        return int(result.split()[-1])
     finally:
         await conn.close()
 

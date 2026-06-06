@@ -1698,6 +1698,37 @@ async def online_segment_md(seg_id: int):
     )
 
 
+@router.post("/online/delete-segments")
+async def online_delete_segments(request: Request):
+    """Удалить выбранные сегменты по списку ID.
+
+    Тело запроса (JSON):
+      {"router_sn": ..., "equip_type": ..., "panel_id": ..., "seg_ids": [1, 2, 3]}
+    """
+    from online import db as odb
+    data = await request.json()
+    router_sn  = data.get("router_sn",  "")
+    equip_type = data.get("equip_type", "")
+    panel_id   = int(data.get("panel_id", 0))
+    seg_ids    = [int(i) for i in data.get("seg_ids", [])]
+
+    if not seg_ids:
+        return JSONResponse({"deleted": 0, "error": "Не указаны сегменты"}, status_code=400)
+
+    # Остановить движок перед удалением
+    try:
+        from online.manager import get_manager
+        mgr = get_manager()
+        if mgr.is_running(router_sn, equip_type, panel_id):
+            await mgr.stop_machine(router_sn, equip_type, panel_id)
+    except Exception:
+        pass
+
+    deleted = await odb.delete_segments_by_ids(seg_ids)
+    logger.info("Удалено сегментов: %d (ids: %s)", deleted, seg_ids[:10])
+    return JSONResponse({"deleted": deleted})
+
+
 @router.post("/online/clear")
 async def online_clear(
     request: Request,
