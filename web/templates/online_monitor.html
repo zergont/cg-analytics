@@ -204,6 +204,7 @@
         {% set eq_key = eq.router_sn ~ "|" ~ eq.equip_type ~ "|" ~ eq.panel_id %}
         {% set is_running = observations | selectattr("router_sn", "equalto", eq.router_sn)
                | selectattr("equip_type", "equalto", eq.equip_type)
+               | selectattr("panel_id", "equalto", eq.panel_id)
                | selectattr("status", "equalto", "running") | list | length > 0 %}
         <div class="form-check mb-1">
           <input class="form-check-input machine-cb" type="checkbox"
