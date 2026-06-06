@@ -233,8 +233,9 @@
           </label>
           <input type="datetime-local" id="start-date-input" class="form-control form-control-sm"
                  value="{{ now_local }}" required>
-          <div class="form-text text-warning" style="font-size:0.75rem">
-            Если у машины уже есть сегменты — дата игнорируется, продолжение с последней точки.
+          <div class="form-text text-muted" style="font-size:0.75rem">
+            Если дата раньше последнего сегмента — движок заполнит пропуск и продолжит с текущего момента.
+            Если позже или нет сегментов — добор начнётся с этой даты.
           </div>
         </div>
         <div class="col-sm-3">

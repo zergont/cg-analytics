@@ -302,28 +302,45 @@ class OnlinePollEngine:
             self.router_sn, self.equip_type, self.panel_id
         )
         if last:
-            self.cursor_ts = _tz_utc(last["t_end"])
-            self.inherited_coking_risk = _coking_from_json(last.get("coking_risk_json"))
-            self._prev_seg_hint = _make_seg_hint(last)
-            if last.get("cause_close") == "DAILY_BOUNDARY":
-                ff = last.get("forward_fill_json")
-                if isinstance(ff, str):
-                    try:
-                        import json as _json
-                        ff = _json.loads(ff)
-                    except Exception:
-                        ff = None
-                self.forward_fill_memory = ff
-                self.continued_from_id = last["id"]
-            else:
+            last_end = _tz_utc(last["t_end"])
+            requested = _tz_utc(start_date)
+
+            if requested < last_end:
+                # Запрошенная дата раньше последнего сегмента →
+                # запускаемся с неё, чтобы batch-добор заполнил пропуск.
+                self.cursor_ts = requested
+                # coking_risk и forward_fill сбрасываем: пересчитаются при обходе
+                self.inherited_coking_risk = CokingRisk()
                 self.forward_fill_memory = None
                 self.continued_from_id = None
-            logger.info(
-                "OnlineEngine[%s]: возобновление с %s (coking=%s, причина_закрытия=%s)",
-                self.key, self.cursor_ts,
-                self.inherited_coking_risk.risk_level,
-                last.get("cause_close"),
-            )
+                logger.info(
+                    "OnlineEngine[%s]: старт с %s (раньше последнего сегмента %s) — заполнение пропуска",
+                    self.key, requested, last_end,
+                )
+            else:
+                # Обычное возобновление с конца последнего сегмента
+                self.cursor_ts = last_end
+                self.inherited_coking_risk = _coking_from_json(last.get("coking_risk_json"))
+                self._prev_seg_hint = _make_seg_hint(last)
+                if last.get("cause_close") == "DAILY_BOUNDARY":
+                    ff = last.get("forward_fill_json")
+                    if isinstance(ff, str):
+                        try:
+                            import json as _json
+                            ff = _json.loads(ff)
+                        except Exception:
+                            ff = None
+                    self.forward_fill_memory = ff
+                    self.continued_from_id = last["id"]
+                else:
+                    self.forward_fill_memory = None
+                    self.continued_from_id = None
+                logger.info(
+                    "OnlineEngine[%s]: возобновление с %s (coking=%s, причина_закрытия=%s)",
+                    self.key, self.cursor_ts,
+                    self.inherited_coking_risk.risk_level,
+                    last.get("cause_close"),
+                )
         else:
             self.cursor_ts = _tz_utc(start_date)
             self.inherited_coking_risk = CokingRisk()
