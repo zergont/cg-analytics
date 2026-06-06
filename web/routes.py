@@ -1869,6 +1869,253 @@ async def api_online_status():
     return JSONResponse(result)
 
 
+# ── Публичный JSON API для внешнего UI ───────────────────────────────────────
+#
+# Эндпоинты читают данные только на чтение.
+# Для использования с внешним фронтендом рекомендуется настроить CORS
+# через fastapi.middleware.cors.CORSMiddleware в main.py.
+
+def _seg_severity(chars_json: Any, active_dets_json: Any = None) -> str | None:
+    """Извлечь максимальный severity из characteristics_json или active_detections_json."""
+    import json as _json
+    sev_rank = {"SHUTDOWN": 4, "ALARM": 3, "WARNING": 2, "INFO": 1}
+
+    dets: list[dict] = []
+    # Закрытый сегмент — из characteristics_json
+    if chars_json:
+        ch = chars_json if isinstance(chars_json, dict) else _json.loads(chars_json or "{}")
+        for sub in ch.get("subsegments", []):
+            dets.extend(sub.get("detections", []))
+    # Открытый сегмент — из active_detections_json
+    if not dets and active_dets_json:
+        ad = active_dets_json if isinstance(active_dets_json, list) else _json.loads(active_dets_json or "[]")
+        dets = ad or []
+
+    if not dets:
+        return None
+    best = max((d.get("severity", "") for d in dets), key=lambda s: sev_rank.get(s, 0))
+    return best or None
+
+
+@router.get("/api/machines", response_class=JSONResponse)
+async def api_machines():
+    """Список наблюдаемых машин с текущим состоянием.
+
+    Возвращает массив объектов — по одному на каждое наблюдение.
+    Подходит для главного экрана UI: список машин + живой статус.
+    Рекомендуется поллинг каждые 10–30 с.
+    """
+    from online import db as odb
+    from datetime import datetime, timezone
+    import json as _json
+
+    observations = await odb.list_observations()
+    result = []
+
+    for obs in observations:
+        key = f"{obs['router_sn']}|{obs['equip_type']}|{obs['panel_id']}"
+        seg = await odb.get_open_segment(obs["router_sn"], obs["equip_type"], obs["panel_id"])
+
+        # Текущее состояние из открытого сегмента
+        run_state      = seg.get("run_state")    if seg else None
+        coking_risk    = None
+        status_text    = None
+        severity_level = None
+        status_updated = None
+
+        if seg:
+            cr = seg.get("coking_risk_json")
+            if isinstance(cr, str):
+                try:
+                    cr = _json.loads(cr)
+                except Exception:
+                    cr = {}
+            coking_risk    = (cr or {}).get("risk_level")
+            status_text    = seg.get("status_text")
+            status_updated = seg["status_updated_at"].isoformat() if seg.get("status_updated_at") else None
+            try:
+                from online.status_assembler import compute_severity_level
+                dets_raw = seg.get("active_detections_json")
+                dets = dets_raw if isinstance(dets_raw, list) else _json.loads(dets_raw or "[]")
+                severity_level = compute_severity_level(dets)
+            except Exception:
+                pass
+
+        result.append({
+            "router_sn":     obs["router_sn"],
+            "equip_type":    obs["equip_type"],
+            "panel_id":      obs["panel_id"],
+            "name":          obs.get("name") or obs["router_sn"],
+            "manufacturer":  obs.get("manufacturer"),
+            "model":         obs.get("model"),
+            "status":        obs["status"],            # running / stopped
+            "run_state":     run_state,
+            "run_state_label": _RUN_STATE_LABELS.get(run_state, str(run_state)) if run_state is not None else None,
+            "severity_level":  severity_level,         # норма / внимание / тревога
+            "status_text":     status_text,            # ИИ-оператор: текущая сводка
+            "status_updated":  status_updated,
+            "coking_risk":     coking_risk,            # GREEN / YELLOW / RED
+            # Ссылки для навигации
+            "_links": {
+                "segments": f"/api/machine/{obs['router_sn']}/{obs['equip_type']}/{obs['panel_id']}/segments",
+                "calendar":  f"/online/calendar/{obs['router_sn']}/{obs['equip_type']}/{obs['panel_id']}",
+            },
+        })
+
+    return JSONResponse(result)
+
+
+@router.get("/api/machine/{router_sn}/{equip_type}/{panel_id}/segments", response_class=JSONResponse)
+async def api_machine_segments(
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    year: int | None  = None,
+    month: int | None = None,
+    limit: int = 200,
+):
+    """История сегментов машины — для построения календаря.
+
+    Query-параметры:
+      year, month  — фильтр по календарному месяцу (оба или ни одного)
+      limit        — макс. число сегментов (дефолт 200)
+
+    Возвращает массив сегментов от новых к старым.
+    Каждый сегмент включает метаданные, уровень тревог и флаги наличия ИИ-анализа.
+    """
+    from online import db as odb
+    from datetime import datetime, timezone
+    import json as _json
+
+    ts_from = ts_to = None
+    if year and month:
+        ts_from = datetime(year, month, 1, tzinfo=timezone.utc)
+        if month == 12:
+            ts_to = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+        else:
+            ts_to = datetime(year, month + 1, 1, tzinfo=timezone.utc)
+
+    segments = await odb.get_segments_for_calendar(
+        router_sn, equip_type, panel_id,
+        ts_from=ts_from, ts_to=ts_to, limit=limit,
+    )
+
+    # Загружаем статусы ИИ-анализа одним запросом
+    seg_ids = [s["id"] for s in segments if s.get("id")]
+    ai_map: dict = {}
+    if seg_ids:
+        try:
+            from corpus.db import get_analyses_for_segments
+            ai_map = await get_analyses_for_segments(seg_ids)
+        except Exception:
+            pass
+
+    result = []
+    for seg in reversed(segments):   # новые первыми
+        seg_id    = seg.get("id")
+        is_open   = seg.get("t_end") is None
+        ai_status = ai_map.get(seg_id, {})
+        sev       = _seg_severity(seg.get("characteristics_json"), seg.get("active_detections_json"))
+        run_state = seg.get("run_state")
+        dur       = None
+        if seg.get("t_start") and seg.get("t_end"):
+            dur = (seg["t_end"] - seg["t_start"]).total_seconds()
+
+        result.append({
+            "id":            seg_id,
+            "t_start":       seg["t_start"].isoformat() if seg.get("t_start") else None,
+            "t_end":         seg["t_end"].isoformat()   if seg.get("t_end")   else None,
+            "is_open":       is_open,
+            "run_state":     run_state,
+            "run_state_label": _RUN_STATE_LABELS.get(run_state, str(run_state)) if run_state is not None else None,
+            "duration_sec":  dur,
+            "cause_close":   seg.get("cause_close"),
+            "severity":      sev,                         # SHUTDOWN/ALARM/WARNING/INFO/None
+            "coking_risk":   None,                        # в calendar-запросе не грузим JSONB полностью
+            "analytics_version": seg.get("analytics_version"),
+            # Наличие ИИ-анализа
+            "has_report":    bool(seg.get("report_md") if "report_md" in (seg or {}) else None),
+            "has_claude":    ai_status.get("status") == "done",
+            "has_qwen":      bool(ai_status.get("humanized_md")),
+            "_links": {
+                "detail": f"/api/segment/{seg_id}",
+                "view":   f"/online/segment/{seg_id}",
+            },
+        })
+
+    return JSONResponse(result)
+
+
+@router.get("/api/segment/{seg_id}", response_class=JSONResponse)
+async def api_segment_detail(seg_id: int):
+    """Полный детальный отчёт по сегменту — для страницы анализа в UI.
+
+    Возвращает:
+      - метаданные сегмента
+      - report_md   — Markdown-отчёт аналитического блока (сегментация, детекции)
+      - analysis    — ИИ-анализ (Claude conclusion + Qwen humanized)
+      - is_open     — true если сегмент ещё активен (открытый)
+    """
+    from online import db as odb
+    import json as _json
+
+    seg = await odb.get_segment_by_id(seg_id)
+    if not seg:
+        raise HTTPException(status_code=404, detail=f"Сегмент #{seg_id} не найден")
+
+    is_open   = seg.get("t_end") is None
+    run_state = seg.get("run_state")
+    sev       = _seg_severity(seg.get("characteristics_json"), seg.get("active_detections_json"))
+
+    # ИИ-анализ (только для закрытых)
+    analysis = None
+    if not is_open:
+        try:
+            from corpus.db import get_analysis
+            rec = await get_analysis(seg_id)
+            if rec:
+                analysis = {
+                    "status":        rec.get("status"),
+                    "conclusion_md": rec.get("conclusion_md"),   # сухое заключение Claude
+                    "humanized_md":  rec.get("humanized_md"),    # очеловеченное Qwen
+                    "created_at":    rec["created_at"].isoformat() if rec.get("created_at") else None,
+                    "updated_at":    rec["updated_at"].isoformat() if rec.get("updated_at") else None,
+                }
+        except Exception:
+            pass
+
+    # Длительность
+    dur = None
+    if seg.get("t_start") and seg.get("t_end"):
+        dur = (seg["t_end"] - seg["t_start"]).total_seconds()
+
+    return JSONResponse({
+        "id":            seg_id,
+        "router_sn":     seg["router_sn"],
+        "equip_type":    seg["equip_type"],
+        "panel_id":      seg["panel_id"],
+        "t_start":       seg["t_start"].isoformat() if seg.get("t_start") else None,
+        "t_end":         seg["t_end"].isoformat()   if seg.get("t_end")   else None,
+        "is_open":       is_open,
+        "run_state":     run_state,
+        "run_state_label": _RUN_STATE_LABELS.get(run_state, str(run_state)) if run_state is not None else None,
+        "duration_sec":  dur,
+        "cause_close":   seg.get("cause_close"),
+        "severity":      sev,
+        "analytics_version": seg.get("analytics_version"),
+        # Аналитический Markdown-отчёт (сегментация + детекции)
+        "report_md":     seg.get("report_md"),
+        # ИИ-анализ
+        "analysis":      analysis,
+        # Для открытого сегмента — живые данные
+        "status_text":   seg.get("status_text") if is_open else None,
+        "_links": {
+            "view":     f"/online/segment/{seg_id}",
+            "segments": f"/api/machine/{seg['router_sn']}/{seg['equip_type']}/{seg['panel_id']}/segments",
+        },
+    })
+
+
 def _count_lines(path) -> int:
     if not path or not path.exists():
         return 0
