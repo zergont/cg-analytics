@@ -247,6 +247,7 @@ async def insert_closed_segment(data: dict[str, Any]) -> int:
                 SELECT id FROM auto_segments
                 WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
                   AND t_start = $4
+                  AND t_end IS NOT NULL
                   AND continued_from IS NULL
                   AND id != $5
                 LIMIT 1
