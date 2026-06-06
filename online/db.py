@@ -153,39 +153,33 @@ async def get_open_segment(
 
 
 async def upsert_open_segment(data: dict[str, Any]) -> int:
-    """Создать или обновить открытый сегмент (DELETE + INSERT).
+    """Создать или обновить открытый сегмент.
 
-    Статус-поля (status_text, status_hash, status_updated_at) сохраняются
-    между циклами: читаем их перед DELETE и восстанавливаем в новой строке.
+    Стратегия UPDATE + INSERT (вместо DELETE + INSERT):
+    - Если открытый сегмент уже есть → UPDATE (status_text/hash/updated_at не трогаем).
+    - Если нет → INSERT.
+
+    Это устраняет гонку: qwen пишет prose в существующую строку, а UPDATE её не удаляет
+    и не перезаписывает статус-поля, поэтому проза сохраняется.
     """
     conn = await _connect()
     try:
         async with conn.transaction():
-            # Сохраняем статус-поля чтобы не затереть при пересоздании строки
-            existing = await conn.fetchrow("""
-                SELECT status_text, status_hash, status_updated_at
-                FROM auto_segments
-                WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
-                  AND t_end IS NULL
-            """, data["router_sn"], data["equip_type"], data["panel_id"])
-
-            await conn.execute("""
-                DELETE FROM auto_segments
-                WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
-                  AND t_end IS NULL
-            """, data["router_sn"], data["equip_type"], data["panel_id"])
-
+            # Пытаемся обновить существующий открытый сегмент.
+            # status_text / status_hash / status_updated_at намеренно НЕ обновляем —
+            # они пишутся только через update_open_segment_status() (планировщик / qwen).
             row = await conn.fetchrow("""
-                INSERT INTO auto_segments (
-                    router_sn, equip_type, panel_id,
-                    t_start, t_end,
-                    run_state, coking_risk_json,
-                    analytics_version,
-                    current_values_json, active_detections_json,
-                    continued_from,
-                    status_text, status_hash, status_updated_at,
-                    updated_at
-                ) VALUES ($1,$2,$3,$4,NULL,$5,$6::jsonb,$7,$8::jsonb,$9::jsonb,$10,$11,$12,$13,now())
+                UPDATE auto_segments SET
+                    t_start                = $4,
+                    run_state              = $5,
+                    coking_risk_json       = $6::jsonb,
+                    analytics_version      = $7,
+                    current_values_json    = $8::jsonb,
+                    active_detections_json = $9::jsonb,
+                    continued_from         = $10,
+                    updated_at             = now()
+                WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
+                  AND t_end IS NULL
                 RETURNING id
             """,
                 data["router_sn"], data["equip_type"], data["panel_id"],
@@ -196,9 +190,31 @@ async def upsert_open_segment(data: dict[str, Any]) -> int:
                 json.dumps(data.get("current_values_json"), ensure_ascii=False),
                 json.dumps(data.get("active_detections_json"), ensure_ascii=False),
                 data.get("continued_from"),
-                existing["status_text"] if existing else None,
-                existing["status_hash"] if existing else None,
-                existing["status_updated_at"] if existing else None,
+            )
+
+            if row:
+                return row["id"]
+
+            # Открытого сегмента нет (первый цикл или после закрытия) → INSERT
+            row = await conn.fetchrow("""
+                INSERT INTO auto_segments (
+                    router_sn, equip_type, panel_id,
+                    t_start, t_end,
+                    run_state, coking_risk_json,
+                    analytics_version,
+                    current_values_json, active_detections_json,
+                    continued_from, updated_at
+                ) VALUES ($1,$2,$3,$4,NULL,$5,$6::jsonb,$7,$8::jsonb,$9::jsonb,$10,now())
+                RETURNING id
+            """,
+                data["router_sn"], data["equip_type"], data["panel_id"],
+                data["t_start"],
+                data.get("run_state"),
+                json.dumps(data.get("coking_risk_json"), ensure_ascii=False),
+                data.get("analytics_version", "2.2.0"),
+                json.dumps(data.get("current_values_json"), ensure_ascii=False),
+                json.dumps(data.get("active_detections_json"), ensure_ascii=False),
+                data.get("continued_from"),
             )
         return row["id"]
     finally:
