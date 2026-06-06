@@ -230,11 +230,41 @@ async def insert_closed_segment(data: dict[str, Any]) -> int:
             data.get("report_md"),
         )
         seg_id = row["id"]
-        # Двусторонняя связь: если есть continued_from — обновить continues_to у предка
+
+        # ── Двусторонняя связь НАЗАД ──────────────────────────────────────
+        # Если у нового сегмента есть continued_from — обновить continues_to у предка
         if data.get("continued_from"):
             await conn.execute("""
                 UPDATE auto_segments SET continues_to=$2 WHERE id=$1
             """, data["continued_from"], seg_id)
+
+        # ── Двусторонняя связь ВПЕРЁД ─────────────────────────────────────
+        # Только для DAILY_BOUNDARY: найти преемника с t_start = новый.t_end
+        # у которого continued_from = NULL (ссылка была оборвана — например после удаления).
+        # Восстанавливает цепочку при повторном анализе удалённого периода.
+        if data.get("t_end") and data.get("cause_close") == "DAILY_BOUNDARY":
+            next_row = await conn.fetchrow("""
+                SELECT id FROM auto_segments
+                WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
+                  AND t_start = $4
+                  AND continued_from IS NULL
+                  AND id != $5
+                LIMIT 1
+            """,
+                data["router_sn"], data["equip_type"], data["panel_id"],
+                data["t_end"], seg_id,
+            )
+            if next_row:
+                next_id = next_row["id"]
+                await conn.execute(
+                    "UPDATE auto_segments SET continued_from=$2 WHERE id=$1",
+                    next_id, seg_id,
+                )
+                await conn.execute(
+                    "UPDATE auto_segments SET continues_to=$2 WHERE id=$1",
+                    seg_id, next_id,
+                )
+
         return seg_id
     finally:
         await conn.close()
