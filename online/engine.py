@@ -296,8 +296,15 @@ class OnlinePollEngine:
 
     # ── Инициализация состояния из БД ─────────────────────────────────────────
 
-    async def initialize(self, start_date: datetime) -> None:
-        """Восстановить состояние из последнего закрытого сегмента (п. 3.1 ТЗ)."""
+    async def initialize(self, start_date: datetime, allow_gap_fill: bool = False) -> None:
+        """Восстановить состояние из последнего закрытого сегмента (п. 3.1 ТЗ).
+
+        allow_gap_fill=False (дефолт) — автоматический перезапуск сервиса:
+            всегда возобновляем с t_end последнего сегмента, start_date игнорируется.
+        allow_gap_fill=True — ручной Пуск по кнопке:
+            если start_date < last.t_end, запускаемся с start_date чтобы
+            batch-добор заполнил пропуск в середине истории.
+        """
         last = await online_db.get_last_closed_segment(
             self.router_sn, self.equip_type, self.panel_id
         )
@@ -305,16 +312,15 @@ class OnlinePollEngine:
             last_end = _tz_utc(last["t_end"])
             requested = _tz_utc(start_date)
 
-            if requested < last_end:
-                # Запрошенная дата раньше последнего сегмента →
-                # запускаемся с неё, чтобы batch-добор заполнил пропуск.
+            if allow_gap_fill and requested < last_end:
+                # Ручной Пуск с датой раньше последнего сегмента →
+                # запускаемся с неё, batch-добор заполнит пропуск.
                 self.cursor_ts = requested
-                # coking_risk и forward_fill сбрасываем: пересчитаются при обходе
                 self.inherited_coking_risk = CokingRisk()
                 self.forward_fill_memory = None
                 self.continued_from_id = None
                 logger.info(
-                    "OnlineEngine[%s]: старт с %s (раньше последнего сегмента %s) — заполнение пропуска",
+                    "OnlineEngine[%s]: заполнение пропуска с %s (последний сегмент: %s)",
                     self.key, requested, last_end,
                 )
             else:

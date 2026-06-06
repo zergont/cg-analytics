@@ -72,7 +72,7 @@ class OnlineManager:
                 engine = await self._build_engine(obs)
                 if engine is None:
                     continue
-                await engine.initialize(obs["start_date"])
+                await engine.initialize(obs["start_date"], allow_gap_fill=False)
                 self._launch(engine)
             except Exception:
                 logger.exception(
@@ -152,7 +152,7 @@ class OnlineManager:
                 key, op_stop_t_start, prev_coking.risk_level,
             )
         else:
-            await engine.initialize(_tz_utc(start_date))
+            await engine.initialize(_tz_utc(start_date), allow_gap_fill=True)
 
         self._launch(engine)
         logger.info("OnlineManager[%s]: движок запущен", key)
