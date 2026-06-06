@@ -95,6 +95,7 @@
         <div class="fw-semibold">{{ obs.name or obs.router_sn }}</div>
         <small class="text-muted">{{ obs.equip_type }} / панель {{ obs.panel_id }}</small>
         {% if obs.model %}<br><small class="text-muted">{{ obs.manufacturer or "" }} {{ obs.model }}</small>{% endif %}
+        <div class="status-line mt-1" style="display:none; font-size:0.78rem; font-style:italic"></div>
       </td>
 
       <td style="min-width:200px">
@@ -399,6 +400,19 @@ async function refreshStatus() {
         const colorMap = {GREEN:'success', YELLOW:'warning', RED:'danger'};
         crCell.className = `badge bg-${colorMap[item.coking_risk]||'secondary'} coking-badge`;
         crCell.textContent = item.coking_risk;
+      }
+
+      // Статус-строка ИИ-оператора
+      const statusLine = row.querySelector('.status-line');
+      if (statusLine) {
+        if (item.status_text) {
+          const sevColor = {норма: 'text-secondary', внимание: 'text-warning', тревога: 'text-danger'};
+          statusLine.className = 'status-line mt-1 ' + (sevColor[item.severity_level] || 'text-secondary');
+          statusLine.textContent = item.status_text;
+          statusLine.style.display = '';
+        } else {
+          statusLine.style.display = 'none';
+        }
       }
 
       if (item.status !== 'running') return;
