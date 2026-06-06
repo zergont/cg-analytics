@@ -368,17 +368,35 @@ class OnlineManager:
                 new_hash = compute_status_hash(struct)
                 old_hash = seg.get("status_hash")
 
-                if new_hash == old_hash:
+                # Проверяем: хэш совпадает, но текст всё ещё fallback?
+                # (qwen мог не успеть записать прозу из-за гонки до v3.3.11)
+                _FALLBACK_MARKER = "Анализ готовится"
+                current_text = seg.get("status_text") or ""
+                hash_changed = new_hash != old_hash
+                is_fallback  = _FALLBACK_MARKER in current_text
+
+                if not hash_changed and not is_fallback:
                     logger.debug("StatusLineScheduler[%s]: статус не изменился", key)
                     continue
 
-                # Статус изменился → сразу записываем fallback (оператор видит немедленно)
-                fallback = build_fallback_text(struct)
-                await online_db.update_open_segment_status(
-                    engine.router_sn, engine.equip_type, engine.panel_id,
-                    status_text=fallback,
-                    status_hash=new_hash,
-                )
+                if hash_changed:
+                    # Статус изменился → записываем свежий fallback
+                    fallback = build_fallback_text(struct)
+                    await online_db.update_open_segment_status(
+                        engine.router_sn, engine.equip_type, engine.panel_id,
+                        status_text=fallback,
+                        status_hash=new_hash,
+                    )
+                    logger.info(
+                        "StatusLineScheduler[%s]: статус изменился (hash %s → %s), enqueue qwen",
+                        key, old_hash, new_hash,
+                    )
+                else:
+                    # Хэш тот же, но текст — fallback: qwen не записал прозу → повторяем
+                    logger.info(
+                        "StatusLineScheduler[%s]: fallback-маркер при совпадающем хэше, повтор qwen",
+                        key,
+                    )
 
                 # Ставим в очередь qwen для замены fallback на прозу
                 worker.enqueue_status({
@@ -388,11 +406,6 @@ class OnlineManager:
                     "structural_status": struct,
                     "status_hash":       new_hash,
                 })
-
-                logger.info(
-                    "StatusLineScheduler[%s]: статус изменился (hash %s → %s), enqueue qwen",
-                    key, old_hash, new_hash,
-                )
 
             except Exception:
                 logger.exception("StatusLineScheduler: ошибка для %s", key)
