@@ -2167,17 +2167,29 @@ def _list_kb_paths(equipment_dir) -> list[str]:
 
 @router.get("/db", response_class=HTMLResponse)
 async def db_health_page(request: Request):
-    from db.analytics import get_db_health_stats, get_app_setting
+    from db.analytics import get_db_health_stats, get_app_setting, get_equipment_registry
     from db.source import get_source_mode
 
-    stats = await get_db_health_stats()
-    sync_interval = int(await get_app_setting("history_sync_interval_sec", "30"))
-    source_mode   = get_source_mode()
+    stats, registry, sync_interval_str = await asyncio.gather(
+        get_db_health_stats(),
+        get_equipment_registry(),
+        get_app_setting("history_sync_interval_sec", "30"),
+    )
+
+    sync_by_key = {
+        f"{s['router_sn']}|{s['equip_type']}|{s['panel_id']}": s
+        for s in stats["sync_state"]
+    }
+    devices = [
+        {**eq, "sync": sync_by_key.get(f"{eq['router_sn']}|{eq['equip_type']}|{eq['panel_id']}")}
+        for eq in registry
+    ]
 
     return templates.TemplateResponse(request, "db_health.html", {
         "stats":         stats,
-        "sync_interval": sync_interval,
-        "source_mode":   source_mode,
+        "devices":       devices,
+        "sync_interval": int(sync_interval_str),
+        "source_mode":   get_source_mode(),
     })
 
 
