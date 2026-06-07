@@ -89,3 +89,12 @@ ALTER TABLE auto_segments
     ADD COLUMN IF NOT EXISTS status_text        TEXT,
     ADD COLUMN IF NOT EXISTS status_hash        TEXT,
     ADD COLUMN IF NOT EXISTS status_updated_at  TIMESTAMPTZ;
+
+-- Миграция v3.4.0: курсор синхронизации history из источника
+CREATE TABLE IF NOT EXISTS history_sync_state (
+    router_sn    TEXT        NOT NULL,
+    equip_type   TEXT        NOT NULL,
+    panel_id     INT         NOT NULL,
+    last_sync_at TIMESTAMPTZ NOT NULL DEFAULT (now() - interval '7 days'),
+    PRIMARY KEY (router_sn, equip_type, panel_id)
+);

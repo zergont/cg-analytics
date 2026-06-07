@@ -53,6 +53,7 @@ class OnlineManager:
         self._engines: dict[str, OnlinePollEngine] = {}
         self._tasks:   dict[str, asyncio.Task]     = {}
         self._status_task: asyncio.Task | None     = None
+        self._history_sync: "HistorySyncWorker | None" = None
 
     # ── Запуск всех активных наблюдений ───────────────────────────────────────
 
@@ -85,6 +86,11 @@ class OnlineManager:
             self._run_status_scheduler(), name="status_line_scheduler"
         )
         logger.info("OnlineManager: планировщик статус-строк запущен")
+
+        # Запустить синхронизацию history из источника
+        from online.history_sync import HistorySyncWorker
+        self._history_sync = HistorySyncWorker(interval_sec=30)
+        self._history_sync.start()
 
     # ── ПУСК ОНЛАЙН ───────────────────────────────────────────────────────────
 
@@ -198,6 +204,11 @@ class OnlineManager:
             except (asyncio.CancelledError, Exception):
                 pass
         self._status_task = None
+
+        # Остановить синхронизацию history
+        if self._history_sync:
+            await self._history_sync.stop()
+            self._history_sync = None
 
         for key in list(self._engines.keys()):
             try:
