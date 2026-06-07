@@ -5,8 +5,23 @@ from typing import Any
 
 from config import settings
 
+# "external" → settings.source_db_url (10.10.10.1)
+# "local"    → settings.analytics_db_url (локальная реплика)
+_source_mode: str = "external"
+
+
+def set_source_mode(mode: str) -> None:
+    global _source_mode
+    _source_mode = mode
+
+
+def get_source_mode() -> str:
+    return _source_mode
+
 
 async def _connect() -> asyncpg.Connection:
+    if _source_mode == "local":
+        return await asyncpg.connect(settings.analytics_db_url)
     return await asyncpg.connect(settings.source_db_url)
 
 

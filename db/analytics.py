@@ -454,3 +454,81 @@ async def list_equipment_with_runs() -> list[dict[str, Any]]:
         return [dict(row) for row in rows]
     finally:
         await conn.close()
+
+
+# ── Здоровье БД ───────────────────────────────────────────────────────────────
+
+def _fmt_bytes(n: int) -> str:
+    for unit in ("Б", "КБ", "МБ", "ГБ"):
+        if n < 1024:
+            return f"{n:.0f} {unit}"
+        n /= 1024
+    return f"{n:.1f} ТБ"
+
+
+async def get_db_health_stats() -> dict:
+    """Статистика аналитической БД: размеры, синхронизация history."""
+    conn = await _connect()
+    try:
+        db_size_bytes = await conn.fetchval(
+            "SELECT pg_database_size(current_database())"
+        )
+
+        table_names = [
+            "history", "enum_history", "fault_history", "events", "data_gaps",
+            "register_catalog", "objects", "equipment", "parameter_history",
+            "auto_segments", "online_observations", "history_sync_state",
+        ]
+        tables = []
+        for t in table_names:
+            try:
+                size_bytes = await conn.fetchval(
+                    "SELECT pg_total_relation_size($1::regclass)", t
+                )
+                size_pretty = await conn.fetchval(
+                    "SELECT pg_size_pretty(pg_total_relation_size($1::regclass))", t
+                )
+                row_count = await conn.fetchval(f"SELECT COUNT(*) FROM {t}")
+                tables.append({
+                    "name": t,
+                    "size_bytes": size_bytes,
+                    "size_pretty": size_pretty,
+                    "row_count": row_count,
+                })
+            except Exception:
+                pass
+
+        sync_rows = await conn.fetch("""
+            SELECT hs.router_sn, hs.equip_type, hs.panel_id, hs.last_sync_at,
+                   EXTRACT(EPOCH FROM (now() - hs.last_sync_at))::int AS lag_sec,
+                   er.name AS device_name
+            FROM history_sync_state hs
+            LEFT JOIN equipment_registry er
+                ON  er.router_sn   = hs.router_sn
+                AND er.equip_type  = hs.equip_type
+                AND er.panel_id    = hs.panel_id
+            ORDER BY hs.router_sn, hs.panel_id
+        """)
+
+        daily_rows = await conn.fetchval(
+            "SELECT COUNT(*) FROM history WHERE received_at > now() - interval '24 hours'"
+        )
+        history_entry = next((t for t in tables if t["name"] == "history"), None)
+        if history_entry and history_entry["row_count"] and history_entry["row_count"] > 0:
+            avg_row = history_entry["size_bytes"] / history_entry["row_count"]
+        else:
+            avg_row = 0
+        daily_mb  = round(daily_rows * avg_row / 1024 / 1024, 1)
+        monthly_mb = round(daily_mb * 30, 0)
+
+        return {
+            "db_size_bytes": db_size_bytes,
+            "db_size_pretty": _fmt_bytes(db_size_bytes),
+            "tables": tables,
+            "sync_state": [dict(r) for r in sync_rows],
+            "daily_rows": daily_rows,
+            "daily_mb": daily_mb,
+            "monthly_mb": int(monthly_mb),
+        }
+    finally:
+        await conn.close()

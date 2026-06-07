@@ -2161,3 +2161,55 @@ def _list_kb_paths(equipment_dir) -> list[str]:
     if not equipment_dir.exists():
         return []
     return sorted(d.name for d in equipment_dir.iterdir() if d.is_dir())
+
+
+# ── База данных: здоровье и настройки ────────────────────────────────────────
+
+@router.get("/db", response_class=HTMLResponse)
+async def db_health_page(request: Request):
+    from db.analytics import get_db_health_stats, get_app_setting
+    from db.source import get_source_mode
+
+    stats = await get_db_health_stats()
+    sync_interval = int(await get_app_setting("history_sync_interval_sec", "30"))
+    source_mode   = get_source_mode()
+
+    return templates.TemplateResponse(request, "db_health.html", {
+        "stats":         stats,
+        "sync_interval": sync_interval,
+        "source_mode":   source_mode,
+    })
+
+
+@router.get("/api/db/health")
+async def api_db_health():
+    from db.analytics import get_db_health_stats
+    from db.source import get_source_mode
+    stats = await get_db_health_stats()
+    stats["source_mode"] = get_source_mode()
+    return JSONResponse(stats)
+
+
+@router.post("/settings/source-mode")
+async def set_source_mode_route(mode: str = Form(...)):
+    from db.analytics import set_app_setting
+    from db.source import set_source_mode
+    if mode not in ("external", "local"):
+        raise HTTPException(400, "mode must be external or local")
+    await set_app_setting("source_mode", mode)
+    set_source_mode(mode)
+    logger.info("Источник телеметрии переключён: %s", mode)
+    return RedirectResponse("/db", status_code=303)
+
+
+@router.post("/settings/history-sync-interval")
+async def set_history_sync_interval(interval_sec: int = Form(...)):
+    from db.analytics import set_app_setting
+    import online.manager as _mgr
+    if not (5 <= interval_sec <= 3600):
+        raise HTTPException(400, "interval_sec must be 5..3600")
+    await set_app_setting("history_sync_interval_sec", str(interval_sec))
+    mgr = _mgr.get_manager()
+    if mgr._history_sync:
+        mgr._history_sync._interval_sec = interval_sec
+    return RedirectResponse("/db", status_code=303)

@@ -58,6 +58,9 @@ async def lifespan(app: FastAPI):
         proxy=          await get_app_setting("claude_proxy",          _claude_defaults["proxy"]),
         system_prompt=  await get_app_setting("claude_system_prompt",  _CLAUDE_DEFAULT_PROMPT),
     )
+    # Загрузить режим источника телеметрии
+    from db.source import set_source_mode as _set_source_mode
+    _set_source_mode(await get_app_setting("source_mode", "external"))
     start_scheduler()
     # Запустить онлайн-мониторинг (Этап 1.5)
     mgr = _online_mgr.init_manager()

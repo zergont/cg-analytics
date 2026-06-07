@@ -1,0 +1,230 @@
+{% extends "base.html" %}
+{% block title %}База данных — cg-analytics{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="mb-0">База данных</h5>
+    <span class="text-muted small" id="refreshed-at"></span>
+</div>
+
+<div class="row g-3">
+
+    <!-- ─── Левая колонка ──────────────────────────────────────────────── -->
+    <div class="col-md-6">
+
+        <!-- Общий размер -->
+        <div class="card mb-3">
+            <div class="card-header fw-semibold">Размер аналитической БД</div>
+            <div class="card-body">
+                <div class="d-flex align-items-baseline gap-3 mb-3">
+                    <span class="fs-4 fw-bold" id="db-size">{{ stats.db_size_pretty }}</span>
+                    <span class="text-muted small">analytics@localhost</span>
+                </div>
+                <div class="row text-center g-2">
+                    <div class="col-4">
+                        <div class="border rounded p-2">
+                            <div class="fw-semibold" id="daily-rows">{{ "{:,}".format(stats.daily_rows).replace(",", " ") }}</div>
+                            <div class="text-muted" style="font-size:0.75rem">строк/сутки</div>
+                        </div>
+                    </div>
+                    <div class="col-4">
+                        <div class="border rounded p-2">
+                            <div class="fw-semibold" id="daily-mb">{{ stats.daily_mb }} МБ</div>
+                            <div class="text-muted" style="font-size:0.75rem">рост/сутки</div>
+                        </div>
+                    </div>
+                    <div class="col-4">
+                        <div class="border rounded p-2">
+                            <div class="fw-semibold" id="monthly-mb">{{ stats.monthly_mb }} МБ</div>
+                            <div class="text-muted" style="font-size:0.75rem">рост/месяц</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Синхронизация history -->
+        <div class="card mb-3">
+            <div class="card-header fw-semibold">Синхронизация history</div>
+            <div class="card-body p-0">
+                {% if stats.sync_state %}
+                <table class="table table-sm mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Устройство</th>
+                            <th>Курсор</th>
+                            <th>Отставание</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sync-state-tbody">
+                    {% for s in stats.sync_state %}
+                    <tr>
+                        <td>
+                            <small class="fw-semibold">{{ s.device_name or s.router_sn }}</small><br>
+                            <span class="text-muted" style="font-size:0.75rem">panel {{ s.panel_id }}</span>
+                        </td>
+                        <td>
+                            <small>{{ s.last_sync_at.strftime("%d.%m %H:%M:%S") if s.last_sync_at else "—" }}</small>
+                        </td>
+                        <td>
+                            {% set lag = s.lag_sec %}
+                            {% if lag < 120 %}
+                                <span class="badge bg-success">{{ lag }} с</span>
+                            {% elif lag < 600 %}
+                                <span class="badge bg-warning text-dark">{{ (lag // 60) }} мин</span>
+                            {% else %}
+                                <span class="badge bg-danger">{{ (lag // 60) }} мин</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <div class="p-3 text-muted small">Нет данных — синхронизация ещё не запускалась.</div>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Источник телеметрии -->
+        <div class="card">
+            <div class="card-header fw-semibold">Источник телеметрии</div>
+            <div class="card-body">
+                <p class="small text-muted mb-3">
+                    Управляет тем, откуда аналитический движок читает данные телеметрии.
+                    Переключайте на <strong>локальный</strong> только когда history sync
+                    полностью догнал текущий момент (отставание &lt; 60 с).
+                </p>
+                <form method="post" action="/settings/source-mode">
+                    <div class="d-flex gap-3 mb-3">
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="mode"
+                                   id="mode-external" value="external"
+                                   {% if source_mode == "external" %}checked{% endif %}>
+                            <label class="form-check-label" for="mode-external">
+                                <span class="fw-semibold">Внешний</span>
+                                <span class="text-muted small d-block">10.10.10.1 (TimescaleDB)</span>
+                            </label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="mode"
+                                   id="mode-local" value="local"
+                                   {% if source_mode == "local" %}checked{% endif %}>
+                            <label class="form-check-label" for="mode-local">
+                                <span class="fw-semibold">Локальный</span>
+                                <span class="text-muted small d-block">localhost (реплика)</span>
+                            </label>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-sm btn-primary">Применить</button>
+                    <span class="text-muted small ms-2">
+                        Текущий:
+                        {% if source_mode == "local" %}
+                            <span class="text-success fw-semibold">локальный</span>
+                        {% else %}
+                            <span class="text-warning fw-semibold">внешний</span>
+                        {% endif %}
+                    </span>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- ─── Правая колонка ─────────────────────────────────────────────── -->
+    <div class="col-md-6">
+
+        <!-- Таблицы -->
+        <div class="card mb-3">
+            <div class="card-header fw-semibold">Размеры таблиц</div>
+            <div class="card-body p-0">
+                <table class="table table-sm mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Таблица</th>
+                            <th class="text-end">Строк</th>
+                            <th class="text-end">Размер</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tables-tbody">
+                    {% for t in stats.tables | sort(attribute="size_bytes", reverse=True) %}
+                    <tr>
+                        <td><code style="font-size:0.8rem">{{ t.name }}</code></td>
+                        <td class="text-end text-muted small">
+                            {{ "{:,}".format(t.row_count).replace(",", " ") }}
+                        </td>
+                        <td class="text-end">
+                            <span class="badge bg-secondary-subtle text-secondary-emphasis"
+                                  style="font-size:0.75rem">{{ t.size_pretty }}</span>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Настройки синхронизации -->
+        <div class="card">
+            <div class="card-header fw-semibold">Настройки синхронизации</div>
+            <div class="card-body">
+                <form method="post" action="/settings/history-sync-interval"
+                      class="d-flex align-items-center gap-2">
+                    <label class="small text-muted mb-0">Интервал синхронизации history:</label>
+                    <input type="number" name="interval_sec"
+                           class="form-control form-control-sm" style="width:80px"
+                           value="{{ sync_interval }}" min="5" max="3600" required>
+                    <span class="text-muted small">сек</span>
+                    <button type="submit" class="btn btn-sm btn-outline-secondary">Сохранить</button>
+                </form>
+                <div class="text-muted small mt-2">
+                    Изменяется без перезапуска. Рекомендуется 30 сек.
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function fmt(n) {
+    return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+}
+
+async function refresh() {
+    try {
+        const r = await fetch("/api/db/health");
+        const d = await r.json();
+
+        document.getElementById("db-size").textContent    = d.db_size_pretty;
+        document.getElementById("daily-rows").textContent = fmt(d.daily_rows);
+        document.getElementById("daily-mb").textContent   = d.daily_mb + " МБ";
+        document.getElementById("monthly-mb").textContent = d.monthly_mb + " МБ";
+
+        const tbody = document.getElementById("sync-state-tbody");
+        if (tbody && d.sync_state) {
+            tbody.innerHTML = d.sync_state.map(s => {
+                const lag = s.lag_sec;
+                let badge;
+                if (lag < 120)      badge = `<span class="badge bg-success">${lag} с</span>`;
+                else if (lag < 600) badge = `<span class="badge bg-warning text-dark">${Math.floor(lag/60)} мин</span>`;
+                else                badge = `<span class="badge bg-danger">${Math.floor(lag/60)} мин</span>`;
+                const ts = s.last_sync_at ? new Date(s.last_sync_at).toLocaleString("ru-RU") : "—";
+                return `<tr>
+                    <td><small class="fw-semibold">${s.device_name || s.router_sn}</small><br>
+                        <span class="text-muted" style="font-size:.75rem">panel ${s.panel_id}</span></td>
+                    <td><small>${ts}</small></td>
+                    <td>${badge}</td>
+                </tr>`;
+            }).join("");
+        }
+
+        document.getElementById("refreshed-at").textContent =
+            "обновлено " + new Date().toLocaleTimeString("ru-RU");
+    } catch(e) { console.error(e); }
+}
+
+refresh();
+setInterval(refresh, 15000);
+</script>
+{% endblock %}
