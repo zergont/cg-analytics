@@ -912,8 +912,9 @@ async def settings_page(request: Request):
     from corpus.settings import get_claude_settings
     registry = await analytics.get_equipment_registry()
     kb_list = _list_kb_paths(cfg.knowledge_base_path / "equipment")
-    corpus_auto = await analytics.get_app_setting("corpus_auto_analyze", "false")
-    qwen_auto   = await analytics.get_app_setting("qwen_auto_analyze",   "false")
+    corpus_auto       = await analytics.get_app_setting("corpus_auto_analyze",       "false")
+    qwen_auto         = await analytics.get_app_setting("qwen_auto_analyze",         "false")
+    analytics_verify  = await analytics.get_app_setting("analytics_verify_on_close", "false")
     status_line_interval_min = int(
         await analytics.get_app_setting("status_line_interval_min", "5")
     )
@@ -925,9 +926,10 @@ async def settings_page(request: Request):
         "current_timezone": get_tz().key,
         "llm": get_llm_settings(),
         "claude": get_claude_settings(),
-        "corpus_auto_analyze":      corpus_auto == "true",
-        "qwen_auto_analyze":        qwen_auto   == "true",
-        "status_line_interval_min": status_line_interval_min,
+        "corpus_auto_analyze":       corpus_auto      == "true",
+        "qwen_auto_analyze":         qwen_auto        == "true",
+        "analytics_verify_on_close": analytics_verify == "true",
+        "status_line_interval_min":  status_line_interval_min,
     })
 
 
@@ -996,6 +998,18 @@ async def qwen_toggle(enabled: str = Form("off")):
     logger.info("qwen авто-анализ: %s", "включён" if value == "true" else "выключен")
     return RedirectResponse(url="/settings", status_code=303)
 
+
+
+@router.post("/settings/analytics-verify-toggle")
+async def analytics_verify_toggle(enabled: str = Form("off")):
+    """Включить / выключить финальную проверку характеристик при закрытии сегмента."""
+    value = "true" if enabled == "on" else "false"
+    await analytics.set_app_setting("analytics_verify_on_close", value)
+    logger.info(
+        "Финальная проверка характеристик: %s",
+        "включена" if value == "true" else "выключена",
+    )
+    return RedirectResponse(url="/settings", status_code=303)
 
 
 @router.post("/settings/corpus-toggle")
@@ -1568,28 +1582,52 @@ async def online_segment_detail(request: Request, seg_id: int):
         rs = prev_seg_raw.get("run_state")
         prev_run_state_label = _RUN_STATE_LABELS.get(rs, f"RUN_STATE={rs}") if rs is not None else None
 
-    # Загрузить анализ Claude (Этап 2) — только для закрытых сегментов
+    # Загрузить анализ Claude (Этап 2) — для всех сегментов (открытые — ручной запуск)
     claude_analysis = None
-    if not is_open:
-        try:
-            from corpus.db import get_analysis as _get_analysis
-            from corpus.humanizer import _extract_block2 as _exb2
-            claude_analysis = await _get_analysis(seg_id)
-            # Извлекаем только Блок 2 (аналитика Claude без мета-шапок) — для qwen
-            if claude_analysis and claude_analysis.get("conclusion_md"):
-                claude_analysis = dict(claude_analysis)
-                claude_analysis["conclusion_block2"] = _exb2(claude_analysis["conclusion_md"])
-        except Exception as _ce:
-            logger.debug("corpus: анализ для #%d недоступен: %s", seg_id, _ce)
+    try:
+        from corpus.db import get_analysis as _get_analysis
+        from corpus.humanizer import _extract_block2 as _exb2
+        claude_analysis = await _get_analysis(seg_id)
+        if claude_analysis and claude_analysis.get("conclusion_md"):
+            claude_analysis = dict(claude_analysis)
+            claude_analysis["conclusion_block2"] = _exb2(claude_analysis["conclusion_md"])
+    except Exception as _ce:
+        logger.debug("corpus: анализ для #%d недоступен: %s", seg_id, _ce)
 
     if is_open:
-        # Открытый сегмент: показать текущие значения
+        _sev_rank = {"SHUTDOWN": 4, "ALARM": 3, "WARNING": 2, "INFO": 1}
+        _open_dets = []
+        if chars_dict:
+            for _sub in chars_dict.get("subsegments", []):
+                _open_dets.extend(_sub.get("detections", []))
+        _max_sev_open = max(
+            (_d.get("severity") for _d in _open_dets),
+            key=lambda s: _sev_rank.get(s, 0),
+            default=None,
+        ) if _open_dets else None
+
+        run_open = {
+            "id":                str(seg_id),
+            "router_sn":         seg["router_sn"],
+            "equip_type":        seg["equip_type"],
+            "panel_id":          seg["panel_id"],
+            "ts_from":           seg["t_start"].astimezone(tz).strftime("%Y-%m-%d %H:%M:%S %Z")
+                                 if seg.get("t_start") else "—",
+            "ts_to":             "открытый",
+            "analytics_version": seg.get("analytics_version", "—"),
+            "report_md":         seg.get("report_md"),
+            "max_severity":      _max_sev_open,
+            "_is_auto_seg":      True,
+            "_seg_id":           seg_id,
+            "_calendar_url":     f"/online/calendar/{seg['router_sn']}/{seg['equip_type']}/{seg['panel_id']}",
+        }
         return templates.TemplateResponse(request, "auto_segment_report.html", {
             "seg": seg, "is_open": True,
+            "run": run_open,
             "current_values": current_vals,
             "active_detections": active_dets,
             "coking_risk": coking_risk,
-            "claude_analysis": None,
+            "claude_analysis": claude_analysis,
             "prev_run_state_label": prev_run_state_label,
             "prev_nav": prev_nav,
             "next_nav": next_nav,

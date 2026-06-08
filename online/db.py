@@ -177,6 +177,8 @@ async def upsert_open_segment(data: dict[str, Any]) -> int:
                     current_values_json    = $8::jsonb,
                     active_detections_json = $9::jsonb,
                     continued_from         = $10,
+                    characteristics_json   = COALESCE($11::jsonb, characteristics_json),
+                    report_md              = COALESCE($12, report_md),
                     updated_at             = now()
                 WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
                   AND t_end IS NULL
@@ -190,6 +192,9 @@ async def upsert_open_segment(data: dict[str, Any]) -> int:
                 json.dumps(data.get("current_values_json"), ensure_ascii=False),
                 json.dumps(data.get("active_detections_json"), ensure_ascii=False),
                 data.get("continued_from"),
+                json.dumps(data.get("characteristics_json"), ensure_ascii=False)
+                    if data.get("characteristics_json") is not None else None,
+                data.get("report_md"),
             )
 
             if row:
@@ -203,8 +208,8 @@ async def upsert_open_segment(data: dict[str, Any]) -> int:
                     run_state, coking_risk_json,
                     analytics_version,
                     current_values_json, active_detections_json,
-                    continued_from, updated_at
-                ) VALUES ($1,$2,$3,$4,NULL,$5,$6::jsonb,$7,$8::jsonb,$9::jsonb,$10,now())
+                    continued_from, characteristics_json, report_md, updated_at
+                ) VALUES ($1,$2,$3,$4,NULL,$5,$6::jsonb,$7,$8::jsonb,$9::jsonb,$10,$11::jsonb,$12,now())
                 RETURNING id
             """,
                 data["router_sn"], data["equip_type"], data["panel_id"],
@@ -215,6 +220,9 @@ async def upsert_open_segment(data: dict[str, Any]) -> int:
                 json.dumps(data.get("current_values_json"), ensure_ascii=False),
                 json.dumps(data.get("active_detections_json"), ensure_ascii=False),
                 data.get("continued_from"),
+                json.dumps(data.get("characteristics_json"), ensure_ascii=False)
+                    if data.get("characteristics_json") is not None else None,
+                data.get("report_md"),
             )
         return row["id"]
     finally:

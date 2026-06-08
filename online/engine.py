@@ -22,7 +22,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from analytics.contract import CokingRisk, RiskAccumulators
+from analytics.contract import CokingRisk
 from online import db as online_db
 
 logger = logging.getLogger(__name__)
@@ -445,6 +445,21 @@ class OnlinePollEngine:
             logger.exception("OnlineEngine[%s]: ошибка анализа [%s, %s]", self.key, t_from, t_to)
             return
 
+        # Сохранить характеристики открытого сегмента для верификации (до удаления)
+        _open_row = await online_db.get_open_segment(
+            self.router_sn, self.equip_type, self.panel_id
+        )
+        _open_chars: dict | None = None
+        if _open_row:
+            _raw = _open_row.get("characteristics_json")
+            if isinstance(_raw, str):
+                try:
+                    import json as _j; _open_chars = _j.loads(_raw)
+                except Exception:
+                    pass
+            elif isinstance(_raw, dict):
+                _open_chars = _raw
+
         # Удалить старый открытый сегмент
         await online_db.delete_open_segment(
             self.router_sn, self.equip_type, self.panel_id
@@ -551,6 +566,18 @@ class OnlinePollEngine:
                     self.continued_from_id = None
                     self.forward_fill_memory = None
 
+                # Верификация: сравниваем сохранённые инкрементальные vs reference
+                from online.verifier import fire_verify as _fire_verify
+                _fire_verify(
+                    seg_id=db_id,
+                    unit_key=self.key,
+                    run_state=seg.run_state,
+                    t_start_str=seg.t_start,
+                    t_end_str=seg_t_end.isoformat(),
+                    incr_chars=_open_chars,
+                    ref_chars=seg_dict,
+                )
+
         logger.debug(
             "OnlineEngine[%s]: закрыто %d сегментов до %s (%s)",
             self.key, len(segments), t_to, close_reason,
@@ -581,6 +608,21 @@ class OnlinePollEngine:
         # Новые закрытые сегменты (смены RUN_STATE внутри открытого окна)
         closed_segs = [s for s in segments if s.cause_close == "RUN_STATE_CHANGE"]
         if closed_segs:
+            # Сохранить характеристики открытого сегмента для верификации (до удаления)
+            _rs_open_row = await online_db.get_open_segment(
+                self.router_sn, self.equip_type, self.panel_id
+            )
+            _rs_open_chars: dict | None = None
+            if _rs_open_row:
+                _raw_rs = _rs_open_row.get("characteristics_json")
+                if isinstance(_raw_rs, str):
+                    try:
+                        import json as _j; _rs_open_chars = _j.loads(_raw_rs)
+                    except Exception:
+                        pass
+                elif isinstance(_raw_rs, dict):
+                    _rs_open_chars = _raw_rs
+
             await online_db.delete_open_segment(
                 self.router_sn, self.equip_type, self.panel_id
             )
@@ -601,6 +643,7 @@ class OnlinePollEngine:
                 except Exception:
                     report_md_rs = None
 
+                _rs_seg_dict = seg.to_dict()
                 _rs_db_id = await online_db.insert_closed_segment({
                     "router_sn":          self.router_sn,
                     "equip_type":         self.equip_type,
@@ -613,11 +656,24 @@ class OnlinePollEngine:
                     "continued_from":     carry_continued_from,
                     "coking_risk_json":   coking_risk.to_dict(),
                     "analytics_version":  ANALYTICS_VERSION,
-                    "characteristics_json": seg.to_dict(),
+                    "characteristics_json": _rs_seg_dict,
                     "report_md":          report_md_rs,
                 })
                 # ← await выше = прогресс обновляется на каждой смене RUN_STATE
                 _enqueue_segment(_rs_db_id)
+
+                # Верификация: сравниваем первый закрытый сегмент с открытым (тот же RS)
+                if ci == 0:
+                    from online.verifier import fire_verify as _fire_verify
+                    _fire_verify(
+                        seg_id=_rs_db_id,
+                        unit_key=self.key,
+                        run_state=seg.run_state,
+                        t_start_str=seg.t_start,
+                        t_end_str=seg_t_end_rs.isoformat(),
+                        incr_chars=_rs_open_chars,
+                        ref_chars=_rs_seg_dict,
+                    )
                 self.last_processed_to = seg_t_end_rs
                 self.cursor_ts = _tz_utc(datetime.fromisoformat(seg.t_end))
                 self.inherited_coking_risk = coking_risk
@@ -635,6 +691,17 @@ class OnlinePollEngine:
         # открытый сегмент сам является продолжением pre-boundary сегмента
         open_continued_from = self.continued_from_id
 
+        try:
+            from analytics.serializer import to_markdown as _to_md
+            open_report_md = _to_md(
+                [open_seg], self.router_sn, self.equip_type, self.panel_id,
+                _tz_utc(self.cursor_ts), _tz_utc(t_to),
+                ANALYTICS_VERSION, tz=self.tz, prev_seg=self._prev_seg_hint,
+                fault_ref=self._fault_ref,
+            )
+        except Exception:
+            open_report_md = None
+
         await online_db.upsert_open_segment({
             "router_sn":              self.router_sn,
             "equip_type":             self.equip_type,
@@ -645,6 +712,8 @@ class OnlinePollEngine:
             "analytics_version":      ANALYTICS_VERSION,
             "current_values_json":    current_values,
             "active_detections_json": active_detections,
+            "characteristics_json":   open_seg.to_dict(),
+            "report_md":              open_report_md,
             "continued_from":         open_continued_from,
         })
 

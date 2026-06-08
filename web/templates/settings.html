@@ -75,6 +75,21 @@
                             </label>
                         </div>
                     </form>
+                    <form method="post" action="/settings/analytics-verify-toggle">
+                        <div class="form-check form-switch mb-0">
+                            <input class="form-check-input" type="checkbox" role="switch"
+                                   name="enabled" value="on" id="analyticsVerifySwitch"
+                                   {% if analytics_verify_on_close %}checked{% endif %}
+                                   onchange="this.form.submit()">
+                            <label class="form-check-label" for="analyticsVerifySwitch">
+                                {% if analytics_verify_on_close %}
+                                    <span class="text-warning fw-semibold">Проверка характеристик при закрытии — включена</span>
+                                {% else %}
+                                    <span class="text-muted">Проверка характеристик при закрытии — выключена</span>
+                                {% endif %}
+                            </label>
+                        </div>
+                    </form>
                 </div>
 
                 <hr class="my-3">

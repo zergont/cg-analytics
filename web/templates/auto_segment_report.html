@@ -144,7 +144,6 @@
     </div>
     {% endif %}
 
-    {% if not is_open %}
     {# ── Claude-анализ (Этап 2) ── #}
     {% set ca = claude_analysis %}
     {% set ca_status = ca.status if ca else None %}
@@ -232,7 +231,6 @@
         <div id="qwenStatus" class="mt-2 small text-muted" style="display:none"></div>
       </div>
     </div>
-    {% endif %}
 
   </div>
 
@@ -240,10 +238,67 @@
   <div class="col-md-8 col-lg-9 d-flex flex-column h-100">
 
     {% if is_open %}
-    {# ── Открытый: текущие значения ── #}
-    <h6 class="text-muted mb-2">Текущие параметры (обновлено на последнем цикле опроса)</h6>
-    {% if current_values and current_values.get("values") %}
-    <div class="border rounded p-3 bg-white overflow-auto flex-grow-1">
+    {# ── Открытый: статус-баннер ── #}
+    {% set max_sev = run.get("max_severity") if run else None %}
+    {% if max_sev == "SHUTDOWN" %}
+      <div class="alert alert-danger py-2 mb-2">🔴 <strong>SHUTDOWN</strong> — аварийный останов</div>
+    {% elif max_sev == "ALARM" %}
+      <div class="alert alert-danger py-2 mb-2">🟠 <strong>ALARM</strong> — требуется внимание</div>
+    {% elif max_sev == "WARNING" %}
+      <div class="alert alert-warning py-2 mb-2">🟡 <strong>WARNING</strong> — предупреждения зафиксированы</div>
+    {% else %}
+      <div class="alert alert-success py-2 mb-2">🟢 <strong>Норма</strong> — нарушений не выявлено</div>
+    {% endif %}
+
+    {# Тулбар #}
+    {% set has_report = run and run.report_md %}
+    <div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
+      <div class="text-muted small">
+        {{ run.ts_from if run else "—" }}
+        <span class="badge bg-primary ms-1">Открытый</span>
+        <span class="badge bg-secondary ms-1">{{ tz_name }}</span>
+      </div>
+      <div class="ms-auto d-flex gap-2 flex-wrap">
+        <button class="btn btn-sm btn-outline-secondary active" onclick="showOpenPanel('analytics')" id="tabAnalytics">
+          📊 Аналитика
+        </button>
+        <button class="btn btn-sm btn-outline-secondary" onclick="showOpenPanel('live')" id="tabLive">
+          📡 Текущие
+        </button>
+        {% if has_report %}
+        <button class="btn btn-sm btn-outline-secondary" onclick="showOpenPanel('raw')" id="tabRaw">
+          Сырой текст
+        </button>
+        <button class="btn btn-sm btn-outline-primary" onclick="showOpenPanel('claude')" id="tabClaude"
+          {% if not (claude_analysis and claude_analysis.status == 'done' and claude_analysis.conclusion_md) %}disabled{% endif %}>
+          ✨ Claude
+        </button>
+        <button class="btn btn-sm btn-outline-success" onclick="showOpenPanel('qwen')" id="tabQwen">
+          🤖 qwen
+        </button>
+        <button class="btn btn-sm btn-outline-secondary" onclick="copyOpenMd()">📋 Копировать</button>
+        <a href="/online/segment/{{ seg.id }}/md" class="btn btn-sm btn-outline-secondary">↓ MD</a>
+        {% endif %}
+        <a href="." class="btn btn-sm btn-outline-secondary">🔄 Обновить</a>
+      </div>
+    </div>
+
+    {# Панель: Аналитика #}
+    <div id="openAnalyticsPanel" class="border rounded p-3 bg-white overflow-auto flex-grow-1">
+      {% if has_report %}
+        <div id="openMdContent"></div>
+      {% else %}
+        <div class="text-center text-muted py-5">
+          <div class="fs-2 mb-2">⏳</div>
+          <div>Данные накапливаются…</div>
+          <div class="small mt-1">Появятся после первого цикла опроса (~30 сек). Нажмите <strong>Обновить</strong>.</div>
+        </div>
+      {% endif %}
+    </div>
+
+    {# Панель: Текущие параметры #}
+    <div id="openLivePanel" class="border rounded p-3 bg-white overflow-auto flex-grow-1" style="display:none">
+      {% if current_values and current_values.get("values") %}
       <div class="mb-2">
         <span class="badge
           {%- if run_state == 3 %} bg-primary
@@ -279,10 +334,26 @@
       </div>
       {% endfor %}
       {% endif %}
+      {% else %}
+      <div class="alert alert-secondary">Данные ещё не получены. Дождитесь первого цикла опроса.</div>
+      {% endif %}
     </div>
 
-    {% else %}
-    <div class="alert alert-secondary">Данные ещё не получены. Дождитесь первого цикла опроса.</div>
+    {# Панель: Сырой текст #}
+    {% if has_report %}
+    <div id="openRawPanel" class="flex-grow-1" style="display:none">
+      <textarea id="openRawMd" class="form-control font-monospace w-100 h-100"
+                style="font-size:.78rem;resize:none;white-space:pre-wrap" readonly></textarea>
+    </div>
+    {# Панель: Claude #}
+    <div id="openClaudePanel" class="border rounded p-3 bg-white overflow-auto flex-grow-1" style="display:none">
+      <div id="openClaudeContent" class="text-muted fst-italic">Заключение Claude не загружено.</div>
+    </div>
+    {# Панель: qwen #}
+    <div id="openQwenPanel" class="border rounded p-3 bg-white overflow-auto flex-grow-1" style="display:none">
+      <div id="openQwenContent" class="text-muted fst-italic">Сначала запустите Claude-анализ (левая панель), затем отправьте в qwen.</div>
+    </div>
+    <script id="openReportMdSrc" type="text/plain">{{ run.report_md or "" }}</script>
     {% endif %}
 
     {% else %}
@@ -470,6 +541,117 @@ async function sendToQwen() {
             qc.innerHTML = _renderMd(text);
             status.textContent = 'Готово.';
           }
+          if (d.error) { qc.innerHTML = '<div class="alert alert-danger">' + d.error + '</div>'; }
+        } catch {}
+      }
+    }
+  } catch(e) {
+    qc.innerHTML = '<div class="alert alert-danger">Ошибка: ' + e.message + '</div>';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Отправить в qwen →';
+  }
+}
+</script>
+{% endif %}
+
+{% if is_open and run and run.report_md %}
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script>
+const _openMd = document.getElementById('openReportMdSrc').textContent;
+
+{% if claude_analysis and claude_analysis.status == 'done' and claude_analysis.conclusion_md %}
+const _openConclusionMd = {{ claude_analysis.conclusion_md | tojson }};
+const _openBlock2Md     = {{ (claude_analysis.conclusion_block2 or claude_analysis.conclusion_md) | tojson }};
+{% else %}
+const _openConclusionMd = null;
+const _openBlock2Md     = null;
+{% endif %}
+{% if claude_analysis and claude_analysis.status == 'done' and claude_analysis.humanized_md %}
+const _openHumanizedMd = {{ claude_analysis.humanized_md | tojson }};
+{% else %}
+const _openHumanizedMd = null;
+{% endif %}
+
+function _renderMdOpen(text) {
+  if (!text) return '';
+  return typeof marked !== 'undefined'
+    ? marked.parse(text)
+    : '<pre style="white-space:pre-wrap;font-size:.85rem">' + text.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</pre>';
+}
+
+const _openPanels = {
+  analytics: {block: 'openAnalyticsPanel', tab: 'tabAnalytics'},
+  live:      {block: 'openLivePanel',      tab: 'tabLive'},
+  raw:       {block: 'openRawPanel',       tab: 'tabRaw'},
+  claude:    {block: 'openClaudePanel',    tab: 'tabClaude'},
+  qwen:      {block: 'openQwenPanel',      tab: 'tabQwen'},
+};
+
+function showOpenPanel(p) {
+  Object.entries(_openPanels).forEach(([key, ids]) => {
+    const block = document.getElementById(ids.block);
+    const tab   = ids.tab ? document.getElementById(ids.tab) : null;
+    if (block) block.style.display = key === p ? '' : 'none';
+    if (tab)   tab.classList.toggle('active', key === p);
+  });
+}
+
+function copyOpenMd() {
+  navigator.clipboard.writeText(_openMd).then(() => {
+    const btn = event.target;
+    btn.textContent = '✓ Скопировано';
+    setTimeout(() => btn.textContent = '📋 Копировать', 1500);
+  });
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('openMdContent').innerHTML = _renderMdOpen(_openMd);
+  const raw = document.getElementById('openRawMd');
+  if (raw) raw.value = _openMd;
+  if (_openConclusionMd)
+    document.getElementById('openClaudeContent').innerHTML = _renderMdOpen(_openConclusionMd);
+  if (_openHumanizedMd)
+    document.getElementById('openQwenContent').innerHTML = _renderMdOpen(_openHumanizedMd);
+  {% if claude_analysis and claude_analysis.status in ['queued', 'processing'] %}
+  setTimeout(() => location.reload(), 4000);
+  {% endif %}
+});
+
+// qwen: отправляет заключение Claude (block2), как на странице закрытого сегмента
+async function sendToQwen() {
+  const btn    = document.getElementById('qwenBtn');
+  const status = document.getElementById('qwenStatus');
+  if (!_openBlock2Md) return;
+  btn.disabled = true;
+  btn.textContent = '⏳ Отправляю…';
+  status.style.display = '';
+  status.textContent = 'Подключение к qwen…';
+  showOpenPanel('qwen');
+  const qc = document.getElementById('openQwenContent');
+  qc.innerHTML = '<span class="streaming-cursor"></span>';
+  let text = '';
+  try {
+    const resp = await fetch('/analyze/run', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({markdown: _openBlock2Md}),
+    });
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const d = JSON.parse(line.slice(6));
+          if (d.token) { text += d.token; qc.innerHTML = _renderMdOpen(text) + '<span class="streaming-cursor"></span>'; }
+          if (d.done)  { qc.innerHTML = _renderMdOpen(text); status.textContent = 'Готово.'; }
           if (d.error) { qc.innerHTML = '<div class="alert alert-danger">' + d.error + '</div>'; }
         } catch {}
       }
