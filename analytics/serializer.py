@@ -134,10 +134,13 @@ def to_markdown(
     tz=None,
     prev_seg=None,
     fault_ref=None,
+    inherited_run_state_sec: "dict[int, float] | None" = None,
 ) -> str:
     """Сформировать Markdown-отчёт.
 
     tz — объект часового пояса (например, из config.get_tz()); None → UTC.
+    inherited_run_state_sec — накопленное время (сек) в каждом RS от предыдущих
+    сегментов суточной цепочки (continued_from). Добавляется к RS=3 времени в сводке.
     """
     fmt_ts = _make_fmt_ts(tz)
 
@@ -154,7 +157,7 @@ def to_markdown(
 
     # ── Сводка ──
     all_detections: list[dict] = []
-    total_running_sec = 0.0
+    total_running_sec = float((inherited_run_state_sec or {}).get(3, 0.0))
     total_elevated_sec = 0.0
     seg_dqs: list[float] = []
 

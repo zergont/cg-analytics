@@ -102,6 +102,22 @@ def _coking_from_json(d) -> CokingRisk:
     )
 
 
+def _load_rs_sec_from_ff(ff: dict | None) -> dict[int, float]:
+    """Извлечь накопленное время RS из forward_fill_json (_run_state_sec ключ)."""
+    if not isinstance(ff, dict):
+        return {}
+    raw = ff.get("_run_state_sec")
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[int, float] = {}
+    for k, v in raw.items():
+        try:
+            result[int(k)] = float(v)
+        except (ValueError, TypeError):
+            pass
+    return result
+
+
 def _find_daily_boundaries(
     t_from: datetime,
     t_to: datetime,
@@ -279,6 +295,7 @@ class OnlinePollEngine:
         # Изменяемое состояние — переинициализируется из БД при старте
         self.cursor_ts: datetime | None          = None
         self.inherited_coking_risk: CokingRisk   = CokingRisk()
+        self.inherited_run_state_sec: dict[int, float] = {}
         self.forward_fill_memory: dict | None    = None
         self.continued_from_id: int | None       = None  # предок в DAILY_BOUNDARY цепочке
         self.prev_poll_ts: datetime | None        = None
@@ -317,6 +334,7 @@ class OnlinePollEngine:
                 # запускаемся с неё, batch-добор заполнит пропуск.
                 self.cursor_ts = requested
                 self.inherited_coking_risk = CokingRisk()
+                self.inherited_run_state_sec = {}
                 self.forward_fill_memory = None
                 self.continued_from_id = None
                 logger.info(
@@ -338,9 +356,11 @@ class OnlinePollEngine:
                             ff = None
                     self.forward_fill_memory = ff
                     self.continued_from_id = last["id"]
+                    self.inherited_run_state_sec = _load_rs_sec_from_ff(ff)
                 else:
                     self.forward_fill_memory = None
                     self.continued_from_id = None
+                    self.inherited_run_state_sec = {}
                 logger.info(
                     "OnlineEngine[%s]: возобновление с %s (coking=%s, причина_закрытия=%s)",
                     self.key, self.cursor_ts,
@@ -350,6 +370,7 @@ class OnlinePollEngine:
         else:
             self.cursor_ts = _tz_utc(start_date)
             self.inherited_coking_risk = CokingRisk()
+            self.inherited_run_state_sec = {}
             self.forward_fill_memory = None
             self.continued_from_id = None
             logger.info(
@@ -487,6 +508,9 @@ class OnlinePollEngine:
         })
 
         last_saved_id: int | None = None
+        # Накопленное время RS до этого батча (из предыдущей суточной цепочки)
+        running_rs_sec = dict(self.inherited_run_state_sec)
+
         for i, seg in enumerate(segments):
             is_last = (i == len(segments) - 1)
 
@@ -510,10 +534,27 @@ class OnlinePollEngine:
 
             coking_risk = _extract_coking_risk_from_segments([seg])
 
-            # forward-fill память: только для RUNNING сегмента на DAILY_BOUNDARY
+            # Унаследованное время RS для report_md этого сегмента:
+            # i==0 — прямое продолжение предыдущей цепочки; i>0 — новый RS (смена).
+            seg_inherited_rs = running_rs_sec if i == 0 else {}
+
+            # forward-fill память + накопленное время RS для суточного реза
             ff_json = None
-            if is_last and close_reason == "DAILY_BOUNDARY" and seg.run_state == 3:
-                ff_json = _build_ff_memory(seg)
+            updated_rs_sec: dict[int, float] | None = None
+            if is_last and close_reason == "DAILY_BOUNDARY":
+                if i == 0:
+                    updated_rs_sec = dict(running_rs_sec)
+                    updated_rs_sec[seg.run_state] = (
+                        updated_rs_sec.get(seg.run_state, 0.0) + seg.duration_sec
+                    )
+                else:
+                    # Последний сегмент начался с новым RS — счётчик свежий
+                    updated_rs_sec = {seg.run_state: seg.duration_sec}
+                if seg.run_state == 3:
+                    ff_json = _build_ff_memory(seg) or {}
+                else:
+                    ff_json = {}
+                ff_json["_run_state_sec"] = {str(k): v for k, v in updated_rs_sec.items()}
 
             seg_dict = seg.to_dict()
             seg_dict["t_end"] = seg_t_end.isoformat()
@@ -530,6 +571,7 @@ class OnlinePollEngine:
                     _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end,
                     ANALYTICS_VERSION, tz=self.tz, prev_seg=ps,
                     fault_ref=self._fault_ref,
+                    inherited_run_state_sec=seg_inherited_rs,
                 )
             except Exception:
                 report_md = None
@@ -559,10 +601,16 @@ class OnlinePollEngine:
                 last_saved_id = db_id
                 self.cursor_ts = _tz_utc(t_to)
                 self.inherited_coking_risk = coking_risk
-                if close_reason == "DAILY_BOUNDARY" and seg.run_state == 3:
-                    self.continued_from_id = db_id
-                    self.forward_fill_memory = ff_json
+                if close_reason == "DAILY_BOUNDARY":
+                    self.inherited_run_state_sec = updated_rs_sec  # type: ignore[assignment]
+                    if seg.run_state == 3:
+                        self.continued_from_id = db_id
+                        self.forward_fill_memory = ff_json
+                    else:
+                        self.continued_from_id = None
+                        self.forward_fill_memory = None
                 else:
+                    self.inherited_run_state_sec = {}
                     self.continued_from_id = None
                     self.forward_fill_memory = None
 
@@ -628,6 +676,8 @@ class OnlinePollEngine:
             )
             # Первый закрытый сегмент в окне может быть продолжением после DAILY_BOUNDARY
             carry_continued_from = self.continued_from_id
+            # Унаследованное RS время: ci==0 продолжает цепочку, ci>0 — новый RS
+            _rs_inherited_before = dict(self.inherited_run_state_sec)
             for ci, seg in enumerate(closed_segs):
                 coking_risk = _extract_coking_risk_from_segments([seg])
                 seg_t_end_rs = _tz_utc(datetime.fromisoformat(seg.t_end))
@@ -639,6 +689,7 @@ class OnlinePollEngine:
                         _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end_rs,
                         ANALYTICS_VERSION, tz=self.tz, prev_seg=ps_rs,
                         fault_ref=self._fault_ref,
+                        inherited_run_state_sec=_rs_inherited_before if ci == 0 else {},
                     )
                 except Exception:
                     report_md_rs = None
@@ -677,6 +728,7 @@ class OnlinePollEngine:
                 self.last_processed_to = seg_t_end_rs
                 self.cursor_ts = _tz_utc(datetime.fromisoformat(seg.t_end))
                 self.inherited_coking_risk = coking_risk
+                self.inherited_run_state_sec = {}  # смена RS — счётчик сбрасывается
                 self._prev_seg_hint = seg
                 carry_continued_from = None   # только первый сегмент несёт ссылку
                 self.continued_from_id = None
@@ -698,6 +750,7 @@ class OnlinePollEngine:
                 _tz_utc(self.cursor_ts), _tz_utc(t_to),
                 ANALYTICS_VERSION, tz=self.tz, prev_seg=self._prev_seg_hint,
                 fault_ref=self._fault_ref,
+                inherited_run_state_sec=self.inherited_run_state_sec,
             )
         except Exception:
             open_report_md = None
