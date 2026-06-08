@@ -27,10 +27,15 @@ class AnalysisWorker:
 
     # ── Очередь ──────────────────────────────────────────────────────────────
 
-    def enqueue(self, seg_id: int, priority: int = PRIORITY_NORMAL) -> None:
-        """Добавить сегмент в очередь на анализ."""
-        self._queue.put_nowait((priority, seg_id))
-        logger.debug("corpus/worker: enqueue #%d (p=%d)", seg_id, priority)
+    def enqueue(self, seg_id: int, priority: int = PRIORITY_NORMAL, force: bool = False) -> None:
+        """Добавить сегмент в очередь на анализ.
+
+        force=True разрешает обработку открытых сегментов (t_end IS NULL).
+        Автоматически выставляется при priority=PRIORITY_MANUAL.
+        """
+        _force = force or (priority == PRIORITY_MANUAL)
+        self._queue.put_nowait((priority, seg_id, _force))
+        logger.debug("corpus/worker: enqueue #%d (p=%d force=%s)", seg_id, priority, _force)
 
     async def enqueue_pending(self) -> int:
         """Batch: все закрытые сегменты без анализа → NORMAL очередь.
@@ -57,7 +62,7 @@ class AnalysisWorker:
 
         while self._running:
             try:
-                _, seg_id = await asyncio.wait_for(self._queue.get(), timeout=5.0)
+                _, seg_id, _force = await asyncio.wait_for(self._queue.get(), timeout=5.0)
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
@@ -65,7 +70,7 @@ class AnalysisWorker:
 
             self._current = seg_id
             try:
-                await _process_segment(seg_id)
+                await _process_segment(seg_id, force=_force)
             except Exception:
                 logger.exception(
                     "corpus/worker: необработанная ошибка при анализе #%d", seg_id
@@ -98,8 +103,11 @@ class AnalysisWorker:
 
 # ── Обработка одного сегмента ─────────────────────────────────────────────────
 
-async def _process_segment(seg_id: int) -> None:
-    """Полный цикл обработки сегмента: Claude → humanizer → сохранение в БД."""
+async def _process_segment(seg_id: int, force: bool = False) -> None:
+    """Полный цикл обработки сегмента: Claude → humanizer → сохранение в БД.
+
+    force=True — разрешить анализ открытого сегмента (ручной запуск из UI).
+    """
     import corpus.db as corpus_db
     from corpus.agent import analyse_segment
     from corpus.humanizer import humanize
@@ -121,10 +129,12 @@ async def _process_segment(seg_id: int) -> None:
         await corpus_db.set_status(seg_id, "error", "Сегмент не найден в БД")
         return
 
-    if seg_row.get("t_end") is None:
+    if seg_row.get("t_end") is None and not force:
         logger.warning("corpus/worker: сегмент #%d открытый — пропускаю", seg_id)
         await corpus_db.set_status(seg_id, "error", "Сегмент ещё открытый (t_end IS NULL)")
         return
+    if seg_row.get("t_end") is None:
+        logger.info("corpus/worker: сегмент #%d открытый — ручной запуск (force=True)", seg_id)
 
     # 3. Получить kb_path для поиска по документации
     kb_path = await corpus_db.get_equipment_kb_path(
