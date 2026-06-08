@@ -733,7 +733,7 @@ async def knowledge_page(request: Request):
             if fault_ref_path.exists():
                 try:
                     import json as _json
-                    data = _json.loads(fault_ref_path.read_text(encoding="utf-8"))
+                    data = _json.loads(fault_ref_path.read_text(encoding="utf-8-sig"))
                     fault_ref_codes = data.get("statistics", {}).get("total_codes", 0) \
                                       or len(data.get("fault_codes", []))
                 except Exception:
@@ -958,16 +958,20 @@ async def update_llm_settings(
     llm_temperature:    float = Form(...),
     llm_num_ctx:        int   = Form(...),
     llm_system_prompt:  str   = Form(...),
+    llm_stream:         str   = Form(""),   # checkbox: "on" если отмечен, "" если нет
 ):
     """Сохранить настройки LLM и применить без перезапуска."""
     from llm.client import apply_llm_settings
-    apply_llm_settings(llm_base_url, llm_model, llm_temperature, llm_num_ctx, llm_system_prompt)
+    stream = llm_stream == "on"
+    apply_llm_settings(llm_base_url, llm_model, llm_temperature, llm_num_ctx, llm_system_prompt,
+                       stream=stream)
     await analytics.set_app_setting("llm_base_url",     llm_base_url)
     await analytics.set_app_setting("llm_model",        llm_model)
     await analytics.set_app_setting("llm_temperature",  str(llm_temperature))
     await analytics.set_app_setting("llm_num_ctx",      str(llm_num_ctx))
     await analytics.set_app_setting("llm_system_prompt", llm_system_prompt)
-    logger.info("LLM настройки сохранены: model=%s", llm_model)
+    await analytics.set_app_setting("llm_stream",       "true" if stream else "false")
+    logger.info("LLM настройки сохранены: model=%s stream=%s", llm_model, stream)
     return RedirectResponse(url="/settings", status_code=303)
 
 

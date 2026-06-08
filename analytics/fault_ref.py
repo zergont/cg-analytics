@@ -68,7 +68,7 @@ class FaultRef:
             p = base / name
             if p.exists():
                 try:
-                    data = json.loads(p.read_text(encoding="utf-8"))
+                    data = json.loads(p.read_text(encoding="utf-8-sig"))
                     codes_list = data.get("fault_codes", [])
                     self._index = {
                         int(entry["code"]): entry
