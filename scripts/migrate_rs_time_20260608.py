@@ -40,12 +40,30 @@ def _fmt_duration(sec: float) -> str:
     return " ".join(parts)
 
 
-def _patch_report_md(report_md: str, total_rs3_sec: float) -> str:
-    """Заменить строку «Время под нагрузкой (RUN_STATE=3)» новым значением."""
-    new_val = _fmt_duration(total_rs3_sec)
+def _patch_rs3(report_md: str, total_sec: float) -> str:
+    """Заменить строку «Время под нагрузкой (RUN_STATE=3)»."""
+    new_val = _fmt_duration(total_sec)
     return re.sub(
         r"(\| Время под нагрузкой \(RUN_STATE=3\) \| )([^|]+?)( \|)",
         lambda m: f"{m.group(1)}{new_val}{m.group(3)}",
+        report_md,
+    )
+
+
+def _insert_rs0_line(report_md: str, total_sec: float) -> str:
+    """Вставить строку «Время в останове (RUN_STATE=0)» после строки RS=3."""
+    new_line = f"| Время в останове (RUN_STATE=0) | {_fmt_duration(total_sec)} |"
+    # Если строка уже есть — обновить
+    if "Время в останове (RUN_STATE=0)" in report_md:
+        return re.sub(
+            r"(\| Время в останове \(RUN_STATE=0\) \| )([^|]+?)( \|)",
+            lambda m: f"{m.group(1)}{_fmt_duration(total_sec)}{m.group(3)}",
+            report_md,
+        )
+    # Иначе вставить после строки RS=3
+    return re.sub(
+        r"(\| Время под нагрузкой \(RUN_STATE=3\) \| [^|]+\|)",
+        lambda m: f"{m.group(1)}\n{new_line}",
         report_md,
     )
 
@@ -85,8 +103,9 @@ async def main(dry_run: bool) -> None:
                 skipped += 1
                 continue
 
-            # Накапливаем RS=3 время из предшественников
+            # Накапливаем RS=3 и RS=0 время из предшественников
             inherited_rs3_sec = 0.0
+            inherited_rs0_sec = 0.0
             pred_id = row["continued_from"]
             depth = 0
             while pred_id is not None and depth < 100:
@@ -99,27 +118,36 @@ async def main(dry_run: bool) -> None:
                     break
                 if pred["run_state"] == 3:
                     inherited_rs3_sec += pred["duration_sec"] or 0.0
+                elif pred["run_state"] == 0:
+                    inherited_rs0_sec += pred["duration_sec"] or 0.0
                 pred_id = pred["continued_from"]
                 depth += 1
 
-            if inherited_rs3_sec <= 0:
-                logger.debug("  seg %d: нет унаследованного RS=3 времени — пропуск.", seg_id)
+            if inherited_rs3_sec <= 0 and inherited_rs0_sec <= 0:
+                logger.debug("  seg %d: нет унаследованного времени RS — пропуск.", seg_id)
                 skipped += 1
                 continue
 
-            # Итоговое время RS=3 для этого сегмента
+            # Итоговое время для этого сегмента
             total_rs3 = inherited_rs3_sec + (seg_dur if seg_rs == 3 else 0.0)
-            new_report_md = _patch_report_md(report_md, total_rs3)
+            total_rs0 = inherited_rs0_sec + (seg_dur if seg_rs == 0 else 0.0)
+
+            new_report_md = report_md
+            if inherited_rs3_sec > 0:
+                new_report_md = _patch_rs3(new_report_md, total_rs3)
+            # Вставить/обновить строку RS=0 (новая строка в формате v3.7.1)
+            new_report_md = _insert_rs0_line(new_report_md, total_rs0)
 
             if new_report_md == report_md:
-                logger.debug("  seg %d: строка не найдена в report_md — пропуск.", seg_id)
+                logger.debug("  seg %d: report_md не изменился — пропуск.", seg_id)
                 skipped += 1
                 continue
 
             logger.info(
-                "  seg %d (RS=%d): +%s -> итого %s",
+                "  seg %d (RS=%d): RS3 +%s→%s | RS0 +%s→%s",
                 seg_id, seg_rs,
                 _fmt_duration(inherited_rs3_sec), _fmt_duration(total_rs3),
+                _fmt_duration(inherited_rs0_sec), _fmt_duration(total_rs0),
             )
 
             if not dry_run:

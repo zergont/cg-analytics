@@ -158,6 +158,7 @@ def to_markdown(
     # ── Сводка ──
     all_detections: list[dict] = []
     total_running_sec = float((inherited_run_state_sec or {}).get(3, 0.0))
+    total_stopped_sec = float((inherited_run_state_sec or {}).get(0, 0.0))
     total_elevated_sec = 0.0
     seg_dqs: list[float] = []
 
@@ -165,6 +166,8 @@ def to_markdown(
         seg_dqs.append(seg.data_quality)
         if seg.run_state == 3:
             total_running_sec += seg.duration_sec
+        elif seg.run_state == 0:
+            total_stopped_sec += seg.duration_sec
         for sub in seg.subsegments:
             all_detections.extend(_as_dict(d) for d in sub.detections)
             tr = sub.risk_accumulators.thermal_risk
@@ -183,6 +186,7 @@ def to_markdown(
     a(f"|----------|----------|")
     a(f"| Сегментов | {len(segments)} |")
     a(f"| Время под нагрузкой (RUN_STATE=3) | {_fmt_duration(total_running_sec)} |")
+    a(f"| Время в останове (RUN_STATE=0) | {_fmt_duration(total_stopped_sec)} |")
     a(f"| Время в зоне повышенной нагрузки | {_fmt_duration(total_elevated_sec)} |")
     a(f"| Всего обнаружений | {len(all_detections)} |")
     for sev in ["SHUTDOWN", "ALARM", "WARNING", "INFO"]:

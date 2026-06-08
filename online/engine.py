@@ -510,6 +510,8 @@ class OnlinePollEngine:
         last_saved_id: int | None = None
         # Накопленное время RS до этого батча (из предыдущей суточной цепочки)
         running_rs_sec = dict(self.inherited_run_state_sec)
+        # t_end последнего успешно сохранённого сегмента (для отката cursor_ts при пропуске границы)
+        last_committed_t_end: datetime = _tz_utc(t_from)
 
         for i, seg in enumerate(segments):
             is_last = (i == len(segments) - 1)
@@ -533,6 +535,16 @@ class OnlinePollEngine:
                 seg_t_end = _tz_utc(t_to)  # граница = t_to в этом вызове
 
             coking_risk = _extract_coking_risk_from_segments([seg])
+
+            # DAILY_BOUNDARY пропускаем если переходное состояние (RS ≠ 0 и ≠ 3).
+            # Переходные состояния кратковременны — сегмент закроется RUN_STATE_CHANGE.
+            if is_last and close_reason == "DAILY_BOUNDARY" and seg.run_state not in {0, 3}:
+                logger.info(
+                    "OnlineEngine[%s]: DAILY_BOUNDARY@%s пропущен — RS=%d (переходное)",
+                    self.key, t_to, seg.run_state,
+                )
+                self.cursor_ts = last_committed_t_end
+                break
 
             # Унаследованное время RS для report_md этого сегмента:
             # i==0 — прямое продолжение предыдущей цепочки; i>0 — новый RS (смена).
@@ -596,6 +608,7 @@ class OnlinePollEngine:
             _enqueue_segment(db_id)
             self.last_processed_to = seg_t_end
             self._prev_seg_hint = seg
+            last_committed_t_end = seg_t_end
 
             if is_last:
                 last_saved_id = db_id
@@ -603,7 +616,7 @@ class OnlinePollEngine:
                 self.inherited_coking_risk = coking_risk
                 if close_reason == "DAILY_BOUNDARY":
                     self.inherited_run_state_sec = updated_rs_sec  # type: ignore[assignment]
-                    if seg.run_state == 3:
+                    if seg.run_state in {0, 3}:  # стабильные состояния: тянем цепочку
                         self.continued_from_id = db_id
                         self.forward_fill_memory = ff_json
                     else:
