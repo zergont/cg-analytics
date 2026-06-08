@@ -1,0 +1,203 @@
+{% extends "base.html" %}
+{% block content %}
+<h5 class="mb-3">Ручной запрос ИИ</h5>
+
+<div class="row g-3">
+    <div class="col-md-5">
+        <div class="card h-100">
+            <div class="card-header fw-semibold">Параметры запроса</div>
+            <div class="card-body">
+                <form id="pg-form">
+
+                    <!-- Провайдер -->
+                    <div class="mb-3">
+                        <label class="form-label small fw-semibold">Провайдер</label>
+                        <div class="d-flex gap-3">
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="provider"
+                                       id="prov-llm" value="llm" checked onchange="updateModelHint()">
+                                <label class="form-check-label" for="prov-llm">🤖 LLM (Ollama)</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="provider"
+                                       id="prov-api" value="api" onchange="updateModelHint()">
+                                <label class="form-check-label" for="prov-api">✨ Claude API</label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Модель -->
+                    <div class="mb-3">
+                        <label class="form-label small fw-semibold">Модель
+                            <span class="text-muted fw-normal" id="model-hint">(оставь пустым — из настроек)</span>
+                        </label>
+                        <input type="text" name="model" id="pg-model"
+                               class="form-control form-control-sm"
+                               placeholder="{{ llm.model }}">
+                    </div>
+
+                    <!-- Стриминг -->
+                    <div class="mb-3">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" name="stream"
+                                   id="pg-stream" value="on" checked>
+                            <label class="form-check-label small" for="pg-stream">
+                                Потоковый вывод (streaming)
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- Системный промпт -->
+                    <div class="mb-3">
+                        <label class="form-label small fw-semibold">Системный промпт</label>
+                        <textarea name="system_prompt" id="pg-system"
+                                  class="form-control form-control-sm"
+                                  rows="6"
+                                  style="font-size:0.8rem;font-family:monospace"
+                                  placeholder="Системный промпт (необязательно)"></textarea>
+                    </div>
+
+                    <!-- Запрос -->
+                    <div class="mb-3">
+                        <label class="form-label small fw-semibold">Запрос</label>
+                        <textarea name="user_message" id="pg-user"
+                                  class="form-control form-control-sm"
+                                  rows="8"
+                                  style="font-size:0.8rem;font-family:monospace"
+                                  placeholder="Введите запрос..."></textarea>
+                    </div>
+
+                    <div class="d-flex gap-2 align-items-center">
+                        <button type="submit" class="btn btn-sm btn-primary" id="pg-btn">
+                            ▶ Отправить
+                        </button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary"
+                                onclick="clearAll()">Очистить</button>
+                        <span class="text-muted small ms-auto" id="pg-status"></span>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-7">
+        <!-- Ответ -->
+        <div class="card mb-3">
+            <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
+                Ответ
+                <button class="btn btn-sm btn-outline-secondary" onclick="copyResponse()">Копировать</button>
+            </div>
+            <div class="card-body">
+                <div id="pg-response"
+                     style="min-height:200px;white-space:pre-wrap;font-size:0.88rem;font-family:monospace;word-break:break-word"
+                     class="text-muted fst-italic">Ответ появится здесь...</div>
+            </div>
+        </div>
+
+        <!-- Raw (спойлер) -->
+        <div class="card">
+            <div class="card-header fw-semibold p-0">
+                <details>
+                    <summary class="p-2" style="cursor:pointer;list-style:none">
+                        ▶ Raw-ответ (отладка)
+                    </summary>
+                    <div class="card-body pt-0">
+                        <pre id="pg-raw"
+                             style="font-size:0.75rem;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-all"
+                             class="text-muted">—</pre>
+                    </div>
+                </details>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+  .streaming-cursor::after{content:"▋";animation:blink .7s step-end infinite;}
+  @keyframes blink{50%{opacity:0}}
+</style>
+
+<script>
+const llmModel  = {{ llm.model | tojson }};
+const apiModel  = {{ claude.model | tojson }};
+
+function updateModelHint() {
+    const prov = document.querySelector('input[name=provider]:checked').value;
+    document.getElementById('pg-model').placeholder = prov === 'llm' ? llmModel : apiModel;
+}
+
+function clearAll() {
+    document.getElementById('pg-response').textContent = 'Ответ появится здесь...';
+    document.getElementById('pg-response').className = 'text-muted fst-italic';
+    document.getElementById('pg-raw').textContent = '—';
+    document.getElementById('pg-status').textContent = '';
+}
+
+function copyResponse() {
+    const text = document.getElementById('pg-response').textContent;
+    navigator.clipboard.writeText(text).catch(() => {});
+}
+
+document.getElementById('pg-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const btn  = document.getElementById('pg-btn');
+    const resp = document.getElementById('pg-response');
+    const raw  = document.getElementById('pg-raw');
+    const stat = document.getElementById('pg-status');
+
+    resp.textContent = '';
+    resp.className = 'streaming-cursor';
+    raw.textContent = '—';
+    btn.disabled = true;
+    stat.textContent = 'Запрос отправлен...';
+
+    const t0 = Date.now();
+    let text = '';
+
+    try {
+        const fd = new FormData(form);
+        const response = await fetch('/ai-playground/run', {method:'POST', body: fd});
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        const reader = response.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '';
+
+        while (true) {
+            const {done, value} = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, {stream: true});
+            const lines = buf.split('\n');
+            buf = lines.pop();
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                try {
+                    const d = JSON.parse(line.slice(6));
+                    if (d.token) {
+                        text += d.token;
+                        resp.textContent = text;
+                        resp.className = 'streaming-cursor';
+                    }
+                    if (d.done) {
+                        resp.className = '';
+                        if (d.raw) raw.textContent = d.raw;
+                        if (d.error) {
+                            resp.className = 'text-danger';
+                            resp.textContent = '⚠ ' + d.error;
+                        }
+                    }
+                } catch {}
+            }
+        }
+    } catch (err) {
+        resp.textContent = '⚠ ' + err.message;
+        resp.className = 'text-danger';
+    } finally {
+        btn.disabled = false;
+        const sec = ((Date.now() - t0) / 1000).toFixed(1);
+        stat.textContent = `${sec}с`;
+    }
+});
+</script>
+{% endblock %}

@@ -927,6 +927,7 @@ async def settings_page(request: Request):
     status_line_interval_min = int(
         await analytics.get_app_setting("status_line_interval_min", "5")
     )
+    from llm.router import get_all as _get_router, TASKS as _TASKS
     return templates.TemplateResponse(request, "settings.html", {
         "settings": cfg,
         "registry": registry,
@@ -939,6 +940,8 @@ async def settings_page(request: Request):
         "qwen_auto_analyze":         qwen_auto        == "true",
         "analytics_verify_on_close": analytics_verify == "true",
         "status_line_interval_min":  status_line_interval_min,
+        "ai_routing":   _get_router(),
+        "ai_task_meta": {k: {"label": v[0]} for k, v in _TASKS.items()},
     })
 
 
@@ -957,22 +960,147 @@ async def update_llm_settings(
     llm_model:          str   = Form(...),
     llm_temperature:    float = Form(...),
     llm_num_ctx:        int   = Form(...),
-    llm_system_prompt:  str   = Form(...),
     llm_stream:         str   = Form(""),   # checkbox: "on" если отмечен, "" если нет
 ):
     """Сохранить настройки LLM и применить без перезапуска."""
     from llm.client import apply_llm_settings
     stream = llm_stream == "on"
-    apply_llm_settings(llm_base_url, llm_model, llm_temperature, llm_num_ctx, llm_system_prompt,
-                       stream=stream)
+    apply_llm_settings(llm_base_url, llm_model, llm_temperature, llm_num_ctx, stream=stream)
     await analytics.set_app_setting("llm_base_url",     llm_base_url)
     await analytics.set_app_setting("llm_model",        llm_model)
     await analytics.set_app_setting("llm_temperature",  str(llm_temperature))
     await analytics.set_app_setting("llm_num_ctx",      str(llm_num_ctx))
-    await analytics.set_app_setting("llm_system_prompt", llm_system_prompt)
     await analytics.set_app_setting("llm_stream",       "true" if stream else "false")
     logger.info("LLM настройки сохранены: model=%s stream=%s", llm_model, stream)
     return RedirectResponse(url="/settings", status_code=303)
+
+
+@router.post("/settings/ai-routing")
+async def update_ai_routing(request: Request):
+    """Сохранить маршрутизацию AI-задач (провайдер + промпт для каждой задачи)."""
+    from llm.router import apply_task, TASKS as _TASKS
+    form = await request.form()
+    for task_id in _TASKS:
+        provider = str(form.get(f"ai_{task_id}_provider", "llm")).strip()
+        prompt   = str(form.get(f"ai_{task_id}_prompt",   "")).strip()
+        apply_task(task_id, provider, prompt)
+        await analytics.set_app_setting(f"ai_task_{task_id}_provider", provider)
+        await analytics.set_app_setting(f"ai_task_{task_id}_prompt",   prompt)
+    logger.info("AI routing сохранён (%d задач)", len(_TASKS))
+    return RedirectResponse(url="/settings#ai-routing", status_code=303)
+
+
+@router.get("/ai-playground", response_class=HTMLResponse)
+async def ai_playground_page(request: Request):
+    """Страница ручного запроса к AI (playground)."""
+    from llm.client import get_llm_settings
+    from corpus.settings import get_claude_settings
+    return templates.TemplateResponse(request, "ai_playground.html", {
+        "llm": get_llm_settings(),
+        "claude": get_claude_settings(),
+    })
+
+
+@router.post("/ai-playground/run")
+async def ai_playground_run(request: Request):
+    """Выполнить запрос к AI и вернуть ответ (streaming SSE)."""
+    import json as _json
+    from fastapi.responses import StreamingResponse
+
+    form = await request.form()
+    provider      = str(form.get("provider", "llm"))
+    model_override= str(form.get("model", "")).strip()
+    system_prompt = str(form.get("system_prompt", "")).strip()
+    user_message  = str(form.get("user_message", "")).strip()
+    use_stream    = form.get("stream") == "on"
+
+    async def _generate():
+        raw_chunks: list[str] = []
+        try:
+            if provider == "llm":
+                import httpx
+                from llm.client import _cfg
+                model = model_override or _cfg["model"]
+                payload = {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user",   "content": user_message},
+                    ],
+                    "stream": use_stream,
+                    "options": {"temperature": _cfg["temperature"], "num_ctx": _cfg["num_ctx"]},
+                }
+                if use_stream:
+                    async with httpx.AsyncClient(timeout=600.0) as client:
+                        async with client.stream("POST", f"{_cfg['base_url']}/api/chat",
+                                                 json=payload) as resp:
+                            resp.raise_for_status()
+                            async for line in resp.aiter_lines():
+                                if not line:
+                                    continue
+                                try:
+                                    data = _json.loads(line)
+                                    token = data.get("message", {}).get("content", "")
+                                    if token:
+                                        raw_chunks.append(token)
+                                        yield f"data: {_json.dumps({'token': token})}\n\n"
+                                    if data.get("done"):
+                                        break
+                                except _json.JSONDecodeError:
+                                    continue
+                else:
+                    async with httpx.AsyncClient(timeout=600.0) as client:
+                        resp = await client.post(f"{_cfg['base_url']}/api/chat", json=payload)
+                        resp.raise_for_status()
+                        data = resp.json()
+                        content = data.get("message", {}).get("content", "")
+                        raw_chunks.append(content)
+                        yield f"data: {_json.dumps({'token': content})}\n\n"
+                        raw_chunks.append(f"\n\n[raw]\n{_json.dumps(data, ensure_ascii=False, indent=2)}")
+
+            else:  # api (Claude)
+                import anthropic
+                from corpus.settings import get_claude_settings
+                from config import settings as app_settings
+                claude_cfg = get_claude_settings()
+                model = model_override or claude_cfg["model"]
+                client = anthropic.AsyncAnthropic(api_key=app_settings.anthropic_api_key)
+                if use_stream:
+                    async with client.messages.stream(
+                        model=model,
+                        max_tokens=claude_cfg["max_tokens"],
+                        system=system_prompt,
+                        messages=[{"role": "user", "content": user_message}],
+                    ) as stream:
+                        async for token in stream.text_stream:
+                            raw_chunks.append(token)
+                            yield f"data: {_json.dumps({'token': token})}\n\n"
+                    raw_msg = await stream.get_final_message()
+                    raw_chunks.append(
+                        f"\n\n[raw]\n{_json.dumps({'usage': dict(raw_msg.usage.__dict__)}, ensure_ascii=False, indent=2)}"
+                    )
+                else:
+                    response = await client.messages.create(
+                        model=model,
+                        max_tokens=claude_cfg["max_tokens"],
+                        system=system_prompt,
+                        messages=[{"role": "user", "content": user_message}],
+                    )
+                    content = "".join(b.text for b in response.content if hasattr(b, "text"))
+                    raw_chunks.append(content)
+                    yield f"data: {_json.dumps({'token': content})}\n\n"
+                    raw_chunks.append(
+                        f"\n\n[raw]\n{_json.dumps({'usage': dict(response.usage.__dict__)}, ensure_ascii=False, indent=2)}"
+                    )
+
+            yield f"data: {_json.dumps({'done': True, 'raw': ''.join(raw_chunks)})}\n\n"
+
+        except Exception as exc:
+            err = repr(exc)
+            logger.error("ai-playground: ошибка: %s", err)
+            yield f"data: {_json.dumps({'error': err, 'done': True, 'raw': err})}\n\n"
+
+    return StreamingResponse(_generate(), media_type="text/event-stream")
 
 
 @router.post("/settings/claude")
@@ -981,17 +1109,14 @@ async def update_claude_settings(
     claude_max_tool_calls: int = Form(...),
     claude_max_tokens:     int = Form(...),
     claude_proxy:          str = Form(""),
-    claude_system_prompt:  str = Form(...),
 ):
     """Сохранить настройки Claude API и применить без перезапуска."""
     from corpus.settings import apply_claude_settings
-    apply_claude_settings(claude_model, claude_max_tool_calls, claude_max_tokens,
-                          claude_proxy, claude_system_prompt)
+    apply_claude_settings(claude_model, claude_max_tool_calls, claude_max_tokens, claude_proxy)
     await analytics.set_app_setting("claude_model",          claude_model)
     await analytics.set_app_setting("claude_max_tool_calls", str(claude_max_tool_calls))
     await analytics.set_app_setting("claude_max_tokens",     str(claude_max_tokens))
     await analytics.set_app_setting("claude_proxy",          claude_proxy)
-    await analytics.set_app_setting("claude_system_prompt",  claude_system_prompt)
     logger.info("Claude API настройки сохранены: model=%s", claude_model)
     return RedirectResponse(url="/settings", status_code=303)
 

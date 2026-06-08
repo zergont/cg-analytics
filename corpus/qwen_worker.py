@@ -40,9 +40,10 @@ class QwenWorker:
 
     # ── Очередь ──────────────────────────────────────────────────────────────
 
-    def enqueue(self, seg_id: int, priority: int = PRIORITY_NORMAL) -> None:
-        self._queue.put_nowait((priority, seg_id))
-        logger.debug("qwen/worker: enqueue #%d (p=%d)", seg_id, priority)
+    def enqueue(self, seg_id: int, priority: int = PRIORITY_NORMAL,
+                task_id: str = "human_auto") -> None:
+        self._queue.put_nowait((priority, seg_id, task_id))
+        logger.debug("qwen/worker: enqueue #%d (p=%d task=%s)", seg_id, priority, task_id)
 
     def enqueue_status(self, data: dict) -> None:
         """Поставить задачу генерации статус-строки в очередь (низкий приоритет)."""
@@ -75,7 +76,7 @@ class QwenWorker:
 
         while self._running:
             try:
-                _, item = await asyncio.wait_for(self._queue.get(), timeout=5.0)
+                _, item, *_extra = await asyncio.wait_for(self._queue.get(), timeout=5.0)
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
@@ -83,17 +84,17 @@ class QwenWorker:
 
             # ── Диспетчер по типу задачи ──
             if isinstance(item, int):
-                # Анализ сегмента (основной поток)
                 seg_id = item
+                task_id = _extra[0] if _extra else "human_auto"
                 from db.analytics import get_app_setting
                 qwen_auto = await get_app_setting("qwen_auto_analyze", "false")
-                if qwen_auto != "true":
+                if qwen_auto != "true" and task_id == "human_auto":
                     self._queue.task_done()
                     logger.debug("qwen/worker: авто-анализ выключен, сегмент #%d пропущен", seg_id)
                     continue
                 self._current = seg_id
                 try:
-                    await _process_segment(seg_id)
+                    await _process_segment(seg_id, task_id=task_id)
                 except Exception:
                     logger.exception("qwen/worker: ошибка обработки сегмента #%d", seg_id)
                 finally:
@@ -134,12 +135,15 @@ class QwenWorker:
 
 # ── Обработка одного сегмента ─────────────────────────────────────────────────
 
-async def _process_segment(seg_id: int) -> None:
-    """Прогнать conclusion_md сегмента через Qwen, сохранить humanized_md."""
+async def _process_segment(seg_id: int, task_id: str = "human_auto") -> None:
+    """Прогнать conclusion_md сегмента через хуманизатор, сохранить humanized_md.
+
+    Провайдер и промпт берутся из llm.router по task_id.
+    """
     import corpus.db as corpus_db
     from corpus.humanizer import humanize
 
-    logger.info("qwen/worker: обрабатываю сегмент #%d", seg_id)
+    logger.info("qwen/worker: хуманизирую #%d (task=%s)", seg_id, task_id)
 
     analysis = await corpus_db.get_analysis(seg_id)
     if not analysis:
@@ -148,24 +152,28 @@ async def _process_segment(seg_id: int) -> None:
 
     conclusion_md = analysis.get("conclusion_md") or ""
     if not conclusion_md:
-        logger.warning("qwen/worker: conclusion_md пустой у сегмента #%d — пропускаю", seg_id)
+        logger.warning("qwen/worker: conclusion_md пустой у #%d — пропускаю", seg_id)
         return
 
-    humanized = await humanize(conclusion_md)
+    humanized = await humanize(conclusion_md, task_id=task_id)
     if not humanized:
-        logger.warning("qwen/worker: Qwen вернул пустой результат для #%d", seg_id)
+        logger.warning("qwen/worker: хуманизатор вернул пустой результат для #%d", seg_id)
         return
 
     await corpus_db.set_humanized_md(seg_id, humanized)
-    logger.info("qwen/worker: сегмент #%d обработан (%d символов)", seg_id, len(humanized))
+    logger.info("qwen/worker: #%d обработан (%d символов)", seg_id, len(humanized))
 
 
 # ── Генерация статус-строки ───────────────────────────────────────────────────
 
 async def _process_status_line(job: dict) -> None:
-    """Сгенерировать статус-строку через qwen и сохранить в открытый сегмент."""
+    """Сгенерировать статус-строку и сохранить в открытый сегмент.
+
+    Провайдер и промпт берутся из llm.router (task_id="status_auto").
+    """
     import httpx
     from llm.client import _cfg
+    from llm.router import get_provider, get_prompt
     from online.status_assembler import build_status_prompt
     from online import db as online_db
 
@@ -177,38 +185,17 @@ async def _process_status_line(job: dict) -> None:
 
     logger.debug("qwen/worker: статус-строка %s/%s/%s", router_sn, equip_type, panel_id)
 
-    prompt = build_status_prompt(struct_status)
-
-    payload = {
-        "model": _cfg["model"],
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "Ты формируешь краткую текстовую сводку состояния дизельного генератора "
-                    "для оператора пульта управления. "
-                    "Используй ТОЛЬКО приведённые факты. "
-                    "НЕ добавляй оценки, предположения, рекомендации, которых нет в фактах. "
-                    "Облеки факты в 1-2 коротких естественных фразы на русском языке."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        "stream": False,
-        "options": {
-            "temperature": 0.1,
-            "num_ctx": _cfg.get("num_ctx", 4096),
-        },
-    }
+    provider      = get_provider("status_auto")
+    system_prompt = get_prompt("status_auto")
+    user_msg      = build_status_prompt(struct_status)
 
     # Один retry: Ollama может «холодно» стартовать модель и обрывать первый запрос
     for attempt in range(2):
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.post(f"{_cfg['base_url']}/api/chat", json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-                status_text = data.get("message", {}).get("content", "").strip()
+            if provider == "api":
+                status_text = await _status_via_api(system_prompt, user_msg)
+            else:
+                status_text = await _status_via_llm(system_prompt, user_msg, _cfg)
 
             if not status_text:
                 logger.warning("qwen/worker: статус-строка пустая для %s/%s/%s",
@@ -237,6 +224,39 @@ async def _process_status_line(job: dict) -> None:
                     "qwen/worker: ошибка статус-строки %s/%s/%s: %s",
                     router_sn, equip_type, panel_id, exc_desc,
                 )
+
+
+async def _status_via_llm(system_prompt: str, user_msg: str, cfg: dict) -> str:
+    import httpx
+    payload = {
+        "model": cfg["model"],
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_msg},
+        ],
+        "stream": False,
+        "options": {"temperature": 0.1, "num_ctx": cfg.get("num_ctx", 4096)},
+    }
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(f"{cfg['base_url']}/api/chat", json=payload)
+        resp.raise_for_status()
+        return resp.json().get("message", {}).get("content", "").strip()
+
+
+async def _status_via_api(system_prompt: str, user_msg: str) -> str:
+    import anthropic
+    from corpus.settings import get_claude_settings
+    from config import settings as app_settings
+
+    claude_cfg = get_claude_settings()
+    client = anthropic.AsyncAnthropic(api_key=app_settings.anthropic_api_key)
+    response = await client.messages.create(
+        model=claude_cfg["model"],
+        max_tokens=512,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_msg}],
+    )
+    return "".join(b.text for b in response.content if hasattr(b, "text")).strip()
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────────

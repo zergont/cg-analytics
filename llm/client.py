@@ -34,7 +34,7 @@ def apply_llm_settings(
     model: str,
     temperature: float,
     num_ctx: int,
-    prompt: str,
+    prompt: str = "",
     stream: bool = True,
 ) -> None:
     """Обновить конфигурацию LLM в памяти (вступает в силу немедленно)."""
@@ -42,7 +42,6 @@ def apply_llm_settings(
     _cfg["model"]       = model.strip()
     _cfg["temperature"] = float(temperature)
     _cfg["num_ctx"]     = int(num_ctx)
-    _cfg["prompt"]      = prompt.strip()
     _cfg["stream"]      = bool(stream)
     logger.info("LLM настройки обновлены: model=%s url=%s stream=%s",
                 _cfg["model"], _cfg["base_url"], _cfg["stream"])
@@ -66,7 +65,7 @@ async def stream_analysis(md_packet: str) -> AsyncIterator[str]:
     payload = {
         "model": _cfg["model"],
         "messages": [
-            {"role": "system", "content": _cfg["prompt"]},
+            {"role": "system", "content": system},
             {"role": "user",   "content": md_packet},
         ],
         "stream": use_stream,
@@ -75,6 +74,9 @@ async def stream_analysis(md_packet: str) -> AsyncIterator[str]:
             "num_ctx":     _cfg["num_ctx"],
         },
     }
+
+    from llm.router import get_prompt
+    system = get_prompt("analyze_page") or _cfg.get("prompt", "")
 
     logger.info("LLM запрос: model=%s, ctx=%d, prompt_len=%d, stream=%s",
                 _cfg["model"], _cfg["num_ctx"], len(md_packet), use_stream)

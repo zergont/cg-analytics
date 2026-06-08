@@ -165,12 +165,6 @@
                             </label>
                         </div>
                     </div>
-                    <div class="mb-2">
-                        <label class="form-label small fw-semibold mb-1">Системный промпт</label>
-                        <textarea name="llm_system_prompt" class="form-control form-control-sm"
-                                  rows="10" required
-                                  style="font-size:0.8rem;font-family:monospace">{{ llm.prompt }}</textarea>
-                    </div>
                     <button type="submit" class="btn btn-sm btn-primary">Сохранить</button>
                     <span class="text-muted small ms-2">Вступает в силу немедленно, без перезапуска.</span>
                 </form>
@@ -212,14 +206,56 @@
                                    value="{{ claude.max_tokens }}" min="256" max="32000" required>
                         </div>
                     </div>
-                    <div class="mb-2">
-                        <label class="form-label small fw-semibold mb-1">Системный промпт</label>
-                        <textarea name="claude_system_prompt" class="form-control form-control-sm"
-                                  rows="10" required
-                                  style="font-size:0.8rem;font-family:monospace">{{ claude.system_prompt }}</textarea>
-                    </div>
                     <button type="submit" class="btn btn-sm btn-primary">Сохранить</button>
                     <span class="text-muted small ms-2">Вступает в силу немедленно, без перезапуска.</span>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ─── Маршрутизация AI-задач (полная ширина) ───────────────────────── -->
+<div class="row g-3 mt-0" id="ai-routing">
+    <div class="col-12">
+        <div class="card mb-3">
+            <div class="card-header fw-semibold">🔀 Маршрутизация AI — провайдер и промпт для каждой задачи</div>
+            <div class="card-body">
+                <form method="post" action="/settings/ai-routing">
+                {% for task_id, meta in ai_task_meta.items() %}
+                {% set r = ai_routing[task_id] %}
+                <div class="border rounded p-3 mb-3">
+                    <div class="d-flex align-items-center gap-3 mb-2">
+                        <span class="fw-semibold" style="min-width:260px">{{ meta.label }}</span>
+                        <div class="d-flex gap-3">
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio"
+                                       name="ai_{{ task_id }}_provider" id="ai_{{ task_id }}_api"
+                                       value="api" {% if r.provider == 'api' %}checked{% endif %}>
+                                <label class="form-check-label small" for="ai_{{ task_id }}_api">
+                                    ✨ Claude API
+                                </label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio"
+                                       name="ai_{{ task_id }}_provider" id="ai_{{ task_id }}_llm"
+                                       value="llm" {% if r.provider == 'llm' %}checked{% endif %}>
+                                <label class="form-check-label small" for="ai_{{ task_id }}_llm">
+                                    🤖 LLM (Ollama)
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                    <details>
+                        <summary class="text-muted small" style="cursor:pointer">Системный промпт</summary>
+                        <textarea name="ai_{{ task_id }}_prompt"
+                                  class="form-control form-control-sm mt-2"
+                                  rows="6"
+                                  style="font-size:0.78rem;font-family:monospace">{{ r.prompt }}</textarea>
+                    </details>
+                </div>
+                {% endfor %}
+                <button type="submit" class="btn btn-sm btn-primary">Сохранить маршрутизацию</button>
+                <span class="text-muted small ms-2">Вступает в силу немедленно, без перезапуска.</span>
                 </form>
             </div>
         </div>

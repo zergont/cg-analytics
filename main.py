@@ -19,6 +19,7 @@ from config import settings
 from db.analytics import init_db, get_app_setting
 from analytics.source import init_source_pool, close_source_pool
 from llm.client import apply_llm_settings, get_llm_settings
+from llm.router import apply_task, TASKS as _ROUTER_TASKS
 from corpus.settings import apply_claude_settings, get_claude_settings
 from corpus.prompt import SYSTEM_PROMPT as _CLAUDE_DEFAULT_PROMPT
 from scheduler import start_scheduler, stop_scheduler
@@ -68,6 +69,12 @@ async def lifespan(app: FastAPI):
         proxy=          await get_app_setting("claude_proxy",          _claude_defaults["proxy"]),
         system_prompt=  await get_app_setting("claude_system_prompt",  _CLAUDE_DEFAULT_PROMPT),
     )
+    # Загружаем маршрутизацию AI-задач из БД
+    for _task_id, (_label, _def_provider, _def_prompt) in _ROUTER_TASKS.items():
+        _provider = await get_app_setting(f"ai_task_{_task_id}_provider", _def_provider)
+        _prompt   = await get_app_setting(f"ai_task_{_task_id}_prompt",   _def_prompt)
+        apply_task(_task_id, _provider, _prompt)
+    logger.info("AI router загружен (%d задач)", len(_ROUTER_TASKS))
     # Загрузить режим источника телеметрии
     from db.source import set_source_mode as _set_source_mode
     _set_source_mode(await get_app_setting("source_mode", "external"))

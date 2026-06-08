@@ -26,9 +26,14 @@ from corpus.preprocessor import build_claude_input, extract_verdict_alarm
 logger = logging.getLogger(__name__)
 
 
-async def analyse_segment(segment_row: dict, kb_path: str | None) -> dict[str, Any]:
+async def analyse_segment(
+    segment_row: dict,
+    kb_path: str | None,
+    system_prompt: str | None = None,
+) -> dict[str, Any]:
     """Прогнать сегмент через Claude API.
 
+    system_prompt — если передан, используется вместо промпта из corpus/settings.
     Returns dict со всеми полями для corpus/db.upsert_analysis():
         conclusion_md, verdict, alarm_level, claude_model,
         tokens_used, tool_calls_count, loops_count,
@@ -71,7 +76,7 @@ async def analyse_segment(segment_row: dict, kb_path: str | None) -> dict[str, A
         _model          = claude_cfg["model"]
         _max_tool_calls = claude_cfg["max_tool_calls"]
         _max_tokens     = claude_cfg["max_tokens"]
-        _system_prompt  = claude_cfg["system_prompt"]
+        _system_prompt  = system_prompt or claude_cfg["system_prompt"]
 
         while tool_calls_count < _max_tool_calls:
             loops_count += 1

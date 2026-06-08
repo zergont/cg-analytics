@@ -27,14 +27,15 @@ def apply_claude_settings(
     max_tool_calls: int,
     max_tokens: int,
     proxy: str,
-    system_prompt: str,
+    system_prompt: str = "",
 ) -> None:
     """Обновить конфигурацию Claude API в памяти (вступает в силу немедленно)."""
     _state["model"]          = model.strip()
     _state["max_tool_calls"] = int(max_tool_calls)
     _state["max_tokens"]     = int(max_tokens)
     _state["proxy"]          = proxy.strip()
-    _state["system_prompt"]  = system_prompt.strip()
+    if system_prompt:
+        _state["system_prompt"] = system_prompt.strip()
     logger.info("Claude API настройки обновлены: model=%s", _state["model"])
 
 
