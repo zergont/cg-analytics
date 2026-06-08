@@ -179,51 +179,64 @@ async def _process_status_line(job: dict) -> None:
 
     prompt = build_status_prompt(struct_status)
 
-    try:
-        payload = {
-            "model": _cfg["model"],
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "Ты формируешь краткую текстовую сводку состояния дизельного генератора "
-                        "для оператора пульта управления. "
-                        "Используй ТОЛЬКО приведённые факты. "
-                        "НЕ добавляй оценки, предположения, рекомендации, которых нет в фактах. "
-                        "Облеки факты в 1-2 коротких естественных фразы на русском языке."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            "stream": False,
-            "options": {
-                "temperature": 0.1,
-                "num_ctx": _cfg.get("num_ctx", 4096),
+    payload = {
+        "model": _cfg["model"],
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Ты формируешь краткую текстовую сводку состояния дизельного генератора "
+                    "для оператора пульта управления. "
+                    "Используй ТОЛЬКО приведённые факты. "
+                    "НЕ добавляй оценки, предположения, рекомендации, которых нет в фактах. "
+                    "Облеки факты в 1-2 коротких естественных фразы на русском языке."
+                ),
             },
-        }
+            {"role": "user", "content": prompt},
+        ],
+        "stream": False,
+        "options": {
+            "temperature": 0.1,
+            "num_ctx": _cfg.get("num_ctx", 4096),
+        },
+    }
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(f"{_cfg['base_url']}/api/chat", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            status_text = data.get("message", {}).get("content", "").strip()
+    # Один retry: Ollama может «холодно» стартовать модель и обрывать первый запрос
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(f"{_cfg['base_url']}/api/chat", json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+                status_text = data.get("message", {}).get("content", "").strip()
 
-        if not status_text:
-            logger.warning("qwen/worker: статус-строка пустая для %s/%s/%s",
-                           router_sn, equip_type, panel_id)
+            if not status_text:
+                logger.warning("qwen/worker: статус-строка пустая для %s/%s/%s",
+                               router_sn, equip_type, panel_id)
+                return
+
+            await online_db.update_open_segment_status(
+                router_sn, equip_type, panel_id,
+                status_text=status_text,
+                status_hash=status_hash,
+            )
+            logger.info("qwen/worker: статус обновлён %s/%s/%s (%d симв.)",
+                        router_sn, equip_type, panel_id, len(status_text))
             return
 
-        await online_db.update_open_segment_status(
-            router_sn, equip_type, panel_id,
-            status_text=status_text,
-            status_hash=status_hash,
-        )
-        logger.info("qwen/worker: статус обновлён %s/%s/%s (%d симв.)",
-                    router_sn, equip_type, panel_id, len(status_text))
-
-    except Exception as exc:
-        logger.warning("qwen/worker: ошибка статус-строки %s/%s/%s: %s",
-                       router_sn, equip_type, panel_id, exc)
+        except Exception as exc:
+            exc_desc = repr(exc) if not str(exc) else str(exc)
+            if attempt == 0:
+                logger.debug(
+                    "qwen/worker: попытка 1 неудачна (%s/%s/%s): %s — повтор через 10с",
+                    router_sn, equip_type, panel_id, exc_desc,
+                )
+                await asyncio.sleep(10)
+            else:
+                logger.warning(
+                    "qwen/worker: ошибка статус-строки %s/%s/%s: %s",
+                    router_sn, equip_type, panel_id, exc_desc,
+                )
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────────
