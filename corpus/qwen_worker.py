@@ -218,10 +218,9 @@ async def _process_status_line(job: dict) -> None:
         logger.info("qwen/worker: статус обновлён %s/%s/%s (%d симв.)",
                     router_sn, equip_type, panel_id, len(status_text))
 
-    except Exception as exc:
-        exc_desc = repr(exc) if not str(exc) else str(exc)
-        logger.warning("qwen/worker: ошибка статус-строки %s/%s/%s: %s",
-                       router_sn, equip_type, panel_id, exc_desc)
+    except Exception:
+        logger.exception("qwen/worker: ошибка статус-строки %s/%s/%s",
+                         router_sn, equip_type, panel_id)
 
 
 async def _status_via_llm(system_prompt: str, user_msg: str, cfg: dict) -> str:
