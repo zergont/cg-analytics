@@ -29,8 +29,10 @@
     "run_state_label": "Работа",       // Стоп | Прогрев | Работа | Разгрузка | Охлаждение на х.х. | Переход на х.х.
 
     "severity_level":  "норма",        // норма | внимание | тревога
-    "status_text":     "Работа, нагрузка 42%, все параметры в норме. 3ч 20м.",
-    "status_updated":  "2026-06-06T10:35:00Z",   // когда обновлялся статус-текст
+    "status_text":     "Работа, нагрузка 42%, 3ч 20м — параметры в норме.",
+    "status_updated":  "2026-06-09T10:35:00Z",
+
+    "warning_analysis_md": null,       // Claude-анализ предупреждения (см. раздел 1.1)
 
     "coking_risk":     "GREEN",        // GREEN | YELLOW | RED
 
@@ -48,15 +50,38 @@
 | `run_state` | телеметрия (Modbus) | каждые 30 с |
 | `severity_level` | детерминированный аналитический блок | каждые 30 с |
 | `coking_risk` | накопленный риск закоксовки | каждые 30 с |
-| `status_text` | ИИ-оператор (Qwen) | каждые 5 мин при изменении |
-| `status_updated` | timestamp генерации статус-текста | каждые 5 мин |
+| `status_text` | детерминированный (без LLM) | каждые ~1 мин при изменении состояния |
+| `warning_analysis_md` | Claude API | однократно при появлении новых неисправностей |
 
 **Цветовая схема `severity_level`:**
 - `норма` → зелёный / нейтральный
 - `внимание` → жёлтый (WARNING-тревоги)
 - `тревога` → красный (ALARM / SHUTDOWN)
 
-**`status_text` может быть `null`** — первые ~1 мин после старта наблюдения, пока планировщик не сделал первый тик.
+**`status_text`** формируется детерминированно из аналитики — доступен сразу после первого тика (~1 мин после старта наблюдения). Не требует LLM.
+
+---
+
+### 1.1. Анализ предупреждений (`warning_analysis_md`)
+
+Поле появляется когда аналитика фиксирует предупреждение (`severity_level != "норма"`):
+
+1. Аналитика обнаруживает новые коды неисправностей
+2. Ждём **60 секунд** стабилизации (коды не меняются)
+3. Структурный статус отправляется в **Claude API**
+4. Ответ сохраняется в `warning_analysis_md` текущего открытого сегмента
+
+**Дедупликация:** если набор fault-кодов не изменился — повторной отправки нет.  
+При возврате в `норма` — поле `warning_analysis_md` остаётся (история), обнуляется только при появлении новых кодов.
+
+**Как показывать в UI:**
+```
+severity_level = "норма"     → зелёный статус, warning_analysis_md игнорируем
+severity_level = "внимание"  → жёлтый статус
+  + warning_analysis_md = null  → "Анализ готовится…" (ждём ~60 с + время ответа Claude)
+  + warning_analysis_md != null → показываем блок анализа Claude
+severity_level = "тревога"   → красный статус, аналогично
+```
 
 ---
 
@@ -109,11 +134,11 @@
     "cause_close":     "DAILY_BOUNDARY",   // RUN_STATE_CHANGE | DAILY_BOUNDARY | OPERATOR_STOP
 
     "severity":        "WARNING",          // SHUTDOWN | ALARM | WARNING | INFO | null
-    "analytics_version": "3.3.1",
+    "analytics_version": "4.0.0",
 
     "has_report":  true,    // есть Markdown-отчёт аналитики
-    "has_claude":  true,    // есть Claude-заключение
-    "has_qwen":    true,    // есть Qwen-очеловечивание
+    "has_claude":  true,    // есть Claude-заключение по закрытому сегменту
+    "has_llm":     false,   // есть LLM-хуманизация (отложено)
 
     "_links": {
       "detail": "/api/segment/1234",
@@ -127,8 +152,8 @@
 
 **Для построения календаря:**
 - Группируйте по дате `t_start` (в локальном часовом поясе)
-- `severity` → цвет ячейки дня: SHUTDOWN/ALARM → красный, WARNING → жёлтый, null → зелёный
-- `has_qwen: true` → показывать значок ИИ-анализа
+- `severity` → цвет ячейки: SHUTDOWN/ALARM → красный, WARNING → жёлтый, null/INFO → зелёный
+- `has_claude: true` → показывать значок Claude-анализа
 
 ---
 
@@ -136,7 +161,7 @@
 
 ### `GET /api/segment/{id}`
 
-Полный отчёт по сегменту для страницы детального анализа.
+Полный отчёт по сегменту.
 
 ```json
 {
@@ -153,20 +178,21 @@
   "duration_sec":    32400,
   "cause_close":     "DAILY_BOUNDARY",
   "severity":        "WARNING",
-  "analytics_version": "3.3.1",
+  "analytics_version": "4.0.0",
 
-  "report_md": "# Аналитический отчёт...\n\n## Сводка\n...",
+  "report_md": "# Аналитический отчёт...",
 
   "analysis": {
     "status":        "done",
-    "conclusion_md": "## Сводка\nШтатная работа...",   // сухое заключение Claude
-    "humanized_md":  "ДГУ работал штатно...",           // очеловеченное Qwen
+    "conclusion_md": "## Сводка\nШтатная работа...",   // заключение Claude по закрытому сегменту
+    "humanized_md":  null,                              // LLM-хуманизация (отложено)
     "created_at":    "2026-06-06T15:05:00Z",
     "updated_at":    "2026-06-06T15:06:00Z"
   },
 
   // Только для открытых сегментов (is_open: true):
-  "status_text": "Работа, нагрузка 42%...",
+  "status_text":           "Работа, нагрузка 67%, 2ч 10м — параметры в норме.",
+  "warning_analysis_md":   null,   // Claude-анализ предупреждения (null если нет активных)
 
   "_links": {
     "view":     "/online/segment/1234",
@@ -177,20 +203,19 @@
 
 **Что показывать в UI:**
 
-| Блок | Поле | Описание |
+| Блок | Поле | Когда |
 |---|---|---|
-| Карточка сегмента | `t_start`, `t_end`, `duration_sec`, `run_state_label` | Время и режим |
-| Индикатор | `severity` | Цвет: красный/жёлтый/зелёный |
+| Статус-строка | `status_text` | Всегда для открытого сегмента |
+| Анализ предупреждения | `warning_analysis_md` | Если `severity_level != норма` и поле не null |
 | Аналитика | `report_md` | Рендерить как Markdown |
-| ИИ-заключение | `analysis.humanized_md` | Основной текст для оператора |
-| Сырое Claude | `analysis.conclusion_md` | По запросу / для инженера |
+| Claude-заключение | `analysis.conclusion_md` | Для закрытых сегментов |
 
 **Значения `analysis.status`:**
-- `pending` — ожидает в очереди
+- `pending` — ожидает в очереди Claude
 - `processing` — обрабатывается прямо сейчас
 - `done` — готово
 - `error` — ошибка
-- `null` (поле `analysis: null`) — анализ ещё не запускался
+- `null` (поле `analysis: null`) — анализ не запускался (нет Anthropic API key или сегмент только закрылся)
 
 ---
 
@@ -201,7 +226,8 @@
 1. GET /api/machines                 → список машин, текущий статус
 2. Поллинг каждые 15 с
 3. Показываем: имя, run_state_label, severity_level (цвет), status_text
-4. Кнопка «История» → переход к календарю машины
+4. Если warning_analysis_md != null → иконка ⚠ + блок анализа Claude
+5. Кнопка «История» → переход к календарю машины
 ```
 
 ### Календарь истории машины
@@ -209,7 +235,7 @@
 1. GET /api/machine/{sn}/{type}/{panel}/segments?year=2026&month=6
 2. Строим сетку месяца, группируем по дате t_start
 3. Цвет ячейки по максимальному severity дня
-4. Значок 🤖 если has_qwen
+4. Значок ✨ если has_claude
 5. Клик по ячейке → GET /api/segment/{id} → страница детального анализа
 ```
 
@@ -217,10 +243,22 @@
 ```
 1. GET /api/segment/{id}
 2. Карточка: время, режим, длительность, severity
-3. Блок «Аналитика»: рендерим report_md
-4. Блок «ИИ-заключение»: показываем humanized_md (если has_qwen)
-   - Если analysis.status = pending/processing → спиннер + поллинг каждые 10 с
-   - Если null → «Анализ не запускался»
+3. Блок «Аналитика»: рендерим report_md как Markdown
+4. Если is_open:
+   - status_text → строка-статус (всегда актуальна)
+   - warning_analysis_md → блок Claude-анализа (если есть)
+5. Если !is_open:
+   - analysis.conclusion_md → Claude-заключение по закрытому сегменту
+   - Если analysis.status = pending/processing → поллинг каждые 10 с
+```
+
+### Отображение предупреждения в реальном времени
+```
+1. GET /api/machines (поллинг 15 с)
+2. severity_level изменился на "внимание" или "тревога"
+   a. status_text уже содержит описание: "Работа, 2ч — ⚠ внимание: HIGH_COOLANT_TEMP."
+   b. warning_analysis_md = null → показываем "Анализ готовится…" (~60–120 сек)
+3. Следующий поллинг: warning_analysis_md заполнен → показываем анализ Claude
 ```
 
 ---
@@ -229,7 +267,9 @@
 
 - Все временны́е метки в **UTC** (ISO 8601 с `Z`)
 - `report_md` — синтаксис Markdown, нужен рендерер (marked.js и т.п.)
-- `humanized_md` — plain text, без Markdown
+- `conclusion_md` — Markdown (заключение Claude по **закрытому** сегменту)
+- `warning_analysis_md` — Markdown (анализ Claude по **активному предупреждению**)
+- `status_text` — plain text, детерминированный, без Markdown
 - `cause_close`:
   - `RUN_STATE_CHANGE` — смена режима (напр. Работа → Стоп)
   - `DAILY_BOUNDARY` — суточный рез в 09:00
