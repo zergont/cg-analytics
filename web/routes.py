@@ -960,18 +960,22 @@ async def update_llm_settings(
     llm_model:          str   = Form(...),
     llm_temperature:    float = Form(...),
     llm_num_ctx:        int   = Form(...),
+    llm_status_num_ctx: int   = Form(2048),
     llm_stream:         str   = Form(""),   # checkbox: "on" если отмечен, "" если нет
 ):
     """Сохранить настройки LLM и применить без перезапуска."""
     from llm.client import apply_llm_settings
     stream = llm_stream == "on"
-    apply_llm_settings(llm_base_url, llm_model, llm_temperature, llm_num_ctx, stream=stream)
-    await analytics.set_app_setting("llm_base_url",     llm_base_url)
-    await analytics.set_app_setting("llm_model",        llm_model)
-    await analytics.set_app_setting("llm_temperature",  str(llm_temperature))
-    await analytics.set_app_setting("llm_num_ctx",      str(llm_num_ctx))
-    await analytics.set_app_setting("llm_stream",       "true" if stream else "false")
-    logger.info("LLM настройки сохранены: model=%s stream=%s", llm_model, stream)
+    apply_llm_settings(llm_base_url, llm_model, llm_temperature, llm_num_ctx,
+                       status_num_ctx=llm_status_num_ctx, stream=stream)
+    await analytics.set_app_setting("llm_base_url",        llm_base_url)
+    await analytics.set_app_setting("llm_model",           llm_model)
+    await analytics.set_app_setting("llm_temperature",     str(llm_temperature))
+    await analytics.set_app_setting("llm_num_ctx",         str(llm_num_ctx))
+    await analytics.set_app_setting("llm_status_num_ctx",  str(llm_status_num_ctx))
+    await analytics.set_app_setting("llm_stream",          "true" if stream else "false")
+    logger.info("LLM настройки сохранены: model=%s num_ctx=%d status_num_ctx=%d stream=%s",
+                llm_model, llm_num_ctx, llm_status_num_ctx, stream)
     return RedirectResponse(url="/settings", status_code=303)
 
 

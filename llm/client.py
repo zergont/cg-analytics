@@ -20,12 +20,13 @@ logger = logging.getLogger(__name__)
 
 # ── In-memory конфигурация LLM (применяется при старте и через веб-морду) ──────
 _cfg: dict = {
-    "base_url":    "http://localhost:11434",
-    "model":       "qwen2.5:14b",
-    "temperature": 0.1,
-    "num_ctx":     16384,
-    "prompt":      ANALYSIS_SYSTEM_PROMPT,
-    "stream":      True,   # False — модели без поддержки стриминга (например gemma)
+    "base_url":       "http://localhost:11434",
+    "model":          "qwen2.5:14b",
+    "temperature":    0.1,
+    "num_ctx":        16384,
+    "status_num_ctx": 2048,   # контекст для коротких запросов (статус-строка, хуманизация)
+    "prompt":         ANALYSIS_SYSTEM_PROMPT,
+    "stream":         True,   # False — модели без поддержки стриминга (например gemma)
 }
 
 
@@ -34,17 +35,19 @@ def apply_llm_settings(
     model: str,
     temperature: float,
     num_ctx: int,
+    status_num_ctx: int = 2048,
     prompt: str = "",
     stream: bool = True,
 ) -> None:
     """Обновить конфигурацию LLM в памяти (вступает в силу немедленно)."""
-    _cfg["base_url"]    = base_url.rstrip("/")
-    _cfg["model"]       = model.strip()
-    _cfg["temperature"] = float(temperature)
-    _cfg["num_ctx"]     = int(num_ctx)
-    _cfg["stream"]      = bool(stream)
-    logger.info("LLM настройки обновлены: model=%s url=%s stream=%s",
-                _cfg["model"], _cfg["base_url"], _cfg["stream"])
+    _cfg["base_url"]       = base_url.rstrip("/")
+    _cfg["model"]          = model.strip()
+    _cfg["temperature"]    = float(temperature)
+    _cfg["num_ctx"]        = int(num_ctx)
+    _cfg["status_num_ctx"] = int(status_num_ctx)
+    _cfg["stream"]         = bool(stream)
+    logger.info("LLM настройки обновлены: model=%s url=%s num_ctx=%d status_num_ctx=%d stream=%s",
+                _cfg["model"], _cfg["base_url"], _cfg["num_ctx"], _cfg["status_num_ctx"], _cfg["stream"])
 
 
 def get_llm_settings() -> dict:
