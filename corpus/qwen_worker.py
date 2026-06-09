@@ -241,7 +241,10 @@ async def _status_via_llm(system_prompt: str, user_msg: str, cfg: dict) -> str:
         "stream": False,
         "options": {"temperature": 0.1, "num_ctx": status_num_ctx},
     }
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    # Модель может долго перезагружаться (смена num_ctx) → длинный read-таймаут.
+    # connect/write короткие, read — до 5 минут.
+    _timeout = httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=10.0)
+    async with httpx.AsyncClient(timeout=_timeout) as client:
         resp = await client.post(f"{cfg['base_url']}/api/chat", json=payload)
         resp.raise_for_status()
         return resp.json().get("message", {}).get("content", "").strip()
