@@ -212,19 +212,29 @@ def build_structural_status(
 def compute_status_hash(s: dict) -> str:
     """Хэш структурного статуса для детекции изменений.
 
-    Реагирует на: смену режима, уровня тревоги, набора fault-кодов, ведра нагрузки.
-    НЕ реагирует на флуктуации аналоговых значений.
+    Реагирует на: смену режима, уровня тревоги, набора fault-кодов, ведра нагрузки,
+    каждый час работы в режиме, изменение ключевых параметров на 10+ единиц.
+    НЕ реагирует на мелкие флуктуации аналоговых значений.
     """
     fault_codes = tuple(sorted(
         code
         for alarm in s.get("active_alarms", [])
         for code in alarm.get("fault_codes", [])
     ))
+    # Часовой бакет: текст регенерируется раз в час (актуализирует "время в режиме")
+    time_bucket = int(s.get("time_in_mode_sec", 0) // 3600)
+    # Ключевые параметры с шагом 10 единиц (игнорируем мелкий шум, ловим значимые изменения)
+    params_bucket = tuple(
+        (p["role"], int(p["value"] // 10) * 10)
+        for p in sorted(s.get("key_params", []), key=lambda x: x["role"])
+    )
     key = (
         s["run_state"],
         s["severity_level"],
         s.get("load_pct_bucket"),
         fault_codes,
+        time_bucket,
+        params_bucket,
     )
     return hashlib.md5(str(key).encode()).hexdigest()[:12]
 
