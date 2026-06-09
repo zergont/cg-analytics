@@ -523,7 +523,7 @@ async def update_open_segment_status(
     router_sn: str, equip_type: str, panel_id: int,
     status_text: str, status_hash: str,
 ) -> None:
-    """Обновить статус-строку и хэш открытого сегмента."""
+    """Обновить детерминированную статус-строку открытого сегмента."""
     conn = await _connect()
     try:
         await conn.execute("""
@@ -535,6 +535,25 @@ async def update_open_segment_status(
             WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
               AND t_end IS NULL
         """, router_sn, equip_type, panel_id, status_text, status_hash)
+    finally:
+        await conn.close()
+
+
+async def update_open_segment_warning(
+    router_sn: str, equip_type: str, panel_id: int,
+    analysis_md: str, fault_hash: str,
+) -> None:
+    """Сохранить Claude-анализ предупреждения в открытый сегмент."""
+    conn = await _connect()
+    try:
+        await conn.execute("""
+            UPDATE auto_segments
+            SET warning_analysis_md   = $4,
+                warning_analyzed_hash = $5,
+                updated_at            = now()
+            WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
+              AND t_end IS NULL
+        """, router_sn, equip_type, panel_id, analysis_md, fault_hash)
     finally:
         await conn.close()
 

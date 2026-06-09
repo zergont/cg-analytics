@@ -7,17 +7,15 @@
 # Несанкционированное копирование, распространение или использование
 # без письменного разрешения правообладателя запрещено.
 
-"""ИИ-оператор Уровень 1: детерминированный сборщик структурного статуса машины.
-
-Принцип: статус и факты — из открытого сегмента (детерминированно).
-qwen только облекает в прозу, не интерпретирует.
+"""Детерминированный сборщик структурного статуса машины.
 
 Публичный API:
   build_structural_status(seg_row, fault_ref, tz) → dict
   compute_status_hash(struct_status) → str
+  compute_fault_hash(struct_status) → str
   compute_severity_level(active_dets) → str
-  build_fallback_text(struct_status) → str
-  build_status_prompt(struct_status) → str
+  format_status_text(struct_status) → str
+  build_warning_prompt(struct_status) → str
 """
 from __future__ import annotations
 
@@ -239,46 +237,49 @@ def compute_status_hash(s: dict) -> str:
     return hashlib.md5(str(key).encode()).hexdigest()[:12]
 
 
-def build_fallback_text(s: dict) -> str:
-    """Детерминированная строка без qwen — показывается до первой генерации.
+def compute_fault_hash(s: dict) -> str:
+    """Хэш только набора fault-кодов — для детекции новых неисправностей."""
+    fault_codes = tuple(sorted(
+        code
+        for alarm in s.get("active_alarms", [])
+        for code in alarm.get("fault_codes", [])
+    ))
+    return hashlib.md5(str(fault_codes).encode()).hexdigest()[:12]
 
-    Даёт оператору полезную информацию немедленно, пока qwen в очереди.
-    """
+
+def format_status_text(s: dict) -> str:
+    """Детерминированная статус-строка — всегда актуальна, без LLM."""
     mode   = s["mode_label"]
     load   = s.get("load_pct")
     level  = s["severity_level"]
     alarms = s.get("active_alarms", [])
     dur    = s.get("time_in_mode_sec", 0)
 
-    # Базовая часть с нагрузкой
     if load is not None and s["run_state"] == 3:
         base = f"{mode}, нагрузка {load:.0f}%"
     else:
         base = mode
 
-    # Время в режиме (если > 1 минуты)
     if dur > 60:
-        base += f" ({_fmt_duration(dur)})"
+        base += f", {_fmt_duration(dur)}"
 
-    # Статус
     if level == "норма":
-        text = f"{base} — параметры в норме."
+        return f"{base} — параметры в норме."
     elif alarms:
         first = alarms[0]
         desc = first.get("description") or first["scenario"]
-        emoji = "⚠" if level == "внимание" else "🔴"
-        text = f"{base} — {emoji} {level}: {desc}."
+        marker = "⚠" if level == "внимание" else "🔴"
+        return f"{base} — {marker} {level}: {desc}."
     else:
-        text = f"{base} — {level}."
-
-    return text + " Анализ готовится…"
+        return f"{base} — {level}."
 
 
-def build_status_prompt(s: dict) -> str:
-    """Промпт для qwen: структурный статус → 1-2 фразы живой прозы."""
+def build_warning_prompt(s: dict) -> str:
+    """Промпт для Claude-анализа предупреждения (новые fault-коды)."""
     lines = [
-        "[ФАКТЫ ДЛЯ СВОДКИ]",
-        f"Режим: {s['mode_label']} (RUN_STATE={s['run_state']})",
+        "Выполни анализ неисправности дизель-генераторной установки.",
+        "",
+        f"Режим работы: {s['mode_label']} (RUN_STATE={s['run_state']})",
     ]
 
     if s.get("load_pct") is not None:
@@ -288,19 +289,27 @@ def build_status_prompt(s: dict) -> str:
     if dur > 60:
         lines.append(f"Время в режиме: {_fmt_duration(dur)}")
 
-    lines.append(f"Статус: {s['severity_level']}")
+    lines.append(f"Уровень: {s['severity_level']}")
+    lines.append("")
 
     alarms = s.get("active_alarms", [])
     if alarms:
-        lines.append("Активные тревоги:")
+        lines.append("Активные неисправности:")
         for a in alarms:
             desc = a.get("description") or a["scenario"]
-            lines.append(f"  - {a['severity']}: {desc}")
+            codes = ", ".join(str(c) for c in a.get("fault_codes", []))
+            lines.append(f"  [{a['severity']}] {desc}" + (f" (коды: {codes})" if codes else ""))
 
     kp = s.get("key_params", [])
     if kp:
+        lines.append("")
         lines.append("Ключевые параметры:")
         for p in kp:
-            lines.append(f"  - {p['role']}: {p['value']} {p['unit']}")
+            lines.append(f"  {p['role']}: {p['value']} {p['unit']}")
 
+    lines += [
+        "",
+        "Дай краткий технический анализ: что произошло, возможные причины, "
+        "на что обратить внимание оператору. Ответ на русском языке.",
+    ]
     return "\n".join(lines)

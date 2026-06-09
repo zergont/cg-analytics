@@ -63,6 +63,8 @@ class OnlineManager:
         self._tasks:   dict[str, asyncio.Task]     = {}
         self._status_task: asyncio.Task | None     = None
         self._history_sync: "HistorySyncWorker | None" = None
+        # {key: (fault_hash, first_seen_at)} — трекер стабилизации предупреждений
+        self._warning_tracker: dict[str, tuple[str, datetime]] = {}
 
     # ── Запуск всех активных наблюдений ───────────────────────────────────────
 
@@ -341,42 +343,36 @@ class OnlineManager:
         engine = self._engines.get(key)
         return engine.last_processed_to if engine else None
 
-    # ── Планировщик статус-строк (ИИ-оператор Уровень 1) ─────────────────────
+    # ── Планировщик статусов и детектор предупреждений ───────────────────────
 
     async def _run_status_scheduler(self) -> None:
-        """Периодически обновляет статус-строки активных машин."""
-        # Начальная задержка — дать движкам инициализироваться
+        """Периодически обновляет детерминированный статус и детектирует предупреждения."""
         await asyncio.sleep(60)
-        logger.info("StatusLineScheduler: первый тик")
+        logger.info("StatusScheduler: первый тик")
 
         while True:
             try:
                 from db.analytics import get_app_setting
                 interval_min = int(await get_app_setting("status_line_interval_min", "1"))
             except Exception:
-                interval_min = 5
+                interval_min = 1
 
             try:
                 await self._tick_status_lines()
             except Exception:
-                logger.exception("StatusLineScheduler: ошибка тика")
+                logger.exception("StatusScheduler: ошибка тика")
 
             await asyncio.sleep(interval_min * 60)
 
     async def _tick_status_lines(self) -> None:
-        """Один тик: проверить статус всех активных машин, обновить при изменении."""
-        from corpus.qwen_worker import get_worker
+        """Один тик: детерминированный статус + детектор новых предупреждений → Claude."""
         from online.status_assembler import (
-            build_structural_status, compute_status_hash, build_fallback_text,
+            build_structural_status, compute_status_hash,
+            compute_fault_hash, format_status_text,
         )
         from online import db as online_db
 
-        worker = get_worker()
-        if not worker:
-            logger.debug("StatusLineScheduler: qwen_worker не запущен, пропуск")
-            return
-
-        _FALLBACK_MARKER = "Анализ готовится"
+        now = datetime.now(timezone.utc)
 
         for key, engine in list(self._engines.items()):
             try:
@@ -386,42 +382,108 @@ class OnlineManager:
                 if not seg:
                     continue
 
-                struct = build_structural_status(seg, engine._fault_ref, engine.tz)
-                new_hash = compute_status_hash(struct)
-                old_hash = seg.get("status_hash")
+                struct    = build_structural_status(seg, engine._fault_ref, engine.tz)
+                new_hash  = compute_status_hash(struct)
+                old_hash  = seg.get("status_hash")
 
-                current_text = seg.get("status_text") or ""
-                hash_changed = new_hash != old_hash
-                is_fallback  = _FALLBACK_MARKER in current_text
-
-                if not hash_changed and not is_fallback:
-                    logger.debug("StatusLineScheduler[%s]: статус не изменился", key)
-                    continue
-
-                if hash_changed:
-                    fallback = build_fallback_text(struct)
+                # ── Детерминированный статус (всегда актуален, без LLM) ──
+                if new_hash != old_hash:
+                    status_text = format_status_text(struct)
                     await online_db.update_open_segment_status(
                         engine.router_sn, engine.equip_type, engine.panel_id,
-                        status_text=fallback,
+                        status_text=status_text,
                         status_hash=new_hash,
                     )
-                    logger.info(
-                        "StatusLineScheduler[%s]: статус изменился (hash %s → %s), enqueue qwen",
-                        key, old_hash, new_hash,
-                    )
-                else:
-                    logger.info(
-                        "StatusLineScheduler[%s]: fallback при совпадающем хэше, повтор qwen",
-                        key,
-                    )
+                    logger.debug("StatusScheduler[%s]: статус обновлён", key)
 
-                worker.enqueue_status({
-                    "router_sn":         engine.router_sn,
-                    "equip_type":        engine.equip_type,
-                    "panel_id":          engine.panel_id,
-                    "structural_status": struct,
-                    "status_hash":       new_hash,
-                })
+                # ── Детектор предупреждений → Claude ──
+                severity = struct["severity_level"]
+                if severity == "норма":
+                    self._warning_tracker.pop(key, None)
+                    continue
+
+                fault_hash = compute_fault_hash(struct)
+                already_analyzed = seg.get("warning_analyzed_hash") == fault_hash
+
+                if already_analyzed:
+                    continue
+
+                # Трекер стабилизации: ждём 1 минуту без изменения fault-кодов
+                prev = self._warning_tracker.get(key)
+                if prev is None or prev[0] != fault_hash:
+                    self._warning_tracker[key] = (fault_hash, now)
+                    logger.info(
+                        "StatusScheduler[%s]: новые fault-коды (hash=%s), ждём стабилизации",
+                        key, fault_hash,
+                    )
+                    continue
+
+                _, first_seen = prev
+                if (now - first_seen).total_seconds() < 60:
+                    continue  # ещё ждём стабилизации
+
+                # Стабилизировались → отправляем в Claude
+                logger.info(
+                    "StatusScheduler[%s]: предупреждение стабильно 60с, отправляю в Claude",
+                    key,
+                )
+                self._warning_tracker.pop(key, None)
+                asyncio.create_task(
+                    _analyze_warning_claude(
+                        engine.router_sn, engine.equip_type, engine.panel_id,
+                        struct, fault_hash,
+                    ),
+                    name=f"warning_claude_{key}",
+                )
 
             except Exception:
-                logger.exception("StatusLineScheduler: ошибка для %s", key)
+                logger.exception("StatusScheduler: ошибка для %s", key)
+
+
+async def _analyze_warning_claude(
+    router_sn: str, equip_type: str, panel_id: int,
+    struct: dict, fault_hash: str,
+) -> None:
+    """Отправить предупреждение в Claude, сохранить анализ в открытый сегмент."""
+    import anthropic
+    from corpus.settings import get_claude_settings
+    from config import settings as app_settings
+    from online.status_assembler import build_warning_prompt
+    from online import db as online_db
+
+    logger.info("WarningClaude: анализ для %s/%s/%s (hash=%s)",
+                router_sn, equip_type, panel_id, fault_hash)
+    try:
+        claude_cfg  = get_claude_settings()
+        user_prompt = build_warning_prompt(struct)
+
+        client = anthropic.AsyncAnthropic(api_key=app_settings.anthropic_api_key)
+        response = await client.messages.create(
+            model=claude_cfg["model"],
+            max_tokens=1024,
+            system=(
+                "Ты — эксперт по дизель-генераторным установкам. "
+                "Анализируй неисправности кратко и технически точно."
+            ),
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        analysis = "".join(
+            b.text for b in response.content if hasattr(b, "text")
+        ).strip()
+
+        if not analysis:
+            logger.warning("WarningClaude: пустой ответ для %s/%s/%s",
+                           router_sn, equip_type, panel_id)
+            return
+
+        await online_db.update_open_segment_warning(
+            router_sn, equip_type, panel_id,
+            analysis_md=analysis,
+            fault_hash=fault_hash,
+        )
+        logger.info("WarningClaude: анализ сохранён %s/%s/%s (%d симв.)",
+                    router_sn, equip_type, panel_id, len(analysis))
+
+    except Exception:
+        logger.exception("WarningClaude: ошибка для %s/%s/%s",
+                         router_sn, equip_type, panel_id)

@@ -97,6 +97,11 @@ ALTER TABLE auto_segments
     ADD COLUMN IF NOT EXISTS status_hash        TEXT,
     ADD COLUMN IF NOT EXISTS status_updated_at  TIMESTAMPTZ;
 
+-- Миграция v4.0.0: Claude-анализ предупреждений онлайн
+ALTER TABLE auto_segments
+    ADD COLUMN IF NOT EXISTS warning_analysis_md   TEXT,
+    ADD COLUMN IF NOT EXISTS warning_analyzed_hash TEXT;
+
 -- Миграция v3.4.0: курсор синхронизации history из источника
 CREATE TABLE IF NOT EXISTS history_sync_state (
     router_sn    TEXT        NOT NULL,

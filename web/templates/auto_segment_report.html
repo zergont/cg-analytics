@@ -250,6 +250,19 @@
       <div class="alert alert-success py-2 mb-2">🟢 <strong>Норма</strong> — нарушений не выявлено</div>
     {% endif %}
 
+    {# Детерминированный статус и анализ предупреждения #}
+    {% if seg.status_text %}
+      <div class="small text-muted mb-2 px-1">{{ seg.status_text }}</div>
+    {% endif %}
+    {% if seg.warning_analysis_md %}
+      <div class="card border-warning mb-2">
+        <div class="card-header fw-semibold bg-warning-subtle py-1 small">
+          ⚠ Анализ предупреждения — Claude
+        </div>
+        <div class="card-body py-2 small" id="warningAnalysisContent"></div>
+      </div>
+    {% endif %}
+
     {# Тулбар #}
     {% set has_report = run and run.report_md %}
     <div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
@@ -555,7 +568,7 @@ async function sendToQwen() {
 </script>
 {% endif %}
 
-{% if is_open and run and run.report_md %}
+{% if is_open and (run and run.report_md or seg.warning_analysis_md) %}
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script>
 const _openMd = document.getElementById('openReportMdSrc').textContent;
@@ -613,6 +626,10 @@ window.addEventListener('DOMContentLoaded', () => {
     document.getElementById('openClaudeContent').innerHTML = _renderMdOpen(_openConclusionMd);
   if (_openHumanizedMd)
     document.getElementById('openQwenContent').innerHTML = _renderMdOpen(_openHumanizedMd);
+  {% if seg.warning_analysis_md %}
+  const wac = document.getElementById('warningAnalysisContent');
+  if (wac) wac.innerHTML = _renderMdOpen({{ seg.warning_analysis_md | tojson }});
+  {% endif %}
   {% if claude_analysis and claude_analysis.status in ['queued', 'processing'] %}
   setTimeout(() => location.reload(), 4000);
   {% endif %}
