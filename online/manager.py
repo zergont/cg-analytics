@@ -356,15 +356,25 @@ class OnlineManager:
             except Exception:
                 interval_min = 5
 
+            has_fallbacks = False
             try:
-                await self._tick_status_lines()
+                has_fallbacks = await self._tick_status_lines()
             except Exception:
                 logger.exception("StatusLineScheduler: ошибка тика")
 
-            await asyncio.sleep(interval_min * 60)
+            # Если есть незакрытые fallback-ы — повторяем через 60 с, не ждём полный интервал.
+            # Это ускоряет восстановление после сбоя LLM или холодного старта Ollama.
+            if has_fallbacks:
+                await asyncio.sleep(60)
+            else:
+                await asyncio.sleep(interval_min * 60)
 
-    async def _tick_status_lines(self) -> None:
-        """Один тик: проверить статус всех активных машин, обновить при изменении."""
+    async def _tick_status_lines(self) -> bool:
+        """Один тик: проверить статус всех активных машин, обновить при изменении.
+
+        Returns:
+            True если хотя бы одна машина всё ещё имеет fallback-текст (нужен повтор).
+        """
         from corpus.qwen_worker import get_worker
         from online.status_assembler import (
             build_structural_status, compute_status_hash, build_fallback_text,
@@ -374,7 +384,10 @@ class OnlineManager:
         worker = get_worker()
         if not worker:
             logger.debug("StatusLineScheduler: qwen_worker не запущен, пропуск")
-            return
+            return False
+
+        _FALLBACK_MARKER = "Анализ готовится"
+        any_fallback = False
 
         for key, engine in list(self._engines.items()):
             try:
@@ -388,9 +401,6 @@ class OnlineManager:
                 new_hash = compute_status_hash(struct)
                 old_hash = seg.get("status_hash")
 
-                # Проверяем: хэш совпадает, но текст всё ещё fallback?
-                # (qwen мог не успеть записать прозу из-за гонки до v3.3.11)
-                _FALLBACK_MARKER = "Анализ готовится"
                 current_text = seg.get("status_text") or ""
                 hash_changed = new_hash != old_hash
                 is_fallback  = _FALLBACK_MARKER in current_text
@@ -426,6 +436,9 @@ class OnlineManager:
                     "structural_status": struct,
                     "status_hash":       new_hash,
                 })
+                any_fallback = True
 
             except Exception:
                 logger.exception("StatusLineScheduler: ошибка для %s", key)
+
+        return any_fallback
