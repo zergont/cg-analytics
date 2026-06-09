@@ -1081,7 +1081,7 @@ async def ai_playground_run(request: Request):
                             yield f"data: {_json.dumps({'token': token})}\n\n"
                     raw_msg = await stream.get_final_message()
                     raw_chunks.append(
-                        f"\n\n[raw]\n{_json.dumps({'usage': dict(raw_msg.usage.__dict__)}, ensure_ascii=False, indent=2)}"
+                        f"\n\n[raw]\n{_json.dumps({'usage': dict(raw_msg.usage.__dict__)}, ensure_ascii=False, indent=2, default=str)}"
                     )
                 else:
                     response = await client.messages.create(
@@ -1094,7 +1094,7 @@ async def ai_playground_run(request: Request):
                     raw_chunks.append(content)
                     yield f"data: {_json.dumps({'token': content})}\n\n"
                     raw_chunks.append(
-                        f"\n\n[raw]\n{_json.dumps({'usage': dict(response.usage.__dict__)}, ensure_ascii=False, indent=2)}"
+                        f"\n\n[raw]\n{_json.dumps({'usage': dict(response.usage.__dict__)}, ensure_ascii=False, indent=2, default=str)}"
                     )
 
             yield f"data: {_json.dumps({'done': True, 'raw': ''.join(raw_chunks)})}\n\n"
