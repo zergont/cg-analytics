@@ -253,25 +253,33 @@ async def _run_segment(
     cfg,
     initial_coking_risk: CokingRisk,
 ) -> list:
-    """Загрузить данные и запустить segment()."""
+    """Загрузить данные и запустить segment() в отдельном потоке.
+
+    segment() — CPU-bound синхронная функция. asyncio.to_thread() выносит её
+    в ThreadPoolExecutor, освобождая event loop для обработки веб-запросов.
+    """
+    import functools
     from analytics.segmenter import segment as _segment
 
     history, enum_periods, fault_periods, gaps = await _load_data(
         router_sn, equip_type, panel_id, ts_from, ts_to, cfg
     )
-    segments = _segment(
-        enum_periods=enum_periods,
-        history=history,
-        fault_periods=fault_periods,
-        gaps=gaps,
-        cfg=cfg,
-        router_sn=router_sn,
-        equip_type=equip_type,
-        panel_id=panel_id,
-        engine_sn=engine_sn,
-        ts_from=_tz_utc(ts_from),
-        ts_to=_tz_utc(ts_to),
-        initial_coking_risk=copy.deepcopy(initial_coking_risk),
+    segments = await asyncio.to_thread(
+        functools.partial(
+            _segment,
+            enum_periods=enum_periods,
+            history=history,
+            fault_periods=fault_periods,
+            gaps=gaps,
+            cfg=cfg,
+            router_sn=router_sn,
+            equip_type=equip_type,
+            panel_id=panel_id,
+            engine_sn=engine_sn,
+            ts_from=_tz_utc(ts_from),
+            ts_to=_tz_utc(ts_to),
+            initial_coking_risk=copy.deepcopy(initial_coking_risk),
+        )
     )
     return segments
 
