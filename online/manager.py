@@ -352,7 +352,7 @@ class OnlineManager:
         while True:
             try:
                 from db.analytics import get_app_setting
-                interval_min = int(await get_app_setting("status_line_interval_min", "5"))
+                interval_min = int(await get_app_setting("status_line_interval_min", "1"))
             except Exception:
                 interval_min = 5
 

@@ -925,7 +925,7 @@ async def settings_page(request: Request):
     qwen_auto         = await analytics.get_app_setting("qwen_auto_analyze",         "false")
     analytics_verify  = await analytics.get_app_setting("analytics_verify_on_close", "false")
     status_line_interval_min = int(
-        await analytics.get_app_setting("status_line_interval_min", "5")
+        await analytics.get_app_setting("status_line_interval_min", "1")
     )
     from llm.router import get_all as _get_router, TASKS as _TASKS
     return templates.TemplateResponse(request, "settings.html", {
