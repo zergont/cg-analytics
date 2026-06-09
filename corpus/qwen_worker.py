@@ -21,6 +21,7 @@
 """
 from __future__ import annotations
 import asyncio
+import itertools
 import logging
 from typing import Any
 
@@ -29,6 +30,10 @@ logger = logging.getLogger(__name__)
 PRIORITY_MANUAL = 0
 PRIORITY_NORMAL = 1
 PRIORITY_STATUS = 2   # статус-строка — ниже приоритета анализа сегментов
+
+# Монотонный счётчик — тай-брейкер в PriorityQueue.
+# Без него heapq сравнивает dict-элементы при одинаковом приоритете → TypeError.
+_seq = itertools.count()
 
 
 class QwenWorker:
@@ -42,13 +47,15 @@ class QwenWorker:
 
     def enqueue(self, seg_id: int, priority: int = PRIORITY_NORMAL,
                 task_id: str = "human_auto") -> None:
-        self._queue.put_nowait((priority, seg_id, task_id))
+        # Кортеж: (priority, seq, seg_id, task_id) — seq-тай-брейкер, никогда не сравниваем dict/str
+        self._queue.put_nowait((priority, next(_seq), seg_id, task_id))
         logger.debug("qwen/worker: enqueue #%d (p=%d task=%s)", seg_id, priority, task_id)
 
     def enqueue_status(self, data: dict) -> None:
         """Поставить задачу генерации статус-строки в очередь (низкий приоритет)."""
         item = {"type": "status_line", **data}
-        self._queue.put_nowait((PRIORITY_STATUS, item))
+        # Кортеж: (priority, seq, item_dict) — seq не даёт heapq дойти до сравнения dict
+        self._queue.put_nowait((PRIORITY_STATUS, next(_seq), item))
         logger.debug(
             "qwen/worker: enqueue status для %s/%s/%s",
             data.get("router_sn"), data.get("equip_type"), data.get("panel_id"),
@@ -76,7 +83,10 @@ class QwenWorker:
 
         while self._running:
             try:
-                _, item, *_extra = await asyncio.wait_for(self._queue.get(), timeout=5.0)
+                # Формат: (priority, seq, payload, *extra)
+                # segment:  (priority, seq, seg_id:int, task_id:str)
+                # status:   (PRIORITY_STATUS, seq, item_dict:dict)
+                _, _, item, *_extra = await asyncio.wait_for(self._queue.get(), timeout=5.0)
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
