@@ -138,15 +138,10 @@
                             <input type="text" name="llm_base_url" class="form-control form-control-sm"
                                    value="{{ llm.base_url }}" required>
                         </div>
-                        <div class="col-2">
+                        <div class="col-4">
                             <label class="form-label small fw-semibold mb-1">Контекст (токенов)</label>
                             <input type="number" name="llm_num_ctx" class="form-control form-control-sm"
                                    value="{{ llm.num_ctx }}" min="1024" max="131072" required>
-                        </div>
-                        <div class="col-2">
-                            <label class="form-label small fw-semibold mb-1">Контекст статус-строки</label>
-                            <input type="number" name="llm_status_num_ctx" class="form-control form-control-sm"
-                                   value="{{ llm.status_num_ctx }}" min="512" max="16384" required>
                         </div>
                     </div>
                     <div class="row g-2 mb-2">

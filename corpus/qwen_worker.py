@@ -229,9 +229,7 @@ async def _process_status_line(job: dict) -> None:
 
 async def _status_via_llm(system_prompt: str, user_msg: str, cfg: dict) -> str:
     import httpx
-    # Для статус-строки (1-2 фразы) используем status_num_ctx — отдельная настройка,
-    # меньше num_ctx для анализа: быстрее загрузка модели, меньше риск ReadTimeout.
-    status_num_ctx = cfg.get("status_num_ctx", 2048)
+    # Используем тот же num_ctx, что и для анализа — Ollama не перезагружает модель.
     payload = {
         "model": cfg["model"],
         "messages": [
@@ -239,12 +237,9 @@ async def _status_via_llm(system_prompt: str, user_msg: str, cfg: dict) -> str:
             {"role": "user",   "content": user_msg},
         ],
         "stream": False,
-        "options": {"temperature": 0.1, "num_ctx": status_num_ctx},
+        "options": {"temperature": 0.1, "num_ctx": cfg.get("num_ctx", 16384)},
     }
-    # Модель может долго перезагружаться (смена num_ctx) → длинный read-таймаут.
-    # connect/write короткие, read — до 5 минут.
-    _timeout = httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=10.0)
-    async with httpx.AsyncClient(timeout=_timeout) as client:
+    async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(f"{cfg['base_url']}/api/chat", json=payload)
         resp.raise_for_status()
         return resp.json().get("message", {}).get("content", "").strip()
