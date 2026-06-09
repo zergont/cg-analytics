@@ -61,6 +61,9 @@ async def stream_analysis(md_packet: str) -> AsyncIterator[str]:
     Yields:
         Строки-токены по мере генерации (или вся строка сразу при stream=False).
     """
+    from llm.router import get_prompt
+    system = get_prompt("analyze_page") or _cfg.get("prompt", "")
+
     use_stream = _cfg.get("stream", True)
     payload = {
         "model": _cfg["model"],
@@ -74,9 +77,6 @@ async def stream_analysis(md_packet: str) -> AsyncIterator[str]:
             "num_ctx":     _cfg["num_ctx"],
         },
     }
-
-    from llm.router import get_prompt
-    system = get_prompt("analyze_page") or _cfg.get("prompt", "")
 
     logger.info("LLM запрос: model=%s, ctx=%d, prompt_len=%d, stream=%s",
                 _cfg["model"], _cfg["num_ctx"], len(md_packet), use_stream)
