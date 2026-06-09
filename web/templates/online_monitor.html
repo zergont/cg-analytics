@@ -349,12 +349,14 @@ async function refreshPipelineStatus() {
       }
     }
 
-    // Qwen
+    // LLM (qwen worker)
     const qb = document.getElementById('qwen-status-badge');
     if (qb) {
       const q = d.qwen;
       if (q.processing_seg_id) {
         qb.innerHTML = `<span class="badge bg-primary" style="font-size:0.72rem">▶ сег. #${q.processing_seg_id}</span>`;
+      } else if (q.processing_status) {
+        qb.innerHTML = `<span class="badge bg-warning text-dark" style="font-size:0.72rem">⏳ обработка</span>`;
       } else if (q.queue_size > 0) {
         qb.innerHTML = `<span class="badge bg-secondary" style="font-size:0.72rem">очередь: ${q.queue_size}</span>`;
       } else {

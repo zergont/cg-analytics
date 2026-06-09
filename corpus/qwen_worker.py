@@ -39,7 +39,8 @@ _seq = itertools.count()
 class QwenWorker:
     def __init__(self) -> None:
         self._queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
-        self._current: int | None = None
+        self._current: int | None = None          # seg_id хуманизации
+        self._processing_status: bool = False     # True пока LLM считает статус-строку
         self._running: bool = False
         self._task: asyncio.Task | None = None
 
@@ -113,11 +114,13 @@ class QwenWorker:
 
             elif isinstance(item, dict) and item.get("type") == "status_line":
                 # Генерация статус-строки (ИИ-оператор Уровень 1)
+                self._processing_status = True
                 try:
                     await _process_status_line(item)
                 except Exception:
                     logger.exception("qwen/worker: ошибка генерации статус-строки")
                 finally:
+                    self._processing_status = False
                     self._queue.task_done()
 
             else:
@@ -139,6 +142,7 @@ class QwenWorker:
         return {
             "running":            self._running,
             "processing_seg_id":  self._current,
+            "processing_status":  self._processing_status,
             "queue_size":         self._queue.qsize(),
         }
 
