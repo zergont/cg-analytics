@@ -1059,12 +1059,16 @@ async def ai_playground_run(request: Request):
                         raw_chunks.append(f"\n\n[raw]\n{_json.dumps(data, ensure_ascii=False, indent=2)}")
 
             else:  # api (Claude)
-                import anthropic
+                import anthropic, httpx as _httpx
                 from corpus.settings import get_claude_settings
                 from config import settings as app_settings
                 claude_cfg = get_claude_settings()
                 model = model_override or claude_cfg["model"]
-                client = anthropic.AsyncAnthropic(api_key=app_settings.anthropic_api_key)
+                _http = _httpx.AsyncClient(proxy=claude_cfg["proxy"]) if claude_cfg.get("proxy") else None
+                client = anthropic.AsyncAnthropic(
+                    api_key=app_settings.anthropic_api_key,
+                    http_client=_http,
+                )
                 if use_stream:
                     async with client.messages.stream(
                         model=model,
