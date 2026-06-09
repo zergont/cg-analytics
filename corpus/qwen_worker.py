@@ -238,6 +238,10 @@ async def _process_status_line(job: dict) -> None:
 
 async def _status_via_llm(system_prompt: str, user_msg: str, cfg: dict) -> str:
     import httpx
+    # Для статус-строки (1-2 фразы) достаточно 2048 токенов контекста.
+    # Не берём num_ctx из cfg — там может быть 16384 (для анализа), что
+    # замедляет загрузку модели и приводит к ReadTimeout.
+    _STATUS_NUM_CTX = 2048
     payload = {
         "model": cfg["model"],
         "messages": [
@@ -245,9 +249,9 @@ async def _status_via_llm(system_prompt: str, user_msg: str, cfg: dict) -> str:
             {"role": "user",   "content": user_msg},
         ],
         "stream": False,
-        "options": {"temperature": 0.1, "num_ctx": cfg.get("num_ctx", 4096)},
+        "options": {"temperature": 0.1, "num_ctx": _STATUS_NUM_CTX},
     }
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(f"{cfg['base_url']}/api/chat", json=payload)
         resp.raise_for_status()
         return resp.json().get("message", {}).get("content", "").strip()
