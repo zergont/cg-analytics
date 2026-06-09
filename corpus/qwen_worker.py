@@ -199,41 +199,29 @@ async def _process_status_line(job: dict) -> None:
     system_prompt = get_prompt("status_auto")
     user_msg      = build_status_prompt(struct_status)
 
-    # Один retry: Ollama может «холодно» стартовать модель и обрывать первый запрос
-    for attempt in range(2):
-        try:
-            if provider == "api":
-                status_text = await _status_via_api(system_prompt, user_msg)
-            else:
-                status_text = await _status_via_llm(system_prompt, user_msg, _cfg)
+    try:
+        if provider == "api":
+            status_text = await _status_via_api(system_prompt, user_msg)
+        else:
+            status_text = await _status_via_llm(system_prompt, user_msg, _cfg)
 
-            if not status_text:
-                logger.warning("qwen/worker: статус-строка пустая для %s/%s/%s",
-                               router_sn, equip_type, panel_id)
-                return
-
-            await online_db.update_open_segment_status(
-                router_sn, equip_type, panel_id,
-                status_text=status_text,
-                status_hash=status_hash,
-            )
-            logger.info("qwen/worker: статус обновлён %s/%s/%s (%d симв.)",
-                        router_sn, equip_type, panel_id, len(status_text))
+        if not status_text:
+            logger.warning("qwen/worker: статус-строка пустая для %s/%s/%s",
+                           router_sn, equip_type, panel_id)
             return
 
-        except Exception as exc:
-            exc_desc = repr(exc) if not str(exc) else str(exc)
-            if attempt == 0:
-                logger.debug(
-                    "qwen/worker: попытка 1 неудачна (%s/%s/%s): %s — повтор через 10с",
-                    router_sn, equip_type, panel_id, exc_desc,
-                )
-                await asyncio.sleep(10)
-            else:
-                logger.warning(
-                    "qwen/worker: ошибка статус-строки %s/%s/%s: %s",
-                    router_sn, equip_type, panel_id, exc_desc,
-                )
+        await online_db.update_open_segment_status(
+            router_sn, equip_type, panel_id,
+            status_text=status_text,
+            status_hash=status_hash,
+        )
+        logger.info("qwen/worker: статус обновлён %s/%s/%s (%d симв.)",
+                    router_sn, equip_type, panel_id, len(status_text))
+
+    except Exception as exc:
+        exc_desc = repr(exc) if not str(exc) else str(exc)
+        logger.warning("qwen/worker: ошибка статус-строки %s/%s/%s: %s",
+                       router_sn, equip_type, panel_id, exc_desc)
 
 
 async def _status_via_llm(system_prompt: str, user_msg: str, cfg: dict) -> str:

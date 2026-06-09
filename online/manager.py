@@ -356,25 +356,15 @@ class OnlineManager:
             except Exception:
                 interval_min = 5
 
-            has_fallbacks = False
             try:
-                has_fallbacks = await self._tick_status_lines()
+                await self._tick_status_lines()
             except Exception:
                 logger.exception("StatusLineScheduler: ошибка тика")
 
-            # Если есть незакрытые fallback-ы — повторяем через 60 с, не ждём полный интервал.
-            # Это ускоряет восстановление после сбоя LLM или холодного старта Ollama.
-            if has_fallbacks:
-                await asyncio.sleep(60)
-            else:
-                await asyncio.sleep(interval_min * 60)
+            await asyncio.sleep(interval_min * 60)
 
-    async def _tick_status_lines(self) -> bool:
-        """Один тик: проверить статус всех активных машин, обновить при изменении.
-
-        Returns:
-            True если хотя бы одна машина всё ещё имеет fallback-текст (нужен повтор).
-        """
+    async def _tick_status_lines(self) -> None:
+        """Один тик: проверить статус всех активных машин, обновить при изменении."""
         from corpus.qwen_worker import get_worker
         from online.status_assembler import (
             build_structural_status, compute_status_hash, build_fallback_text,
@@ -384,10 +374,9 @@ class OnlineManager:
         worker = get_worker()
         if not worker:
             logger.debug("StatusLineScheduler: qwen_worker не запущен, пропуск")
-            return False
+            return
 
         _FALLBACK_MARKER = "Анализ готовится"
-        any_fallback = False
 
         for key, engine in list(self._engines.items()):
             try:
@@ -410,7 +399,6 @@ class OnlineManager:
                     continue
 
                 if hash_changed:
-                    # Статус изменился → записываем свежий fallback
                     fallback = build_fallback_text(struct)
                     await online_db.update_open_segment_status(
                         engine.router_sn, engine.equip_type, engine.panel_id,
@@ -422,13 +410,11 @@ class OnlineManager:
                         key, old_hash, new_hash,
                     )
                 else:
-                    # Хэш тот же, но текст — fallback: qwen не записал прозу → повторяем
                     logger.info(
-                        "StatusLineScheduler[%s]: fallback-маркер при совпадающем хэше, повтор qwen",
+                        "StatusLineScheduler[%s]: fallback при совпадающем хэше, повтор qwen",
                         key,
                     )
 
-                # Ставим в очередь qwen для замены fallback на прозу
                 worker.enqueue_status({
                     "router_sn":         engine.router_sn,
                     "equip_type":        engine.equip_type,
@@ -436,9 +422,6 @@ class OnlineManager:
                     "structural_status": struct,
                     "status_hash":       new_hash,
                 })
-                any_fallback = True
 
             except Exception:
                 logger.exception("StatusLineScheduler: ошибка для %s", key)
-
-        return any_fallback
