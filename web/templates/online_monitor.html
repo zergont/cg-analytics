@@ -42,9 +42,9 @@
                  onchange="this.form.submit()">
           <label class="form-check-label" for="monQwenSwitch" style="font-size:0.85rem">
             {% if qwen_auto_analyze %}
-              <span class="text-success fw-semibold">Qwen — вкл</span>
+              <span class="text-success fw-semibold">LLM — вкл</span>
             {% else %}
-              <span class="text-muted">Qwen — выкл</span>
+              <span class="text-muted">LLM — выкл</span>
             {% endif %}
           </label>
         </div>
@@ -61,9 +61,9 @@
         </button>
       </form>
       <form method="post" action="/online/clear-qwen-analysis" class="d-inline"
-            onsubmit="return confirm('Удалить весь анализ Qwen (humanized_md)? Claude-заключения сохранятся.')">
+            onsubmit="return confirm('Удалить весь анализ LLM (humanized_md)? Claude-заключения сохранятся.')">
         <button type="submit" class="btn btn-sm btn-outline-warning" style="font-size:0.8rem">
-          Удалить анализ Qwen
+          Удалить анализ LLM
         </button>
       </form>
     </div>

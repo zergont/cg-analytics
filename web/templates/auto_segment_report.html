@@ -210,22 +210,22 @@
     {% set has_claude   = claude_analysis and claude_analysis.status == 'done' and claude_analysis.conclusion_md %}
     {% set has_humanized = claude_analysis and claude_analysis.humanized_md %}
     <div class="card border-success mt-2">
-      <div class="card-header fw-semibold bg-success-subtle py-2">🤖 qwen (локальный)</div>
+      <div class="card-header fw-semibold bg-success-subtle py-2">🤖 LLM (локальный)</div>
       <div class="card-body py-2">
         {% if has_humanized %}
           <p class="small text-success mb-2">✓ Результат готов.</p>
           <button class="btn btn-outline-success btn-sm w-100" id="qwenBtn" onclick="sendToQwen()">
-            Перезапустить qwen →
+            Перезапустить LLM →
           </button>
         {% elif has_claude %}
           <p class="small text-muted mb-2">Переписать заключение Claude в прозу для оператора.</p>
           <button class="btn btn-success btn-sm w-100" id="qwenBtn" onclick="sendToQwen()">
-            Отправить в qwen →
+            Отправить в LLM →
           </button>
         {% else %}
           <p class="small text-muted mb-2">Сначала запустите Claude-анализ.</p>
           <button class="btn btn-success btn-sm w-100" disabled>
-            Отправить в qwen →
+            Отправить в LLM →
           </button>
         {% endif %}
         <div id="qwenStatus" class="mt-2 small text-muted" style="display:none"></div>
@@ -274,7 +274,7 @@
           ✨ Claude
         </button>
         <button class="btn btn-sm btn-outline-success" onclick="showOpenPanel('qwen')" id="tabQwen">
-          🤖 qwen
+          🤖 LLM
         </button>
         <button class="btn btn-sm btn-outline-secondary" onclick="copyOpenMd()">📋 Копировать</button>
         <a href="/online/segment/{{ seg.id }}/md" class="btn btn-sm btn-outline-secondary">↓ MD</a>
@@ -351,7 +351,7 @@
     </div>
     {# Панель: qwen #}
     <div id="openQwenPanel" class="border rounded p-3 bg-white overflow-auto flex-grow-1" style="display:none">
-      <div id="openQwenContent" class="text-muted fst-italic">Сначала запустите Claude-анализ (левая панель), затем отправьте в qwen.</div>
+      <div id="openQwenContent" class="text-muted fst-italic">Сначала запустите Claude-анализ (левая панель), затем отправьте в LLM.</div>
     </div>
     <script id="openReportMdSrc" type="text/plain">{{ run.report_md or "" }}</script>
     {% endif %}
@@ -389,7 +389,7 @@
           ✨ Claude
         </button>
         <button class="btn btn-sm btn-outline-success" onclick="showPanel('qwen')" id="tabQwen">
-          🤖 qwen
+          🤖 LLM
         </button>
         <button class="btn btn-sm btn-outline-secondary" onclick="copyMd()">
           📋 Копировать
@@ -412,7 +412,7 @@
       <div id="claudeContent" class="text-muted fst-italic">Заключение Claude не загружено.</div>
     </div>
     <div id="qwenBlock" class="border rounded p-3 bg-white overflow-auto flex-grow-1" style="display:none">
-      <div id="qwenContent" class="text-muted fst-italic">Нажмите «Отправить в qwen» в левой панели.</div>
+      <div id="qwenContent" class="text-muted fst-italic">Нажмите «Отправить в LLM» в левой панели.</div>
     </div>
 
     {# Скрытый источник MD для JS #}
@@ -506,7 +506,7 @@ async function sendToQwen() {
   btn.disabled = true;
   btn.textContent = '⏳ Отправляю…';
   status.style.display = '';
-  status.textContent = 'Подключение к qwen…';
+  status.textContent = 'Подключение к LLM…';
   showPanel('qwen');
 
   const qc = document.getElementById('qwenContent');
@@ -549,7 +549,7 @@ async function sendToQwen() {
     qc.innerHTML = '<div class="alert alert-danger">Ошибка: ' + e.message + '</div>';
   } finally {
     btn.disabled = false;
-    btn.textContent = 'Отправить в qwen →';
+    btn.textContent = 'Отправить в LLM →';
   }
 }
 </script>
@@ -626,7 +626,7 @@ async function sendToQwen() {
   btn.disabled = true;
   btn.textContent = '⏳ Отправляю…';
   status.style.display = '';
-  status.textContent = 'Подключение к qwen…';
+  status.textContent = 'Подключение к LLM…';
   showOpenPanel('qwen');
   const qc = document.getElementById('openQwenContent');
   qc.innerHTML = '<span class="streaming-cursor"></span>';
@@ -660,7 +660,7 @@ async function sendToQwen() {
     qc.innerHTML = '<div class="alert alert-danger">Ошибка: ' + e.message + '</div>';
   } finally {
     btn.disabled = false;
-    btn.textContent = 'Отправить в qwen →';
+    btn.textContent = 'Отправить в LLM →';
   }
 }
 </script>
