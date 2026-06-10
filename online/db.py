@@ -539,6 +539,31 @@ async def update_open_segment_status(
         await conn.close()
 
 
+async def get_run_state_origin_ts(seg_id: int):
+    """Вернуть t_start первого сегмента в цепочке continued_from.
+
+    Нужно для корректного расчёта времени в режиме: суточный срез создаёт
+    новый сегмент с тем же run_state, поэтому t_start текущего сегмента
+    не отражает реальное время начала режима.
+    """
+    conn = await _connect()
+    try:
+        row = await conn.fetchrow("""
+            WITH RECURSIVE chain AS (
+                SELECT id, t_start, continued_from
+                  FROM auto_segments WHERE id = $1
+                UNION ALL
+                SELECT s.id, s.t_start, s.continued_from
+                  FROM auto_segments s
+                  JOIN chain c ON s.id = c.continued_from
+            )
+            SELECT t_start FROM chain WHERE continued_from IS NULL LIMIT 1
+        """, seg_id)
+        return row["t_start"] if row else None
+    finally:
+        await conn.close()
+
+
 async def update_open_segment_warning(
     router_sn: str, equip_type: str, panel_id: int,
     analysis_md: str, fault_hash: str,

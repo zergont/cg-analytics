@@ -95,13 +95,17 @@ def build_structural_status(
     seg_row: dict,
     fault_ref=None,
     tz=None,
+    origin_ts=None,
 ) -> dict[str, Any]:
     """Собрать структурный статус из строки открытого сегмента.
 
     Args:
         seg_row:   строка из auto_segments (dict)
         fault_ref: FaultRef для расшифровки кодов тревог (может быть None)
-        tz:        часовой пояс (не используется для вычислений, зарезервирован)
+        tz:        часовой пояс (зарезервирован)
+        origin_ts: реальное начало режима (datetime) — перекрывает t_start сегмента;
+                   нужно когда текущий сегмент создан суточным срезом, а режим
+                   начался раньше (цепочка continued_from)
 
     Returns:
         dict с полями:
@@ -127,15 +131,17 @@ def build_structural_status(
     load_pct_bucket = (int(load_pct // 10) * 10) if load_pct is not None else None
 
     # ── Время в режиме ──
-    t_start = seg_row.get("t_start")
+    # Используем origin_ts если передан (реальное начало режима через цепочку
+    # continued_from), иначе t_start текущего сегмента.
+    raw_ts = origin_ts or seg_row.get("t_start")
     time_in_mode_sec = 0.0
-    if t_start:
+    if raw_ts:
         now_utc = datetime.now(timezone.utc)
-        if isinstance(t_start, datetime):
-            ts = t_start if t_start.tzinfo else t_start.replace(tzinfo=timezone.utc)
+        if isinstance(raw_ts, datetime):
+            ts = raw_ts if raw_ts.tzinfo else raw_ts.replace(tzinfo=timezone.utc)
         else:
             try:
-                ts = datetime.fromisoformat(str(t_start))
+                ts = datetime.fromisoformat(str(raw_ts))
                 if not ts.tzinfo:
                     ts = ts.replace(tzinfo=timezone.utc)
             except Exception:
@@ -255,13 +261,14 @@ def format_status_text(s: dict) -> str:
     alarms = s.get("active_alarms", [])
     dur    = s.get("time_in_mode_sec", 0)
 
-    if load is not None and s["run_state"] == 3:
-        base = f"{mode}, нагрузка {load:.0f}%"
-    else:
-        base = mode
-
+    # Режим + время (если > 1 мин)
+    base = mode
     if dur > 60:
-        base += f", {_fmt_duration(dur)}"
+        base += f" {_fmt_duration(dur)}"
+
+    # Нагрузка — только в режиме Работа
+    if load is not None and s["run_state"] == 3:
+        base += f", нагрузка {load:.0f}%"
 
     if level == "норма":
         return f"{base} — параметры в норме."
