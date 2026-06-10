@@ -50,7 +50,16 @@ _KEY_ROLES: dict[int, list[str]] = {
     6: ["COOLANT_TEMP", "RPM"],
 }
 
-_SEV_RANK: dict[str, int] = {"SHUTDOWN": 3, "ALARM": 3, "WARNING": 2, "INFO": 1}
+# Ранг severity от панели управления (CONTROLLER_FAULT)
+_PANEL_SEV_RANK: dict[str, int] = {"SHUTDOWN": 3, "ALARM": 3, "WARNING": 2}
+
+# Общий ранг для сортировки итогового уровня
+_OVERALL_RANK: dict[str, int] = {
+    "авария":         4,
+    "предупреждение": 3,
+    "внимание":       2,
+    "норма":          1,
+}
 
 
 # ── Вспомогательные ───────────────────────────────────────────────────────────
@@ -79,16 +88,39 @@ def _fmt_duration(sec: float) -> str:
 
 # ── Публичный API ─────────────────────────────────────────────────────────────
 
-def compute_severity_level(active_dets: list[dict]) -> str:
-    """Вычислить уровень серьёзности: норма / внимание / тревога."""
-    if not active_dets:
+def compute_panel_severity(active_dets: list[dict]) -> str:
+    """Уровень по сигналам панели управления (scenario=CONTROLLER_FAULT).
+
+    норма / предупреждение / авария
+    """
+    panel = [d for d in active_dets if d.get("scenario") == "CONTROLLER_FAULT"]
+    if not panel:
         return "норма"
-    max_rank = max((_SEV_RANK.get(d.get("severity", ""), 0) for d in active_dets), default=0)
-    if max_rank >= 3:
-        return "тревога"
-    if max_rank >= 1:
-        return "внимание"
+    rank = max((_PANEL_SEV_RANK.get(d.get("severity", ""), 0) for d in panel), default=0)
+    if rank >= 3:
+        return "авария"
+    if rank >= 2:
+        return "предупреждение"
     return "норма"
+
+
+def compute_analytics_severity(active_dets: list[dict]) -> str:
+    """Уровень по детекциям нашего аналитического движка (все кроме CONTROLLER_FAULT).
+
+    норма / внимание
+    """
+    analytics = [d for d in active_dets if d.get("scenario") != "CONTROLLER_FAULT"]
+    return "внимание" if analytics else "норма"
+
+
+def compute_severity_level(active_dets: list[dict]) -> str:
+    """Итоговый уровень — максимум из панели и аналитики.
+
+    норма < внимание < предупреждение < авария
+    """
+    panel     = compute_panel_severity(active_dets)
+    analytics = compute_analytics_severity(active_dets)
+    return max(panel, analytics, key=lambda x: _OVERALL_RANK.get(x, 0))
 
 
 def build_structural_status(
@@ -110,7 +142,8 @@ def build_structural_status(
     Returns:
         dict с полями:
           run_state, mode_label, load_pct, load_pct_bucket,
-          severity_level, time_in_mode_sec, active_alarms[], key_params[]
+          severity_level, panel_severity, analytics_severity,
+          time_in_mode_sec, panel_alarms[], analytics_alarms[], key_params[]
     """
     run_state: int = seg_row.get("run_state") or 0
     mode_label = _RUN_STATE_LABELS.get(run_state, f"RUN_STATE={run_state}")
@@ -148,15 +181,18 @@ def build_structural_status(
                 ts = now_utc
         time_in_mode_sec = max(0.0, (now_utc - ts).total_seconds())
 
-    # ── Severity ──
-    sev_level = compute_severity_level(active_dets)
+    # ── Severity (раздельно по источнику) ──
+    panel_sev     = compute_panel_severity(active_dets)
+    analytics_sev = compute_analytics_severity(active_dets)
+    sev_level     = compute_severity_level(active_dets)
 
     # ── Активные тревоги с расшифровкой из справочника ──
-    active_alarms: list[dict] = []
+    panel_alarms:     list[dict] = []
+    analytics_alarms: list[dict] = []
     for d in active_dets:
-        severity   = d.get("severity", "INFO")
-        scenario   = d.get("scenario", "?")
-        trigger    = d.get("trigger", "")
+        severity    = d.get("severity", "INFO")
+        scenario    = d.get("scenario", "?")
+        trigger     = d.get("trigger", "")
         fault_codes = d.get("fault_codes") or []
 
         # Расшифровка: первый verified-код из справочника
@@ -175,13 +211,17 @@ def build_structural_status(
         if not description:
             description = trigger or scenario
 
-        active_alarms.append({
+        alarm = {
             "scenario":    scenario,
             "severity":    severity,
             "trigger":     trigger,
             "fault_codes": fault_codes,
             "description": description,
-        })
+        }
+        if scenario == "CONTROLLER_FAULT":
+            panel_alarms.append(alarm)
+        else:
+            analytics_alarms.append(alarm)
 
     # ── Ключевые параметры для режима ──
     key_params: list[dict] = []
@@ -202,39 +242,41 @@ def build_structural_status(
                     pass
 
     return {
-        "run_state":         run_state,
-        "mode_label":        mode_label,
-        "load_pct":          load_pct,
-        "load_pct_bucket":   load_pct_bucket,
-        "severity_level":    sev_level,
-        "time_in_mode_sec":  time_in_mode_sec,
-        "active_alarms":     active_alarms,
-        "key_params":        key_params,
+        "run_state":          run_state,
+        "mode_label":         mode_label,
+        "load_pct":           load_pct,
+        "load_pct_bucket":    load_pct_bucket,
+        "severity_level":     sev_level,
+        "panel_severity":     panel_sev,
+        "analytics_severity": analytics_sev,
+        "time_in_mode_sec":   time_in_mode_sec,
+        "panel_alarms":       panel_alarms,
+        "analytics_alarms":   analytics_alarms,
+        "key_params":         key_params,
     }
 
 
 def compute_status_hash(s: dict) -> str:
     """Хэш структурного статуса для детекции изменений.
 
-    Реагирует на: смену режима, уровня тревоги, набора fault-кодов, ведра нагрузки,
-    каждый час работы в режиме, изменение ключевых параметров на 10+ единиц.
-    НЕ реагирует на мелкие флуктуации аналоговых значений.
+    Реагирует на: смену режима, уровней тревоги (панель + аналитика), набора fault-кодов,
+    ведра нагрузки, каждый час в режиме, изменение ключевых параметров на 10+ единиц.
     """
+    all_alarms = s.get("panel_alarms", []) + s.get("analytics_alarms", [])
     fault_codes = tuple(sorted(
         code
-        for alarm in s.get("active_alarms", [])
+        for alarm in all_alarms
         for code in alarm.get("fault_codes", [])
     ))
-    # Часовой бакет: текст регенерируется раз в час (актуализирует "время в режиме")
     time_bucket = int(s.get("time_in_mode_sec", 0) // 3600)
-    # Ключевые параметры с шагом 10 единиц (игнорируем мелкий шум, ловим значимые изменения)
     params_bucket = tuple(
         (p["role"], int(p["value"] // 10) * 10)
         for p in sorted(s.get("key_params", []), key=lambda x: x["role"])
     )
     key = (
         s["run_state"],
-        s["severity_level"],
+        s.get("panel_severity", "норма"),
+        s.get("analytics_severity", "норма"),
         s.get("load_pct_bucket"),
         fault_codes,
         time_bucket,
@@ -244,10 +286,11 @@ def compute_status_hash(s: dict) -> str:
 
 
 def compute_fault_hash(s: dict) -> str:
-    """Хэш только набора fault-кодов — для детекции новых неисправностей."""
+    """Хэш набора fault-кодов по всем источникам — для детекции новых неисправностей."""
+    all_alarms = s.get("panel_alarms", []) + s.get("analytics_alarms", [])
     fault_codes = tuple(sorted(
         code
-        for alarm in s.get("active_alarms", [])
+        for alarm in all_alarms
         for code in alarm.get("fault_codes", [])
     ))
     return hashlib.md5(str(fault_codes).encode()).hexdigest()[:12]
@@ -255,30 +298,37 @@ def compute_fault_hash(s: dict) -> str:
 
 def format_status_text(s: dict) -> str:
     """Детерминированная статус-строка — всегда актуальна, без LLM."""
-    mode   = s["mode_label"]
-    load   = s.get("load_pct")
-    level  = s["severity_level"]
-    alarms = s.get("active_alarms", [])
-    dur    = s.get("time_in_mode_sec", 0)
+    mode              = s["mode_label"]
+    load              = s.get("load_pct")
+    panel_sev         = s.get("panel_severity", "норма")
+    analytics_sev     = s.get("analytics_severity", "норма")
+    panel_alarms      = s.get("panel_alarms", [])
+    analytics_alarms  = s.get("analytics_alarms", [])
+    dur               = s.get("time_in_mode_sec", 0)
 
-    # Режим + время (если > 1 мин)
+    # Режим + время + нагрузка
     base = mode
     if dur > 60:
         base += f" {_fmt_duration(dur)}"
-
-    # Нагрузка — только в режиме Работа
     if load is not None and s["run_state"] == 3:
         base += f", нагрузка {load:.0f}%"
 
-    if level == "норма":
-        return f"{base} — параметры в норме."
-    elif alarms:
-        first = alarms[0]
-        desc = first.get("description") or first["scenario"]
-        marker = "⚠" if level == "внимание" else "🔴"
-        return f"{base} — {marker} {level}: {desc}."
-    else:
-        return f"{base} — {level}."
+    parts = []
+
+    if panel_sev == "авария" and panel_alarms:
+        desc = panel_alarms[0].get("description") or panel_alarms[0]["scenario"]
+        parts.append(f"🔴 авария панели: {desc}")
+    elif panel_sev == "предупреждение" and panel_alarms:
+        desc = panel_alarms[0].get("description") or panel_alarms[0]["scenario"]
+        parts.append(f"🟠 предупреждение панели: {desc}")
+
+    if analytics_sev == "внимание" and analytics_alarms:
+        desc = analytics_alarms[0].get("description") or analytics_alarms[0]["scenario"]
+        parts.append(f"⚠ внимание: {desc}")
+
+    if parts:
+        return f"{base} — {' | '.join(parts)}."
+    return f"{base} — параметры в норме."
 
 
 def build_warning_prompt(s: dict) -> str:
@@ -296,14 +346,27 @@ def build_warning_prompt(s: dict) -> str:
     if dur > 60:
         lines.append(f"Время в режиме: {_fmt_duration(dur)}")
 
-    lines.append(f"Уровень: {s['severity_level']}")
+    lines.append(f"Итоговый уровень: {s['severity_level']}")
+    lines.append(f"Источник панели: {s.get('panel_severity', 'норма')}")
+    lines.append(f"Источник аналитики: {s.get('analytics_severity', 'норма')}")
     lines.append("")
 
-    alarms = s.get("active_alarms", [])
-    if alarms:
-        lines.append("Активные неисправности:")
-        for a in alarms:
-            desc = a.get("description") or a["scenario"]
+    panel_alarms     = s.get("panel_alarms", [])
+    analytics_alarms = s.get("analytics_alarms", [])
+
+    if panel_alarms:
+        lines.append("Сигналы панели управления (CONTROLLER_FAULT):")
+        for a in panel_alarms:
+            desc  = a.get("description") or a["scenario"]
+            codes = ", ".join(str(c) for c in a.get("fault_codes", []))
+            lines.append(f"  [{a['severity']}] {desc}" + (f" (коды: {codes})" if codes else ""))
+
+    if analytics_alarms:
+        if panel_alarms:
+            lines.append("")
+        lines.append("Сигналы аналитического движка:")
+        for a in analytics_alarms:
+            desc  = a.get("description") or a["scenario"]
             codes = ", ".join(str(c) for c in a.get("fault_codes", []))
             lines.append(f"  [{a['severity']}] {desc}" + (f" (коды: {codes})" if codes else ""))
 

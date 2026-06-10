@@ -2034,23 +2034,30 @@ async def api_online_status():
         batch_end_iso   = obs["batch_end_ts"].isoformat() if obs.get("batch_end_ts") else None
 
         # ── ИИ-оператор: статус-строка ──
-        status_text     = None
-        severity_level  = "норма"
-        status_updated  = None
+        status_text      = None
+        severity_level   = "норма"
+        panel_severity   = "норма"
+        analytics_severity = "норма"
+        status_updated   = None
         if open_seg:
             status_text = open_seg.get("status_text")
             if open_seg.get("status_updated_at"):
                 status_updated = open_seg["status_updated_at"].isoformat()
-            # severity_level из active_detections (детерминированно)
             try:
-                from online.status_assembler import compute_severity_level
+                from online.status_assembler import (
+                    compute_severity_level,
+                    compute_panel_severity,
+                    compute_analytics_severity,
+                )
                 dets_raw = open_seg.get("active_detections_json")
                 if isinstance(dets_raw, str):
                     import json as _json
                     dets = _json.loads(dets_raw) if dets_raw else []
                 else:
                     dets = dets_raw or []
-                severity_level = compute_severity_level(dets)
+                severity_level     = compute_severity_level(dets)
+                panel_severity     = compute_panel_severity(dets)
+                analytics_severity = compute_analytics_severity(dets)
             except Exception:
                 pass
 
@@ -2074,9 +2081,11 @@ async def api_online_status():
                 if open_seg and open_seg.get("t_start") else None
             ),
             # ИИ-оператор Уровень 1
-            "status_text":    status_text,
-            "severity_level": severity_level,
-            "status_updated": status_updated,
+            "status_text":       status_text,
+            "severity_level":    severity_level,
+            "panel_severity":    panel_severity,
+            "analytics_severity": analytics_severity,
+            "status_updated":    status_updated,
         })
     return JSONResponse(result)
 
@@ -2135,6 +2144,9 @@ async def api_machines():
         severity_level = None
         status_updated = None
 
+        panel_severity     = "норма"
+        analytics_severity = "норма"
+
         if seg:
             cr = seg.get("coking_risk_json")
             if isinstance(cr, str):
@@ -2146,10 +2158,16 @@ async def api_machines():
             status_text    = seg.get("status_text")
             status_updated = seg["status_updated_at"].isoformat() if seg.get("status_updated_at") else None
             try:
-                from online.status_assembler import compute_severity_level
+                from online.status_assembler import (
+                    compute_severity_level,
+                    compute_panel_severity,
+                    compute_analytics_severity,
+                )
                 dets_raw = seg.get("active_detections_json")
                 dets = dets_raw if isinstance(dets_raw, list) else _json.loads(dets_raw or "[]")
-                severity_level = compute_severity_level(dets)
+                severity_level     = compute_severity_level(dets)
+                panel_severity     = compute_panel_severity(dets)
+                analytics_severity = compute_analytics_severity(dets)
             except Exception:
                 pass
 
@@ -2163,11 +2181,13 @@ async def api_machines():
             "status":        obs["status"],            # running / stopped
             "run_state":     run_state,
             "run_state_label": _RUN_STATE_LABELS.get(run_state, str(run_state)) if run_state is not None else None,
-            "severity_level":  severity_level,         # норма / внимание / тревога
-            "status_text":     status_text,            # ИИ-оператор: текущая сводка
+            "severity_level":    severity_level,       # норма / внимание / предупреждение / авария
+            "panel_severity":    panel_severity,       # норма / предупреждение / авария
+            "analytics_severity": analytics_severity,  # норма / внимание
+            "status_text":     status_text,
             "status_updated":  status_updated,
             "coking_risk":     coking_risk,            # GREEN / YELLOW / RED
-            # Ссылки для навигации
+            "warning_analysis_md": seg.get("warning_analysis_md") if seg else None,
             "_links": {
                 "segments": f"/api/machine/{obs['router_sn']}/{obs['equip_type']}/{obs['panel_id']}/segments",
                 "calendar":  f"/online/calendar/{obs['router_sn']}/{obs['equip_type']}/{obs['panel_id']}",

@@ -408,8 +408,22 @@ async function refreshStatus() {
       const statusLine = row.querySelector('.status-line');
       if (statusLine) {
         if (item.status_text) {
-          const sevColor = {норма: 'text-secondary', внимание: 'text-warning', тревога: 'text-danger'};
-          statusLine.className = 'status-line mt-1 ' + (sevColor[item.severity_level] || 'text-secondary');
+          // 4-уровневая схема: норма(серый) внимание(жёлтый) предупреждение(оранжевый) авария(красный)
+          const sevColor = {
+            'норма':         'text-secondary',
+            'внимание':      'text-warning',
+            'предупреждение':'text-warning',   // оранжевый через Bootstrap нет, используем warning
+            'авария':        'text-danger',
+          };
+          // Если есть панельная авария/предупреждение — выделяем сильнее
+          const panelSev = item.panel_severity || 'норма';
+          if (panelSev === 'авария') {
+            statusLine.className = 'status-line mt-1 fw-semibold text-danger';
+          } else if (panelSev === 'предупреждение') {
+            statusLine.className = 'status-line mt-1 fw-semibold text-warning';
+          } else {
+            statusLine.className = 'status-line mt-1 ' + (sevColor[item.severity_level] || 'text-secondary');
+          }
           statusLine.textContent = item.status_text;
           statusLine.style.display = '';
         } else {
