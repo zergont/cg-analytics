@@ -164,22 +164,29 @@ def build_structural_status(
     load_pct_bucket = (int(load_pct // 10) * 10) if load_pct is not None else None
 
     # ── Время в режиме ──
-    # Используем origin_ts если передан (реальное начало режима через цепочку
-    # continued_from), иначе t_start текущего сегмента.
-    raw_ts = origin_ts or seg_row.get("t_start")
-    time_in_mode_sec = 0.0
-    if raw_ts:
-        now_utc = datetime.now(timezone.utc)
-        if isinstance(raw_ts, datetime):
-            ts = raw_ts if raw_ts.tzinfo else raw_ts.replace(tzinfo=timezone.utc)
-        else:
-            try:
-                ts = datetime.fromisoformat(str(raw_ts))
-                if not ts.tzinfo:
-                    ts = ts.replace(tzinfo=timezone.utc)
-            except Exception:
-                ts = now_utc
-        time_in_mode_sec = max(0.0, (now_utc - ts).total_seconds())
+    # Берём из _total_run_state_sec в characteristics_json — аналитика уже посчитала
+    # накопленное время через всю цепочку суточных резов (inherited_run_state_sec + duration).
+    # Fallback: wallclock от t_start (для первого тика, когда chars ещё нет).
+    chars        = _parse_json(seg_row.get("characteristics_json")) or {}
+    total_rs_sec = chars.get("_total_run_state_sec") or {}
+    # JSON ключи — строки; сравниваем и str и int
+    time_in_mode_sec = float(
+        total_rs_sec.get(run_state) or total_rs_sec.get(str(run_state)) or 0.0
+    )
+    if not time_in_mode_sec:
+        raw_ts = origin_ts or seg_row.get("t_start")
+        if raw_ts:
+            now_utc = datetime.now(timezone.utc)
+            if isinstance(raw_ts, datetime):
+                ts = raw_ts if raw_ts.tzinfo else raw_ts.replace(tzinfo=timezone.utc)
+            else:
+                try:
+                    ts = datetime.fromisoformat(str(raw_ts))
+                    if not ts.tzinfo:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                except Exception:
+                    ts = now_utc
+            time_in_mode_sec = max(0.0, (now_utc - ts).total_seconds())
 
     # ── Severity (раздельно по источнику) ──
     panel_sev     = compute_panel_severity(active_dets)

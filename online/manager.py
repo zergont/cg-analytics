@@ -382,11 +382,7 @@ class OnlineManager:
                 if not seg:
                     continue
 
-                # Реальное начало режима: идём по цепочке continued_from,
-                # чтобы не терять время при суточных срезах.
-                origin_ts = await online_db.get_run_state_origin_ts(seg["id"])
-                struct    = build_structural_status(seg, engine._fault_ref, engine.tz,
-                                                    origin_ts=origin_ts)
+                struct = build_structural_status(seg, engine._fault_ref, engine.tz)
                 new_hash  = compute_status_hash(struct)
                 old_hash  = seg.get("status_hash")
 

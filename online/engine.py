@@ -795,7 +795,16 @@ class OnlinePollEngine:
             "analytics_version":      ANALYTICS_VERSION,
             "current_values_json":    current_values,
             "active_detections_json": active_detections,
-            "characteristics_json":   open_seg.to_dict(),
+            "characteristics_json":   {
+                **open_seg.to_dict(),
+                "_total_run_state_sec": {
+                    **self.inherited_run_state_sec,
+                    open_seg.run_state: (
+                        self.inherited_run_state_sec.get(open_seg.run_state, 0.0)
+                        + open_seg.duration_sec
+                    ),
+                },
+            },
             "report_md":              open_report_md,
             "continued_from":         open_continued_from,
         })
