@@ -521,7 +521,7 @@ async def clear_segments(
 
 async def update_open_segment_status(
     router_sn: str, equip_type: str, panel_id: int,
-    status_text: str, status_hash: str,
+    status_text: str,
 ) -> None:
     """Обновить детерминированную статус-строку открытого сегмента."""
     conn = await _connect()
@@ -529,12 +529,11 @@ async def update_open_segment_status(
         await conn.execute("""
             UPDATE auto_segments
             SET status_text       = $4,
-                status_hash       = $5,
                 status_updated_at = now(),
                 updated_at        = now()
             WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
               AND t_end IS NULL
-        """, router_sn, equip_type, panel_id, status_text, status_hash)
+        """, router_sn, equip_type, panel_id, status_text)
     finally:
         await conn.close()
 

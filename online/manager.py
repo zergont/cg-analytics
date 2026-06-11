@@ -367,7 +367,7 @@ class OnlineManager:
     async def _tick_status_lines(self) -> None:
         """Один тик: детерминированный статус + детектор новых предупреждений → Claude."""
         from online.status_assembler import (
-            build_structural_status, compute_status_hash,
+            build_structural_status,
             compute_fault_hash, format_status_text,
         )
         from online import db as online_db
@@ -383,18 +383,12 @@ class OnlineManager:
                     continue
 
                 struct = build_structural_status(seg, engine._fault_ref, engine.tz)
-                new_hash  = compute_status_hash(struct)
-                old_hash  = seg.get("status_hash")
 
-                # ── Детерминированный статус (всегда актуален, без LLM) ──
-                if new_hash != old_hash:
-                    status_text = format_status_text(struct)
-                    await online_db.update_open_segment_status(
-                        engine.router_sn, engine.equip_type, engine.panel_id,
-                        status_text=status_text,
-                        status_hash=new_hash,
-                    )
-                    logger.debug("StatusScheduler[%s]: статус обновлён", key)
+                # ── Детерминированный статус — пишем каждый тик ──
+                await online_db.update_open_segment_status(
+                    engine.router_sn, engine.equip_type, engine.panel_id,
+                    status_text=format_status_text(struct),
+                )
 
                 # ── Детектор предупреждений → Claude ──
                 severity = struct["severity_level"]

@@ -263,35 +263,6 @@ def build_structural_status(
     }
 
 
-def compute_status_hash(s: dict) -> str:
-    """Хэш структурного статуса для детекции изменений.
-
-    Реагирует на: смену режима, уровней тревоги (панель + аналитика), набора fault-кодов,
-    ведра нагрузки, каждый час в режиме, изменение ключевых параметров на 10+ единиц.
-    """
-    all_alarms = s.get("panel_alarms", []) + s.get("analytics_alarms", [])
-    fault_codes = tuple(sorted(
-        code
-        for alarm in all_alarms
-        for code in alarm.get("fault_codes", [])
-    ))
-    time_bucket = int(s.get("time_in_mode_sec", 0) // 3600)
-    params_bucket = tuple(
-        (p["role"], int(p["value"] // 10) * 10)
-        for p in sorted(s.get("key_params", []), key=lambda x: x["role"])
-    )
-    key = (
-        s["run_state"],
-        s.get("panel_severity", "норма"),
-        s.get("analytics_severity", "норма"),
-        s.get("load_pct_bucket"),
-        fault_codes,
-        time_bucket,
-        params_bucket,
-    )
-    return hashlib.md5(str(key).encode()).hexdigest()[:12]
-
-
 def compute_fault_hash(s: dict) -> str:
     """Хэш набора fault-кодов по всем источникам — для детекции новых неисправностей."""
     all_alarms = s.get("panel_alarms", []) + s.get("analytics_alarms", [])
