@@ -424,7 +424,9 @@ async function refreshStatus() {
           } else {
             statusLine.className = 'status-line mt-1 ' + (sevColor[item.severity_level] || 'text-secondary');
           }
-          statusLine.textContent = item.status_text;
+          statusLine.dataset.text    = item.status_text;
+          statusLine.dataset.updated = item.status_updated || '';
+          tickStatusAge(statusLine);
           statusLine.style.display = '';
         } else {
           statusLine.style.display = 'none';
@@ -474,9 +476,28 @@ async function refreshStatus() {
   } catch(e) {}
 }
 
+// ── Счётчик актуальности статус-строки ───────────────────────────────────
+function tickStatusAge(el) {
+  const text    = el.dataset.text    || '';
+  const updated = el.dataset.updated || '';
+  if (!text) return;
+  if (!updated) { el.textContent = text; return; }
+  const ageSec = Math.round((Date.now() - new Date(updated).getTime()) / 1000);
+  let ageStr;
+  if      (ageSec < 60)   ageStr = ageSec + ' с';
+  else if (ageSec < 3600) ageStr = Math.floor(ageSec / 60) + ' мин';
+  else                    ageStr = Math.floor(ageSec / 3600) + ' ч';
+  el.textContent = text + ' · ' + ageStr + ' назад';
+}
+
+function tickAllStatusAges() {
+  document.querySelectorAll('.status-line[data-text]').forEach(tickStatusAge);
+}
+
 refreshStatus();
 refreshPipelineStatus();
 setInterval(refreshStatus, 10000);
 setInterval(refreshPipelineStatus, 10000);
+setInterval(tickAllStatusAges, 5000);
 </script>
 {% endblock %}
