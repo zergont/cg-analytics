@@ -425,7 +425,7 @@ async function refreshStatus() {
             statusLine.className = 'status-line mt-1 ' + (sevColor[item.severity_level] || 'text-secondary');
           }
           statusLine.dataset.text    = item.status_text;
-          statusLine.dataset.updated = item.status_updated || '';
+          statusLine.dataset.updated = item.processed_to || item.status_updated || '';
           tickStatusAge(statusLine);
           statusLine.style.display = '';
         } else {
