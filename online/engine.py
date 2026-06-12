@@ -167,7 +167,7 @@ def _extract_coking_risk_from_segments(segments: list) -> CokingRisk:
 
 
 def _extract_open_segment_data(seg) -> tuple[dict, list]:
-    """Извлечь текущие значения и активные детекции из последнего подсегмента."""
+    """Извлечь текущие значения и активные детекции из открытого сегмента."""
     if not seg.subsegments:
         return {}, []
     last_sub = seg.subsegments[-1]
@@ -188,9 +188,17 @@ def _extract_open_segment_data(seg) -> tuple[dict, list]:
         },
     }
 
-    active_dets: list[dict] = [
-        d.to_dict() for d in last_sub.detections
-    ]
+    # Детекции из всех подсегментов: сигнал из раннего подсегмента
+    # остаётся активным пока сегмент открыт. Дедупликация по (scenario, fault_codes).
+    seen: set[tuple] = set()
+    active_dets: list[dict] = []
+    for sub in seg.subsegments:
+        for d in sub.detections:
+            d_dict = d.to_dict()
+            key = (d_dict.get("scenario"), tuple(sorted(d_dict.get("fault_codes") or [])))
+            if key not in seen:
+                seen.add(key)
+                active_dets.append(d_dict)
 
     return current_values, active_dets
 
