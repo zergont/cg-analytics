@@ -265,14 +265,17 @@ def build_structural_status(
 
 
 def compute_fault_hash(s: dict) -> str:
-    """Хэш набора fault-кодов по всем источникам — для детекции новых неисправностей."""
+    """Хэш активных тревог — для детекции новых неисправностей.
+
+    Включает scenario + fault_codes, чтобы аналитические детекции без fault_codes
+    (METRIC_RULE) тоже давали уникальный хэш и не считались «уже проанализированными».
+    """
     all_alarms = s.get("panel_alarms", []) + s.get("analytics_alarms", [])
-    fault_codes = tuple(sorted(
-        code
+    key = tuple(sorted(
+        (alarm.get("scenario", ""), tuple(sorted(alarm.get("fault_codes") or [])))
         for alarm in all_alarms
-        for code in alarm.get("fault_codes", [])
     ))
-    return hashlib.md5(str(fault_codes).encode()).hexdigest()[:12]
+    return hashlib.md5(str(key).encode()).hexdigest()[:12]
 
 
 def format_status_text(s: dict) -> str:
