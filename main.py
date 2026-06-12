@@ -21,7 +21,6 @@ from analytics.source import init_source_pool, close_source_pool
 from llm.client import apply_llm_settings, get_llm_settings
 from llm.router import apply_task, TASKS as _ROUTER_TASKS
 from corpus.settings import apply_claude_settings, get_claude_settings
-from corpus.prompt import SYSTEM_PROMPT as _CLAUDE_DEFAULT_PROMPT
 from scheduler import start_scheduler, stop_scheduler
 from web.routes import router, _apply_tz
 import online.manager as _online_mgr
@@ -57,7 +56,6 @@ async def lifespan(app: FastAPI):
         model          = await get_app_setting("llm_model",          _defaults["model"]),
         temperature    = float(await get_app_setting("llm_temperature",    str(_defaults["temperature"]))),
         num_ctx        = int(await get_app_setting("llm_num_ctx",       str(_defaults["num_ctx"]))),
-        prompt         = await get_app_setting("llm_system_prompt",   _defaults["prompt"]),
         stream         = await get_app_setting("llm_stream", "true") == "true",
     )
     # Загружаем настройки Claude API из БД
@@ -67,7 +65,6 @@ async def lifespan(app: FastAPI):
         max_tool_calls= int(await get_app_setting("claude_max_tool_calls", str(_claude_defaults["max_tool_calls"]))),
         max_tokens=     int(await get_app_setting("claude_max_tokens",     str(_claude_defaults["max_tokens"]))),
         proxy=          await get_app_setting("claude_proxy",          _claude_defaults["proxy"]),
-        system_prompt=  await get_app_setting("claude_system_prompt",  _CLAUDE_DEFAULT_PROMPT),
     )
     # Загружаем маршрутизацию AI-задач из БД
     for _task_id, (_label, _def_provider, _def_prompt) in _ROUTER_TASKS.items():

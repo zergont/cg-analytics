@@ -927,7 +927,7 @@ async def settings_page(request: Request):
     status_line_interval_min = int(
         await analytics.get_app_setting("status_line_interval_min", "1")
     )
-    from llm.router import get_all as _get_router, TASKS as _TASKS
+    from llm.router import get_all as _get_router, TASKS as _TASKS, TASK_HINTS as _HINTS
     return templates.TemplateResponse(request, "settings.html", {
         "settings": cfg,
         "registry": registry,
@@ -941,7 +941,7 @@ async def settings_page(request: Request):
         "analytics_verify_on_close": analytics_verify == "true",
         "status_line_interval_min":  status_line_interval_min,
         "ai_routing":   _get_router(),
-        "ai_task_meta": {k: {"label": v[0]} for k, v in _TASKS.items()},
+        "ai_task_meta": {k: {"label": v[0], "hint": _HINTS.get(k, "")} for k, v in _TASKS.items()},
     })
 
 

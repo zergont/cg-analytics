@@ -224,7 +224,7 @@
                 {% for task_id, meta in ai_task_meta.items() %}
                 {% set r = ai_routing[task_id] %}
                 <div class="border rounded p-3 mb-3">
-                    <div class="d-flex align-items-center gap-3 mb-2">
+                    <div class="d-flex align-items-center gap-3 mb-1">
                         <span class="fw-semibold" style="min-width:260px">{{ meta.label }}</span>
                         <div class="d-flex gap-3">
                             <div class="form-check form-check-inline">
@@ -245,6 +245,9 @@
                             </div>
                         </div>
                     </div>
+                    {% if meta.hint %}
+                    <div class="text-muted small mb-2">{{ meta.hint }}</div>
+                    {% endif %}
                     <details>
                         <summary class="text-muted small" style="cursor:pointer">Системный промпт</summary>
                         <textarea name="ai_{{ task_id }}_prompt"

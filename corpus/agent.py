@@ -76,7 +76,8 @@ async def analyse_segment(
         _model          = claude_cfg["model"]
         _max_tool_calls = claude_cfg["max_tool_calls"]
         _max_tokens     = claude_cfg["max_tokens"]
-        _system_prompt  = system_prompt or claude_cfg["system_prompt"]
+        from llm.router import get_prompt as _router_prompt
+        _system_prompt  = system_prompt or _router_prompt("seg_auto")
 
         while tool_calls_count < _max_tool_calls:
             loops_count += 1

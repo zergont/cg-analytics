@@ -14,17 +14,15 @@ from collections.abc import AsyncIterator
 
 import httpx
 
-from llm.prompts import ANALYSIS_SYSTEM_PROMPT
-
 logger = logging.getLogger(__name__)
 
 # ── In-memory конфигурация LLM (применяется при старте и через веб-морду) ──────
+# Системные промпты живут в AI-роутере (llm/router.py) — здесь только подключение.
 _cfg: dict = {
     "base_url":    "http://localhost:11434",
     "model":       "qwen2.5:14b",
     "temperature": 0.1,
     "num_ctx":     16384,
-    "prompt":      ANALYSIS_SYSTEM_PROMPT,
     "stream":      True,   # False — модели без поддержки стриминга (например gemma)
 }
 
@@ -34,7 +32,6 @@ def apply_llm_settings(
     model: str,
     temperature: float,
     num_ctx: int,
-    prompt: str = "",
     stream: bool = True,
 ) -> None:
     """Обновить конфигурацию LLM в памяти (вступает в силу немедленно)."""
@@ -62,7 +59,7 @@ async def stream_analysis(md_packet: str) -> AsyncIterator[str]:
         Строки-токены по мере генерации (или вся строка сразу при stream=False).
     """
     from llm.router import get_prompt
-    system = get_prompt("analyze_page") or _cfg.get("prompt", "")
+    system = get_prompt("analyze_page")
 
     use_stream = _cfg.get("stream", True)
     payload = {
