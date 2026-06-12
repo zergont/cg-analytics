@@ -2,6 +2,7 @@
 {% block title %}Онлайн-мониторинг — cg-analytics{% endblock %}
 
 {% block content %}
+<style>.text-orange { color: #fd7e14 !important; }</style>
 <div class="d-flex align-items-center gap-3 mb-3">
   <h4 class="mb-0">Онлайн-мониторинг</h4>
   <span class="text-muted" style="font-size:0.8rem" id="status-ts"></span>
@@ -408,19 +409,19 @@ async function refreshStatus() {
       const statusLine = row.querySelector('.status-line');
       if (statusLine) {
         if (item.status_text) {
-          // 4-уровневая схема: норма(серый) внимание(жёлтый) предупреждение(оранжевый) авария(красный)
+          // 4-уровневая схема: норма < предупреждение(аналитика) < внимание(панель WARNING) < авария
           const sevColor = {
             'норма':         'text-secondary',
-            'внимание':      'text-warning',
-            'предупреждение':'text-warning',   // оранжевый через Bootstrap нет, используем warning
+            'предупреждение':'text-warning',   // аналитика — жёлтый 🟡
+            'внимание':      'text-orange',    // панель WARNING — оранжевый 🟠
             'авария':        'text-danger',
           };
-          // Если есть панельная авария/предупреждение — выделяем сильнее
+          // Если есть панельная авария/внимание — выделяем сильнее
           const panelSev = item.panel_severity || 'норма';
           if (panelSev === 'авария') {
             statusLine.className = 'status-line mt-1 fw-semibold text-danger';
-          } else if (panelSev === 'предупреждение') {
-            statusLine.className = 'status-line mt-1 fw-semibold text-warning';
+          } else if (panelSev === 'внимание') {
+            statusLine.className = 'status-line mt-1 fw-semibold text-orange';
           } else {
             statusLine.className = 'status-line mt-1 ' + (sevColor[item.severity_level] || 'text-secondary');
           }

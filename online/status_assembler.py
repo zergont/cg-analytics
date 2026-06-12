@@ -54,10 +54,11 @@ _KEY_ROLES: dict[int, list[str]] = {
 _PANEL_SEV_RANK: dict[str, int] = {"SHUTDOWN": 3, "ALARM": 3, "WARNING": 2}
 
 # Общий ранг для сортировки итогового уровня
+# предупреждение (аналитика) < внимание (панель WARNING) < авария (панель ALARM/SHUTDOWN)
 _OVERALL_RANK: dict[str, int] = {
     "авария":         4,
-    "предупреждение": 3,
-    "внимание":       2,
+    "внимание":       3,
+    "предупреждение": 2,
     "норма":          1,
 }
 
@@ -91,7 +92,7 @@ def _fmt_duration(sec: float) -> str:
 def compute_panel_severity(active_dets: list[dict]) -> str:
     """Уровень по сигналам панели управления (scenario=CONTROLLER_FAULT).
 
-    норма / предупреждение / авария
+    норма / внимание (WARNING) / авария (ALARM/SHUTDOWN)
     """
     panel = [d for d in active_dets if d.get("scenario") == "CONTROLLER_FAULT"]
     if not panel:
@@ -100,17 +101,17 @@ def compute_panel_severity(active_dets: list[dict]) -> str:
     if rank >= 3:
         return "авария"
     if rank >= 2:
-        return "предупреждение"
+        return "внимание"
     return "норма"
 
 
 def compute_analytics_severity(active_dets: list[dict]) -> str:
     """Уровень по детекциям нашего аналитического движка (все кроме CONTROLLER_FAULT).
 
-    норма / внимание
+    норма / предупреждение
     """
     analytics = [d for d in active_dets if d.get("scenario") != "CONTROLLER_FAULT"]
-    return "внимание" if analytics else "норма"
+    return "предупреждение" if analytics else "норма"
 
 
 def compute_severity_level(active_dets: list[dict]) -> str:
@@ -296,13 +297,13 @@ def format_status_text(s: dict) -> str:
     if panel_sev == "авария" and panel_alarms:
         desc = panel_alarms[0].get("description") or panel_alarms[0]["scenario"]
         parts.append(f"🔴 панель: {desc}")
-    elif panel_sev == "предупреждение" and panel_alarms:
+    elif panel_sev == "внимание" and panel_alarms:
         desc = panel_alarms[0].get("description") or panel_alarms[0]["scenario"]
         parts.append(f"🟠 панель: {desc}")
 
-    if analytics_sev == "внимание" and analytics_alarms:
+    if analytics_sev == "предупреждение" and analytics_alarms:
         desc = analytics_alarms[0].get("description") or analytics_alarms[0]["scenario"]
-        parts.append(f"⚠ аналитика: {desc}")
+        parts.append(f"🟡 аналитика: {desc}")
 
     if parts:
         return f"{base} — {' | '.join(parts)}."
