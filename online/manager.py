@@ -472,12 +472,20 @@ async def _analyze_warning_claude(
 
     logger.info("WarningGate: анализ для %s/%s/%s (hash=%s)",
                 router_sn, equip_type, panel_id, fault_hash)
+    http_client = None
     try:
+        import httpx
         claude_cfg  = get_claude_settings()
         user_prompt = build_warning_prompt(struct)
         can_cancel  = struct.get("panel_severity", "норма") == "норма"
 
-        client = anthropic.AsyncAnthropic(api_key=app_settings.anthropic_api_key)
+        # API ходит через прокси из настроек Claude (как corpus/agent и playground)
+        if claude_cfg.get("proxy"):
+            http_client = httpx.AsyncClient(proxy=claude_cfg["proxy"])
+        client = anthropic.AsyncAnthropic(
+            api_key=app_settings.anthropic_api_key,
+            http_client=http_client,
+        )
         response = await client.messages.create(
             model=claude_cfg["model"],
             max_tokens=1024,
@@ -544,3 +552,6 @@ async def _analyze_warning_claude(
         # Fail-open: предупреждение остаётся видимым, подавление не ставится
         logger.exception("WarningGate: ошибка для %s/%s/%s",
                          router_sn, equip_type, panel_id)
+    finally:
+        if http_client:
+            await http_client.aclose()
