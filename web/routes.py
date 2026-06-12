@@ -2104,9 +2104,10 @@ async def api_online_status():
 # через fastapi.middleware.cors.CORSMiddleware в main.py.
 
 def _seg_severity(chars_json: Any, active_dets_json: Any = None) -> str | None:
-    """Извлечь максимальный severity из characteristics_json или active_detections_json."""
+    """Severity сегмента с учётом источника (градация как в status_assembler):
+    панель ALARM/SHUTDOWN → авария, панель WARNING → внимание (оранжевый),
+    любая детекция аналитики → INFO = предупреждение (жёлтый). None — детекций нет."""
     import json as _json
-    sev_rank = {"SHUTDOWN": 4, "ALARM": 3, "WARNING": 2, "INFO": 1}
 
     dets: list[dict] = []
     # Закрытый сегмент — из characteristics_json
@@ -2119,10 +2120,20 @@ def _seg_severity(chars_json: Any, active_dets_json: Any = None) -> str | None:
         ad = active_dets_json if isinstance(active_dets_json, list) else _json.loads(active_dets_json or "[]")
         dets = ad or []
 
+    dets = [d for d in dets if isinstance(d, dict)]
     if not dets:
         return None
-    best = max((d.get("severity", "") for d in dets), key=lambda s: sev_rank.get(s, 0))
-    return best or None
+
+    panel_rank = {"SHUTDOWN": 4, "ALARM": 3, "WARNING": 2}
+    panel = [d.get("severity", "") for d in dets if d.get("scenario") == "CONTROLLER_FAULT"]
+    best_panel = max(panel, key=lambda s: panel_rank.get(s, 0), default="")
+    if panel_rank.get(best_panel, 0) >= 3:
+        return best_panel
+    if best_panel == "WARNING":
+        return "WARNING"
+    if any(d.get("scenario") != "CONTROLLER_FAULT" for d in dets):
+        return "INFO"
+    return None
 
 
 @router.get("/api/machines", response_class=JSONResponse)
