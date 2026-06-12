@@ -38,10 +38,11 @@
   </ol>
 </nav>
 
-<div class="row g-2" style="height:calc(100vh - 140px);overflow:hidden">
+{# Бесконечная страница без внутренних прокруток — инструмент анализа, не дашборд #}
+<div class="row g-2">
 
   {# ── Левая панель ── #}
-  <div class="col-md-4 col-lg-3 overflow-y-auto h-100">
+  <div class="col-md-4 col-lg-3">
 
     {# Шапка сегмента #}
     <div class="card mb-3">
@@ -235,7 +236,7 @@
   </div>
 
   {# ── Правая панель ── #}
-  <div class="col-md-8 col-lg-9 d-flex flex-column h-100">
+  <div class="col-md-8 col-lg-9 d-flex flex-column">
 
     {% if is_open %}
     {# ── Открытый: статус-баннер ── #}
@@ -245,7 +246,8 @@
     {% elif max_sev == "ALARM" %}
       <div class="alert alert-danger py-2 mb-2">🟠 <strong>ALARM</strong> — требуется внимание</div>
     {% elif max_sev == "WARNING" %}
-      <div class="alert alert-warning py-2 mb-2">🟡 <strong>ПРЕДУПРЕЖДЕНИЕ БЛОКА АНАЛИТИКИ</strong></div>
+      <div class="alert alert-warning py-2 mb-2">🟡 <strong>ПРЕДУПРЕЖДЕНИЕ БЛОКА АНАЛИТИКИ</strong>
+        {%- if gate_checked %} — ✓ проверено ИИ, угрозы нет{% endif %}</div>
     {% else %}
       <div class="alert alert-success py-2 mb-2">🟢 <strong>Норма</strong> — нарушений не выявлено</div>
     {% endif %}
@@ -255,14 +257,11 @@
       <div class="small text-muted mb-2 px-1">{{ seg.status_text }}</div>
     {% endif %}
     {% if seg.warning_analysis_md %}
-      {# max-height + внутренний скролл: длинный анализ не должен распирать
-         колонку — контейнер страницы обрезан по высоте экрана (overflow:hidden) #}
-      <div class="card border-warning mb-2 flex-shrink-0">
+      <div class="card border-warning mb-2">
         <div class="card-header fw-semibold bg-warning-subtle py-1 small">
           ⚠ Анализ предупреждения — Claude
         </div>
-        <div class="card-body py-2 small overflow-y-auto" id="warningAnalysisContent"
-             style="max-height:45vh"></div>
+        <div class="card-body py-2 small" id="warningAnalysisContent"></div>
       </div>
     {% endif %}
 
@@ -300,7 +299,7 @@
     </div>
 
     {# Панель: Аналитика #}
-    <div id="openAnalyticsPanel" class="border rounded p-3 bg-white overflow-auto flex-grow-1">
+    <div id="openAnalyticsPanel" class="border rounded p-3 bg-white">
       {% if has_report %}
         <div id="openMdContent"></div>
       {% else %}
@@ -313,7 +312,7 @@
     </div>
 
     {# Панель: Текущие параметры #}
-    <div id="openLivePanel" class="border rounded p-3 bg-white overflow-auto flex-grow-1" style="display:none">
+    <div id="openLivePanel" class="border rounded p-3 bg-white" style="display:none">
       {% if current_values and current_values.get("values") %}
       <div class="mb-2">
         <span class="badge
@@ -357,16 +356,16 @@
 
     {# Панель: Сырой текст #}
     {% if has_report %}
-    <div id="openRawPanel" class="flex-grow-1" style="display:none">
-      <textarea id="openRawMd" class="form-control font-monospace w-100 h-100"
-                style="font-size:.78rem;resize:none;white-space:pre-wrap" readonly></textarea>
+    <div id="openRawPanel" class="" style="display:none">
+      <textarea id="openRawMd" class="form-control font-monospace w-100" rows="40"
+                style="font-size:.78rem;resize:vertical;white-space:pre-wrap" readonly></textarea>
     </div>
     {# Панель: Claude #}
-    <div id="openClaudePanel" class="border rounded p-3 bg-white overflow-auto flex-grow-1" style="display:none">
+    <div id="openClaudePanel" class="border rounded p-3 bg-white" style="display:none">
       <div id="openClaudeContent" class="text-muted fst-italic">Заключение Claude не загружено.</div>
     </div>
     {# Панель: qwen #}
-    <div id="openQwenPanel" class="border rounded p-3 bg-white overflow-auto flex-grow-1" style="display:none">
+    <div id="openQwenPanel" class="border rounded p-3 bg-white" style="display:none">
       <div id="openQwenContent" class="text-muted fst-italic">Сначала запустите Claude-анализ (левая панель), затем отправьте в LLM.</div>
     </div>
     <script id="openReportMdSrc" type="text/plain">{{ run.report_md or "" }}</script>
@@ -417,17 +416,17 @@
     </div>
 
     {# Панели #}
-    <div id="mdRendered" class="border rounded p-3 bg-white overflow-auto flex-grow-1">
+    <div id="mdRendered" class="border rounded p-3 bg-white">
       <div id="mdContent"></div>
     </div>
-    <div id="rawBlock" class="flex-grow-1" style="display:none">
-      <textarea id="rawMd" class="form-control font-monospace w-100 h-100"
-                style="font-size:.78rem;resize:none;white-space:pre-wrap" readonly></textarea>
+    <div id="rawBlock" class="" style="display:none">
+      <textarea id="rawMd" class="form-control font-monospace w-100" rows="40"
+                style="font-size:.78rem;resize:vertical;white-space:pre-wrap" readonly></textarea>
     </div>
-    <div id="claudeBlock" class="border rounded p-3 bg-white overflow-auto flex-grow-1" style="display:none">
+    <div id="claudeBlock" class="border rounded p-3 bg-white" style="display:none">
       <div id="claudeContent" class="text-muted fst-italic">Заключение Claude не загружено.</div>
     </div>
-    <div id="qwenBlock" class="border rounded p-3 bg-white overflow-auto flex-grow-1" style="display:none">
+    <div id="qwenBlock" class="border rounded p-3 bg-white" style="display:none">
       <div id="qwenContent" class="text-muted fst-italic">Нажмите «Отправить в LLM» в левой панели.</div>
     </div>
 

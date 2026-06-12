@@ -1771,9 +1771,11 @@ async def online_segment_detail(request: Request, seg_id: int):
             "_seg_id":           seg_id,
             "_calendar_url":     f"/online/calendar/{seg['router_sn']}/{seg['equip_type']}/{seg['panel_id']}",
         }
+        from online.status_assembler import is_analytics_suppressed as _gate_sup
         return templates.TemplateResponse(request, "auto_segment_report.html", {
             "seg": seg, "is_open": True,
             "run": run_open,
+            "gate_checked": _gate_sup(seg, active_dets or []),
             "current_values": current_vals,
             "active_detections": active_dets,
             "coking_risk": coking_risk,
@@ -2364,6 +2366,8 @@ async def api_segment_detail(seg_id: int):
         "report_md":     seg.get("report_md"),
         # ИИ-анализ
         "analysis":      analysis,
+        # Онлайн-анализ предупреждения (гейт Claude) — есть и у открытого сегмента
+        "warning_analysis_md": seg.get("warning_analysis_md"),
         # Для открытого сегмента — живые данные
         "status_text":   seg.get("status_text") if is_open else None,
         "_links": {
