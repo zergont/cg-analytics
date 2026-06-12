@@ -349,6 +349,23 @@ def format_status_text(s: dict) -> str:
     return f"{base} — параметры в норме."
 
 
+def extract_alarm_text(s: dict) -> str | None:
+    """Текст главной тревоги для карточки внешнего UI: панель важнее аналитики.
+
+    None — тревог нет (норма или срабатывание подавлено гейтом).
+    """
+    panel_sev        = s.get("panel_severity", "норма")
+    analytics_sev    = s.get("analytics_severity", "норма")
+    panel_alarms     = s.get("panel_alarms", [])
+    analytics_alarms = s.get("analytics_alarms", [])
+
+    if panel_sev != "норма" and panel_alarms:
+        return panel_alarms[0].get("description") or panel_alarms[0].get("scenario")
+    if analytics_sev == "предупреждение" and analytics_alarms:
+        return analytics_alarms[0].get("description") or analytics_alarms[0].get("scenario")
+    return None
+
+
 def build_warning_prompt(s: dict) -> str:
     """Промпт для Claude-анализа предупреждения (новые fault-коды)."""
     lines = [

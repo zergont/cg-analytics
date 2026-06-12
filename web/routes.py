@@ -2184,6 +2184,9 @@ async def api_machines():
         severity_level = None
         status_updated = None
         gate_checked   = False
+        status_struct: dict = {}
+        gate_events_count = 0
+        gate_cancelled_count = 0
 
         if seg:
             cr = seg.get("coking_risk_json")
@@ -2195,6 +2198,24 @@ async def api_machines():
             coking_risk    = (cr or {}).get("risk_level")
             status_text    = seg.get("status_text")
             status_updated = seg["status_updated_at"].isoformat() if seg.get("status_updated_at") else None
+            ss = seg.get("status_struct_json")
+            if isinstance(ss, str):
+                try:
+                    ss = _json.loads(ss)
+                except Exception:
+                    ss = None
+            status_struct = ss if isinstance(ss, dict) else {}
+            gl = seg.get("gate_log")
+            if isinstance(gl, str):
+                try:
+                    gl = _json.loads(gl)
+                except Exception:
+                    gl = None
+            if isinstance(gl, list):
+                gate_events_count    = len(gl)
+                gate_cancelled_count = sum(
+                    1 for e in gl if isinstance(e, dict) and e.get("decision_applied")
+                )
             try:
                 from online.status_assembler import compute_severity_level, is_analytics_suppressed
                 dets_raw = seg.get("active_detections_json")
@@ -2222,7 +2243,14 @@ async def api_machines():
             "severity_level":    severity_level,       # норма / предупреждение / внимание / авария
             # Срабатывание аналитики проверено и отменено гейтом Claude
             "gate_checked":      gate_checked,
+            # Сколько предупреждений обработал гейт за текущий сегмент
+            "gate_events_count":    gate_events_count,
+            "gate_cancelled_count": gate_cancelled_count,
             "status_text":     status_text,
+            # Структурный статус для карточки: режим, время в режиме, текст тревоги
+            "mode_label":       status_struct.get("mode_label"),
+            "time_in_mode_sec": status_struct.get("time_in_mode_sec"),
+            "alarm_text":       status_struct.get("alarm_text"),
             "status_updated":  status_updated,
             "coking_risk":     coking_risk,            # GREEN / YELLOW / RED
             "warning_analysis_md": seg.get("warning_analysis_md") if seg else None,

@@ -523,18 +523,22 @@ async def clear_segments(
 async def update_open_segment_status(
     router_sn: str, equip_type: str, panel_id: int,
     status_text: str,
+    status_struct: dict | None = None,
 ) -> None:
-    """Обновить детерминированную статус-строку открытого сегмента."""
+    """Обновить детерминированную статус-строку (и её структурную форму) открытого сегмента."""
+    import json as _json
     conn = await _connect()
     try:
         await conn.execute("""
             UPDATE auto_segments
-            SET status_text       = $4,
-                status_updated_at = now(),
-                updated_at        = now()
+            SET status_text        = $4,
+                status_struct_json = COALESCE($5::jsonb, status_struct_json),
+                status_updated_at  = now(),
+                updated_at         = now()
             WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
               AND t_end IS NULL
-        """, router_sn, equip_type, panel_id, status_text)
+        """, router_sn, equip_type, panel_id, status_text,
+             _json.dumps(status_struct, ensure_ascii=False) if status_struct else None)
     finally:
         await conn.close()
 

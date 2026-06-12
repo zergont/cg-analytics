@@ -102,6 +102,11 @@ ALTER TABLE auto_segments
     ADD COLUMN IF NOT EXISTS warning_analysis_md   TEXT,
     ADD COLUMN IF NOT EXISTS warning_analyzed_hash TEXT;
 
+-- Миграция v4.8.0: структурная форма статуса для карточек внешнего UI
+-- (режим, время в режиме, текст тревоги — без парсинга status_text)
+ALTER TABLE auto_segments
+    ADD COLUMN IF NOT EXISTS status_struct_json JSONB;
+
 -- Миграция v4.2.0: гейт предупреждений Claude — подавление ложных срабатываний аналитики
 -- gate_suppressed_hash: хэш состава аналитических детекций, отменённых вердиктом Claude;
 --   действует пока состав не изменился и сегмент открыт.

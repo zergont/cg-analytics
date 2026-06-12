@@ -368,7 +368,7 @@ class OnlineManager:
         """Один тик: детерминированный статус + детектор новых предупреждений → Claude."""
         from online.status_assembler import (
             build_structural_status,
-            compute_fault_hash, format_status_text,
+            compute_fault_hash, format_status_text, extract_alarm_text,
         )
         from online import db as online_db
 
@@ -388,6 +388,13 @@ class OnlineManager:
                 await online_db.update_open_segment_status(
                     engine.router_sn, engine.equip_type, engine.panel_id,
                     status_text=format_status_text(struct),
+                    status_struct={
+                        "run_state":            struct.get("run_state"),
+                        "mode_label":           struct.get("mode_label"),
+                        "time_in_mode_sec":     struct.get("time_in_mode_sec"),
+                        "alarm_text":           extract_alarm_text(struct),
+                        "analytics_suppressed": struct.get("analytics_suppressed", False),
+                    },
                 )
 
                 # ── Детектор предупреждений → Claude ──
