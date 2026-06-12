@@ -255,11 +255,14 @@
       <div class="small text-muted mb-2 px-1">{{ seg.status_text }}</div>
     {% endif %}
     {% if seg.warning_analysis_md %}
-      <div class="card border-warning mb-2">
+      {# max-height + внутренний скролл: длинный анализ не должен распирать
+         колонку — контейнер страницы обрезан по высоте экрана (overflow:hidden) #}
+      <div class="card border-warning mb-2 flex-shrink-0">
         <div class="card-header fw-semibold bg-warning-subtle py-1 small">
           ⚠ Анализ предупреждения — Claude
         </div>
-        <div class="card-body py-2 small" id="warningAnalysisContent"></div>
+        <div class="card-body py-2 small overflow-y-auto" id="warningAnalysisContent"
+             style="max-height:45vh"></div>
       </div>
     {% endif %}
 
