@@ -2254,7 +2254,9 @@ async def api_machine_segments(
     Каждый сегмент включает метаданные, уровень тревог и флаги наличия ИИ-анализа.
     """
     from online import db as odb
-    from datetime import datetime, timezone
+    from datetime import datetime, timezone, timedelta
+    from config import get_tz
+    from db.analytics import get_app_setting
     import json as _json
 
     ts_from = ts_to = None
@@ -2264,6 +2266,13 @@ async def api_machine_segments(
             ts_to = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
         else:
             ts_to = datetime(year, month + 1, 1, tzinfo=timezone.utc)
+
+    # Операционные сутки: daily_split_hour local → следующие daily_split_hour (дефолт 09:00)
+    tz = get_tz()
+    try:
+        daily_hour = int(await get_app_setting("daily_split_hour", "9"))
+    except Exception:
+        daily_hour = 9
 
     segments = await odb.get_segments_for_calendar(
         router_sn, equip_type, panel_id,
@@ -2296,10 +2305,17 @@ async def api_machine_segments(
         if seg.get("t_start") and seg.get("t_end"):
             dur = (seg["t_end"] - seg["t_start"]).total_seconds()
 
+        # Операционный день сегмента — как в календаре cg-analytics
+        op_day = (
+            (seg["t_start"].astimezone(tz) - timedelta(hours=daily_hour)).date().isoformat()
+            if seg.get("t_start") else None
+        )
+
         result.append({
             "id":            seg_id,
             "t_start":       seg["t_start"].isoformat() if seg.get("t_start") else None,
             "t_end":         seg["t_end"].isoformat()   if seg.get("t_end")   else None,
+            "op_day":        op_day,                      # YYYY-MM-DD операционных суток
             "is_open":       is_open,
             "run_state":     run_state,
             "run_state_label": _RUN_STATE_LABELS.get(run_state, str(run_state)) if run_state is not None else None,
