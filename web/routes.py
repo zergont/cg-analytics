@@ -2162,9 +2162,6 @@ async def api_machines():
         severity_level = None
         status_updated = None
 
-        panel_severity     = "норма"
-        analytics_severity = "норма"
-
         if seg:
             cr = seg.get("coking_risk_json")
             if isinstance(cr, str):
@@ -2176,16 +2173,10 @@ async def api_machines():
             status_text    = seg.get("status_text")
             status_updated = seg["status_updated_at"].isoformat() if seg.get("status_updated_at") else None
             try:
-                from online.status_assembler import (
-                    compute_severity_level,
-                    compute_panel_severity,
-                    compute_analytics_severity,
-                )
+                from online.status_assembler import compute_severity_level
                 dets_raw = seg.get("active_detections_json")
                 dets = dets_raw if isinstance(dets_raw, list) else _json.loads(dets_raw or "[]")
-                severity_level     = compute_severity_level(dets)
-                panel_severity     = compute_panel_severity(dets)
-                analytics_severity = compute_analytics_severity(dets)
+                severity_level = compute_severity_level(dets)
             except Exception:
                 pass
 
@@ -2199,9 +2190,9 @@ async def api_machines():
             "status":        obs["status"],            # running / stopped
             "run_state":     run_state,
             "run_state_label": _RUN_STATE_LABELS.get(run_state, str(run_state)) if run_state is not None else None,
+            # Уровень однозначно кодирует источник: предупреждение — только аналитика,
+            # внимание/авария — только панель
             "severity_level":    severity_level,       # норма / предупреждение / внимание / авария
-            "panel_severity":    panel_severity,       # норма / внимание / авария
-            "analytics_severity": analytics_severity,  # норма / предупреждение
             "status_text":     status_text,
             "status_updated":  status_updated,
             "coking_risk":     coking_risk,            # GREEN / YELLOW / RED
