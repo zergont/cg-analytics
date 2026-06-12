@@ -117,7 +117,7 @@ def compute_analytics_severity(active_dets: list[dict]) -> str:
 def compute_severity_level(active_dets: list[dict]) -> str:
     """Итоговый уровень — максимум из панели и аналитики.
 
-    норма < внимание < предупреждение < авария
+    норма < предупреждение < внимание < авария
     """
     panel     = compute_panel_severity(active_dets)
     analytics = compute_analytics_severity(active_dets)

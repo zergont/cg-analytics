@@ -20,9 +20,10 @@
 .seg-event-open { border-left:3px solid #0d6efd !important; }
 .seg-vicon { position:absolute; top:2px; right:4px; font-size:.65rem;
              font-weight:700; line-height:1; }
-.seg-vicon-ok      { color:#198754; }
-.seg-vicon-warning { color:#856404; }
-.seg-vicon-alarm   { color:#dc3545; }
+.seg-vicon-ok        { color:#198754; }  /* норма — зелёный */
+.seg-vicon-warning   { color:#b08800; }  /* предупреждение (аналитика) — жёлтый */
+.seg-vicon-attention { color:#fd7e14; }  /* внимание (панель WARNING) — оранжевый */
+.seg-vicon-alarm     { color:#dc3545; }  /* авария (панель ALARM/SHUTDOWN) — красный */
 /* AI/Q-кружки */
 .ai-badge, .q-badge {
             position:absolute; bottom:3px;
@@ -144,13 +145,15 @@
     {% set ai = ai_statuses.get(seg.id) if ai_statuses else none %}
     <a href="/online/segment/{{ seg.id }}"
        class="seg-event rs-{{ rs if rs is not none else 'na' }}{% if is_open %} seg-event-open{% endif %}">
-      {# Иконка статуса нарушений #}
-      {% if vlv == "ok" %}
+      {# Иконка итогового уровня: норма < предупреждение < внимание < авария #}
+      {% if vlv == "норма" %}
         <span class="seg-vicon seg-vicon-ok" title="Норма — нарушений не выявлено">✓</span>
-      {% elif vlv == "warning" %}
-        <span class="seg-vicon seg-vicon-warning" title="Выявлены нарушения (WARNING)">⚠</span>
-      {% elif vlv == "alarm" %}
-        <span class="seg-vicon seg-vicon-alarm" title="Выявлены нарушения (ALARM)">❗</span>
+      {% elif vlv == "предупреждение" %}
+        <span class="seg-vicon seg-vicon-warning" title="Предупреждение — детекции аналитики">⚠</span>
+      {% elif vlv == "внимание" %}
+        <span class="seg-vicon seg-vicon-attention" title="Внимание — панель: WARNING">⚠</span>
+      {% elif vlv == "авария" %}
+        <span class="seg-vicon seg-vicon-alarm" title="Авария — панель: ALARM/SHUTDOWN">❗</span>
       {% endif %}
       {# L-кружок (LLM) #}
       {% if ai and ai.has_qwen %}
@@ -225,8 +228,9 @@
   <span class="px-2 py-1 rounded rs-5">Охлаждение на х.х.</span>
   <span class="px-2 py-1 rounded seg-event-open" style="background:#e8f0fe;color:#084298">↖ Открытый</span>
   <span class="ms-3 text-success fw-bold">✓</span><span style="color:#6c757d"> Норма</span>
-  <span class="text-warning fw-bold">⚠</span><span style="color:#6c757d"> Нарушение</span>
-  <span class="text-danger fw-bold">❗</span><span style="color:#6c757d"> Авария</span>
+  <span class="fw-bold" style="color:#b08800">⚠</span><span style="color:#6c757d"> Предупреждение (аналитика)</span>
+  <span class="fw-bold" style="color:#fd7e14">⚠</span><span style="color:#6c757d"> Внимание (панель)</span>
+  <span class="text-danger fw-bold">❗</span><span style="color:#6c757d"> Авария (панель)</span>
 </div>
 
 {# Модальное окно удаления сегментов #}

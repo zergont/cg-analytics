@@ -1542,10 +1542,11 @@ async def online_calendar(
     segments = await odb.get_segments_for_calendar(router_sn, equip_type, panel_id)
 
     # Группируем по операционному дню (сутки = 09:00 local → следующие 09:00)
-    _SEV_RANK = {"INFO": 1, "WARNING": 2, "ALARM": 3, "SHUTDOWN": 3}
+    from online.status_assembler import compute_severity_level
 
     def _violation_level(characteristics_json) -> str | None:
-        """None = нет данных/открытый; 'ok'; 'warning'; 'alarm'."""
+        """None = нет данных/открытый; иначе итоговый уровень как в status_assembler:
+        норма / предупреждение (аналитика) / внимание (панель WARNING) / авария (панель ALARM/SHUTDOWN)."""
         import json as _json
         if isinstance(characteristics_json, str):
             try: characteristics_json = _json.loads(characteristics_json)
@@ -1555,13 +1556,19 @@ async def online_calendar(
         checks = characteristics_json.get("sequence_checks") or []
         if not any(isinstance(c, dict) for c in checks):
             return None
-        if not any(not c.get("passed", True) for c in checks if isinstance(c, dict)):
-            return "ok"
-        max_rank = 0
-        for sub in (characteristics_json.get("subsegments") or []):
-            for det in (sub.get("detections") or []):
-                max_rank = max(max_rank, _SEV_RANK.get(det.get("severity", ""), 0))
-        return "alarm" if max_rank >= 3 else "warning"
+        dets = [
+            det
+            for sub in (characteristics_json.get("subsegments") or [])
+            for det in (sub.get("detections") or [])
+            if isinstance(det, dict)
+        ]
+        level = compute_severity_level(dets)
+        # Проваленная sequence-проверка без детекции — тоже сигнал аналитики
+        if level == "норма" and any(
+            not c.get("passed", True) for c in checks if isinstance(c, dict)
+        ):
+            level = "предупреждение"
+        return level
 
     segs_by_day: dict[date, list] = defaultdict(list)
     for seg in segments:
@@ -2181,9 +2188,9 @@ async def api_machines():
             "status":        obs["status"],            # running / stopped
             "run_state":     run_state,
             "run_state_label": _RUN_STATE_LABELS.get(run_state, str(run_state)) if run_state is not None else None,
-            "severity_level":    severity_level,       # норма / внимание / предупреждение / авария
-            "panel_severity":    panel_severity,       # норма / предупреждение / авария
-            "analytics_severity": analytics_severity,  # норма / внимание
+            "severity_level":    severity_level,       # норма / предупреждение / внимание / авария
+            "panel_severity":    panel_severity,       # норма / внимание / авария
+            "analytics_severity": analytics_severity,  # норма / предупреждение
             "status_text":     status_text,
             "status_updated":  status_updated,
             "coking_risk":     coking_risk,            # GREEN / YELLOW / RED
