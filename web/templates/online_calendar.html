@@ -17,13 +17,15 @@
              font-size:.72rem; line-height:1.3; cursor:pointer;
              text-decoration:none; display:block; position:relative; }
 .seg-event:hover { opacity:.85; filter:brightness(.95); }
-.seg-event-open { border-left:3px solid #0d6efd !important; }
-.seg-vicon { position:absolute; top:2px; right:4px; font-size:.65rem;
-             font-weight:700; line-height:1; }
-.seg-vicon-ok        { color:#198754; }  /* норма — зелёный */
-.seg-vicon-warning   { color:#b08800; }  /* предупреждение (аналитика) — жёлтый */
-.seg-vicon-attention { color:#fd7e14; }  /* внимание (панель WARNING) — оранжевый */
-.seg-vicon-alarm     { color:#dc3545; }  /* авария (панель ALARM/SHUTDOWN) — красный */
+/* Левый край — серьёзность: норма < предупреждение < внимание < авария */
+.sev-ok        { border-left:3px solid #198754; }  /* норма — зелёный */
+.sev-warning   { border-left:3px solid #ffc107; }  /* предупреждение (аналитика) — жёлтый */
+.sev-attention { border-left:3px solid #fd7e14; }  /* внимание (панель WARNING) — оранжевый */
+.sev-alarm     { border-left:3px solid #dc3545; }  /* авария (панель ALARM/SHUTDOWN) — красный */
+.sev-na        { border-left:3px solid #dee2e6; }  /* нет данных */
+/* Маркер открытого сегмента */
+.open-dot { width:8px; height:8px; border-radius:50%; background:#0d6efd; display:inline-block; }
+.seg-event .open-dot { position:absolute; top:4px; right:5px; }
 /* AI/Q-кружки */
 .ai-badge, .q-badge {
             position:absolute; bottom:3px;
@@ -38,14 +40,14 @@
 .ai-proc    { background:#6c757d; animation:ai-pulse .9s ease-in-out infinite; }
 .ai-err     { background:#dc3545; opacity:.6; }
 @keyframes ai-pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
-/* run_state цвета */
-.rs-0  { background:#e9ecef; color:#495057; border-left:3px solid #adb5bd; }
-.rs-1  { background:#fff3cd; color:#664d03; border-left:3px solid #ffc107; }
-.rs-2  { background:#d1ecf1; color:#0c5460; border-left:3px solid #17a2b8; }
-.rs-3  { background:#cfe2ff; color:#084298; border-left:3px solid #0d6efd; }
-.rs-4  { background:#f8d7da; color:#842029; border-left:3px solid #dc3545; }
-.rs-5  { background:#d1ecf1; color:#0c5460; border-left:3px solid #6c757d; }
-.rs-na { background:#f8f9fa; color:#6c757d; border-left:3px solid #dee2e6; }
+/* run_state — закраска плашки (тип сегмента) */
+.rs-0  { background:#e9ecef; color:#495057; }
+.rs-1  { background:#fff3cd; color:#664d03; }
+.rs-2  { background:#d1ecf1; color:#0c5460; }
+.rs-3  { background:#cfe2ff; color:#084298; }
+.rs-4  { background:#f8d7da; color:#842029; }
+.rs-5  { background:#d1ecf1; color:#0c5460; }
+.rs-na { background:#f8f9fa; color:#6c757d; }
 </style>
 
 <nav aria-label="breadcrumb" class="mb-2">
@@ -142,18 +144,21 @@
     {% set cr_lv = cr.get("risk_level","GREEN") if cr else "GREEN" %}
 
     {% set vlv = seg.violation_level %}
+    {% set sev_cls = {"норма": "sev-ok",
+                      "предупреждение": "sev-warning",
+                      "внимание": "sev-attention",
+                      "авария": "sev-alarm"}.get(vlv, "sev-na") %}
+    {% set sev_title = {"норма": "Норма — нарушений не выявлено",
+                        "предупреждение": "Предупреждение — детекции аналитики",
+                        "внимание": "Внимание — панель: WARNING",
+                        "авария": "Авария — панель: ALARM/SHUTDOWN"}.get(vlv, "Нет данных по серьёзности") %}
     {% set ai = ai_statuses.get(seg.id) if ai_statuses else none %}
     <a href="/online/segment/{{ seg.id }}"
-       class="seg-event rs-{{ rs if rs is not none else 'na' }}{% if is_open %} seg-event-open{% endif %}">
-      {# Иконка итогового уровня: норма < предупреждение < внимание < авария #}
-      {% if vlv == "норма" %}
-        <span class="seg-vicon seg-vicon-ok" title="Норма — нарушений не выявлено">✓</span>
-      {% elif vlv == "предупреждение" %}
-        <span class="seg-vicon seg-vicon-warning" title="Предупреждение — детекции аналитики">⚠</span>
-      {% elif vlv == "внимание" %}
-        <span class="seg-vicon seg-vicon-attention" title="Внимание — панель: WARNING">⚠</span>
-      {% elif vlv == "авария" %}
-        <span class="seg-vicon seg-vicon-alarm" title="Авария — панель: ALARM/SHUTDOWN">❗</span>
+       class="seg-event rs-{{ rs if rs is not none else 'na' }} {{ sev_cls }}"
+       title="{{ sev_title }}">
+      {# Маркер открытого сегмента #}
+      {% if is_open %}
+        <span class="open-dot" title="Открытый сегмент"></span>
       {% endif %}
       {# L-кружок (LLM) #}
       {% if ai and ai.has_qwen %}
@@ -219,18 +224,24 @@
 </div>
 
 {# Легенда #}
-<div class="d-flex gap-2 flex-wrap mt-2" style="font-size:.75rem">
+<div class="d-flex gap-2 flex-wrap mt-2 align-items-center" style="font-size:.75rem">
+  <span style="color:#6c757d">Закраска — режим:</span>
   <span class="px-2 py-1 rounded rs-0">Стоп</span>
   <span class="px-2 py-1 rounded rs-1">Задержка пуска</span>
   <span class="px-2 py-1 rounded rs-2">Прогрев</span>
   <span class="px-2 py-1 rounded rs-3">Работа</span>
   <span class="px-2 py-1 rounded rs-4">Разгрузка</span>
   <span class="px-2 py-1 rounded rs-5">Охлаждение на х.х.</span>
-  <span class="px-2 py-1 rounded seg-event-open" style="background:#e8f0fe;color:#084298">↖ Открытый</span>
-  <span class="ms-3 text-success fw-bold">✓</span><span style="color:#6c757d"> Норма</span>
-  <span class="fw-bold" style="color:#b08800">⚠</span><span style="color:#6c757d"> Предупреждение (аналитика)</span>
-  <span class="fw-bold" style="color:#fd7e14">⚠</span><span style="color:#6c757d"> Внимание (панель)</span>
-  <span class="text-danger fw-bold">❗</span><span style="color:#6c757d"> Авария (панель)</span>
+</div>
+<div class="d-flex gap-2 flex-wrap mt-1 align-items-center" style="font-size:.75rem">
+  <span style="color:#6c757d">Левый край — серьёзность:</span>
+  <span class="px-2 py-1 rounded sev-ok"        style="background:#f8f9fa">Норма</span>
+  <span class="px-2 py-1 rounded sev-warning"   style="background:#f8f9fa">Предупреждение (аналитика)</span>
+  <span class="px-2 py-1 rounded sev-attention" style="background:#f8f9fa">Внимание (панель)</span>
+  <span class="px-2 py-1 rounded sev-alarm"     style="background:#f8f9fa">Авария (панель)</span>
+  <span class="ms-2"><span class="open-dot"></span> Открытый сегмент</span>
+  <span class="ms-2"><span class="ai-badge ai-norm" style="position:static;display:inline-block">AI</span> Claude</span>
+  <span><span class="q-badge" style="position:static;display:inline-block">L</span> LLM</span>
 </div>
 
 {# Модальное окно удаления сегментов #}
