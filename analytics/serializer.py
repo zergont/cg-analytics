@@ -30,6 +30,13 @@ _SEVERITY_EMOJI = {
     "INFO": "🔵",
 }
 
+_SEVERITY_LABEL = {
+    "SHUTDOWN": "АВАРИЯ (SHUTDOWN)",
+    "ALARM":    "АВАРИЯ (ALARM)",
+    "WARNING":  "ПРЕДУПРЕЖДЕНИЕ АНАЛИТИКИ",
+    "INFO":     "INFO",
+}
+
 _ZONE_RU = {
     "LOW": "Малая нагрузка",
     "NORMAL": "Нормальная нагрузка",
@@ -201,10 +208,10 @@ def to_markdown(
     for sev in ["SHUTDOWN", "ALARM", "WARNING", "INFO"]:
         cnt = by_severity.get(sev, 0)
         if cnt:
-            a(f"| — {_SEVERITY_EMOJI.get(sev, '')} {sev} | {cnt} |")
+            a(f"| — {_SEVERITY_EMOJI.get(sev, '')} {_SEVERITY_LABEL.get(sev, sev)} | {cnt} |")
     a(f"| Качество данных (среднее) | {avg_dq:.1%} |")
     if max_sev:
-        a(f"| Максимальный уровень тревоги | {_SEVERITY_EMOJI.get(max_sev, '')} {max_sev} |")
+        a(f"| Максимальный уровень тревоги | {_SEVERITY_EMOJI.get(max_sev, '')} {_SEVERITY_LABEL.get(max_sev, max_sev)} |")
     a("")
 
     # ── Быстрый список тревог ──
