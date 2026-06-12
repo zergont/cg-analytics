@@ -86,9 +86,11 @@ def _update_coking(
         cr.idle_low_rpm_sec += duration_sec
 
     # 2. Т ОЖ < порога (wet stacking risk)
+    # Только при работающем двигателе (run_state != 0): на остановленной машине
+    # холодная ОЖ — норма, риска закоксовки нет.
     cool_addr = cfg.role_to_addr("COOLANT_TEMP")
     below_c = float(cfg.thr("coolant_temperature", "tunable", "below_60_risk_threshold_c", default=60.0))
-    if cool_addr and cool_addr in by_addr:
+    if run_state != 0 and cool_addr and cool_addr in by_addr:
         rows = [r for r in by_addr[cool_addr]
                 if t_start <= _tz(r["ts"]) < t_end and r.get("value") is not None]
         for i, r in enumerate(rows[:-1]):
