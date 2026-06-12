@@ -124,6 +124,31 @@ def compute_severity_level(active_dets: list[dict]) -> str:
     return max(panel, analytics, key=lambda x: _OVERALL_RANK.get(x, 0))
 
 
+def compute_analytics_hash(dets: list[dict]) -> str:
+    """Хэш состава аналитических детекций (без панельных) — ключ подавления гейта.
+
+    Подавление действует, пока состав не изменился: новая аналитическая
+    детекция меняет хэш, и вердикт Claude теряет силу.
+    """
+    analytics = [d for d in dets if isinstance(d, dict) and d.get("scenario") != "CONTROLLER_FAULT"]
+    key = tuple(sorted(
+        (d.get("scenario", ""), tuple(sorted(d.get("fault_codes") or [])))
+        for d in analytics
+    ))
+    return hashlib.md5(str(key).encode()).hexdigest()[:12]
+
+
+def is_analytics_suppressed(seg_row: dict, active_dets: list[dict]) -> bool:
+    """Действует ли вердикт гейта «отменить» для текущего состава аналитических детекций."""
+    suppressed = seg_row.get("gate_suppressed_hash")
+    if not suppressed:
+        return False
+    has_analytics = any(
+        isinstance(d, dict) and d.get("scenario") != "CONTROLLER_FAULT" for d in active_dets
+    )
+    return has_analytics and compute_analytics_hash(active_dets) == suppressed
+
+
 def build_structural_status(
     seg_row: dict,
     fault_ref=None,
@@ -190,9 +215,15 @@ def build_structural_status(
             time_in_mode_sec = max(0.0, (now_utc - ts).total_seconds())
 
     # ── Severity (раздельно по источнику) ──
+    # Вердикт гейта «отменить» подавляет аналитику, пока состав детекций не изменился
+    suppressed    = is_analytics_suppressed(seg_row, active_dets)
+    dets_for_level = (
+        [d for d in active_dets if d.get("scenario") == "CONTROLLER_FAULT"]
+        if suppressed else active_dets
+    )
     panel_sev     = compute_panel_severity(active_dets)
-    analytics_sev = compute_analytics_severity(active_dets)
-    sev_level     = compute_severity_level(active_dets)
+    analytics_sev = compute_analytics_severity(dets_for_level)
+    sev_level     = compute_severity_level(dets_for_level)
 
     # ── Активные тревоги с расшифровкой из справочника ──
     panel_alarms:     list[dict] = []
@@ -257,6 +288,7 @@ def build_structural_status(
         "severity_level":     sev_level,
         "panel_severity":     panel_sev,
         "analytics_severity": analytics_sev,
+        "analytics_suppressed": suppressed,
         "time_in_mode_sec":   time_in_mode_sec,
         "panel_alarms":       panel_alarms,
         "analytics_alarms":   analytics_alarms,
@@ -307,6 +339,9 @@ def format_status_text(s: dict) -> str:
     if analytics_sev == "предупреждение" and analytics_alarms:
         desc = analytics_alarms[0].get("description") or analytics_alarms[0]["scenario"]
         parts.append(f"🟡 аналитика: {desc}")
+    elif s.get("analytics_suppressed"):
+        # Ненавязчивый след гейта: срабатывание было, ИИ проверил и отменил
+        parts.append("✓ аналитика: срабатывание проверено ИИ, угрозы нет")
 
     if parts:
         return f"{base} — {' | '.join(parts)}."
@@ -331,6 +366,16 @@ def build_warning_prompt(s: dict) -> str:
     lines.append(f"Итоговый уровень: {s['severity_level']}")
     lines.append(f"Источник панели: {s.get('panel_severity', 'норма')}")
     lines.append(f"Источник аналитики: {s.get('analytics_severity', 'норма')}")
+    if s.get("panel_severity", "норма") == "норма":
+        lines.append(
+            "Гейт: сигналов панели нет — предупреждение чисто аналитическое, "
+            "вердикт cancel ДОПУСТИМ, если угроза не подтверждается."
+        )
+    else:
+        lines.append(
+            "Гейт: активны сигналы панели управления — отмена НЕДОСТУПНА, "
+            "вердикт только pass."
+        )
     lines.append("")
 
     panel_alarms     = s.get("panel_alarms", [])

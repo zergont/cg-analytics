@@ -434,50 +434,113 @@ class OnlineManager:
                 logger.exception("StatusScheduler: ошибка для %s", key)
 
 
+# Инструмент вердикта гейта: машинно-читаемое решение вместо парсинга текста
+_VERDICT_TOOL = {
+    "name": "verdict",
+    "description": (
+        "Вердикт по предупреждению: cancel — срабатывание аналитики не отражает "
+        "реальной угрозы (допустимо только без сигналов панели), pass — пропустить дальше."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "decision": {"type": "string", "enum": ["cancel", "pass"]},
+            "reason":   {"type": "string", "description": "Краткое обоснование (1-2 предложения)"},
+        },
+        "required": ["decision", "reason"],
+    },
+}
+
+
 async def _analyze_warning_claude(
     router_sn: str, equip_type: str, panel_id: int,
     struct: dict, fault_hash: str,
 ) -> None:
-    """Отправить предупреждение в Claude, сохранить анализ в открытый сегмент."""
+    """Гейт предупреждений: Claude анализирует сигнал и выносит вердикт.
+
+    cancel (только для чисто аналитических предупреждений) — подавляет аналитику
+    до изменения состава детекций или закрытия сегмента; pass — предупреждение
+    идёт дальше. Любой исход логируется в gate_log сегмента. Fail-open: при
+    ошибке/недоступности Claude предупреждение проходит без отмены.
+    """
     import anthropic
     from corpus.settings import get_claude_settings
     from config import settings as app_settings
-    from online.status_assembler import build_warning_prompt
+    from llm.router import get_prompt
+    from online.status_assembler import build_warning_prompt, compute_analytics_hash
     from online import db as online_db
 
-    logger.info("WarningClaude: анализ для %s/%s/%s (hash=%s)",
+    logger.info("WarningGate: анализ для %s/%s/%s (hash=%s)",
                 router_sn, equip_type, panel_id, fault_hash)
     try:
         claude_cfg  = get_claude_settings()
         user_prompt = build_warning_prompt(struct)
+        can_cancel  = struct.get("panel_severity", "норма") == "норма"
 
         client = anthropic.AsyncAnthropic(api_key=app_settings.anthropic_api_key)
         response = await client.messages.create(
             model=claude_cfg["model"],
             max_tokens=1024,
-            system=(
-                "Ты — эксперт по дизель-генераторным установкам. "
-                "Анализируй неисправности кратко и технически точно."
-            ),
+            system=get_prompt("warning_claude"),
+            tools=[_VERDICT_TOOL],
             messages=[{"role": "user", "content": user_prompt}],
         )
+
         analysis = "".join(
             b.text for b in response.content if hasattr(b, "text")
         ).strip()
+        decision, reason = "pass", "вердикт не вынесен (fail-open)"
+        for b in response.content:
+            if getattr(b, "type", "") == "tool_use" and b.name == "verdict":
+                decision = str(b.input.get("decision", "pass"))
+                reason   = str(b.input.get("reason", "")).strip() or "без обоснования"
+                break
 
-        if not analysis:
-            logger.warning("WarningClaude: пустой ответ для %s/%s/%s",
+        # Отмена допустима только для чисто аналитического предупреждения
+        applied = decision == "cancel" and can_cancel
+        if decision == "cancel" and not can_cancel:
+            logger.warning("WarningGate: cancel отклонён — активны сигналы панели (%s/%s/%s)",
                            router_sn, equip_type, panel_id)
-            return
 
-        await online_db.update_open_segment_warning(
+        if applied:
+            await online_db.set_segment_gate_suppression(
+                router_sn, equip_type, panel_id,
+                suppressed_hash=compute_analytics_hash(struct.get("analytics_alarms", [])),
+            )
+
+        if analysis:
+            await online_db.update_open_segment_warning(
+                router_sn, equip_type, panel_id,
+                analysis_md=analysis,
+                fault_hash=fault_hash,
+            )
+
+        # Обязательный журнал гейта — пишется при любом исходе
+        await online_db.append_segment_gate_event(
             router_sn, equip_type, panel_id,
-            analysis_md=analysis,
-            fault_hash=fault_hash,
+            event={
+                "ts":                 datetime.now(timezone.utc).isoformat(),
+                "fault_hash":         fault_hash,
+                "severity_level":     struct.get("severity_level"),
+                "panel_severity":     struct.get("panel_severity"),
+                "analytics_severity": struct.get("analytics_severity"),
+                "alarms": [
+                    {"scenario": a.get("scenario"), "severity": a.get("severity"),
+                     "fault_codes": a.get("fault_codes"), "description": a.get("description")}
+                    for a in struct.get("panel_alarms", []) + struct.get("analytics_alarms", [])
+                ],
+                "decision":         decision,
+                "decision_applied": applied,
+                "reason":           reason,
+                "model":            claude_cfg["model"],
+                "tokens_in":        response.usage.input_tokens,
+                "tokens_out":       response.usage.output_tokens,
+            },
         )
-        logger.info("WarningClaude: анализ сохранён %s/%s/%s (%d симв.)",
-                    router_sn, equip_type, panel_id, len(analysis))
+        logger.info("WarningGate: %s/%s/%s — decision=%s applied=%s (%d симв. анализа)",
+                    router_sn, equip_type, panel_id, decision, applied, len(analysis))
 
     except Exception:
-        logger.exception("WarningClaude: ошибка для %s/%s/%s",
+        # Fail-open: предупреждение остаётся видимым, подавление не ставится
+        logger.exception("WarningGate: ошибка для %s/%s/%s",
                          router_sn, equip_type, panel_id)

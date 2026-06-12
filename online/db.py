@@ -451,7 +451,8 @@ async def get_segments_for_calendar(
             SELECT id, t_start, t_end, run_state, cause_close,
                    split_reason, continued_from, continues_to,
                    coking_risk_json, analytics_version,
-                   active_detections_json, characteristics_json
+                   active_detections_json, characteristics_json,
+                   gate_suppressed_hash
             FROM auto_segments
             WHERE {where}
             ORDER BY t_start ASC
@@ -578,6 +579,43 @@ async def update_open_segment_warning(
             WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
               AND t_end IS NULL
         """, router_sn, equip_type, panel_id, analysis_md, fault_hash)
+    finally:
+        await conn.close()
+
+
+async def append_segment_gate_event(
+    router_sn: str, equip_type: str, panel_id: int,
+    event: dict,
+) -> None:
+    """Добавить запись в append-only журнал гейта открытого сегмента."""
+    import json as _json
+    conn = await _connect()
+    try:
+        await conn.execute("""
+            UPDATE auto_segments
+            SET gate_log   = COALESCE(gate_log, '[]'::jsonb) || $4::jsonb,
+                updated_at = now()
+            WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
+              AND t_end IS NULL
+        """, router_sn, equip_type, panel_id, _json.dumps([event], ensure_ascii=False))
+    finally:
+        await conn.close()
+
+
+async def set_segment_gate_suppression(
+    router_sn: str, equip_type: str, panel_id: int,
+    suppressed_hash: str,
+) -> None:
+    """Зафиксировать вердикт «отменить»: подавить аналитику для данного состава детекций."""
+    conn = await _connect()
+    try:
+        await conn.execute("""
+            UPDATE auto_segments
+            SET gate_suppressed_hash = $4,
+                updated_at           = now()
+            WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
+              AND t_end IS NULL
+        """, router_sn, equip_type, panel_id, suppressed_hash)
     finally:
         await conn.close()
 

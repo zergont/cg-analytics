@@ -102,6 +102,14 @@ ALTER TABLE auto_segments
     ADD COLUMN IF NOT EXISTS warning_analysis_md   TEXT,
     ADD COLUMN IF NOT EXISTS warning_analyzed_hash TEXT;
 
+-- Миграция v4.2.0: гейт предупреждений Claude — подавление ложных срабатываний аналитики
+-- gate_suppressed_hash: хэш состава аналитических детекций, отменённых вердиктом Claude;
+--   действует пока состав не изменился и сегмент открыт.
+-- gate_log: append-only журнал решений гейта (вердикты, обоснования, токены).
+ALTER TABLE auto_segments
+    ADD COLUMN IF NOT EXISTS gate_suppressed_hash TEXT,
+    ADD COLUMN IF NOT EXISTS gate_log             JSONB;
+
 -- Миграция v3.4.0: курсор синхронизации history из источника
 CREATE TABLE IF NOT EXISTS history_sync_state (
     router_sn    TEXT        NOT NULL,

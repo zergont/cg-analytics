@@ -2055,6 +2055,7 @@ async def api_online_status():
                     compute_severity_level,
                     compute_panel_severity,
                     compute_analytics_severity,
+                    is_analytics_suppressed,
                 )
                 dets_raw = open_seg.get("active_detections_json")
                 if isinstance(dets_raw, str):
@@ -2062,8 +2063,11 @@ async def api_online_status():
                     dets = _json.loads(dets_raw) if dets_raw else []
                 else:
                     dets = dets_raw or []
+                panel_severity = compute_panel_severity(dets)
+                # Вердикт гейта «отменить» подавляет аналитику до смены состава детекций
+                if is_analytics_suppressed(open_seg, dets):
+                    dets = [d for d in dets if d.get("scenario") == "CONTROLLER_FAULT"]
                 severity_level     = compute_severity_level(dets)
-                panel_severity     = compute_panel_severity(dets)
                 analytics_severity = compute_analytics_severity(dets)
             except Exception:
                 pass
@@ -2103,11 +2107,16 @@ async def api_online_status():
 # Для использования с внешним фронтендом рекомендуется настроить CORS
 # через fastapi.middleware.cors.CORSMiddleware в main.py.
 
-def _seg_severity(chars_json: Any, active_dets_json: Any = None) -> str | None:
+def _seg_severity(
+    chars_json: Any, active_dets_json: Any = None,
+    gate_suppressed_hash: str | None = None,
+) -> str | None:
     """Severity сегмента с учётом источника (градация как в status_assembler):
     панель ALARM/SHUTDOWN → авария, панель WARNING → внимание (оранжевый),
-    любая детекция аналитики → INFO = предупреждение (жёлтый). None — детекций нет."""
+    любая детекция аналитики → INFO = предупреждение (жёлтый). None — детекций нет.
+    Аналитика, отменённая гейтом (hash совпал), не учитывается."""
     import json as _json
+    from online.status_assembler import compute_analytics_hash
 
     dets: list[dict] = []
     # Закрытый сегмент — из characteristics_json
@@ -2121,6 +2130,8 @@ def _seg_severity(chars_json: Any, active_dets_json: Any = None) -> str | None:
         dets = ad or []
 
     dets = [d for d in dets if isinstance(d, dict)]
+    if gate_suppressed_hash and dets and compute_analytics_hash(dets) == gate_suppressed_hash:
+        dets = [d for d in dets if d.get("scenario") == "CONTROLLER_FAULT"]
     if not dets:
         return None
 
@@ -2173,9 +2184,12 @@ async def api_machines():
             status_text    = seg.get("status_text")
             status_updated = seg["status_updated_at"].isoformat() if seg.get("status_updated_at") else None
             try:
-                from online.status_assembler import compute_severity_level
+                from online.status_assembler import compute_severity_level, is_analytics_suppressed
                 dets_raw = seg.get("active_detections_json")
                 dets = dets_raw if isinstance(dets_raw, list) else _json.loads(dets_raw or "[]")
+                # Вердикт гейта «отменить» подавляет аналитику до смены состава детекций
+                if is_analytics_suppressed(seg, dets):
+                    dets = [d for d in dets if d.get("scenario") == "CONTROLLER_FAULT"]
                 severity_level = compute_severity_level(dets)
             except Exception:
                 pass
@@ -2256,7 +2270,8 @@ async def api_machine_segments(
         seg_id    = seg.get("id")
         is_open   = seg.get("t_end") is None
         ai_status = ai_map.get(seg_id, {})
-        sev       = _seg_severity(seg.get("characteristics_json"), seg.get("active_detections_json"))
+        sev       = _seg_severity(seg.get("characteristics_json"), seg.get("active_detections_json"),
+                                  gate_suppressed_hash=seg.get("gate_suppressed_hash"))
         run_state = seg.get("run_state")
         dur       = None
         if seg.get("t_start") and seg.get("t_end"):
@@ -2306,7 +2321,8 @@ async def api_segment_detail(seg_id: int):
 
     is_open   = seg.get("t_end") is None
     run_state = seg.get("run_state")
-    sev       = _seg_severity(seg.get("characteristics_json"), seg.get("active_detections_json"))
+    sev       = _seg_severity(seg.get("characteristics_json"), seg.get("active_detections_json"),
+                              gate_suppressed_hash=seg.get("gate_suppressed_hash"))
 
     # ИИ-анализ (только для закрытых)
     analysis = None
