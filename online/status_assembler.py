@@ -311,21 +311,22 @@ def compute_fault_hash(s: dict) -> str:
 
 
 def format_status_text(s: dict) -> str:
-    """Детерминированная статус-строка — всегда актуальна, без LLM."""
+    """Детерминированная статус-строка — всегда актуальна, без LLM.
+
+    Нагрузку намеренно не включаем: строка обновляется раз в интервал
+    планировщика и рядом с live-значениями выглядит устаревшей.
+    """
     mode              = s["mode_label"]
-    load              = s.get("load_pct")
     panel_sev         = s.get("panel_severity", "норма")
     analytics_sev     = s.get("analytics_severity", "норма")
     panel_alarms      = s.get("panel_alarms", [])
     analytics_alarms  = s.get("analytics_alarms", [])
     dur               = s.get("time_in_mode_sec", 0)
 
-    # Режим + время + нагрузка
+    # Режим + время в режиме
     base = mode
     if dur > 60:
         base += f" {_fmt_duration(dur)}"
-    if load is not None and s["run_state"] == 3:
-        base += f", нагрузка {load:.0f}%"
 
     parts = []
 
