@@ -2109,6 +2109,29 @@ async def api_online_status():
 # Для использования с внешним фронтендом рекомендуется настроить CORS
 # через fastapi.middleware.cors.CORSMiddleware в main.py.
 
+def _seg_collect_dets(chars_json: Any, active_dets_json: Any = None) -> list[dict]:
+    """Все детекции сегмента: закрытый — из characteristics_json, открытый — из active_detections_json."""
+    import json as _json
+    dets: list[dict] = []
+    if chars_json:
+        ch = chars_json if isinstance(chars_json, dict) else _json.loads(chars_json or "{}")
+        for sub in ch.get("subsegments", []):
+            dets.extend(sub.get("detections", []))
+    if not dets and active_dets_json:
+        ad = active_dets_json if isinstance(active_dets_json, list) else _json.loads(active_dets_json or "[]")
+        dets = ad or []
+    return [d for d in dets if isinstance(d, dict)]
+
+
+def _seg_gate_checked(dets: list[dict], gate_suppressed_hash: str | None) -> bool:
+    """Действует ли для сегмента вердикт гейта «отменить» (срабатывание проверено ИИ)."""
+    from online.status_assembler import compute_analytics_hash
+    return bool(
+        gate_suppressed_hash and dets
+        and compute_analytics_hash(dets) == gate_suppressed_hash
+    )
+
+
 def _seg_severity(
     chars_json: Any, active_dets_json: Any = None,
     gate_suppressed_hash: str | None = None,
@@ -2117,22 +2140,8 @@ def _seg_severity(
     панель ALARM/SHUTDOWN → авария, панель WARNING → внимание (оранжевый),
     любая детекция аналитики → INFO = предупреждение (жёлтый). None — детекций нет.
     Аналитика, отменённая гейтом (hash совпал), не учитывается."""
-    import json as _json
-    from online.status_assembler import compute_analytics_hash
-
-    dets: list[dict] = []
-    # Закрытый сегмент — из characteristics_json
-    if chars_json:
-        ch = chars_json if isinstance(chars_json, dict) else _json.loads(chars_json or "{}")
-        for sub in ch.get("subsegments", []):
-            dets.extend(sub.get("detections", []))
-    # Открытый сегмент — из active_detections_json
-    if not dets and active_dets_json:
-        ad = active_dets_json if isinstance(active_dets_json, list) else _json.loads(active_dets_json or "[]")
-        dets = ad or []
-
-    dets = [d for d in dets if isinstance(d, dict)]
-    if gate_suppressed_hash and dets and compute_analytics_hash(dets) == gate_suppressed_hash:
+    dets = _seg_collect_dets(chars_json, active_dets_json)
+    if _seg_gate_checked(dets, gate_suppressed_hash):
         dets = [d for d in dets if d.get("scenario") == "CONTROLLER_FAULT"]
     if not dets:
         return None
@@ -2174,6 +2183,7 @@ async def api_machines():
         status_text    = None
         severity_level = None
         status_updated = None
+        gate_checked   = False
 
         if seg:
             cr = seg.get("coking_risk_json")
@@ -2190,7 +2200,8 @@ async def api_machines():
                 dets_raw = seg.get("active_detections_json")
                 dets = dets_raw if isinstance(dets_raw, list) else _json.loads(dets_raw or "[]")
                 # Вердикт гейта «отменить» подавляет аналитику до смены состава детекций
-                if is_analytics_suppressed(seg, dets):
+                gate_checked = is_analytics_suppressed(seg, dets)
+                if gate_checked:
                     dets = [d for d in dets if d.get("scenario") == "CONTROLLER_FAULT"]
                 severity_level = compute_severity_level(dets)
             except Exception:
@@ -2209,6 +2220,8 @@ async def api_machines():
             # Уровень однозначно кодирует источник: предупреждение — только аналитика,
             # внимание/авария — только панель
             "severity_level":    severity_level,       # норма / предупреждение / внимание / авария
+            # Срабатывание аналитики проверено и отменено гейтом Claude
+            "gate_checked":      gate_checked,
             "status_text":     status_text,
             "status_updated":  status_updated,
             "coking_risk":     coking_risk,            # GREEN / YELLOW / RED
@@ -2274,6 +2287,10 @@ async def api_machine_segments(
         ai_status = ai_map.get(seg_id, {})
         sev       = _seg_severity(seg.get("characteristics_json"), seg.get("active_detections_json"),
                                   gate_suppressed_hash=seg.get("gate_suppressed_hash"))
+        gate_ok   = _seg_gate_checked(
+            _seg_collect_dets(seg.get("characteristics_json"), seg.get("active_detections_json")),
+            seg.get("gate_suppressed_hash"),
+        )
         run_state = seg.get("run_state")
         dur       = None
         if seg.get("t_start") and seg.get("t_end"):
@@ -2289,6 +2306,7 @@ async def api_machine_segments(
             "duration_sec":  dur,
             "cause_close":   seg.get("cause_close"),
             "severity":      sev,                         # SHUTDOWN/ALARM/WARNING/INFO/None
+            "gate_checked":  gate_ok,                     # срабатывание аналитики отменено гейтом
             "coking_risk":   None,                        # в calendar-запросе не грузим JSONB полностью
             "analytics_version": seg.get("analytics_version"),
             # Наличие ИИ-анализа
@@ -2325,6 +2343,10 @@ async def api_segment_detail(seg_id: int):
     run_state = seg.get("run_state")
     sev       = _seg_severity(seg.get("characteristics_json"), seg.get("active_detections_json"),
                               gate_suppressed_hash=seg.get("gate_suppressed_hash"))
+    gate_ok   = _seg_gate_checked(
+        _seg_collect_dets(seg.get("characteristics_json"), seg.get("active_detections_json")),
+        seg.get("gate_suppressed_hash"),
+    )
 
     # ИИ-анализ (только для закрытых)
     analysis = None
@@ -2361,6 +2383,7 @@ async def api_segment_detail(seg_id: int):
         "duration_sec":  dur,
         "cause_close":   seg.get("cause_close"),
         "severity":      sev,
+        "gate_checked":  gate_ok,
         "analytics_version": seg.get("analytics_version"),
         # Аналитический Markdown-отчёт (сегментация + детекции)
         "report_md":     seg.get("report_md"),
