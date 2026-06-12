@@ -295,14 +295,14 @@ def format_status_text(s: dict) -> str:
 
     if panel_sev == "авария" and panel_alarms:
         desc = panel_alarms[0].get("description") or panel_alarms[0]["scenario"]
-        parts.append(f"🔴 авария панели: {desc}")
+        parts.append(f"🔴 панель: {desc}")
     elif panel_sev == "предупреждение" and panel_alarms:
         desc = panel_alarms[0].get("description") or panel_alarms[0]["scenario"]
-        parts.append(f"🟠 предупреждение панели: {desc}")
+        parts.append(f"🟠 панель: {desc}")
 
     if analytics_sev == "внимание" and analytics_alarms:
         desc = analytics_alarms[0].get("description") or analytics_alarms[0]["scenario"]
-        parts.append(f"⚠ внимание: {desc}")
+        parts.append(f"⚠ аналитика: {desc}")
 
     if parts:
         return f"{base} — {' | '.join(parts)}."
