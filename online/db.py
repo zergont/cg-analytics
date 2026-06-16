@@ -658,6 +658,69 @@ async def delete_segments_by_ids(seg_ids: list[int]) -> int:
         await conn.close()
 
 
+# ── detection_events ──────────────────────────────────────────────────────────
+
+async def insert_detection_events(
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    events: list[dict[str, Any]],
+) -> None:
+    """Записать события срабатывания детекторов (одно событие = один фронт).
+
+    events — список dict: {scenario, detected_at, segment_id?, severity?, run_state?}
+    Дублирование по (router_sn, equip_type, panel_id, scenario, segment_id) не
+    контролируется на уровне unique-constraint (сегменты уникальны по id, повтор
+    маловероятен). При необходимости защиты добавить UNIQUE INDEX позднее.
+    """
+    if not events:
+        return
+    conn = await _connect()
+    try:
+        await conn.executemany("""
+            INSERT INTO detection_events
+                (router_sn, equip_type, panel_id, scenario,
+                 detected_at, segment_id, severity, run_state)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        """, [
+            (
+                router_sn, equip_type, panel_id,
+                ev["scenario"],
+                ev["detected_at"],
+                ev.get("segment_id"),
+                ev.get("severity"),
+                ev.get("run_state"),
+            )
+            for ev in events
+        ])
+    finally:
+        await conn.close()
+
+
+async def count_detection_events(
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    scenario: str,
+    window_days: int = 30,
+) -> int:
+    """Число фронтов сценария за последние window_days дней."""
+    conn = await _connect()
+    try:
+        row = await conn.fetchrow("""
+            SELECT COUNT(*) AS cnt
+            FROM detection_events
+            WHERE router_sn = $1
+              AND equip_type = $2
+              AND panel_id   = $3
+              AND scenario   = $4
+              AND detected_at > now() - ($5 || ' days')::interval
+        """, router_sn, equip_type, panel_id, scenario, str(window_days))
+        return int(row["cnt"]) if row else 0
+    finally:
+        await conn.close()
+
+
 async def has_segments(
     router_sn: str, equip_type: str, panel_id: int
 ) -> bool:

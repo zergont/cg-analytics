@@ -453,6 +453,9 @@ def _append_subsegment(
             a(f"  - Источник: `{d['source']}`")
             if d.get("fault_codes"):
                 a(f"  - Коды: {d['fault_codes']}")
+            count_30d = (d.get("values") or {}).get("history_count_30d")
+            if count_30d is not None:
+                a(f"  - Срабатываний этого типа за 30 дней: **{count_30d}**")
         a("")
     elif not short:
         a("*Обнаружений нет.*")

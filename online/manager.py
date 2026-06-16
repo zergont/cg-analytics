@@ -483,6 +483,18 @@ async def _analyze_warning_claude(
     try:
         import httpx
         claude_cfg  = get_claude_settings()
+
+        # Обогатить analytics_alarms счётчиком 30 дней до передачи в промпт
+        for alarm in struct.get("analytics_alarms", []):
+            sc = alarm.get("scenario")
+            if sc:
+                try:
+                    alarm["history_count_30d"] = await online_db.count_detection_events(
+                        router_sn, equip_type, panel_id, sc, window_days=30
+                    )
+                except Exception:
+                    pass  # fail-open: счётчик не критичен
+
         user_prompt = build_warning_prompt(struct)
         can_cancel  = struct.get("panel_severity", "норма") == "норма"
 

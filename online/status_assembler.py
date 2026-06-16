@@ -413,7 +413,11 @@ def build_warning_prompt(s: dict) -> str:
         for a in analytics_alarms:
             desc  = a.get("description") or a["scenario"]
             codes = ", ".join(str(c) for c in a.get("fault_codes", []))
-            lines.append(f"  [{a['severity']}] {desc}" + (f" (коды: {codes})" if codes else ""))
+            count = a.get("history_count_30d")
+            line  = f"  [{a['severity']}] {desc}" + (f" (коды: {codes})" if codes else "")
+            if count is not None:
+                line += f" — срабатываний за 30 дней: {count}"
+            lines.append(line)
 
     kp = s.get("key_params", [])
     if kp:

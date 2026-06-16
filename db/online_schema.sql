@@ -115,6 +115,25 @@ ALTER TABLE auto_segments
     ADD COLUMN IF NOT EXISTS gate_suppressed_hash TEXT,
     ADD COLUMN IF NOT EXISTS gate_log             JSONB;
 
+-- Миграция v4.9.0: универсальный счётчик срабатываний детекторов (Addendum v1.6)
+-- Одна строка = одно событие (фронт) — один сегмент с данным сценарием детектора.
+-- severity / run_state опциональны: заполняются для статистики паттернов.
+-- ON DELETE CASCADE: удаление сегмента удаляет его события.
+CREATE TABLE IF NOT EXISTS detection_events (
+    id          BIGSERIAL   PRIMARY KEY,
+    router_sn   TEXT        NOT NULL,
+    equip_type  TEXT        NOT NULL,
+    panel_id    INT         NOT NULL,
+    scenario    TEXT        NOT NULL,
+    detected_at TIMESTAMPTZ NOT NULL,
+    segment_id  BIGINT      REFERENCES auto_segments(id) ON DELETE CASCADE,
+    severity    TEXT,
+    run_state   INT
+);
+
+CREATE INDEX IF NOT EXISTS idx_detection_events_lookup
+    ON detection_events (router_sn, equip_type, panel_id, scenario, detected_at DESC);
+
 -- Миграция v3.4.0: курсор синхронизации history из источника
 CREATE TABLE IF NOT EXISTS history_sync_state (
     router_sn    TEXT        NOT NULL,

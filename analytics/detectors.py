@@ -86,6 +86,9 @@ def run_all_detectors(
     if cfg.det("CONTROLLER_FAULT", "enabled", default=True):
         detections.extend(_detect_controller_faults(fault_periods_in_seg, seg_start, seg_end, cfg))
 
+    if cfg.det("RPM_UNDERSPEED", "enabled", default=True) and run_state == 3:
+        detections.extend(_detect_rpm_underspeed(characteristics, seg_start, cfg))
+
     return detections
 
 
@@ -743,3 +746,66 @@ def _detect_controller_faults(
         ))
 
     return results
+
+
+# ── RPM_UNDERSPEED ────────────────────────────────────────────────────────────
+
+def _detect_rpm_underspeed(
+    chars: dict[str, Any],
+    seg_start: datetime,
+    cfg: AnalyticsConfig,
+) -> list[Detection]:
+    """Детектор просадки оборотов под нагрузкой (Addendum v1.6).
+
+    Ловит мгновенные провалы RPM ниже порога в режиме RUN_STATE=3.
+    Панель (код 1448) реагирует только при удержании ниже 1350 ~10 сек —
+    блок перекрывает эту «дыру», фиксируя разовые провалы до того, как
+    панель сработает.
+
+    Gate: только RUN_STATE=3 (проверяется в run_all_detectors).
+    Задержки нет (hold_sec=0): даже один срез ниже порога = детекция.
+    Условие: min(RPM) за сегмент < threshold_rpm.
+    """
+    rpm_char = chars.get("RPM")
+    if not rpm_char:
+        return []
+    rpm_min = rpm_char.get("min")
+    if rpm_min is None:
+        return []
+
+    threshold = float(cfg.det("RPM_UNDERSPEED", "threshold_rpm", default=1485.0))
+    if rpm_min >= threshold:
+        return []
+
+    panel_setpoint = float(cfg.det("RPM_UNDERSPEED", "panel_setpoint_rpm", default=1350.0))
+    rated = float(cfg.det("RPM_UNDERSPEED", "rated_rpm", default=1500.0))
+    fault_code_raw = cfg.det("RPM_UNDERSPEED", "fault_code", default=1448)
+    fault_code = int(fault_code_raw) if fault_code_raw is not None else 1448
+
+    rpm_max = rpm_char.get("max")
+    drop_rpm = (rpm_max - rpm_min) if rpm_max is not None else None
+    drop_pct = (drop_rpm / rated * 100) if drop_rpm is not None else None
+
+    return [Detection(
+        scenario="RPM_UNDERSPEED",
+        severity=cfg.det("RPM_UNDERSPEED", "severity_default", default="WARNING"),
+        t_detected=_iso(seg_start),
+        source="METRIC_RULE",
+        trigger=(
+            f"RPM_min={rpm_min:.0f} об/мин < {threshold:.0f} об/мин"
+            + (f" (просадка {drop_rpm:.0f} об/мин = {drop_pct:.1f}%)" if drop_pct is not None else "")
+        ),
+        related_roles=["RPM", "ACTIVE_POWER_TOTAL"],
+        fault_codes=[fault_code],
+        description_key="RPM_UNDERSPEED.below_threshold",
+        values={
+            "rpm_min": rpm_min,
+            "rpm_max": rpm_max,
+            "rpm_med": rpm_char.get("median"),
+            "threshold_rpm": threshold,
+            "panel_setpoint_rpm": panel_setpoint,
+            "rated_rpm": rated,
+            "drop_rpm": drop_rpm,
+            "drop_pct": round(drop_pct, 1) if drop_pct is not None else None,
+        },
+    )]

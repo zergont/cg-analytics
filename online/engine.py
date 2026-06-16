@@ -292,6 +292,63 @@ async def _run_segment(
     return segments
 
 
+async def _collect_and_enrich_detections(
+    seg,
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    seg_t_end: datetime,
+    cfg,
+) -> list[dict]:
+    """Для закрытого сегмента: обогатить детекции счётчиком 30 дней + вернуть events.
+
+    1. Собирает уникальные (scenario, severity, run_state) из всех подсегментов.
+    2. Запрашивает исторический счётчик ДО текущего события.
+    3. Мутирует detection.values["history_count_30d"] = count + 1 (включая текущий).
+    4. Возвращает список event-dict для insert_detection_events.
+
+    Мутация до seg.to_dict() / to_markdown() — счётчик попадает в отчёт.
+    """
+    window_days = int(cfg.det("DETECTION_COUNTER", "window_days", default=30) or 30)
+
+    # Собрать уникальные сценарии (дедупликация по scenario)
+    seen_scenarios: dict[str, tuple[str | None, int | None]] = {}  # scenario → (severity, run_state)
+    for sub in seg.subsegments:
+        for d in sub.detections:
+            sc = d.scenario
+            if sc not in seen_scenarios:
+                seen_scenarios[sc] = (d.severity, seg.run_state)
+
+    if not seen_scenarios:
+        return []
+
+    # Запрос счётчиков (параллельно для всех сценариев)
+    counts: dict[str, int] = {}
+    for sc in seen_scenarios:
+        counts[sc] = await online_db.count_detection_events(
+            router_sn, equip_type, panel_id, sc, window_days
+        )
+
+    # Мутировать detection.values["history_count_30d"] = prev_count + 1
+    for sub in seg.subsegments:
+        for d in sub.detections:
+            if d.scenario in counts:
+                d.values["history_count_30d"] = counts[d.scenario] + 1
+
+    # Подготовить события для вставки в detection_events
+    events = [
+        {
+            "scenario":    sc,
+            "detected_at": seg_t_end,
+            "segment_id":  None,  # segment_id будет обновлён после insert_closed_segment
+            "severity":    sev,
+            "run_state":   rs,
+        }
+        for sc, (sev, rs) in seen_scenarios.items()
+    ]
+    return events
+
+
 class OnlinePollEngine:
     """Движок непрерывного онлайн-мониторинга для одной машины."""
 
@@ -593,6 +650,12 @@ class OnlinePollEngine:
                     ff_json = {}
                 ff_json["_run_state_sec"] = {str(k): v for k, v in updated_rs_sec.items()}
 
+            # Обогатить детекции счётчиком 30д ДО to_dict() / to_markdown()
+            _det_events = await _collect_and_enrich_detections(
+                seg, self.router_sn, self.equip_type, self.panel_id,
+                seg_t_end, self.cfg,
+            )
+
             seg_dict = seg.to_dict()
             seg_dict["t_end"] = seg_t_end.isoformat()
             seg_dict["cause_close"] = seg_cause_close
@@ -631,6 +694,18 @@ class OnlinePollEngine:
             })
             # ← await выше = event loop обслужил API. Сигналим прогресс сразу.
             _enqueue_segment(db_id)
+
+            # Записать события детекций (segment_id теперь известен)
+            if _det_events:
+                for ev in _det_events:
+                    ev["segment_id"] = db_id
+                try:
+                    await online_db.insert_detection_events(
+                        self.router_sn, self.equip_type, self.panel_id, _det_events
+                    )
+                except Exception:
+                    logger.warning("OnlineEngine[%s]: не удалось записать detection_events", self.key)
+
             self.last_processed_to = seg_t_end
             self._prev_seg_hint = seg
             last_committed_t_end = seg_t_end
@@ -720,6 +795,13 @@ class OnlinePollEngine:
                 coking_risk = _extract_coking_risk_from_segments([seg])
                 seg_t_end_rs = _tz_utc(datetime.fromisoformat(seg.t_end))
                 ps_rs = closed_segs[ci - 1] if ci > 0 else self._prev_seg_hint
+
+                # Обогатить детекции счётчиком 30д ДО to_dict() / to_markdown()
+                _rs_det_events = await _collect_and_enrich_detections(
+                    seg, self.router_sn, self.equip_type, self.panel_id,
+                    seg_t_end_rs, self.cfg,
+                )
+
                 try:
                     from analytics.serializer import to_markdown as _to_md
                     report_md_rs = _to_md(
@@ -750,6 +832,17 @@ class OnlinePollEngine:
                 })
                 # ← await выше = прогресс обновляется на каждой смене RUN_STATE
                 _enqueue_segment(_rs_db_id)
+
+                # Записать события детекций (segment_id теперь известен)
+                if _rs_det_events:
+                    for ev in _rs_det_events:
+                        ev["segment_id"] = _rs_db_id
+                    try:
+                        await online_db.insert_detection_events(
+                            self.router_sn, self.equip_type, self.panel_id, _rs_det_events
+                        )
+                    except Exception:
+                        logger.warning("OnlineEngine[%s]: не удалось записать detection_events", self.key)
 
                 # Верификация: сравниваем первый закрытый сегмент с открытым (тот же RS)
                 if ci == 0:
