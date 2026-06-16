@@ -349,6 +349,35 @@ async def _collect_and_enrich_detections(
     return events
 
 
+async def _enrich_open_seg_detections(seg, router_sn: str, equip_type: str, panel_id: int, cfg) -> None:
+    """Для открытого сегмента: обогатить детекции историческим счётчиком.
+
+    Только запрос — без вставки в detection_events (сегмент не завершён).
+    Счётчик = исторические фронты; текущее событие не засчитывается (+1 будет при закрытии).
+    """
+    window_days = int(cfg.det("DETECTION_COUNTER", "window_days", default=30) or 30)
+
+    seen_scenarios: set[str] = {
+        d.scenario
+        for sub in seg.subsegments
+        for d in sub.detections
+    }
+    if not seen_scenarios:
+        return
+
+    for sc in seen_scenarios:
+        try:
+            count = await online_db.count_detection_events(
+                router_sn, equip_type, panel_id, sc, window_days
+            )
+        except Exception:
+            count = 0
+        for sub in seg.subsegments:
+            for d in sub.detections:
+                if d.scenario == sc:
+                    d.values["history_count_30d"] = count
+
+
 class OnlinePollEngine:
     """Движок непрерывного онлайн-мониторинга для одной машины."""
 
@@ -867,6 +896,12 @@ class OnlinePollEngine:
 
         # Открытый сегмент = последний в списке
         open_seg = segments[-1]
+
+        # Обогатить детекции историческим счётчиком ДО _extract_open_segment_data / to_markdown
+        await _enrich_open_seg_detections(
+            open_seg, self.router_sn, self.equip_type, self.panel_id, self.cfg
+        )
+
         current_values, active_detections = _extract_open_segment_data(open_seg)
         coking_risk = _extract_coking_risk_from_segments(segments)
 
