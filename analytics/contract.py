@@ -90,6 +90,7 @@ class DerivedMetrics:
     oil_coolant_delta_med: Optional[float] = None
     oil_coolant_delta_max: Optional[float] = None
     rpm_stability_mad: Optional[float] = None
+    rpm_underspeed_fronts_count: Optional[int] = None  # число фронтов (переходов RPM ниже порога)
     freq_stability_mad: Optional[float] = None
     # ── Класс A (быстрые/электрические, RUN_STATE=3) ──
     dP_dt_max: Optional[float] = None          # кВт/с   — скорость изменения мощности

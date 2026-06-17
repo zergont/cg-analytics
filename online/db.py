@@ -680,8 +680,8 @@ async def insert_detection_events(
         await conn.executemany("""
             INSERT INTO detection_events
                 (router_sn, equip_type, panel_id, scenario,
-                 detected_at, segment_id, severity, run_state)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 detected_at, segment_id, severity, run_state, front_count)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         """, [
             (
                 router_sn, equip_type, panel_id,
@@ -690,6 +690,7 @@ async def insert_detection_events(
                 ev.get("segment_id"),
                 ev.get("severity"),
                 ev.get("run_state"),
+                int(ev.get("front_count", 1)),
             )
             for ev in events
         ])
@@ -708,7 +709,7 @@ async def count_detection_events(
     conn = await _connect()
     try:
         row = await conn.fetchrow("""
-            SELECT COUNT(*) AS cnt
+            SELECT COALESCE(SUM(front_count), 0) AS cnt
             FROM detection_events
             WHERE router_sn = $1
               AND equip_type = $2
@@ -716,6 +717,30 @@ async def count_detection_events(
               AND scenario   = $4
               AND detected_at > now() - ($5 || ' days')::interval
         """, router_sn, equip_type, panel_id, scenario, str(window_days))
+        return int(row["cnt"]) if row else 0
+    finally:
+        await conn.close()
+
+
+async def count_detection_events_since(
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    scenario: str,
+    since_ts: datetime,
+) -> int:
+    """Число фронтов сценария начиная с since_ts (счётчик «с пуска»)."""
+    conn = await _connect()
+    try:
+        row = await conn.fetchrow("""
+            SELECT COALESCE(SUM(front_count), 0) AS cnt
+            FROM detection_events
+            WHERE router_sn = $1
+              AND equip_type = $2
+              AND panel_id   = $3
+              AND scenario   = $4
+              AND detected_at >= $5
+        """, router_sn, equip_type, panel_id, scenario, since_ts)
         return int(row["cnt"]) if row else 0
     finally:
         await conn.close()

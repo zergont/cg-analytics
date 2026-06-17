@@ -87,7 +87,7 @@ def run_all_detectors(
         detections.extend(_detect_controller_faults(fault_periods_in_seg, seg_start, seg_end, cfg))
 
     if cfg.det("RPM_UNDERSPEED", "enabled", default=True) and run_state == 3:
-        detections.extend(_detect_rpm_underspeed(characteristics, seg_start, cfg))
+        detections.extend(_detect_rpm_underspeed(characteristics, derived, seg_start, cfg))
 
     return detections
 
@@ -342,10 +342,9 @@ def _detect_cooling_failure(
             ))
         return results
 
-    severity = "ALARM" if slope >= alarm_thr else "WARNING"
     results.append(Detection(
         scenario="COOLING_FAILURE",
-        severity=severity,
+        severity="WARNING",
         t_detected=_iso(seg_start),
         source="METRIC_RULE",
         trigger=(
@@ -577,7 +576,7 @@ def _detect_start_failure(
         if bat_min is not None and bat_min < sag_alarm:
             results.append(Detection(
                 scenario="START_FAILURE",
-                severity="ALARM",
+                severity=cfg.det("START_FAILURE", "severity_default", default="WARNING"),
                 t_detected=_iso(seg_start),
                 source="METRIC_RULE",
                 trigger=f"battery_min={bat_min:.1f}V < {sag_alarm:.1f}V при прокрутке",
@@ -752,6 +751,7 @@ def _detect_controller_faults(
 
 def _detect_rpm_underspeed(
     chars: dict[str, Any],
+    derived: DerivedMetrics,
     seg_start: datetime,
     cfg: AnalyticsConfig,
 ) -> list[Detection]:
@@ -785,6 +785,7 @@ def _detect_rpm_underspeed(
     rpm_max = rpm_char.get("max")
     drop_rpm = (rpm_max - rpm_min) if rpm_max is not None else None
     drop_pct = (drop_rpm / rated * 100) if drop_rpm is not None else None
+    front_count = derived.rpm_underspeed_fronts_count if derived.rpm_underspeed_fronts_count else 1
 
     return [Detection(
         scenario="RPM_UNDERSPEED",
@@ -793,7 +794,7 @@ def _detect_rpm_underspeed(
         source="METRIC_RULE",
         trigger=(
             f"RPM_min={rpm_min:.0f} об/мин < {threshold:.0f} об/мин"
-            + (f" (просадка {drop_rpm:.0f} об/мин = {drop_pct:.1f}%)" if drop_pct is not None else "")
+            + (f" (просадка {drop_rpm:.0f} об/мин = {drop_pct:.1f}%, фронтов: {front_count})" if drop_pct is not None else f" (фронтов: {front_count})")
         ),
         related_roles=["RPM", "ACTIVE_POWER_TOTAL"],
         fault_codes=[fault_code],
@@ -807,5 +808,6 @@ def _detect_rpm_underspeed(
             "rated_rpm": rated,
             "drop_rpm": drop_rpm,
             "drop_pct": round(drop_pct, 1) if drop_pct is not None else None,
+            "front_count": front_count,
         },
     )]

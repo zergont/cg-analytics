@@ -299,41 +299,52 @@ async def _collect_and_enrich_detections(
     panel_id: int,
     seg_t_end: datetime,
     cfg,
+    run_origin_ts: datetime,
 ) -> list[dict]:
-    """Для закрытого сегмента: обогатить детекции счётчиком 30 дней + вернуть events.
+    """Для закрытого сегмента: обогатить детекции счётчиками + вернуть events.
 
-    1. Собирает уникальные (scenario, severity, run_state) из всех подсегментов.
-    2. Запрашивает исторический счётчик ДО текущего события.
-    3. Мутирует detection.values["history_count_30d"] = count + 1 (включая текущий).
+    1. Собирает уникальные (scenario, severity, run_state, front_count) из всех подсегментов.
+    2. Запрашивает history_count_30d и startup_count ДО текущего события.
+    3. Мутирует detection.values с +1 (включая текущее событие).
     4. Возвращает список event-dict для insert_detection_events.
 
-    Мутация до seg.to_dict() / to_markdown() — счётчик попадает в отчёт.
+    Мутация до seg.to_dict() / to_markdown() — счётчики попадают в отчёт.
     """
     window_days = int(cfg.det("DETECTION_COUNTER", "window_days", default=30) or 30)
 
     # Собрать уникальные сценарии (дедупликация по scenario)
-    seen_scenarios: dict[str, tuple[str | None, int | None]] = {}  # scenario → (severity, run_state)
+    # Сохраняем: (severity, run_state, front_count)
+    seen_scenarios: dict[str, tuple[str | None, int | None, int]] = {}
     for sub in seg.subsegments:
         for d in sub.detections:
             sc = d.scenario
             if sc not in seen_scenarios:
-                seen_scenarios[sc] = (d.severity, seg.run_state)
+                fc = int(d.values.get("front_count", 1)) if d.values else 1
+                seen_scenarios[sc] = (d.severity, seg.run_state, fc)
 
     if not seen_scenarios:
         return []
 
-    # Запрос счётчиков (параллельно для всех сценариев)
-    counts: dict[str, int] = {}
+    # Запрос обоих счётчиков
+    counts_30d: dict[str, int] = {}
+    counts_startup: dict[str, int] = {}
     for sc in seen_scenarios:
-        counts[sc] = await online_db.count_detection_events(
+        counts_30d[sc] = await online_db.count_detection_events(
             router_sn, equip_type, panel_id, sc, window_days
         )
+        try:
+            counts_startup[sc] = await online_db.count_detection_events_since(
+                router_sn, equip_type, panel_id, sc, run_origin_ts
+            )
+        except Exception:
+            counts_startup[sc] = 0
 
-    # Мутировать detection.values["history_count_30d"] = prev_count + 1
+    # Мутировать detection.values с +1 (текущее событие включается)
     for sub in seg.subsegments:
         for d in sub.detections:
-            if d.scenario in counts:
-                d.values["history_count_30d"] = counts[d.scenario] + 1
+            if d.scenario in counts_30d:
+                d.values["history_count_30d"] = counts_30d[d.scenario] + 1
+                d.values["startup_count"] = counts_startup.get(d.scenario, 0) + 1
 
     # Подготовить события для вставки в detection_events
     events = [
@@ -343,17 +354,25 @@ async def _collect_and_enrich_detections(
             "segment_id":  None,  # segment_id будет обновлён после insert_closed_segment
             "severity":    sev,
             "run_state":   rs,
+            "front_count": fc,
         }
-        for sc, (sev, rs) in seen_scenarios.items()
+        for sc, (sev, rs, fc) in seen_scenarios.items()
     ]
     return events
 
 
-async def _enrich_open_seg_detections(seg, router_sn: str, equip_type: str, panel_id: int, cfg) -> None:
-    """Для открытого сегмента: обогатить детекции историческим счётчиком.
+async def _enrich_open_seg_detections(
+    seg,
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    cfg,
+    run_origin_ts: datetime,
+) -> None:
+    """Для открытого сегмента: обогатить детекции счётчиками.
 
     Только запрос — без вставки в detection_events (сегмент не завершён).
-    Счётчик = исторические фронты; текущее событие не засчитывается (+1 будет при закрытии).
+    +1 добавляется для обоих счётчиков: текущее активное событие включается в счёт.
     """
     window_days = int(cfg.det("DETECTION_COUNTER", "window_days", default=30) or 30)
 
@@ -367,15 +386,24 @@ async def _enrich_open_seg_detections(seg, router_sn: str, equip_type: str, pane
 
     for sc in seen_scenarios:
         try:
-            count = await online_db.count_detection_events(
+            count_30d = await online_db.count_detection_events(
                 router_sn, equip_type, panel_id, sc, window_days
             )
         except Exception:
-            count = 0
+            count_30d = 0
+
+        try:
+            count_startup = await online_db.count_detection_events_since(
+                router_sn, equip_type, panel_id, sc, run_origin_ts
+            )
+        except Exception:
+            count_startup = 0
+
         for sub in seg.subsegments:
             for d in sub.detections:
                 if d.scenario == sc:
-                    d.values["history_count_30d"] = count
+                    d.values["history_count_30d"] = count_30d + 1
+                    d.values["startup_count"] = count_startup + 1
 
 
 class OnlinePollEngine:
@@ -618,6 +646,15 @@ class OnlinePollEngine:
             "continued_from":         None,
         })
 
+        # Вычислить начало текущего непрерывного запуска (для счётчика «с пуска»)
+        chain_origin_ts: datetime | None = None
+        if self.continued_from_id is not None:
+            try:
+                _origin = await online_db.get_run_state_origin_ts(self.continued_from_id)
+                chain_origin_ts = _tz_utc(_origin) if _origin else None
+            except Exception:
+                pass
+
         last_saved_id: int | None = None
         # Накопленное время RS до этого батча (из предыдущей суточной цепочки)
         running_rs_sec = dict(self.inherited_run_state_sec)
@@ -679,10 +716,17 @@ class OnlinePollEngine:
                     ff_json = {}
                 ff_json["_run_state_sec"] = {str(k): v for k, v in updated_rs_sec.items()}
 
-            # Обогатить детекции счётчиком 30д ДО to_dict() / to_markdown()
+            # Начало запуска: i==0 продолжает цепочку, i>0 — новый запуск
+            _run_origin = (
+                (chain_origin_ts or _tz_utc(datetime.fromisoformat(seg.t_start)))
+                if i == 0
+                else _tz_utc(datetime.fromisoformat(seg.t_start))
+            )
+
+            # Обогатить детекции счётчиками ДО to_dict() / to_markdown()
             _det_events = await _collect_and_enrich_detections(
                 seg, self.router_sn, self.equip_type, self.panel_id,
-                seg_t_end, self.cfg,
+                seg_t_end, self.cfg, run_origin_ts=_run_origin,
             )
 
             seg_dict = seg.to_dict()
@@ -795,6 +839,15 @@ class OnlinePollEngine:
         if not segments:
             return
 
+        # Вычислить начало текущего непрерывного запуска (для счётчика «с пуска»)
+        chain_origin_ts: datetime | None = None
+        if self.continued_from_id is not None:
+            try:
+                _origin = await online_db.get_run_state_origin_ts(self.continued_from_id)
+                chain_origin_ts = _tz_utc(_origin) if _origin else None
+            except Exception:
+                pass
+
         # Новые закрытые сегменты (смены RUN_STATE внутри открытого окна)
         closed_segs = [s for s in segments if s.cause_close == "RUN_STATE_CHANGE"]
         if closed_segs:
@@ -825,10 +878,17 @@ class OnlinePollEngine:
                 seg_t_end_rs = _tz_utc(datetime.fromisoformat(seg.t_end))
                 ps_rs = closed_segs[ci - 1] if ci > 0 else self._prev_seg_hint
 
-                # Обогатить детекции счётчиком 30д ДО to_dict() / to_markdown()
+                # Начало запуска: ci==0 продолжает цепочку, ci>0 — новый запуск
+                _rs_run_origin = (
+                    (chain_origin_ts or _tz_utc(datetime.fromisoformat(seg.t_start)))
+                    if ci == 0
+                    else _tz_utc(datetime.fromisoformat(seg.t_start))
+                )
+
+                # Обогатить детекции счётчиками ДО to_dict() / to_markdown()
                 _rs_det_events = await _collect_and_enrich_detections(
                     seg, self.router_sn, self.equip_type, self.panel_id,
-                    seg_t_end_rs, self.cfg,
+                    seg_t_end_rs, self.cfg, run_origin_ts=_rs_run_origin,
                 )
 
                 try:
@@ -897,9 +957,18 @@ class OnlinePollEngine:
         # Открытый сегмент = последний в списке
         open_seg = segments[-1]
 
-        # Обогатить детекции историческим счётчиком ДО _extract_open_segment_data / to_markdown
+        # Начало запуска для открытого сегмента:
+        # если были смены RS — открытый сегмент начинается свежо; иначе — продолжает цепочку
+        _open_run_origin = (
+            _tz_utc(datetime.fromisoformat(open_seg.t_start))
+            if closed_segs
+            else (chain_origin_ts or _tz_utc(self.cursor_ts))
+        )
+
+        # Обогатить детекции счётчиками ДО _extract_open_segment_data / to_markdown
         await _enrich_open_seg_detections(
-            open_seg, self.router_sn, self.equip_type, self.panel_id, self.cfg
+            open_seg, self.router_sn, self.equip_type, self.panel_id, self.cfg,
+            run_origin_ts=_open_run_origin,
         )
 
         current_values, active_detections = _extract_open_segment_data(open_seg)

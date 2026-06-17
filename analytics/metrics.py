@@ -383,6 +383,20 @@ def compute_derived_metrics(
     rpm_vals = [v for _, v in rpm_rows]
     rpm_stability_mad = _mad(rpm_vals)
 
+    # RPM_UNDERSPEED front count: число падений RPM ниже порога (переходов сверху вниз)
+    rpm_underspeed_fronts_count: int | None = None
+    if rpm_rows:
+        _thr_rpm = float(cfg.det("RPM_UNDERSPEED", "threshold_rpm", default=1485.0))
+        _fronts = 0
+        _was_above: bool | None = None
+        for _, _v in rpm_rows:
+            _cur_above = _v >= _thr_rpm
+            if _was_above is True and not _cur_above:
+                _fronts += 1
+            _was_above = _cur_above
+        if _fronts > 0:
+            rpm_underspeed_fronts_count = _fronts
+
     # Freq stability
     freq_rows = _rows_in(_addr("FREQUENCY") or 0) if _addr("FREQUENCY") else []
     freq_vals = [v for _, v in freq_rows]
@@ -454,6 +468,7 @@ def compute_derived_metrics(
         oil_coolant_delta_med=_r(oil_coolant_delta_med),
         oil_coolant_delta_max=_r(oil_coolant_delta_max),
         rpm_stability_mad=_r(rpm_stability_mad),
+        rpm_underspeed_fronts_count=rpm_underspeed_fronts_count,
         freq_stability_mad=_r(freq_stability_mad),
         dP_dt_max=_r(dP_dt_max),
         dRPM_dt_max=_r(dRPM_dt_max),

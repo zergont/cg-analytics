@@ -456,6 +456,9 @@ def _append_subsegment(
             count_30d = (d.get("values") or {}).get("history_count_30d")
             if count_30d is not None:
                 a(f"  - Срабатываний этого типа за 30 дней: **{count_30d}**")
+            startup_count = (d.get("values") or {}).get("startup_count")
+            if startup_count is not None:
+                a(f"  - Срабатываний с пуска: **{startup_count}**")
         a("")
     elif not short:
         a("*Обнаружений нет.*")

@@ -128,11 +128,16 @@ CREATE TABLE IF NOT EXISTS detection_events (
     detected_at TIMESTAMPTZ NOT NULL,
     segment_id  BIGINT      REFERENCES auto_segments(id) ON DELETE CASCADE,
     severity    TEXT,
-    run_state   INT
+    run_state   INT,
+    front_count INT         NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_detection_events_lookup
     ON detection_events (router_sn, equip_type, panel_id, scenario, detected_at DESC);
+
+-- Миграция v4.8.3: front_count — число фактических переходов порога в сегменте
+ALTER TABLE detection_events
+    ADD COLUMN IF NOT EXISTS front_count INT NOT NULL DEFAULT 1;
 
 -- Миграция v3.4.0: курсор синхронизации history из источника
 CREATE TABLE IF NOT EXISTS history_sync_state (

@@ -179,7 +179,7 @@ START_FAILURE:
   battery_sag_alarm_v: 19.0           # из thresholds.yaml, battery_voltage.tunable.sag_alarm_v
   # Длительность RUN_STATE=1 (Time Delay to Start / прокрутка)
   crank_time_alarm_sec: 45            # > 3 × 15 сек (3 попытки без учёта перерывов)
-  severity_default: ALARM
+  severity_default: WARNING
   _source: PASSPORT_РЭ
 
 # ─── THERMAL_HIGHLOAD: Перегрев от высокой нагрузки ─────────────────────────

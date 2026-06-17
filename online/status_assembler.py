@@ -250,12 +250,16 @@ def build_structural_status(
         if not description:
             description = trigger or scenario
 
+        # Счётчики срабатываний из enriched values (заполняются движком каждый цикл)
+        det_vals = d.get("values") or {}
         alarm = {
-            "scenario":    scenario,
-            "severity":    severity,
-            "trigger":     trigger,
-            "fault_codes": fault_codes,
-            "description": description,
+            "scenario":          scenario,
+            "severity":          severity,
+            "trigger":           trigger,
+            "fault_codes":       fault_codes,
+            "description":       description,
+            "history_count_30d": det_vals.get("history_count_30d"),
+            "startup_count":     det_vals.get("startup_count"),
         }
         if scenario == "CONTROLLER_FAULT":
             panel_alarms.append(alarm)
@@ -411,12 +415,15 @@ def build_warning_prompt(s: dict) -> str:
             lines.append("")
         lines.append("Сигналы аналитического движка:")
         for a in analytics_alarms:
-            desc  = a.get("description") or a["scenario"]
-            codes = ", ".join(str(c) for c in a.get("fault_codes", []))
-            count = a.get("history_count_30d")
-            line  = f"  [{a['severity']}] {desc}" + (f" (коды: {codes})" if codes else "")
-            if count is not None:
-                line += f" — срабатываний за 30 дней: {count}"
+            desc          = a.get("description") or a["scenario"]
+            codes         = ", ".join(str(c) for c in a.get("fault_codes", []))
+            count_30d     = a.get("history_count_30d")
+            count_startup = a.get("startup_count")
+            line = f"  [{a['severity']}] {desc}" + (f" (коды: {codes})" if codes else "")
+            if count_30d is not None:
+                line += f" — за 30 дней: {count_30d}"
+            if count_startup is not None:
+                line += f", с пуска: {count_startup}"
             lines.append(line)
 
     kp = s.get("key_params", [])
