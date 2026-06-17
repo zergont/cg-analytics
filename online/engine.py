@@ -315,12 +315,18 @@ async def _collect_and_enrich_detections(
     # Собрать уникальные сценарии (дедупликация по scenario)
     # Сохраняем: (severity, run_state, front_count)
     seen_scenarios: dict[str, tuple[str | None, int | None, int]] = {}
+    first_t_detected: dict[str, datetime] = {}
     for sub in seg.subsegments:
         for d in sub.detections:
             sc = d.scenario
             if sc not in seen_scenarios:
                 fc = int(d.values.get("front_count", 1)) if d.values else 1
                 seen_scenarios[sc] = (d.severity, seg.run_state, fc)
+                if d.t_detected:
+                    try:
+                        first_t_detected[sc] = _tz_utc(datetime.fromisoformat(d.t_detected))
+                    except Exception:
+                        pass
 
     if not seen_scenarios:
         return []
@@ -350,7 +356,7 @@ async def _collect_and_enrich_detections(
     events = [
         {
             "scenario":    sc,
-            "detected_at": seg_t_end,
+            "detected_at": first_t_detected.get(sc, seg_t_end),
             "segment_id":  None,  # segment_id будет обновлён после insert_closed_segment
             "severity":    sev,
             "run_state":   rs,
@@ -445,6 +451,9 @@ class OnlinePollEngine:
 
         self._running = False
         self._task: asyncio.Task | None = None
+        # Кэш аналоговых данных открытого окна (обнуляется при смене cursor_ts)
+        self._open_history_cache: list[dict] | None = None
+        self._open_history_cache_ts: datetime | None = None
 
     @property
     def key(self) -> str:
@@ -537,6 +546,8 @@ class OnlinePollEngine:
 
     async def stop(self) -> None:
         self._running = False
+        self._open_history_cache = None
+        self._open_history_cache_ts = None
         if self._task and not self._task.done():
             self._task.cancel()
             try:
@@ -812,6 +823,8 @@ class OnlinePollEngine:
                     ref_chars=seg_dict,
                 )
 
+        self._open_history_cache = None
+        self._open_history_cache_ts = None
         logger.debug(
             "OnlineEngine[%s]: закрыто %d сегментов до %s (%s)",
             self.key, len(segments), t_to, close_reason,
@@ -827,10 +840,76 @@ class OnlinePollEngine:
         from analytics.runner import ANALYTICS_VERSION
 
         try:
-            segments = await _run_segment(
-                self.router_sn, self.equip_type, self.panel_id, self.engine_sn,
-                t_from, t_to, self.cfg,
-                self.inherited_coking_risk,
+            from analytics import source as _src
+            import functools
+            from analytics.segmenter import segment as _segment_fn
+
+            _OVERLAP = 120  # сек перекрытия при дозагрузке хвоста (защита от поздних строк)
+            ts_from_utc = _tz_utc(t_from)
+            ts_to_utc   = _tz_utc(t_to)
+
+            if self._open_history_cache is not None and self._open_history_cache_ts is not None:
+                # Дозагрузка: стабильная часть из кэша + свежий хвост из БД
+                split_ts = self._open_history_cache_ts - timedelta(seconds=_OVERLAP)
+                preamble_floor = ts_from_utc - timedelta(seconds=_PREAMBLE_LOOKBACK_SEC)
+                if split_ts < preamble_floor:
+                    split_ts = preamble_floor
+                stable = [r for r in self._open_history_cache if r["ts"] < split_ts]
+                tail = await _src.get_whitelist_history(
+                    self.router_sn, self.equip_type, self.panel_id,
+                    split_ts, ts_to_utc, self.cfg.whitelist_analog,
+                )
+                history = stable + tail
+                logger.debug(
+                    "OnlineEngine[%s]: history кэш=%d + хвост=%d",
+                    self.key, len(stable), len(tail),
+                )
+            else:
+                preamble_floor = ts_from_utc - timedelta(seconds=_PREAMBLE_LOOKBACK_SEC)
+                history = await _src.get_whitelist_history(
+                    self.router_sn, self.equip_type, self.panel_id,
+                    preamble_floor, ts_to_utc, self.cfg.whitelist_analog,
+                )
+                logger.debug(
+                    "OnlineEngine[%s]: history полная загрузка=%d строк",
+                    self.key, len(history),
+                )
+
+            self._open_history_cache = history
+            self._open_history_cache_ts = max((r["ts"] for r in history), default=None)
+
+            enum_periods, fault_periods, gaps = await asyncio.gather(
+                _src.get_enum_periods(
+                    self.router_sn, self.equip_type, self.panel_id,
+                    ts_from_utc, ts_to_utc, addrs=[40011, 40010],
+                ),
+                _src.get_fault_periods(
+                    self.router_sn, self.equip_type, self.panel_id,
+                    ts_from_utc, ts_to_utc,
+                    fault_addrs=self.cfg.whitelist_fault,
+                ),
+                _src.get_data_gaps(
+                    self.router_sn, self.equip_type, self.panel_id,
+                    ts_from_utc, ts_to_utc,
+                ),
+            )
+
+            segments = await asyncio.to_thread(
+                functools.partial(
+                    _segment_fn,
+                    enum_periods=enum_periods,
+                    history=history,
+                    fault_periods=fault_periods,
+                    gaps=gaps,
+                    cfg=self.cfg,
+                    router_sn=self.router_sn,
+                    equip_type=self.equip_type,
+                    panel_id=self.panel_id,
+                    engine_sn=self.engine_sn,
+                    ts_from=ts_from_utc,
+                    ts_to=ts_to_utc,
+                    initial_coking_risk=copy.deepcopy(self.inherited_coking_risk),
+                )
             )
         except Exception:
             logger.exception("OnlineEngine[%s]: ошибка анализа открытого окна", self.key)
@@ -953,6 +1032,8 @@ class OnlinePollEngine:
                 carry_continued_from = None   # только первый сегмент несёт ссылку
                 self.continued_from_id = None
                 self.forward_fill_memory = None
+                self._open_history_cache = None
+                self._open_history_cache_ts = None
 
         # Открытый сегмент = последний в списке
         open_seg = segments[-1]
