@@ -840,6 +840,7 @@ class OnlinePollEngine:
         from analytics.runner import ANALYTICS_VERSION
 
         try:
+            import time as _time
             from analytics import source as _src
             import functools
             from analytics.segmenter import segment as _segment_fn
@@ -848,6 +849,7 @@ class OnlinePollEngine:
             ts_from_utc = _tz_utc(t_from)
             ts_to_utc   = _tz_utc(t_to)
 
+            _t0 = _time.perf_counter()
             if self._open_history_cache is not None and self._open_history_cache_ts is not None:
                 # Дозагрузка: стабильная часть из кэша + свежий хвост из БД
                 split_ts = self._open_history_cache_ts - timedelta(seconds=_OVERLAP)
@@ -860,9 +862,9 @@ class OnlinePollEngine:
                     split_ts, ts_to_utc, self.cfg.whitelist_analog,
                 )
                 history = stable + tail
-                logger.debug(
-                    "OnlineEngine[%s]: history кэш=%d + хвост=%d",
-                    self.key, len(stable), len(tail),
+                logger.info(
+                    "TIMING[%s]: history кэш=%d + хвост=%d за %.2fs",
+                    self.key, len(stable), len(tail), _time.perf_counter() - _t0,
                 )
             else:
                 preamble_floor = ts_from_utc - timedelta(seconds=_PREAMBLE_LOOKBACK_SEC)
@@ -870,14 +872,15 @@ class OnlinePollEngine:
                     self.router_sn, self.equip_type, self.panel_id,
                     preamble_floor, ts_to_utc, self.cfg.whitelist_analog,
                 )
-                logger.debug(
-                    "OnlineEngine[%s]: history полная загрузка=%d строк",
-                    self.key, len(history),
+                logger.info(
+                    "TIMING[%s]: history полная загрузка=%d строк за %.2fs",
+                    self.key, len(history), _time.perf_counter() - _t0,
                 )
 
             self._open_history_cache = history
             self._open_history_cache_ts = max((r["ts"] for r in history), default=None)
 
+            _t0 = _time.perf_counter()
             enum_periods, fault_periods, gaps = await asyncio.gather(
                 _src.get_enum_periods(
                     self.router_sn, self.equip_type, self.panel_id,
@@ -892,6 +895,11 @@ class OnlinePollEngine:
                     self.router_sn, self.equip_type, self.panel_id,
                     ts_from_utc, ts_to_utc,
                 ),
+            )
+            logger.info(
+                "TIMING[%s]: gather(enum=%d, fault=%d, gaps=%d) за %.2fs",
+                self.key, len(enum_periods), len(fault_periods), len(gaps),
+                _time.perf_counter() - _t0,
             )
 
             segments = await asyncio.to_thread(
