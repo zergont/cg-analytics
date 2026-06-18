@@ -155,11 +155,7 @@ def apply_forward_fill(
                     break
 
             # 2. Была ли реальная строка В ЭТОМ пакете (вблизи pkt_ts)?
-            real_at_packet = any(
-                abs((_tz(r["ts"]) - pkt_ts).total_seconds()) <= tol_sec
-                for r in output_rows[-real_idx:]  # смотрим только свежедобавленные
-            )
-            # Упрощённая проверка: последняя добавленная строка — в пакете?
+            # Последняя добавленная строка — в пакете?
             real_at_packet = bool(
                 output_rows
                 and not output_rows[-1]["is_carried_forward"]
