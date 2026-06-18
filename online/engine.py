@@ -849,6 +849,7 @@ class OnlinePollEngine:
             ts_from_utc = _tz_utc(t_from)
             ts_to_utc   = _tz_utc(t_to)
 
+            _t_cycle_start = _time.perf_counter()
             _t0 = _time.perf_counter()
             if self._open_history_cache is not None and self._open_history_cache_ts is not None:
                 # Дозагрузка: стабильная часть из кэша + свежий хвост из БД
@@ -1055,9 +1056,14 @@ class OnlinePollEngine:
         )
 
         # Обогатить детекции счётчиками ДО _extract_open_segment_data / to_markdown
+        _t0 = _time.perf_counter()
         await _enrich_open_seg_detections(
             open_seg, self.router_sn, self.equip_type, self.panel_id, self.cfg,
             run_origin_ts=_open_run_origin,
+        )
+        logger.info(
+            "TIMING[%s]: enrich за %.3fs",
+            self.key, _time.perf_counter() - _t0,
         )
 
         current_values, active_detections = _extract_open_segment_data(open_seg)
@@ -1067,6 +1073,7 @@ class OnlinePollEngine:
         # открытый сегмент сам является продолжением pre-boundary сегмента
         open_continued_from = self.continued_from_id
 
+        _t0 = _time.perf_counter()
         try:
             from analytics.serializer import to_markdown as _to_md
             open_report_md = _to_md(
@@ -1078,7 +1085,12 @@ class OnlinePollEngine:
             )
         except Exception:
             open_report_md = None
+        logger.info(
+            "TIMING[%s]: to_markdown за %.3fs",
+            self.key, _time.perf_counter() - _t0,
+        )
 
+        _t0 = _time.perf_counter()
         await online_db.upsert_open_segment({
             "router_sn":              self.router_sn,
             "equip_type":             self.equip_type,
@@ -1102,6 +1114,11 @@ class OnlinePollEngine:
             "report_md":              open_report_md,
             "continued_from":         open_continued_from,
         })
+        logger.info(
+            "TIMING[%s]: upsert за %.3fs | ИТОГО цикл %.2fs",
+            self.key, _time.perf_counter() - _t0,
+            _time.perf_counter() - _t_cycle_start,
+        )
 
         logger.debug(
             "OnlineEngine[%s]: открытый сегмент обновлён (run_state=%s, coking=%s)",
