@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import bisect
 import logging
-import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -83,10 +82,6 @@ def _filter_gaps(
         if gs < t1 and ge > t0:
             result.append(g)
     return result
-
-
-# Параллельный прогон старого/нового пути для верификации. Убрать после проверки.
-_VERIFY_SLICING = True
 
 
 def _build_ts_index(by_addr: dict[int, list[dict]]) -> dict[int, list[datetime]]:
@@ -320,33 +315,9 @@ def _build_single_subsegment(
     sub_chars = _slice_by_addr(seg_by_addr, ts_index, char_t_start, t_end)
     sub_win   = _slice_by_addr(seg_by_addr, ts_index, t_start, t_end)
 
-    if _VERIFY_SLICING:
-        _t0 = time.perf_counter()
-        _chars_old   = compute_characteristics(seg_by_addr, char_t_start, t_end, cfg)
-        _derived_old = compute_derived_metrics(seg_by_addr, t_start, t_end, gaps, cfg)
-        _acc_old     = update_accumulators(accumulators, seg_by_addr, t_start, t_end, load_zone, run_state, cfg)
-        _dt_old = time.perf_counter() - _t0
-
-        _t0 = time.perf_counter()
-        chars   = compute_characteristics(sub_chars, char_t_start, t_end, cfg)
-        derived = compute_derived_metrics(sub_win, t_start, t_end, gaps, cfg)
-        new_acc = update_accumulators(accumulators, sub_win, t_start, t_end, load_zone, run_state, cfg)
-        _dt_new = time.perf_counter() - _t0
-
-        if _chars_old != chars:
-            logger.error("VERIFY: chars mismatch %s", subseg_id)
-        if _derived_old.to_dict() != derived.to_dict():
-            logger.error("VERIFY: derived mismatch %s", subseg_id)
-        if _acc_old.to_dict() != new_acc.to_dict():
-            logger.error("VERIFY: accumulators mismatch %s", subseg_id)
-        logger.info(
-            "VERIFY single[%s]: old=%.3fs new=%.3fs x%.1f",
-            subseg_id, _dt_old, _dt_new, _dt_old / _dt_new if _dt_new > 0 else 0,
-        )
-    else:
-        chars   = compute_characteristics(sub_chars, char_t_start, t_end, cfg)
-        derived = compute_derived_metrics(sub_win, t_start, t_end, gaps, cfg)
-        new_acc = update_accumulators(accumulators, sub_win, t_start, t_end, load_zone, run_state, cfg)
+    chars   = compute_characteristics(sub_chars, char_t_start, t_end, cfg)
+    derived = compute_derived_metrics(sub_win, t_start, t_end, gaps, cfg)
+    new_acc = update_accumulators(accumulators, sub_win, t_start, t_end, load_zone, run_state, cfg)
 
     faults_in = [
         fp for fp in fault_periods
@@ -489,8 +460,6 @@ def _build_subsegments_for_running(
     prev_sub_zone: str | None = None
 
     ts_index = _build_ts_index(seg_by_addr)
-    _t_old = 0.0
-    _t_new = 0.0
 
     for idx, (t_sub_start, t_sub_end, zone, cause_open, cause_close) in enumerate(intervals):
         subseg_id = f"{seg_id}.{idx + 1}"
@@ -499,29 +468,9 @@ def _build_subsegments_for_running(
         sub_chars = _slice_by_addr(seg_by_addr, ts_index, char_t_start, t_sub_end)
         sub_win   = _slice_by_addr(seg_by_addr, ts_index, t_sub_start, t_sub_end)
 
-        if _VERIFY_SLICING:
-            _t0 = time.perf_counter()
-            _chars_old   = compute_characteristics(seg_by_addr, char_t_start, t_sub_end, cfg)
-            _derived_old = compute_derived_metrics(seg_by_addr, t_sub_start, t_sub_end, gaps, cfg)
-            _acc_old     = update_accumulators(accumulators, seg_by_addr, t_sub_start, t_sub_end, zone, run_state, cfg)
-            _t_old += time.perf_counter() - _t0
-
-            _t0 = time.perf_counter()
-            chars        = compute_characteristics(sub_chars, char_t_start, t_sub_end, cfg)
-            derived      = compute_derived_metrics(sub_win, t_sub_start, t_sub_end, gaps, cfg)
-            accumulators = update_accumulators(accumulators, sub_win, t_sub_start, t_sub_end, zone, run_state, cfg)
-            _t_new += time.perf_counter() - _t0
-
-            if _chars_old != chars:
-                logger.error("VERIFY: chars mismatch %s", subseg_id)
-            if _derived_old.to_dict() != derived.to_dict():
-                logger.error("VERIFY: derived mismatch %s", subseg_id)
-            if _acc_old.to_dict() != accumulators.to_dict():
-                logger.error("VERIFY: accumulators mismatch %s", subseg_id)
-        else:
-            chars        = compute_characteristics(sub_chars, char_t_start, t_sub_end, cfg)
-            derived      = compute_derived_metrics(sub_win, t_sub_start, t_sub_end, gaps, cfg)
-            accumulators = update_accumulators(accumulators, sub_win, t_sub_start, t_sub_end, zone, run_state, cfg)
+        chars        = compute_characteristics(sub_chars, char_t_start, t_sub_end, cfg)
+        derived      = compute_derived_metrics(sub_win, t_sub_start, t_sub_end, gaps, cfg)
+        accumulators = update_accumulators(accumulators, sub_win, t_sub_start, t_sub_end, zone, run_state, cfg)
 
         faults_in_sub = [
             fp for fp in fault_periods_in_seg
@@ -553,13 +502,6 @@ def _build_subsegments_for_running(
         )
         subsegments.append(subseg)
         prev_sub_zone = zone
-
-    if _VERIFY_SLICING and intervals:
-        logger.info(
-            "VERIFY running[%s]: %d subseg, old=%.3fs new=%.3fs x%.1f",
-            seg_id, len(intervals), _t_old, _t_new,
-            _t_old / _t_new if _t_new > 0 else 0,
-        )
 
     return subsegments, accumulators
 

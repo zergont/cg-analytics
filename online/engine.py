@@ -863,7 +863,7 @@ class OnlinePollEngine:
                     split_ts, ts_to_utc, self.cfg.whitelist_analog,
                 )
                 history = stable + tail
-                logger.info(
+                logger.debug(
                     "TIMING[%s]: history кэш=%d + хвост=%d за %.2fs",
                     self.key, len(stable), len(tail), _time.perf_counter() - _t0,
                 )
@@ -873,7 +873,7 @@ class OnlinePollEngine:
                     self.router_sn, self.equip_type, self.panel_id,
                     preamble_floor, ts_to_utc, self.cfg.whitelist_analog,
                 )
-                logger.info(
+                logger.debug(
                     "TIMING[%s]: history полная загрузка=%d строк за %.2fs",
                     self.key, len(history), _time.perf_counter() - _t0,
                 )
@@ -897,7 +897,7 @@ class OnlinePollEngine:
                     ts_from_utc, ts_to_utc,
                 ),
             )
-            logger.info(
+            logger.debug(
                 "TIMING[%s]: gather(enum=%d, fault=%d, gaps=%d) за %.2fs",
                 self.key, len(enum_periods), len(fault_periods), len(gaps),
                 _time.perf_counter() - _t0,
@@ -1061,7 +1061,7 @@ class OnlinePollEngine:
             open_seg, self.router_sn, self.equip_type, self.panel_id, self.cfg,
             run_origin_ts=_open_run_origin,
         )
-        logger.info(
+        logger.debug(
             "TIMING[%s]: enrich за %.3fs",
             self.key, _time.perf_counter() - _t0,
         )
@@ -1085,7 +1085,7 @@ class OnlinePollEngine:
             )
         except Exception:
             open_report_md = None
-        logger.info(
+        logger.debug(
             "TIMING[%s]: to_markdown за %.3fs",
             self.key, _time.perf_counter() - _t0,
         )
@@ -1114,7 +1114,7 @@ class OnlinePollEngine:
             "report_md":              open_report_md,
             "continued_from":         open_continued_from,
         })
-        logger.info(
+        logger.debug(
             "TIMING[%s]: upsert за %.3fs | ИТОГО цикл %.2fs",
             self.key, _time.perf_counter() - _t0,
             _time.perf_counter() - _t_cycle_start,
