@@ -25,9 +25,12 @@
 from __future__ import annotations
 
 import bisect
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from .config import AnalyticsConfig
 from .contract import RiskAccumulators, Segment, Subsegment
