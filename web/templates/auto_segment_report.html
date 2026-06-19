@@ -243,10 +243,10 @@
     {% set max_sev = run.get("max_severity") if run else None %}
     {% if max_sev == "SHUTDOWN" %}
       <div class="alert alert-danger py-2 mb-2">🔴 <strong>SHUTDOWN</strong> — аварийный останов</div>
-    {% elif max_sev == "ALARM" %}
-      <div class="alert alert-danger py-2 mb-2">🟠 <strong>ALARM</strong> — требуется внимание</div>
     {% elif max_sev == "WARNING" %}
-      <div class="alert alert-warning py-2 mb-2">🟡 <strong>ПРЕДУПРЕЖДЕНИЕ БЛОКА АНАЛИТИКИ</strong>
+      <div class="alert alert-warning py-2 mb-2">🟠 <strong>WARNING</strong> — панельная тревога</div>
+    {% elif max_sev == "CAUTION" %}
+      <div class="alert alert-warning py-2 mb-2">🟡 <strong>ПРЕДУПРЕЖДЕНИЕ АНАЛИТИКИ</strong>
         {%- if gate_checked %} — ✓ проверено ИИ, угрозы нет{% endif %}</div>
     {% else %}
       <div class="alert alert-success py-2 mb-2">🟢 <strong>Норма</strong> — нарушений не выявлено</div>
@@ -342,9 +342,9 @@
       <h6 class="mt-3">Активные детекции</h6>
       {% for det in active_detections %}
       {% set sev = det.get("severity","INFO") %}
-      <div class="alert {% if sev in ['SHUTDOWN','ALARM'] %}alert-danger{% elif sev=='WARNING' %}alert-warning{% else %}alert-info{% endif %} py-1 mb-1" style="font-size:.85rem">
+      <div class="alert {% if sev=='SHUTDOWN' %}alert-danger{% elif sev in ['WARNING','CAUTION'] %}alert-warning{% else %}alert-info{% endif %} py-1 mb-1" style="font-size:.85rem">
         <strong>{{ det.get("scenario","?") }}</strong>
-        <span class="badge {% if sev in ['SHUTDOWN','ALARM'] %}bg-danger{% elif sev=='WARNING' %}bg-warning text-dark{% else %}bg-info text-dark{% endif %} ms-1">{{ sev }}</span>
+        <span class="badge {% if sev=='SHUTDOWN' %}bg-danger{% elif sev=='WARNING' %}bg-warning text-dark{% elif sev=='CAUTION' %}bg-warning text-dark{% else %}bg-info text-dark{% endif %} ms-1">{{ sev }}</span>
         — {{ det.get("trigger","") }}
       </div>
       {% endfor %}
@@ -378,10 +378,10 @@
     {% set max_sev = run.get("max_severity") %}
     {% if max_sev == "SHUTDOWN" %}
       <div class="alert alert-danger py-2 mb-2">🔴 <strong>SHUTDOWN</strong> — аварийный останов</div>
-    {% elif max_sev == "ALARM" %}
-      <div class="alert alert-danger py-2 mb-2">🟠 <strong>ALARM</strong> — требуется внимание</div>
     {% elif max_sev == "WARNING" %}
-      <div class="alert alert-warning py-2 mb-2">🟡 <strong>ПРЕДУПРЕЖДЕНИЕ БЛОКА АНАЛИТИКИ</strong></div>
+      <div class="alert alert-warning py-2 mb-2">🟠 <strong>WARNING</strong> — панельная тревога</div>
+    {% elif max_sev == "CAUTION" %}
+      <div class="alert alert-warning py-2 mb-2">🟡 <strong>ПРЕДУПРЕЖДЕНИЕ АНАЛИТИКИ</strong></div>
     {% else %}
       <div class="alert alert-success py-2 mb-2">🟢 <strong>Норма</strong> — нарушений не выявлено</div>
     {% endif %}

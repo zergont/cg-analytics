@@ -79,7 +79,7 @@ NEGATIVE_SEQUENCE:
   pf_nominal: 0.8                    # номинальный PF для расчёта I_nom
   # Gate: только RUN_STATE=3 при ненулевом токе
   valid_run_states: [3]
-  severity_default: WARNING
+  severity_default: CAUTION
   _source: CONTROLLER  # 12% — уставка neg-seq PCC3300, 0900-0670 раздел 8.29.4
 
 # ─── COOLING_FAILURE: Отказ охлаждения ──────────────────────────────────────
@@ -108,8 +108,8 @@ COOLING_FAILURE:
   # Гейт по режиму: только RUN_STATE=3 (установившаяся работа)
   # valid_run_states: задаётся неявно в коде (run_state != 3 → return [])
   # Приближение к порогу HCT Warning (вторичная проверка по max-значению)
-  proximity_warning_pct: 10          # coolant_max > HCT_warning - 10% → WARNING
-  severity_default: WARNING
+  proximity_warning_pct: 10          # coolant_max > HCT_warning - 10% → CAUTION
+  severity_default: CAUTION
   _source: TUNABLE
 
 # ─── OIL_DILUTION: Разжижение/перегрев масла ────────────────────────────────
@@ -123,7 +123,7 @@ OIL_DILUTION:
   concurrent_window_sec: 300      # в пределах 5 минут
   # Порог по абсолютным значениям (см. thresholds.yaml, oil_pressure.passport.rated_min_kpa)
   oil_press_abs_warning_kpa: 310  # давление ниже паспортного минимума при номинале
-  severity_default: WARNING
+  severity_default: CAUTION
   _source: TUNABLE
 
 # ─── COKING_RISK: Закоксовка / wet stacking ─────────────────────────────────
@@ -144,7 +144,7 @@ COKING_RISK:
   risk_red_idle_sec: 1800
   risk_yellow_low_load_sec: 3600
   risk_red_low_load_sec: 7200
-  severity_default: WARNING
+  severity_default: CAUTION
   _source: PASSPORT_РЭ  # idle 600 сек — K38-50_РЭ_и_ТО
 
 # ─── WARMUP_VIOLATION: Нарушение прогрева ───────────────────────────────────
@@ -156,7 +156,7 @@ WARMUP_VIOLATION:
   # Требование к прогреву при ГОРЯЧЕМ пуске (ОЖ >= cold_start_coolant_c)
   # 0 = прогрев не обязателен; можно задать мягкое требование, напр. 60 сек
   hot_start_warmup_sec: 0
-  severity_default: WARNING
+  severity_default: CAUTION
   _source: PASSPORT_РЭ
 
 # ─── COOLDOWN_VIOLATION: Нарушение охлаждения перед остановом ───────────────
@@ -167,7 +167,7 @@ COOLDOWN_VIOLATION:
   # Минимальная длительность охлаждения (RUN_STATE 4 или 5)
   min_cooldown_sec: 0             # РЭ допускает быстрый останов, но рекомендует 3-5 мин
   # Считаем нарушением: переход Stop без каких-либо cooldown-фаз после ELEVATED
-  severity_default: WARNING
+  severity_default: CAUTION
   _source: PASSPORT_РЭ
 
 # ─── START_FAILURE: Проблема пуска ──────────────────────────────────────────
@@ -179,7 +179,7 @@ START_FAILURE:
   battery_sag_alarm_v: 19.0           # из thresholds.yaml, battery_voltage.tunable.sag_alarm_v
   # Длительность RUN_STATE=1 (Time Delay to Start / прокрутка)
   crank_time_alarm_sec: 45            # > 3 × 15 сек (3 попытки без учёта перерывов)
-  severity_default: WARNING
+  severity_default: CAUTION
   _source: PASSPORT_РЭ
 
 # ─── THERMAL_HIGHLOAD: Перегрев от высокой нагрузки ─────────────────────────
@@ -198,7 +198,7 @@ THERMAL_HIGHLOAD:
   # Скорость спада: на 1 сек простоя вне ELEVATED накопитель уменьшается на thermal_decay_rate_per_sec сек.
   # Пример: 0.5 → за 2 мин без нагрузки «прощается» 1 мин теплового риска.
   thermal_decay_rate_per_sec: 0.5
-  severity_default: WARNING
+  severity_default: CAUTION
   _source: TUNABLE
 
 # ─── LIMIT_PROXIMITY: Близость к паспортному порогу ─────────────────────────
@@ -207,12 +207,12 @@ LIMIT_PROXIMITY:
   # Валидные режимы: давление масла 0 на стопе — норма, не приближение к аварии.
   valid_run_states: [3]
   # Предупреждать когда любой параметр приближается к паспортному/контроллерному порогу
-  proximity_pct: 10               # в пределах X% от порога → WARNING
+  proximity_pct: 10               # в пределах X% от порога → CAUTION
   # Конкретные пороги берутся из thresholds.yaml:
   # OIL_PRESS → oil_pressure.controller.shutdown_rated_kpa
   # COOLANT_TEMP → coolant_temperature.controller.shutdown_c
   # OIL_TEMP → oil_temperature.controller.shutdown_c
-  severity_default: WARNING
+  severity_default: CAUTION
   _source: TUNABLE
 
 # ─── STOP_PROFILE: Диагностика профиля останова ──────────────────────────────
@@ -222,7 +222,7 @@ LIMIT_PROXIMITY:
 # T_stop_max берётся из segmentation.yaml → transitions.T_stop_max_sec.
 STOP_PROFILE:
   enabled: true
-  severity_default: ALARM   # отказ клапана отсечки — критичный дефект безопасности
+  severity_default: WARNING   # отказ клапана отсечки — критичный дефект безопасности
   _source: TUNABLE
 
 # ─── RPM_UNDERSPEED: Просадка оборотов под нагрузкой ────────────────────────
@@ -239,7 +239,7 @@ RPM_UNDERSPEED:
   rated_rpm: 1500            # справочно: 50 Гц = 1500 об/мин
   require_run_state: 3       # только под нагрузкой
   hold_sec: 0                # без задержки — ловим мгновенный провал
-  severity_default: WARNING
+  severity_default: CAUTION
   fault_code: 1448
   _source: CONTROLLER        # код 1448 «Пониженная частота», PCC_3_3_Rus.pdf стр.120
 

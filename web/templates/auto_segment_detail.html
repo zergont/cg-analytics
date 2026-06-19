@@ -157,11 +157,11 @@
 {% set sev = det.get("severity","INFO") %}
 <div class="alert
   {%- if sev=="SHUTDOWN" %} alert-danger
-  {%- elif sev=="ALARM" %} alert-danger
   {%- elif sev=="WARNING" %} alert-warning
+  {%- elif sev=="CAUTION" %} alert-warning
   {%- else %} alert-info{% endif %} py-2 mb-2">
   <strong>{{ det.get("scenario","?") }}</strong>
-  <span class="badge bg-{{ 'danger' if sev in ['SHUTDOWN','ALARM'] else 'warning text-dark' if sev=='WARNING' else 'info text-dark' }} ms-2">{{ sev }}</span>
+  <span class="badge bg-{{ 'danger' if sev=='SHUTDOWN' else 'warning text-dark' if sev in ['WARNING','CAUTION'] else 'info text-dark' }} ms-2">{{ sev }}</span>
   <br><small>{{ det.get("trigger","") }}</small>
 </div>
 {% endfor %}
@@ -272,11 +272,11 @@
     {% for det in dets %}
     {% set sev = det.get("severity","INFO") %}
     <div class="alert
-      {%- if sev in ["SHUTDOWN","ALARM"] %} alert-danger
-      {%- elif sev=="WARNING" %} alert-warning
+      {%- if sev=="SHUTDOWN" %} alert-danger
+      {%- elif sev in ["WARNING","CAUTION"] %} alert-warning
       {%- else %} alert-info{% endif %} py-1 mb-1" style="font-size:0.8rem">
       <strong>{{ det.get("scenario","?") }}</strong>
-      <span class="badge bg-{{ 'danger' if sev in ['SHUTDOWN','ALARM'] else 'warning text-dark' if sev=='WARNING' else 'info text-dark' }} ms-1">{{ sev }}</span>
+      <span class="badge bg-{{ 'danger' if sev=='SHUTDOWN' else 'warning text-dark' if sev in ['WARNING','CAUTION'] else 'info text-dark' }} ms-1">{{ sev }}</span>
       — {{ det.get("trigger","") }}
     </div>
     {% endfor %}

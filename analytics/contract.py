@@ -168,7 +168,7 @@ class RiskAccumulators:
 class Detection:
     """Сработавший диагностический сценарий."""
     scenario: str                  # LOAD_STEP / PHASE_IMBALANCE / ...
-    severity: str                  # INFO / WARNING / ALARM / SHUTDOWN
+    severity: str                  # INFO / CAUTION / WARNING / SHUTDOWN
     t_detected: str                # ISO8601
     source: str                    # PASSPORT_THRESHOLD / CONTROLLER_FAULT / METRIC_RULE
     trigger: str                   # описание триггера (метрика + значение + порог)

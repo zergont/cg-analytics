@@ -610,7 +610,7 @@ def _check_stop_profile(
                 "details": f"ok: RPM упали до порога за {stop_time:.0f}с <= {T_stop_max:.0f}с",
             })
         else:
-            # Медленный останов — просто информируем, не ALARM
+            # Медленный останов — просто информируем, не WARNING
             stop_seg.sequence_checks.append({
                 "check": "rpm_stop_profile",
                 "passed": True,
@@ -636,7 +636,7 @@ def _check_stop_profile(
         if stop_seg.subsegments:
             stop_seg.subsegments[0].detections.append(Detection(
                 scenario="STOP_PROFILE",
-                severity=cfg.det("STOP_PROFILE", "severity_default", default="ALARM"),
+                severity=cfg.det("STOP_PROFILE", "severity_default", default="WARNING"),
                 t_detected=stop_seg.t_start,
                 source="METRIC_RULE",
                 trigger=(
@@ -797,8 +797,8 @@ def _check_cooldown_transition(
     Причина останова НЕ подавляет тревогу — аварийная УСИЛИВАЕТ (риск заклинивания!).
 
     severity:
-    - останов с ELEVATED/OVERLOAD → ALARM (риск заклинивания/коробления турбины)
-    - останов с NORMAL/LOW → WARNING
+    - останов с ELEVATED/OVERLOAD → WARNING (риск заклинивания/коробления турбины)
+    - останов с NORMAL/LOW → CAUTION
     Аварийный останов (SHUTDOWN-fault в сегменте) добавляет контекст в trigger.
     """
     required_after = cfg.det("COOLDOWN_VIOLATION", "required_after_zone", default="ELEVATED")
@@ -855,8 +855,8 @@ def _check_cooldown_transition(
     })
 
     if not passed and stop_seg.subsegments:
-        # Severity: ALARM если была высокая нагрузка, иначе WARNING
-        severity = "ALARM" if had_elevated else "WARNING"
+        # Severity: WARNING если была высокая нагрузка (риск турбины), иначе CAUTION
+        severity = "WARNING" if had_elevated else "CAUTION"
 
         # Контекст аварийного останова (SHUTDOWN-fault в сегменте останова)
         has_shutdown_fault = any(

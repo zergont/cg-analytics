@@ -25,15 +25,15 @@ from .contract import Segment, Subsegment
 
 _SEVERITY_EMOJI = {
     "SHUTDOWN": "🔴",
-    "ALARM": "🟠",
-    "WARNING": "🟡",
-    "INFO": "🔵",
+    "WARNING":  "🟠",
+    "CAUTION":  "🟡",
+    "INFO":     "🔵",
 }
 
 _SEVERITY_LABEL = {
     "SHUTDOWN": "АВАРИЯ (SHUTDOWN)",
-    "ALARM":    "АВАРИЯ (ALARM)",
-    "WARNING":  "ПРЕДУПРЕЖДЕНИЕ АНАЛИТИКИ",
+    "WARNING":  "АВАРИЯ (WARNING)",
+    "CAUTION":  "ПРЕДУПРЕЖДЕНИЕ АНАЛИТИКИ",
     "INFO":     "INFO",
 }
 
@@ -103,7 +103,7 @@ def _as_dict(d: Any) -> dict:
 
 
 def _max_severity(detections: list) -> str | None:
-    order = ["SHUTDOWN", "ALARM", "WARNING", "INFO"]
+    order = ["SHUTDOWN", "WARNING", "CAUTION", "INFO"]
     found = {_as_dict(d)["severity"] for d in detections}
     for sev in order:
         if sev in found:
@@ -205,7 +205,7 @@ def to_markdown(
     a(f"| Время в останове (RUN_STATE=0) | {_fmt_duration(total_stopped_sec)} |")
     a(f"| Время в зоне повышенной нагрузки | {_fmt_duration(total_elevated_sec)} |")
     a(f"| Всего обнаружений | {len(all_detections)} |")
-    for sev in ["SHUTDOWN", "ALARM", "WARNING", "INFO"]:
+    for sev in ["SHUTDOWN", "WARNING", "CAUTION", "INFO"]:
         cnt = by_severity.get(sev, 0)
         if cnt:
             a(f"| — {_SEVERITY_EMOJI.get(sev, '')} {_SEVERITY_LABEL.get(sev, sev)} | {cnt} |")
@@ -215,7 +215,7 @@ def to_markdown(
     a("")
 
     # ── Быстрый список тревог ──
-    alarm_detections = [d for d in all_detections if d["severity"] in ("SHUTDOWN", "ALARM")]
+    alarm_detections = [d for d in all_detections if d["severity"] in ("SHUTDOWN", "WARNING")]
     if alarm_detections:
         a("## Тревоги")
         a("")

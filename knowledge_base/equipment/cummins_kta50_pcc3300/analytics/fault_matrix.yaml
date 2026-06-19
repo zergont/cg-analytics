@@ -1,7 +1,7 @@
 # Матрица приоритетов неисправностей PCC3300
 # Источник: operation_rules.json → alarm_priority_matrix; A035B516; 0900-0670
 # Используется детектором CONTROLLER_FAULT для определения severity.
-# Шкала: SHUTDOWN / ALARM / WARNING / INFO (ТЗ, раздел 8.3)
+# Шкала: SHUTDOWN / WARNING / CAUTION / INFO (ТЗ, раздел 8.3)
 # Изменение: только через веб-морду (раздел 9 ТЗ)
 
 # ─── МАППИНГ SEVERITY БИТОВ fault_bitmap_map → шкала ТЗ ────────────────────
@@ -10,7 +10,7 @@
 bitmap_severity_map:
   shutdown: SHUTDOWN
   shutdown_cooldown: SHUTDOWN
-  derate: ALARM
+  derate: WARNING
   warning: WARNING
   none: INFO
 

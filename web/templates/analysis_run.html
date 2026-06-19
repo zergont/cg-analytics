@@ -20,10 +20,10 @@
     <div class="alert alert-danger">⚠ <strong>Ошибка прогона:</strong> {{ run.error }}</div>
 {% elif run.max_severity == 'SHUTDOWN' %}
     <div class="alert alert-danger">🔴 <strong>SHUTDOWN</strong> — выявлены события аварийного останова</div>
-{% elif run.max_severity == 'ALARM' %}
-    <div class="alert alert-warning">🟠 <strong>ALARM</strong> — требуется внимание</div>
 {% elif run.max_severity == 'WARNING' %}
-    <div class="alert alert-warning">🟡 <strong>ПРЕДУПРЕЖДЕНИЕ БЛОКА АНАЛИТИКИ</strong></div>
+    <div class="alert alert-warning">🟠 <strong>WARNING</strong> — панельная тревога</div>
+{% elif run.max_severity == 'CAUTION' %}
+    <div class="alert alert-warning">🟡 <strong>ПРЕДУПРЕЖДЕНИЕ АНАЛИТИКИ</strong></div>
 {% else %}
     <div class="alert alert-success">🟢 <strong>Норма</strong> — нарушений не выявлено</div>
 {% endif %}

@@ -42,10 +42,10 @@
                             <span class="badge bg-secondary">ОШИБКА</span>
                         {% elif run.max_severity == 'SHUTDOWN' %}
                             <span class="badge bg-danger">SHUTDOWN</span>
-                        {% elif run.max_severity == 'ALARM' %}
-                            <span class="badge" style="background:#fd7e14">ALARM</span>
                         {% elif run.max_severity == 'WARNING' %}
-                            <span class="badge bg-warning text-dark">WARNING</span>
+                            <span class="badge" style="background:#fd7e14">WARNING</span>
+                        {% elif run.max_severity == 'CAUTION' %}
+                            <span class="badge bg-warning text-dark">CAUTION</span>
                         {% elif run.max_severity == 'INFO' %}
                             <span class="badge bg-info">INFO</span>
                         {% else %}

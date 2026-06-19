@@ -108,7 +108,7 @@ def _detect_load_step(
     Классификация результата:
     - INFO  — штатный рампинг (плавное изменение в окне рампинга PCC)
     - INFO  — переходный процесс в пределах нормы выбранного класса ISO
-    - WARNING — превышение нормы класса (просадка/заброс/время восстановления)
+    - CAUTION — превышение нормы класса (просадка/заброс/время восстановления)
     """
     if derived.dP_dt_max is None:
         return []
@@ -140,7 +140,7 @@ def _detect_load_step(
         violations.append(f"recovery={rec:.1f}с > {load_class}:{recovery_norm:.1f}с")
 
     if violations:
-        severity = "WARNING"
+        severity = "CAUTION"
         trigger = (
             f"dP_dt_max={derived.dP_dt_max:.2f} кВт/с; "
             f"нарушение {load_class}: {'; '.join(violations)}"
@@ -251,7 +251,7 @@ def _detect_cooling_failure(
 
     ФАЗА 1 — прогрев (T стартовала ниже рабочего диапазона, к концу вошла):
       Предиктор асимптоты T_asymptote (из DerivedMetrics.coolant_asymptote_c).
-      Если T_asymptote > asymptote_norm_max → двигатель нацелен выше нормы → WARNING.
+      Если T_asymptote > asymptote_norm_max → двигатель нацелен выше нормы → CAUTION.
       Пока T < working_range_low — молчим (холодно, не опасно). Тревога — только
       в точке входа в рабочий диапазон.
 
@@ -294,7 +294,7 @@ def _detect_cooling_failure(
         if T_asym is not None and T_asym > asym_norm:
             results.append(Detection(
                 scenario="COOLING_FAILURE",
-                severity="WARNING",
+                severity="CAUTION",
                 t_detected=_iso(seg_start),
                 source="METRIC_RULE",
                 trigger=(
@@ -331,7 +331,7 @@ def _detect_cooling_failure(
         if cool_max is not None and cool_max >= prox_thr:
             results.append(Detection(
                 scenario="COOLING_FAILURE",
-                severity="WARNING",
+                severity="CAUTION",
                 t_detected=_iso(seg_start),
                 source="PASSPORT_THRESHOLD",
                 trigger=f"coolant_max={cool_max:.1f}°C в пределах {prox_pct:.0f}% от HCT Warning {hct_warn}°C",
@@ -344,7 +344,7 @@ def _detect_cooling_failure(
 
     results.append(Detection(
         scenario="COOLING_FAILURE",
-        severity="WARNING",
+        severity="CAUTION",
         t_detected=_iso(seg_start),
         source="METRIC_RULE",
         trigger=(
@@ -416,7 +416,7 @@ def _detect_oil_dilution(
     if press_min < abs_press_warn:
         return [Detection(
             scenario="OIL_DILUTION",
-            severity="WARNING",
+            severity="CAUTION",
             t_detected=_iso(seg_start),
             source="PASSPORT_THRESHOLD",
             trigger=f"oil_press_min={press_min:.0f}кПа < паспортного минимума {abs_press_warn:.0f}кПа",
@@ -558,7 +558,7 @@ def _detect_start_failure(
     if crank_dur >= crank_alarm:
         results.append(Detection(
             scenario="START_FAILURE",
-            severity=cfg.det("START_FAILURE", "severity_default", default="ALARM"),
+            severity=cfg.det("START_FAILURE", "severity_default", default="CAUTION"),
             t_detected=_iso(seg_start),
             source="PASSPORT_THRESHOLD",
             trigger=f"crank_duration={crank_dur:.0f}с >= {crank_alarm:.0f}с",
@@ -576,7 +576,7 @@ def _detect_start_failure(
         if bat_min is not None and bat_min < sag_alarm:
             results.append(Detection(
                 scenario="START_FAILURE",
-                severity=cfg.det("START_FAILURE", "severity_default", default="WARNING"),
+                severity=cfg.det("START_FAILURE", "severity_default", default="CAUTION"),
                 t_detected=_iso(seg_start),
                 source="METRIC_RULE",
                 trigger=f"battery_min={bat_min:.1f}V < {sag_alarm:.1f}V при прокрутке",

@@ -109,7 +109,7 @@ class AnalyticsConfig:
         return node if node != {} else default
 
     def bitmap_severity(self, raw_severity: str | None) -> str:
-        """Перевести severity из fault_bitmap_map → шкалу ТЗ (SHUTDOWN/ALARM/WARNING/INFO).
+        """Перевести severity из fault_bitmap_map → шкалу ТЗ (SHUTDOWN/WARNING/CAUTION/INFO).
 
         Бит без поля severity (raw_severity=None/'') → INFO:
         это статусный/информационный бит, не неисправность.
@@ -222,7 +222,7 @@ class AnalyticsConfig:
                 errors.append(f"segmentation.data_quality.heartbeat_nominal_sec={heartbeat!r}: не число")
 
         # ── Детекторы: severity_default ────────────────────────────────────
-        valid_sev = {"INFO", "WARNING", "ALARM", "SHUTDOWN"}
+        valid_sev = {"INFO", "CAUTION", "WARNING", "SHUTDOWN"}
         for scenario, params in self.detectors.items():
             if not isinstance(params, dict):
                 continue

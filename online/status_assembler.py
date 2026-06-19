@@ -51,10 +51,10 @@ _KEY_ROLES: dict[int, list[str]] = {
 }
 
 # Ранг severity от панели управления (CONTROLLER_FAULT)
-_PANEL_SEV_RANK: dict[str, int] = {"SHUTDOWN": 3, "ALARM": 3, "WARNING": 2}
+_PANEL_SEV_RANK: dict[str, int] = {"SHUTDOWN": 3, "WARNING": 2}
 
 # Общий ранг для сортировки итогового уровня
-# предупреждение (аналитика) < внимание (панель WARNING) < авария (панель ALARM/SHUTDOWN)
+# предупреждение (аналитика) < внимание (панель WARNING) < авария (панель SHUTDOWN)
 _OVERALL_RANK: dict[str, int] = {
     "авария":         4,
     "внимание":       3,
@@ -92,7 +92,7 @@ def _fmt_duration(sec: float) -> str:
 def compute_panel_severity(active_dets: list[dict]) -> str:
     """Уровень по сигналам панели управления (scenario=CONTROLLER_FAULT).
 
-    норма / внимание (WARNING) / авария (ALARM/SHUTDOWN)
+    норма / внимание (WARNING) / авария (SHUTDOWN)
     """
     panel = [d for d in active_dets if d.get("scenario") == "CONTROLLER_FAULT"]
     if not panel:

@@ -21,7 +21,7 @@
 .sev-ok        { border-left:3px solid #198754; }  /* норма — зелёный */
 .sev-warning   { border-left:3px solid #ffc107; }  /* предупреждение (аналитика) — жёлтый */
 .sev-attention { border-left:3px solid #fd7e14; }  /* внимание (панель WARNING) — оранжевый */
-.sev-alarm     { border-left:3px solid #dc3545; }  /* авария (панель ALARM/SHUTDOWN) — красный */
+.sev-alarm     { border-left:3px solid #dc3545; }  /* авария (панель SHUTDOWN) — красный */
 .sev-na        { border-left:3px solid #dee2e6; }  /* нет данных */
 /* Маркер открытого сегмента */
 .open-dot { width:8px; height:8px; border-radius:50%; background:#0d6efd; display:inline-block; }
@@ -151,7 +151,7 @@
     {% set sev_title = {"норма": "Норма — нарушений не выявлено",
                         "предупреждение": "Предупреждение — детекции аналитики",
                         "внимание": "Внимание — панель: WARNING",
-                        "авария": "Авария — панель: ALARM/SHUTDOWN"}.get(vlv, "Нет данных по серьёзности") %}
+                        "авария": "Авария — панель: SHUTDOWN"}.get(vlv, "Нет данных по серьёзности") %}
     {% set ai = ai_statuses.get(seg.id) if ai_statuses else none %}
     <a href="/online/segment/{{ seg.id }}"
        class="seg-event rs-{{ rs if rs is not none else 'na' }} {{ sev_cls }}"
@@ -167,9 +167,9 @@
       {# AI-кружок (Claude) #}
       {% if ai %}
         {% if ai.status == 'done' %}
-          {% if ai.alarm_level in ['ALARM','SHUTDOWN'] %}
+          {% if ai.alarm_level in ['WARNING','SHUTDOWN'] %}
             <span class="ai-badge ai-alarm" title="Claude: {{ ai.verdict }}">AI</span>
-          {% elif ai.alarm_level == 'WARNING' %}
+          {% elif ai.alarm_level == 'CAUTION' %}
             <span class="ai-badge ai-warn" title="Claude: {{ ai.verdict }}">AI</span>
           {% else %}
             <span class="ai-badge ai-norm" title="Claude: норма">AI</span>
@@ -327,7 +327,7 @@ function renderClearList(segs) {
     return;
   }
 
-  const sevColors = {SHUTDOWN:'danger', ALARM:'danger', WARNING:'warning', INFO:'info'};
+  const sevColors = {SHUTDOWN:'danger', WARNING:'warning', CAUTION:'info', INFO:'info'};
   const rows = segs.map(seg => {
     const tStart = seg.t_start ? new Date(seg.t_start).toLocaleString('ru-RU',
       {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'}) : '—';

@@ -1546,7 +1546,7 @@ async def online_calendar(
 
     def _violation_level(characteristics_json) -> str | None:
         """None = нет данных/открытый; иначе итоговый уровень как в status_assembler:
-        норма / предупреждение (аналитика) / внимание (панель WARNING) / авария (панель ALARM/SHUTDOWN)."""
+        норма / предупреждение (аналитика) / внимание (панель WARNING) / авария (панель SHUTDOWN)."""
         import json as _json
         if isinstance(characteristics_json, str):
             try: characteristics_json = _json.loads(characteristics_json)
@@ -1745,7 +1745,7 @@ async def online_segment_detail(request: Request, seg_id: int):
         logger.debug("corpus: анализ для #%d недоступен: %s", seg_id, _ce)
 
     if is_open:
-        _sev_rank = {"SHUTDOWN": 4, "ALARM": 3, "WARNING": 2, "INFO": 1}
+        _sev_rank = {"SHUTDOWN": 4, "WARNING": 3, "CAUTION": 2, "INFO": 1}
         _open_dets = []
         if chars_dict:
             for _sub in chars_dict.get("subsegments", []):
@@ -1799,7 +1799,7 @@ async def online_segment_detail(request: Request, seg_id: int):
             if dq is not None:
                 dq_pairs.append((dq, dur))
 
-    sev_rank = {"SHUTDOWN": 4, "ALARM": 3, "WARNING": 2, "INFO": 1}
+    sev_rank = {"SHUTDOWN": 4, "WARNING": 3, "CAUTION": 2, "INFO": 1}
     max_sev = max((d.get("severity") for d in detections), key=lambda s: sev_rank.get(s, 0), default=None)
     total_dur = sum(w for _, w in dq_pairs)
     dq_avg = sum(q * w for q, w in dq_pairs) / total_dur if total_dur > 0 else None
@@ -2137,8 +2137,8 @@ def _seg_severity(
     gate_suppressed_hash: str | None = None,
 ) -> str | None:
     """Severity сегмента с учётом источника (градация как в status_assembler):
-    панель ALARM/SHUTDOWN → авария, панель WARNING → внимание (оранжевый),
-    любая детекция аналитики → INFO = предупреждение (жёлтый). None — детекций нет.
+    панель SHUTDOWN → авария (красный), панель WARNING → внимание (оранжевый),
+    любая детекция аналитики → CAUTION = предупреждение (жёлтый). None — детекций нет.
     Аналитика, отменённая гейтом (hash совпал), не учитывается."""
     dets = _seg_collect_dets(chars_json, active_dets_json)
     if _seg_gate_checked(dets, gate_suppressed_hash):
@@ -2146,15 +2146,13 @@ def _seg_severity(
     if not dets:
         return None
 
-    panel_rank = {"SHUTDOWN": 4, "ALARM": 3, "WARNING": 2}
+    panel_rank = {"SHUTDOWN": 4, "WARNING": 3}
     panel = [d.get("severity", "") for d in dets if d.get("scenario") == "CONTROLLER_FAULT"]
     best_panel = max(panel, key=lambda s: panel_rank.get(s, 0), default="")
     if panel_rank.get(best_panel, 0) >= 3:
         return best_panel
-    if best_panel == "WARNING":
-        return "WARNING"
     if any(d.get("scenario") != "CONTROLLER_FAULT" for d in dets):
-        return "INFO"
+        return "CAUTION"
     return None
 
 
@@ -2349,7 +2347,7 @@ async def api_machine_segments(
             "run_state_label": _RUN_STATE_LABELS.get(run_state, str(run_state)) if run_state is not None else None,
             "duration_sec":  dur,
             "cause_close":   seg.get("cause_close"),
-            "severity":      sev,                         # SHUTDOWN/ALARM/WARNING/INFO/None
+            "severity":      sev,                         # SHUTDOWN/WARNING/CAUTION/None
             "gate_checked":  gate_ok,                     # срабатывание аналитики отменено гейтом
             "coking_risk":   None,                        # в calendar-запросе не грузим JSONB полностью
             "analytics_version": seg.get("analytics_version"),
