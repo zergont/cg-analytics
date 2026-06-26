@@ -139,6 +139,31 @@ CREATE INDEX IF NOT EXISTS idx_detection_events_lookup
 ALTER TABLE detection_events
     ADD COLUMN IF NOT EXISTS front_count INT NOT NULL DEFAULT 1;
 
+-- Миграция v4.9.1: журнал жизненного цикла детекций (живые тревоги)
+-- Одна строка = одно событие перехода состояния детекции:
+--   OPENED  — сценарий появился в активных детекциях
+--   UPDATED — severity изменился (YELLOW↔RED)
+--   CLOSED  — условие снято, сценарий исчез из детекций последнего подсегмента
+-- Тревога живёт сквозь смены RUN_STATE; CLOSED — только при фактическом снятии условия.
+-- ON DELETE SET NULL: удаление сегмента не удаляет историю журнала.
+CREATE TABLE IF NOT EXISTS alert_journal (
+    id           BIGSERIAL   PRIMARY KEY,
+    router_sn    TEXT        NOT NULL,
+    equip_type   TEXT        NOT NULL,
+    panel_id     INT         NOT NULL,
+    scenario     TEXT        NOT NULL,
+    event_type   TEXT        NOT NULL
+                 CHECK (event_type IN ('OPENED', 'UPDATED', 'CLOSED')),
+    ts           TIMESTAMPTZ NOT NULL,
+    severity     TEXT,
+    trigger_text TEXT,
+    values_json  JSONB,
+    segment_id   BIGINT      REFERENCES auto_segments(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_alert_journal_lookup
+    ON alert_journal (router_sn, equip_type, panel_id, scenario, ts DESC);
+
 -- Миграция v3.4.0: курсор синхронизации history из источника
 CREATE TABLE IF NOT EXISTS history_sync_state (
     router_sn    TEXT        NOT NULL,

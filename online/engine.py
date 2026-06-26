@@ -188,19 +188,68 @@ def _extract_open_segment_data(seg) -> tuple[dict, list]:
         },
     }
 
-    # Детекции из всех подсегментов: сигнал из раннего подсегмента
-    # остаётся активным пока сегмент открыт. Дедупликация по (scenario, fault_codes).
-    seen: set[tuple] = set()
-    active_dets: list[dict] = []
-    for sub in seg.subsegments:
-        for d in sub.detections:
-            d_dict = d.to_dict()
-            key = (d_dict.get("scenario"), tuple(sorted(d_dict.get("fault_codes") or [])))
-            if key not in seen:
-                seen.add(key)
-                active_dets.append(d_dict)
+    # Детекции только из последнего подсегмента — текущее состояние детекторов.
+    # Накопленная «живая» картина ведётся отдельно через _diff_alerts / alert_journal.
+    active_dets: list[dict] = [d.to_dict() for d in last_sub.detections]
 
     return current_values, active_dets
+
+
+def _diff_alerts(
+    prev_map: dict[str, dict],
+    curr_list: list[dict],
+    ts: datetime,
+    segment_id: int | None,
+) -> tuple[list[dict], list[dict]]:
+    """Сравнить предыдущий снимок активных тревог с текущим набором детекций.
+
+    Возвращает (new_active, journal_events).
+    new_active  — список детекций, которые должны быть в active_detections_json.
+    journal_events — события для записи в alert_journal.
+    """
+    curr_map: dict[str, dict] = {d["scenario"]: d for d in curr_list}
+    journal: list[dict] = []
+    new_active: list[dict] = []
+
+    for sc, d in curr_map.items():
+        if sc not in prev_map:
+            journal.append({
+                "scenario":    sc,
+                "event_type":  "OPENED",
+                "ts":          ts,
+                "severity":    d.get("severity"),
+                "trigger":     d.get("trigger"),
+                "values":      d.get("values"),
+                "segment_id":  segment_id,
+            })
+        else:
+            prev_sev = prev_map[sc].get("severity")
+            curr_sev = d.get("severity")
+            if prev_sev != curr_sev:
+                journal.append({
+                    "scenario":    sc,
+                    "event_type":  "UPDATED",
+                    "ts":          ts,
+                    "severity":    curr_sev,
+                    "trigger":     d.get("trigger"),
+                    "values":      d.get("values"),
+                    "segment_id":  segment_id,
+                })
+        new_active.append(d)
+
+    for sc, d in prev_map.items():
+        if sc not in curr_map:
+            journal.append({
+                "scenario":    sc,
+                "event_type":  "CLOSED",
+                "ts":          ts,
+                "severity":    d.get("severity"),
+                "trigger":     None,
+                "values":      d.get("values"),
+                "segment_id":  segment_id,
+            })
+
+    return new_active, journal
 
 
 async def _load_data(
@@ -454,6 +503,8 @@ class OnlinePollEngine:
         # Кэш аналоговых данных открытого окна (обнуляется при смене cursor_ts)
         self._open_history_cache: list[dict] | None = None
         self._open_history_cache_ts: datetime | None = None
+        # Живые тревоги: scenario → detection_dict (только активные, не закрытые)
+        self._active_alerts: dict[str, dict] = {}
 
     @property
     def key(self) -> str:
@@ -525,6 +576,24 @@ class OnlinePollEngine:
                 "OnlineEngine[%s]: первый старт с %s",
                 self.key, self.cursor_ts,
             )
+
+        # Восстановить живые тревоги из журнала (незакрытые на момент рестарта)
+        try:
+            active = await online_db.get_active_alerts(
+                self.router_sn, self.equip_type, self.panel_id
+            )
+            self._active_alerts = {a["scenario"]: a for a in active}
+            if self._active_alerts:
+                logger.info(
+                    "OnlineEngine[%s]: восстановлены активные тревоги: %s",
+                    self.key, list(self._active_alerts),
+                )
+        except Exception:
+            logger.warning(
+                "OnlineEngine[%s]: не удалось восстановить active_alerts из журнала",
+                self.key,
+            )
+            self._active_alerts = {}
 
     # ── Главный цикл ──────────────────────────────────────────────────────────
 
@@ -643,7 +712,9 @@ class OnlinePollEngine:
         # Сразу сеем новый открытый сегмент, чтобы не было gap'а между
         # delete и финальным upsert_open_segment в _update_open_window.
         # _update_open_window перезапишет его актуальными данными.
-        _seed_cv, _seed_dets = _extract_open_segment_data(segments[-1])
+        # active_detections из _active_alerts: тревоги живут сквозь смену RUN_STATE.
+        _seed_cv, _ = _extract_open_segment_data(segments[-1])
+        _seed_dets = list(self._active_alerts.values())
         await online_db.upsert_open_segment({
             "router_sn":              self.router_sn,
             "equip_type":             self.equip_type,
@@ -1066,8 +1137,14 @@ class OnlinePollEngine:
             self.key, _time.perf_counter() - _t0,
         )
 
-        current_values, active_detections = _extract_open_segment_data(open_seg)
+        current_values, _curr_dets = _extract_open_segment_data(open_seg)
         coking_risk = _extract_coking_risk_from_segments(segments)
+
+        # Диффузия живых тревог: вычисляем diff до upsert; segment_id подставим после
+        active_detections, _alert_events = _diff_alerts(
+            self._active_alerts, _curr_dets, ts=_tz_utc(t_to), segment_id=None
+        )
+        self._active_alerts = {d["scenario"]: d for d in active_detections}
 
         # continued_from: если после DAILY_BOUNDARY не было смен RUN_STATE,
         # открытый сегмент сам является продолжением pre-boundary сегмента
@@ -1091,7 +1168,7 @@ class OnlinePollEngine:
         )
 
         _t0 = _time.perf_counter()
-        await online_db.upsert_open_segment({
+        _open_seg_id = await online_db.upsert_open_segment({
             "router_sn":              self.router_sn,
             "equip_type":             self.equip_type,
             "panel_id":               self.panel_id,
@@ -1119,6 +1196,24 @@ class OnlinePollEngine:
             self.key, _time.perf_counter() - _t0,
             _time.perf_counter() - _t_cycle_start,
         )
+
+        # Записать события жизненного цикла тревог (segment_id теперь известен)
+        if _alert_events:
+            for ev in _alert_events:
+                ev["segment_id"] = _open_seg_id
+            try:
+                await online_db.insert_alert_events(
+                    self.router_sn, self.equip_type, self.panel_id, _alert_events
+                )
+            except Exception:
+                logger.warning(
+                    "OnlineEngine[%s]: не удалось записать alert_journal", self.key
+                )
+            for ev in _alert_events:
+                logger.info(
+                    "OnlineEngine[%s]: тревога %s — %s (severity=%s)",
+                    self.key, ev["scenario"], ev["event_type"], ev.get("severity"),
+                )
 
         logger.debug(
             "OnlineEngine[%s]: открытый сегмент обновлён (run_state=%s, coking=%s)",

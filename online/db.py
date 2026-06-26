@@ -746,6 +746,78 @@ async def count_detection_events_since(
         await conn.close()
 
 
+# ── alert_journal ─────────────────────────────────────────────────────────────
+
+async def insert_alert_events(
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    events: list[dict[str, Any]],
+) -> None:
+    """Записать события жизненного цикла детекций (OPENED / UPDATED / CLOSED)."""
+    if not events:
+        return
+    conn = await _connect()
+    try:
+        await conn.executemany("""
+            INSERT INTO alert_journal
+                (router_sn, equip_type, panel_id, scenario,
+                 event_type, ts, severity, trigger_text, values_json, segment_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+        """, [
+            (
+                router_sn, equip_type, panel_id,
+                ev["scenario"],
+                ev["event_type"],
+                ev["ts"],
+                ev.get("severity"),
+                ev.get("trigger"),
+                json.dumps(ev.get("values"), ensure_ascii=False)
+                    if ev.get("values") is not None else None,
+                ev.get("segment_id"),
+            )
+            for ev in events
+        ])
+    finally:
+        await conn.close()
+
+
+async def get_active_alerts(
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+) -> list[dict[str, Any]]:
+    """Вернуть список сценариев с незакрытой тревогой (последнее событие ≠ CLOSED).
+
+    Используется при инициализации движка для восстановления _active_alerts.
+    """
+    conn = await _connect()
+    try:
+        rows = await conn.fetch("""
+            SELECT DISTINCT ON (scenario)
+                scenario, event_type, ts, severity, trigger_text, values_json, segment_id
+            FROM alert_journal
+            WHERE router_sn = $1
+              AND equip_type = $2
+              AND panel_id   = $3
+            ORDER BY scenario, ts DESC
+        """, router_sn, equip_type, panel_id)
+        result = []
+        for r in rows:
+            if r["event_type"] != "CLOSED":
+                vj = r["values_json"]
+                result.append({
+                    "scenario":  r["scenario"],
+                    "severity":  r["severity"],
+                    "trigger":   r["trigger_text"],
+                    "values":    json.loads(vj) if isinstance(vj, str) else (vj or {}),
+                    "segment_id": r["segment_id"],
+                })
+        return result
+    finally:
+        await conn.close()
+
+
 async def has_segments(
     router_sn: str, equip_type: str, panel_id: int
 ) -> bool:
