@@ -2136,10 +2136,18 @@ def _seg_severity(
     chars_json: Any, active_dets_json: Any = None,
     gate_suppressed_hash: str | None = None,
 ) -> str | None:
-    """Severity сегмента с учётом источника (градация как в status_assembler):
-    панель SHUTDOWN → авария (красный), панель WARNING → внимание (оранжевый),
-    любая детекция аналитики → CAUTION = предупреждение (жёлтый). None — детекций нет.
-    Аналитика, отменённая гейтом (hash совпал), не учитывается."""
+    """Severity сегмента для API — значение поля `severity` в ответе.
+
+    Шкала (v4.8.9+):
+      "SHUTDOWN" — панель: аварийный останов
+      "WARNING"  — панель: тревога (derate / панельный warning)
+      "CAUTION"  — детекция аналитического движка  (до v4.8.9 называлось "INFO")
+      None       — детекций нет
+
+    Аналитика, отменённая гейтом Claude (gate_suppressed_hash совпал с хешем
+    текущего состава детекций), не учитывается → severity может стать None
+    даже при наличии детекций в characteristics_json.
+    """
     dets = _seg_collect_dets(chars_json, active_dets_json)
     if _seg_gate_checked(dets, gate_suppressed_hash):
         dets = [d for d in dets if d.get("scenario") == "CONTROLLER_FAULT"]
@@ -2276,8 +2284,12 @@ async def api_machine_segments(
       year, month  — фильтр по календарному месяцу (оба или ни одного)
       limit        — макс. число сегментов (дефолт 200)
 
-    Возвращает массив сегментов от новых к старым.
-    Каждый сегмент включает метаданные, уровень тревог и флаги наличия ИИ-анализа.
+    Возвращает массив сегментов от новых к старым. Поле `severity` кодирует
+    наивысший уровень тревоги сегмента согласно шкале (v4.8.9+):
+      "SHUTDOWN" — панель: аварийный останов
+      "WARNING"  — панель: тревога
+      "CAUTION"  — детекция аналитики  ← было "INFO" до v4.8.9
+      null       — нет детекций / аналитика отменена гейтом
     """
     from online import db as odb
     from datetime import datetime, timezone, timedelta
@@ -2347,7 +2359,7 @@ async def api_machine_segments(
             "run_state_label": _RUN_STATE_LABELS.get(run_state, str(run_state)) if run_state is not None else None,
             "duration_sec":  dur,
             "cause_close":   seg.get("cause_close"),
-            "severity":      sev,                         # SHUTDOWN/WARNING/CAUTION/None
+            "severity":      sev,                         # SHUTDOWN/WARNING/CAUTION/None (было INFO до v4.8.9)
             "gate_checked":  gate_ok,                     # срабатывание аналитики отменено гейтом
             "coking_risk":   None,                        # в calendar-запросе не грузим JSONB полностью
             "analytics_version": seg.get("analytics_version"),
