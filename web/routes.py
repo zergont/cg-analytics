@@ -46,38 +46,10 @@ def _apply_tz(tz_name: str) -> None:
 
 # ── Главная страница ──────────────────────────────────────────────────────────
 
-@router.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    reports = await analytics.get_latest_reports(limit=100)
-    return templates.TemplateResponse(request, "index.html", {"reports": reports})
-
-
-# ── Отчёт ─────────────────────────────────────────────────────────────────────
-
-@router.get("/report/{report_id}", response_class=HTMLResponse)
-async def report(request: Request, report_id: str):
-    rep = await analytics.get_report(report_id)
-    if not rep:
-        raise HTTPException(status_code=404, detail="Отчёт не найден")
-    return templates.TemplateResponse(request, "report.html", {"report": rep})
-
-
-# ── История ──────────────────────────────────────────────────────────────────
-
-@router.get("/history/{router_sn}/{equip_type}/{panel_id}", response_class=HTMLResponse)
-async def history(
-    request: Request,
-    router_sn: str,
-    equip_type: str,
-    panel_id: int,
-):
-    reports = await analytics.get_equipment_history(router_sn, equip_type, panel_id, limit=90)
-    return templates.TemplateResponse(request, "history.html", {
-        "router_sn": router_sn,
-        "equip_type": equip_type,
-        "panel_id": panel_id,
-        "reports": reports,
-    })
+@router.get("/")
+async def index():
+    """Корень: онлайн-мониторинг — основной рабочий экран."""
+    return RedirectResponse(url="/online", status_code=307)
 
 
 # ── Анализ произвольного диапазона ───────────────────────────────────────────
