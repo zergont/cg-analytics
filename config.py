@@ -35,11 +35,6 @@ class Settings:
         self.schedule_hour: int = int(sched.get("hour", 21))
         self.schedule_minute: int = int(sched.get("minute", 5))
 
-        emb = data.get("embeddings", {})
-        self.embedding_base_url: str = emb.get("base_url", "http://localhost:11434")
-        self.embedding_model: str = emb.get("model", "nomic-embed-text")
-        self.embedding_dim: int = int(emb.get("dim", 768))
-
         llm = data.get("llm", {})
         self.llm_base_url: str = llm.get("base_url", "http://localhost:11434")
         self.llm_model: str = llm.get("model", "qwen2.5:14b")

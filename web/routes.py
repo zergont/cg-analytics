@@ -95,8 +95,6 @@ async def analyze_page(request: Request):
         "equipment": equipment,
         "default_from": default_from,
         "default_to":   default_to,
-        "result": None,
-        "error": None,
     })
 
 

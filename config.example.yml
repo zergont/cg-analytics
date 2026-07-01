@@ -8,7 +8,7 @@
 databases:
   # Основная БД телеметрии (TimescaleDB/PostgreSQL)
   source: postgresql://user:pass@192.168.1.10:5432/telemetry
-  # Аналитическая БД (отдельный инстанс PostgreSQL + pgvector)
+  # Аналитическая БД (отдельный инстанс PostgreSQL)
   analytics: postgresql://analytics:pass@localhost:5432/analytics
   # Таймаут запросов к source БД (сек). Увеличьте при catch-up окнах >1 суток через WAN/VPN.
   source_query_timeout: 120
@@ -32,16 +32,6 @@ anthropic:
 schedule:
   hour: 21
   minute: 5
-
-# ── Эмбеддинги для RAG ────────────────────────────────────────────────────────
-embeddings:
-  # Ollama (по умолчанию): http://localhost:11434
-  # LMStudio:              http://localhost:1234
-  base_url: http://localhost:11434
-  # Модель должна быть загружена: ollama pull nomic-embed-text
-  model: nomic-embed-text
-  # Размерность векторов: nomic-embed-text = 768
-  dim: 768
 
 # ── Knowledge Base ────────────────────────────────────────────────────────────
 knowledge_base:
