@@ -100,40 +100,6 @@ async def analyze_page(request: Request):
     })
 
 
-@router.post("/analyze", response_class=HTMLResponse)
-async def analyze_run(
-    request: Request,
-    router_sn: str = Form(...),
-    equip_type: str = Form(...),
-    panel_id: int  = Form(...),
-    ts_from_local: str = Form(...),   # YYYY-MM-DDTHH:MM из datetime-local
-    ts_to_local:   str = Form(...),
-):
-    from config import get_tz
-    equipment = await analytics.get_equipment_registry()
-    result = None
-    error  = None
-    try:
-        result = await _run_analysis(
-            router_sn, equip_type, panel_id,
-            ts_from_local, ts_to_local, get_tz(),
-        )
-    except Exception as e:
-        logger.exception("Ошибка анализа: %s", e)
-        error = str(e)
-
-    return templates.TemplateResponse(request, "analyze.html", {
-        "equipment": equipment,
-        "default_from": ts_from_local,
-        "default_to":   ts_to_local,
-        "selected_sn":    router_sn,
-        "selected_type":  equip_type,
-        "selected_panel": str(panel_id),
-        "result": result,
-        "error":  error,
-    })
-
-
 @router.post("/analyze/stream")
 async def analyze_stream(
     router_sn:     str = Form(...),
@@ -373,76 +339,6 @@ async def api_log_clear():
     from web.log_buffer import clear_buffer
     clear_buffer()
     return JSONResponse({"ok": True})
-
-
-async def _run_analysis(
-    router_sn: str,
-    equip_type: str,
-    panel_id: int,
-    ts_from_local: str,
-    ts_to_local: str,
-    tz,
-) -> dict:
-    """Запустить аналитику v2 за диапазон и вернуть результат с Markdown-отчётом."""
-    from datetime import datetime, timezone as _tz
-    from config import settings as _cfg
-    from analytics.runner import run_analysis
-
-    fmt = "%Y-%m-%dT%H:%M"
-    ts_from_utc = datetime.strptime(ts_from_local, fmt).replace(tzinfo=tz).astimezone(_tz.utc)
-    ts_to_utc   = datetime.strptime(ts_to_local,   fmt).replace(tzinfo=tz).astimezone(_tz.utc)
-
-    if ts_to_utc <= ts_from_utc:
-        raise ValueError("Конец диапазона должен быть позже начала")
-
-    # Метаданные из реестра (engine_sn, kb_path)
-    kb_path_rel = await analytics.get_equipment_kb_path(router_sn, equip_type, panel_id)
-    if not kb_path_rel:
-        raise ValueError(
-            f"Не задан kb_path для {router_sn}/{equip_type}/{panel_id}. "
-            "Укажите путь к Knowledge Base в настройках оборудования."
-        )
-    kb_path = _cfg.knowledge_base_path / "equipment" / kb_path_rel
-
-    registry = await analytics.get_equipment_registry()
-    eq = next(
-        (e for e in registry
-         if e["router_sn"] == router_sn
-         and e["equip_type"] == equip_type
-         and str(e["panel_id"]) == str(panel_id)),
-        {}
-    )
-    engine_sn = eq.get("engine_sn") or ""
-
-    result = await run_analysis(
-        router_sn=router_sn,
-        equip_type=equip_type,
-        panel_id=panel_id,
-        engine_sn=engine_sn,
-        ts_from=ts_from_utc,
-        ts_to=ts_to_utc,
-        kb_path=kb_path,
-        tz=tz,
-    )
-
-    if result.get("error"):
-        raise RuntimeError(result["error"])
-
-    return {
-        "markdown":          result["report_md"],
-        "run_id":            result.get("run_id"),
-        "segments_count":    result["segments_count"],
-        "detections_count":  result["detections_count"],
-        "max_severity":      result.get("max_severity"),
-        "data_quality_avg":  result.get("data_quality_avg"),
-        "duration_ms":       result.get("duration_ms"),
-        "ts_from_local":     ts_from_local,
-        "ts_to_local":       ts_to_local,
-        "tz_name":           tz.key,
-        "router_sn":         router_sn,
-        "equip_type":        equip_type,
-        "panel_id":          panel_id,
-    }
 
 
 def _format_operation_rules(rules: dict) -> list[str]:
