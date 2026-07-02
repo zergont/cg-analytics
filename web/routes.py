@@ -1416,7 +1416,9 @@ async def online_calendar(
         import json as _json
         if isinstance(characteristics_json, str):
             try: characteristics_json = _json.loads(characteristics_json)
-            except: return None
+            except Exception:
+                logger.warning("Битый characteristics_json в календаре")
+                return None
         if not characteristics_json or not isinstance(characteristics_json, dict):
             return None
         checks = characteristics_json.get("sequence_checks") or []
@@ -1549,7 +1551,9 @@ async def online_segment_detail(request: Request, seg_id: int):
         if val is None: return None
         if isinstance(val, str):
             try: return _json.loads(val)
-            except: return None
+            except Exception:
+                logger.warning("Битый JSON в сегменте %s", seg_id)
+                return None
         return val
 
     chars_dict   = _pj(seg.get("characteristics_json"))

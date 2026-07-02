@@ -68,13 +68,13 @@ def _enqueue_segment(seg_id: int | None) -> None:
                 if flag == "true":
                     worker.enqueue(seg_id, PRIORITY_NORMAL)
             except Exception:
-                pass
+                logger.warning("Автопостановка сегмента %s в очередь Claude-анализа не удалась", seg_id, exc_info=True)
 
         loop = _aio.get_event_loop()
         if loop.is_running():
             _aio.ensure_future(_check_and_enqueue())
     except Exception:
-        pass
+        logger.warning("Автопостановка сегмента %s в очередь Claude-анализа не удалась", seg_id, exc_info=True)
 
 
 def _make_seg_hint(db_row: dict):
@@ -85,6 +85,7 @@ def _make_seg_hint(db_row: dict):
         try:
             import json as _j; chars = _j.loads(chars)
         except Exception:
+            logger.warning("Битый characteristics_json в сегменте %s", db_row.get("id"))
             chars = None
     label = (chars.get("run_state_label") if isinstance(chars, dict) else None)
     return SimpleNamespace(run_state=db_row.get("run_state"), run_state_label=label)
@@ -99,6 +100,7 @@ def _coking_from_json(d) -> CokingRisk:
             import json as _json
             d = _json.loads(d)
         except Exception:
+            logger.warning("Битый coking_risk_json, риск сброшен в GREEN")
             return CokingRisk()
     if not isinstance(d, dict):
         return CokingRisk()
@@ -375,7 +377,7 @@ async def _collect_and_enrich_detections(
                     try:
                         first_t_detected[sc] = _tz_utc(datetime.fromisoformat(d.t_detected))
                     except Exception:
-                        pass
+                        logger.warning("Некорректный t_detected %r в детекции %s", d.t_detected, sc)
 
     if not seen_scenarios:
         return []
@@ -392,6 +394,7 @@ async def _collect_and_enrich_detections(
                 router_sn, equip_type, panel_id, sc, run_origin_ts
             )
         except Exception:
+            logger.warning("Счётчик «с пуска» для %s не получен, ставлю 0", sc, exc_info=True)
             counts_startup[sc] = 0
 
     # Мутировать detection.values с +1 (текущее событие включается)
@@ -445,6 +448,7 @@ async def _enrich_open_seg_detections(
                 router_sn, equip_type, panel_id, sc, window_days
             )
         except Exception:
+            logger.warning("Счётчик 30д для %s не получен, ставлю 0", sc, exc_info=True)
             count_30d = 0
 
         try:
@@ -452,6 +456,7 @@ async def _enrich_open_seg_detections(
                 router_sn, equip_type, panel_id, sc, run_origin_ts
             )
         except Exception:
+            logger.warning("Счётчик «с пуска» для %s не получен, ставлю 0", sc, exc_info=True)
             count_startup = 0
 
         for sub in seg.subsegments:
@@ -552,6 +557,7 @@ class OnlinePollEngine:
                             import json as _json
                             ff = _json.loads(ff)
                         except Exception:
+                            logger.warning("OnlineEngine[%s]: битый forward_fill_json в сегменте %s", self.key, last.get("id"))
                             ff = None
                     self.forward_fill_memory = ff
                     self.continued_from_id = last["id"]
@@ -696,7 +702,7 @@ class OnlinePollEngine:
                 try:
                     import json as _j; _open_chars = _j.loads(_raw)
                 except Exception:
-                    pass
+                    logger.warning("OnlineEngine[%s]: битый characteristics_json открытого сегмента", self.key)
             elif isinstance(_raw, dict):
                 _open_chars = _raw
 
@@ -735,7 +741,7 @@ class OnlinePollEngine:
                 _origin = await online_db.get_run_state_origin_ts(self.continued_from_id)
                 chain_origin_ts = _tz_utc(_origin) if _origin else None
             except Exception:
-                pass
+                logger.warning("OnlineEngine[%s]: не удалось получить начало запуска для счётчика «с пуска»", self.key, exc_info=True)
 
         last_saved_id: int | None = None
         # Накопленное время RS до этого батча (из предыдущей суточной цепочки)
@@ -829,6 +835,7 @@ class OnlinePollEngine:
                     inherited_run_state_sec=seg_inherited_rs,
                 )
             except Exception:
+                logger.exception("OnlineEngine[%s]: не удалось построить отчёт закрытого сегмента, сохраняю без report_md", self.key)
                 report_md = None
 
             db_id = await online_db.insert_closed_segment({
@@ -1005,7 +1012,7 @@ class OnlinePollEngine:
                 _origin = await online_db.get_run_state_origin_ts(self.continued_from_id)
                 chain_origin_ts = _tz_utc(_origin) if _origin else None
             except Exception:
-                pass
+                logger.warning("OnlineEngine[%s]: не удалось получить начало запуска для счётчика «с пуска»", self.key, exc_info=True)
 
         # Новые закрытые сегменты (смены RUN_STATE внутри открытого окна)
         closed_segs = [s for s in segments if s.cause_close == "RUN_STATE_CHANGE"]
@@ -1021,7 +1028,7 @@ class OnlinePollEngine:
                     try:
                         import json as _j; _rs_open_chars = _j.loads(_raw_rs)
                     except Exception:
-                        pass
+                        logger.warning("OnlineEngine[%s]: битый characteristics_json открытого сегмента", self.key)
                 elif isinstance(_raw_rs, dict):
                     _rs_open_chars = _raw_rs
 
@@ -1060,6 +1067,7 @@ class OnlinePollEngine:
                         inherited_run_state_sec=_rs_inherited_before if ci == 0 else {},
                     )
                 except Exception:
+                    logger.exception("OnlineEngine[%s]: не удалось построить отчёт сегмента RUN_STATE_CHANGE, сохраняю без report_md", self.key)
                     report_md_rs = None
 
                 _rs_seg_dict = seg.to_dict()
@@ -1161,6 +1169,7 @@ class OnlinePollEngine:
                 inherited_run_state_sec=self.inherited_run_state_sec,
             )
         except Exception:
+            logger.exception("OnlineEngine[%s]: не удалось построить отчёт открытого сегмента", self.key)
             open_report_md = None
         logger.debug(
             "TIMING[%s]: to_markdown за %.3fs",
