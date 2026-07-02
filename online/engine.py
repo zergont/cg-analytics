@@ -273,7 +273,7 @@ async def _load_data(
     ts_history_from = ts_from_utc - timedelta(seconds=_PREAMBLE_LOOKBACK_SEC)
 
     history_task = asyncio.create_task(
-        _src.get_whitelist_history(
+        _src.get_whitelist_history_chunked(
             router_sn, equip_type, panel_id,
             ts_history_from, ts_to_utc,
             cfg.whitelist_analog,
@@ -936,7 +936,9 @@ class OnlinePollEngine:
                 )
             else:
                 preamble_floor = ts_from_utc - timedelta(seconds=_PREAMBLE_LOOKBACK_SEC)
-                history = await _src.get_whitelist_history(
+                # Холодная загрузка после рестарта: окно может быть многочасовым,
+                # грузим порциями чтобы каждый запрос влезал в command_timeout
+                history = await _src.get_whitelist_history_chunked(
                     self.router_sn, self.equip_type, self.panel_id,
                     preamble_floor, ts_to_utc, self.cfg.whitelist_analog,
                 )

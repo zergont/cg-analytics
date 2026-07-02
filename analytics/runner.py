@@ -202,7 +202,7 @@ async def _load_data(
     from . import source as analytics_source
 
     history_task = asyncio.create_task(
-        analytics_source.get_whitelist_history(
+        analytics_source.get_whitelist_history_chunked(
             router_sn, equip_type, panel_id,
             ts_from, ts_to,
             cfg.whitelist_analog,

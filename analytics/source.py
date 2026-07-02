@@ -18,12 +18,15 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+import logging
+from datetime import datetime, timedelta
 from typing import Any
 
 import asyncpg
 
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 _pool: asyncpg.Pool | None = None
 _QUERY_TIMEOUT_SEC: int = 120  # переопределяется из config при init_source_pool()
@@ -87,6 +90,42 @@ async def get_whitelist_history(
             ts_from, ts_to,
         )
     return [dict(r) for r in rows]
+
+
+# Порция для больших диапазонов history: один SELECT за несколько суток может
+# не влезть в command_timeout через WAN/VPN — режем на куски по N часов.
+_HISTORY_CHUNK_SEC = 6 * 3600
+
+
+async def get_whitelist_history_chunked(
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    ts_from: datetime,
+    ts_to: datetime,
+    whitelist_addrs: frozenset[int],
+) -> list[dict[str, Any]]:
+    """get_whitelist_history порциями по _HISTORY_CHUNK_SEC.
+
+    Каждый кусок — отдельный запрос, гарантированно влезающий в command_timeout.
+    Куски идут последовательно [from, to), порядок ts ASC сохраняется.
+    """
+    out: list[dict[str, Any]] = []
+    cur = ts_from
+    n_chunks = 0
+    while cur < ts_to:
+        nxt = min(cur + timedelta(seconds=_HISTORY_CHUNK_SEC), ts_to)
+        out.extend(await get_whitelist_history(
+            router_sn, equip_type, panel_id, cur, nxt, whitelist_addrs
+        ))
+        cur = nxt
+        n_chunks += 1
+    if n_chunks > 1:
+        logger.debug(
+            "history %s/%s/%s: %d строк за %d кусков [%s .. %s]",
+            router_sn, equip_type, panel_id, len(out), n_chunks, ts_from, ts_to,
+        )
+    return out
 
 
 async def get_enum_periods(
