@@ -24,6 +24,35 @@ from analytics.serializer import RUN_STATE_RU as _RUN_STATE_LABELS
 from db import analytics, source
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_json(val, default=None, ctx: str = ""):
+    """JSONB из asyncpg может прийти строкой — распарсить, при ошибке вернуть default."""
+    import json as _json
+    if val is None:
+        return default
+    if isinstance(val, str):
+        try:
+            return _json.loads(val)
+        except Exception:
+            logger.warning("Битый JSON%s", f" ({ctx})" if ctx else "")
+            return default
+    return val
+
+
+def _active_dets(seg_row: dict) -> tuple[list[dict], bool]:
+    """Детекции открытого сегмента + подавлены ли они вердиктом гейта «отменить».
+
+    Возвращает (полный список детекций, suppressed). Фильтрацию аналитики
+    при suppressed=True вызывающий делает сам — панельные severity считаются
+    по полному списку.
+    """
+    from online.status_assembler import is_analytics_suppressed
+    dets = _parse_json(seg_row.get("active_detections_json"), [], ctx="active_detections_json") or []
+    dets = [d for d in dets if isinstance(d, dict)]
+    return dets, is_analytics_suppressed(seg_row, dets)
+
+
 router = APIRouter()
 templates = Jinja2Templates(directory="web/templates")
 
@@ -110,12 +139,7 @@ async def analyze_stream(
             kb_path = _cfg.knowledge_base_path / "equipment" / kb_path_rel
             cfg = AnalyticsConfig(kb_path)
 
-            registry = await analytics.get_equipment_registry()
-            eq = next(
-                (e for e in registry
-                 if e["router_sn"] == router_sn and e["equip_type"] == equip_type
-                 and str(e["panel_id"]) == str(panel_id)), {}
-            )
+            eq = await analytics.get_equipment(router_sn, equip_type, panel_id) or {}
             engine_sn = eq.get("engine_sn") or ""
 
             # Этап 1: Аналоговая история
@@ -1413,23 +1437,13 @@ async def online_calendar(
     def _violation_level(characteristics_json) -> str | None:
         """None = нет данных/открытый; иначе итоговый уровень как в status_assembler:
         норма / предупреждение (аналитика) / внимание (панель WARNING) / авария (панель SHUTDOWN)."""
-        import json as _json
-        if isinstance(characteristics_json, str):
-            try: characteristics_json = _json.loads(characteristics_json)
-            except Exception:
-                logger.warning("Битый characteristics_json в календаре")
-                return None
+        characteristics_json = _parse_json(characteristics_json, ctx="characteristics_json в календаре")
         if not characteristics_json or not isinstance(characteristics_json, dict):
             return None
         checks = characteristics_json.get("sequence_checks") or []
         if not any(isinstance(c, dict) for c in checks):
             return None
-        dets = [
-            det
-            for sub in (characteristics_json.get("subsegments") or [])
-            for det in (sub.get("detections") or [])
-            if isinstance(det, dict)
-        ]
+        dets = _seg_collect_dets(characteristics_json)
         level = compute_severity_level(dets)
         # Проваленная sequence-проверка без детекции — тоже сигнал аналитики
         if level == "норма" and any(
@@ -1472,12 +1486,7 @@ async def online_calendar(
     _MONTH_RU = ["","Январь","Февраль","Март","Апрель","Май","Июнь",
                  "Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"]
 
-    registry = await analytics.get_equipment_registry()
-    eq_meta = next(
-        (e for e in registry
-         if e["router_sn"] == router_sn and e["equip_type"] == equip_type
-         and str(e["panel_id"]) == str(panel_id)), {},
-    )
+    eq_meta = await analytics.get_equipment(router_sn, equip_type, panel_id) or {}
     obs = await odb.get_observation(router_sn, equip_type, panel_id)
 
     # Загружаем статусы Claude-анализа для всех сегментов месяца одним запросом
@@ -1548,13 +1557,7 @@ async def online_segment_detail(request: Request, seg_id: int):
     is_open = seg["t_end"] is None
 
     def _pj(val):
-        if val is None: return None
-        if isinstance(val, str):
-            try: return _json.loads(val)
-            except Exception:
-                logger.warning("Битый JSON в сегменте %s", seg_id)
-                return None
-        return val
+        return _parse_json(val, ctx=f"сегмент {seg_id}")
 
     chars_dict   = _pj(seg.get("characteristics_json"))
     current_vals = _pj(seg.get("current_values_json"))
@@ -1927,22 +1930,16 @@ async def api_online_status():
                     compute_severity_level,
                     compute_panel_severity,
                     compute_analytics_severity,
-                    is_analytics_suppressed,
                 )
-                dets_raw = open_seg.get("active_detections_json")
-                if isinstance(dets_raw, str):
-                    import json as _json
-                    dets = _json.loads(dets_raw) if dets_raw else []
-                else:
-                    dets = dets_raw or []
+                dets, suppressed = _active_dets(open_seg)
                 panel_severity = compute_panel_severity(dets)
                 # Вердикт гейта «отменить» подавляет аналитику до смены состава детекций
-                if is_analytics_suppressed(open_seg, dets):
+                if suppressed:
                     dets = [d for d in dets if d.get("scenario") == "CONTROLLER_FAULT"]
                 severity_level     = compute_severity_level(dets)
                 analytics_severity = compute_analytics_severity(dets)
             except Exception:
-                pass
+                logger.warning("api_online_status: не удалось вычислить severity", exc_info=True)
 
         result.append({
             "key":              key,
@@ -1981,15 +1978,13 @@ async def api_online_status():
 
 def _seg_collect_dets(chars_json: Any, active_dets_json: Any = None) -> list[dict]:
     """Все детекции сегмента: закрытый — из characteristics_json, открытый — из active_detections_json."""
-    import json as _json
     dets: list[dict] = []
-    if chars_json:
-        ch = chars_json if isinstance(chars_json, dict) else _json.loads(chars_json or "{}")
+    ch = _parse_json(chars_json, {}, ctx="characteristics_json") or {}
+    if isinstance(ch, dict):
         for sub in ch.get("subsegments", []):
             dets.extend(sub.get("detections", []))
     if not dets and active_dets_json:
-        ad = active_dets_json if isinstance(active_dets_json, list) else _json.loads(active_dets_json or "[]")
-        dets = ad or []
+        dets = _parse_json(active_dets_json, [], ctx="active_detections_json") or []
     return [d for d in dets if isinstance(d, dict)]
 
 
@@ -2065,44 +2060,27 @@ async def api_machines():
         gate_cancelled_count = 0
 
         if seg:
-            cr = seg.get("coking_risk_json")
-            if isinstance(cr, str):
-                try:
-                    cr = _json.loads(cr)
-                except Exception:
-                    cr = {}
+            cr = _parse_json(seg.get("coking_risk_json"), {}, ctx="coking_risk_json")
             coking_risk    = (cr or {}).get("risk_level")
             status_text    = seg.get("status_text")
             status_updated = seg["status_updated_at"].isoformat() if seg.get("status_updated_at") else None
-            ss = seg.get("status_struct_json")
-            if isinstance(ss, str):
-                try:
-                    ss = _json.loads(ss)
-                except Exception:
-                    ss = None
+            ss = _parse_json(seg.get("status_struct_json"), ctx="status_struct_json")
             status_struct = ss if isinstance(ss, dict) else {}
-            gl = seg.get("gate_log")
-            if isinstance(gl, str):
-                try:
-                    gl = _json.loads(gl)
-                except Exception:
-                    gl = None
+            gl = _parse_json(seg.get("gate_log"), ctx="gate_log")
             if isinstance(gl, list):
                 gate_events_count    = len(gl)
                 gate_cancelled_count = sum(
                     1 for e in gl if isinstance(e, dict) and e.get("decision_applied")
                 )
             try:
-                from online.status_assembler import compute_severity_level, is_analytics_suppressed
-                dets_raw = seg.get("active_detections_json")
-                dets = dets_raw if isinstance(dets_raw, list) else _json.loads(dets_raw or "[]")
+                from online.status_assembler import compute_severity_level
                 # Вердикт гейта «отменить» подавляет аналитику до смены состава детекций
-                gate_checked = is_analytics_suppressed(seg, dets)
+                dets, gate_checked = _active_dets(seg)
                 if gate_checked:
                     dets = [d for d in dets if d.get("scenario") == "CONTROLLER_FAULT"]
                 severity_level = compute_severity_level(dets)
             except Exception:
-                pass
+                logger.warning("api_machines: не удалось вычислить severity", exc_info=True)
 
         result.append({
             "router_sn":     obs["router_sn"],

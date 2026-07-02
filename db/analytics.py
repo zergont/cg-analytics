@@ -148,6 +148,24 @@ async def get_equipment_registry() -> list[dict[str, Any]]:
         await conn.close()
 
 
+async def get_equipment(
+    router_sn: str, equip_type: str, panel_id: int
+) -> dict[str, Any] | None:
+    """Одна запись реестра по ключу (вместо загрузки всего реестра)."""
+    conn = await _connect()
+    try:
+        row = await conn.fetchrow("""
+            SELECT router_sn, equip_type, panel_id,
+                   name, manufacturer, model, engine_sn, kb_path,
+                   active, created_at, updated_at
+            FROM equipment_registry
+            WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+        """, router_sn, equip_type, panel_id)
+        return dict(row) if row else None
+    finally:
+        await conn.close()
+
+
 async def delete_equipment(router_sn: str, equip_type: str, panel_id: int) -> None:
     """Удалить запись об оборудовании из реестра."""
     conn = await _connect()
