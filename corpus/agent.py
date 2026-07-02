@@ -64,6 +64,8 @@ async def analyse_segment(
         client = anthropic.AsyncAnthropic(
             api_key=settings.anthropic_api_key,
             http_client=http_client,
+            # SDK сам ретраит 429/5xx/сетевые ошибки с экспоненциальным backoff
+            max_retries=4,
         )
 
         messages: list[dict] = [

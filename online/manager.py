@@ -522,6 +522,8 @@ async def _analyze_warning_claude(
         client = anthropic.AsyncAnthropic(
             api_key=app_settings.anthropic_api_key,
             http_client=http_client,
+            # SDK сам ретраит 429/5xx/сетевые ошибки с экспоненциальным backoff
+            max_retries=3,
         )
         response = await client.messages.create(
             model=claude_cfg["model"],
