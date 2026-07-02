@@ -34,6 +34,9 @@ logger = logging.getLogger(__name__)
 _analytics_pool: asyncpg.Pool | None = None
 _analytics_lock = asyncio.Lock()
 
+_sync_source_pool: asyncpg.Pool | None = None
+_sync_source_lock = asyncio.Lock()
+
 
 class PooledConnection:
     """Соединение из пула, у которого close() возвращает его в пул."""
@@ -66,10 +69,32 @@ async def acquire_analytics() -> PooledConnection:
     return PooledConnection(_analytics_pool, await _analytics_pool.acquire())
 
 
+async def acquire_sync_source() -> PooledConnection:
+    """Соединение с удалённой БД телеметрии для history_sync.
+
+    Отдельный маленький пул: держит соединения тёплыми между циклами
+    синхронизации (реконнект через WAN дорогой). При обрыве VPN мёртвые
+    соединения отбрасываются пулом, следующий acquire откроет новое.
+    """
+    global _sync_source_pool
+    if _sync_source_pool is None:
+        async with _sync_source_lock:
+            if _sync_source_pool is None:
+                _sync_source_pool = await asyncpg.create_pool(
+                    settings.source_db_url, min_size=1, max_size=4
+                )
+                logger.info("Пул source-БД для history_sync создан (min=1, max=4)")
+    return PooledConnection(_sync_source_pool, await _sync_source_pool.acquire())
+
+
 async def close_pools() -> None:
     """Закрыть все пулы при остановке приложения."""
-    global _analytics_pool
+    global _analytics_pool, _sync_source_pool
     if _analytics_pool is not None:
         await _analytics_pool.close()
         _analytics_pool = None
         logger.info("Пул аналитической БД закрыт")
+    if _sync_source_pool is not None:
+        await _sync_source_pool.close()
+        _sync_source_pool = None
+        logger.info("Пул source-БД для history_sync закрыт")

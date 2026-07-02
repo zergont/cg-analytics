@@ -19,10 +19,6 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-import asyncpg
-
-from config import settings
-
 logger = logging.getLogger(__name__)
 
 _INITIAL_WINDOW_DAYS = 7
@@ -30,8 +26,10 @@ _BATCH_LIMIT         = 50_000
 _BUFFER_SEC          = 2       # не трогаем строки моложе N сек (защита от частичных батчей)
 
 
-async def _src() -> asyncpg.Connection:
-    return await asyncpg.connect(settings.source_db_url)
+async def _src():
+    """Соединение с source-БД из пула (тёплое между циклами, conn.close() вернёт в пул)."""
+    from db.pool import acquire_sync_source
+    return await acquire_sync_source()
 
 
 async def _local():
