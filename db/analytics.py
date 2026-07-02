@@ -376,24 +376,21 @@ async def get_db_health_stats() -> dict:
             "register_catalog", "objects", "equipment", "parameter_history",
             "auto_segments", "online_observations", "history_sync_state",
         ]
-        tables = []
-        for t in table_names:
-            try:
-                size_bytes = await conn.fetchval(
-                    "SELECT pg_total_relation_size($1::regclass)", t
-                )
-                size_pretty = await conn.fetchval(
-                    "SELECT pg_size_pretty(pg_total_relation_size($1::regclass))", t
-                )
-                row_count = await conn.fetchval(f"SELECT COUNT(*) FROM {t}")
-                tables.append({
-                    "name": t,
-                    "size_bytes": size_bytes,
-                    "size_pretty": size_pretty,
-                    "row_count": row_count,
-                })
-            except Exception:
-                pass
+        # Один запрос к каталогу вместо COUNT(*) по каждой таблице:
+        # reltuples — оценка автовакуума (-1 до первого ANALYZE), мгновенно
+        # на любом объёме; несуществующие таблицы просто не попадут в выборку.
+        table_rows = await conn.fetch("""
+            SELECT c.relname AS name,
+                   pg_total_relation_size(c.oid) AS size_bytes,
+                   pg_size_pretty(pg_total_relation_size(c.oid)) AS size_pretty,
+                   GREATEST(c.reltuples, 0)::bigint AS row_count
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public'
+              AND c.relkind = 'r'
+              AND c.relname = ANY($1::text[])
+        """, table_names)
+        tables = [dict(r) for r in table_rows]
 
         sync_rows = await conn.fetch("""
             SELECT hs.router_sn, hs.equip_type, hs.panel_id, hs.last_sync_at,
