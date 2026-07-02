@@ -22,8 +22,10 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 
-async def _connect() -> asyncpg.Connection:
-    return await asyncpg.connect(settings.analytics_db_url)
+async def _connect():
+    """Соединение из общего пула (conn.close() вернёт его в пул)."""
+    from db.pool import acquire_analytics
+    return await acquire_analytics()
 
 
 async def init_online_schema() -> None:
@@ -698,50 +700,42 @@ async def insert_detection_events(
         await conn.close()
 
 
-async def count_detection_events(
+async def count_detection_events_batch(
     router_sn: str,
     equip_type: str,
     panel_id: int,
-    scenario: str,
+    scenarios: list[str],
     window_days: int = 30,
-) -> int:
-    """Число фронтов сценария за последние window_days дней."""
+    since_ts: datetime | None = None,
+) -> dict[str, tuple[int, int]]:
+    """Оба счётчика фронтов для всех сценариев одним запросом.
+
+    Возвращает {scenario: (за window_days дней, с since_ts)}.
+    Сценарии без событий получают (0, 0); since_ts=None → счётчик «с пуска» = 0.
+    """
+    if not scenarios:
+        return {}
     conn = await _connect()
     try:
-        row = await conn.fetchrow("""
-            SELECT COALESCE(SUM(front_count), 0) AS cnt
+        rows = await conn.fetch("""
+            SELECT scenario,
+                   COALESCE(SUM(front_count) FILTER (
+                       WHERE detected_at > now() - ($5 || ' days')::interval), 0) AS cnt_window,
+                   COALESCE(SUM(front_count) FILTER (
+                       WHERE $6::timestamptz IS NOT NULL AND detected_at >= $6), 0) AS cnt_since
             FROM detection_events
             WHERE router_sn = $1
               AND equip_type = $2
               AND panel_id   = $3
-              AND scenario   = $4
-              AND detected_at > now() - ($5 || ' days')::interval
-        """, router_sn, equip_type, panel_id, scenario, str(window_days))
-        return int(row["cnt"]) if row else 0
-    finally:
-        await conn.close()
-
-
-async def count_detection_events_since(
-    router_sn: str,
-    equip_type: str,
-    panel_id: int,
-    scenario: str,
-    since_ts: datetime,
-) -> int:
-    """Число фронтов сценария начиная с since_ts (счётчик «с пуска»)."""
-    conn = await _connect()
-    try:
-        row = await conn.fetchrow("""
-            SELECT COALESCE(SUM(front_count), 0) AS cnt
-            FROM detection_events
-            WHERE router_sn = $1
-              AND equip_type = $2
-              AND panel_id   = $3
-              AND scenario   = $4
-              AND detected_at >= $5
-        """, router_sn, equip_type, panel_id, scenario, since_ts)
-        return int(row["cnt"]) if row else 0
+              AND scenario   = ANY($4::text[])
+              AND (detected_at > now() - ($5 || ' days')::interval
+                   OR ($6::timestamptz IS NOT NULL AND detected_at >= $6))
+            GROUP BY scenario
+        """, router_sn, equip_type, panel_id, scenarios, str(window_days), since_ts)
+        result: dict[str, tuple[int, int]] = {sc: (0, 0) for sc in scenarios}
+        for r in rows:
+            result[r["scenario"]] = (int(r["cnt_window"]), int(r["cnt_since"]))
+        return result
     finally:
         await conn.close()
 

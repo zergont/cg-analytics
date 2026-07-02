@@ -494,22 +494,24 @@ async def _analyze_warning_claude(
             except Exception:
                 pass
 
-        for alarm in struct.get("analytics_alarms", []):
-            sc = alarm.get("scenario")
-            if sc:
-                try:
-                    alarm["history_count_30d"] = await online_db.count_detection_events(
-                        router_sn, equip_type, panel_id, sc, window_days=30
-                    ) + 1
-                except Exception:
-                    pass  # fail-open: счётчик не критичен
-                if _run_origin_ts is not None:
-                    try:
-                        alarm["startup_count"] = await online_db.count_detection_events_since(
-                            router_sn, equip_type, panel_id, sc, _run_origin_ts
-                        ) + 1
-                    except Exception:
-                        pass
+        _alarm_scenarios = [
+            a.get("scenario") for a in struct.get("analytics_alarms", []) if a.get("scenario")
+        ]
+        if _alarm_scenarios:
+            try:
+                _counts = await online_db.count_detection_events_batch(
+                    router_sn, equip_type, panel_id, _alarm_scenarios, 30, _run_origin_ts
+                )
+            except Exception:
+                logger.warning("WarningGate: счётчики детекций не получены", exc_info=True)
+                _counts = {}  # fail-open: счётчик не критичен
+            for alarm in struct.get("analytics_alarms", []):
+                sc = alarm.get("scenario")
+                if sc and sc in _counts:
+                    _cnt_30d, _cnt_startup = _counts[sc]
+                    alarm["history_count_30d"] = _cnt_30d + 1
+                    if _run_origin_ts is not None:
+                        alarm["startup_count"] = _cnt_startup + 1
 
         user_prompt = build_warning_prompt(struct)
         can_cancel  = struct.get("panel_severity", "норма") == "норма"

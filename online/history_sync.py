@@ -34,8 +34,10 @@ async def _src() -> asyncpg.Connection:
     return await asyncpg.connect(settings.source_db_url)
 
 
-async def _local() -> asyncpg.Connection:
-    return await asyncpg.connect(settings.analytics_db_url)
+async def _local():
+    """Соединение с локальной БД из общего пула (conn.close() вернёт его в пул)."""
+    from db.pool import acquire_analytics
+    return await acquire_analytics()
 
 
 async def _get_cursors() -> dict[str, datetime]:

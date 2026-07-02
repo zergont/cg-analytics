@@ -382,27 +382,23 @@ async def _collect_and_enrich_detections(
     if not seen_scenarios:
         return []
 
-    # Запрос обоих счётчиков
-    counts_30d: dict[str, int] = {}
-    counts_startup: dict[str, int] = {}
-    for sc in seen_scenarios:
-        counts_30d[sc] = await online_db.count_detection_events(
-            router_sn, equip_type, panel_id, sc, window_days
+    # Оба счётчика по всем сценариям одним batch-запросом
+    try:
+        counts = await online_db.count_detection_events_batch(
+            router_sn, equip_type, panel_id, list(seen_scenarios),
+            window_days, run_origin_ts,
         )
-        try:
-            counts_startup[sc] = await online_db.count_detection_events_since(
-                router_sn, equip_type, panel_id, sc, run_origin_ts
-            )
-        except Exception:
-            logger.warning("Счётчик «с пуска» для %s не получен, ставлю 0", sc, exc_info=True)
-            counts_startup[sc] = 0
+    except Exception:
+        logger.warning("Счётчики детекций не получены, ставлю 0", exc_info=True)
+        counts = {}
 
     # Мутировать detection.values с +1 (текущее событие включается)
     for sub in seg.subsegments:
         for d in sub.detections:
-            if d.scenario in counts_30d:
-                d.values["history_count_30d"] = counts_30d[d.scenario] + 1
-                d.values["startup_count"] = counts_startup.get(d.scenario, 0) + 1
+            if d.scenario in seen_scenarios:
+                cnt_30d, cnt_startup = counts.get(d.scenario, (0, 0))
+                d.values["history_count_30d"] = cnt_30d + 1
+                d.values["startup_count"] = cnt_startup + 1
 
     # Подготовить события для вставки в detection_events
     events = [
@@ -442,28 +438,21 @@ async def _enrich_open_seg_detections(
     if not seen_scenarios:
         return
 
-    for sc in seen_scenarios:
-        try:
-            count_30d = await online_db.count_detection_events(
-                router_sn, equip_type, panel_id, sc, window_days
-            )
-        except Exception:
-            logger.warning("Счётчик 30д для %s не получен, ставлю 0", sc, exc_info=True)
-            count_30d = 0
+    try:
+        counts = await online_db.count_detection_events_batch(
+            router_sn, equip_type, panel_id, list(seen_scenarios),
+            window_days, run_origin_ts,
+        )
+    except Exception:
+        logger.warning("Счётчики детекций не получены, ставлю 0", exc_info=True)
+        counts = {}
 
-        try:
-            count_startup = await online_db.count_detection_events_since(
-                router_sn, equip_type, panel_id, sc, run_origin_ts
-            )
-        except Exception:
-            logger.warning("Счётчик «с пуска» для %s не получен, ставлю 0", sc, exc_info=True)
-            count_startup = 0
-
-        for sub in seg.subsegments:
-            for d in sub.detections:
-                if d.scenario == sc:
-                    d.values["history_count_30d"] = count_30d + 1
-                    d.values["startup_count"] = count_startup + 1
+    for sub in seg.subsegments:
+        for d in sub.detections:
+            if d.scenario in seen_scenarios:
+                cnt_30d, cnt_startup = counts.get(d.scenario, (0, 0))
+                d.values["history_count_30d"] = cnt_30d + 1
+                d.values["startup_count"] = cnt_startup + 1
 
 
 class OnlinePollEngine:

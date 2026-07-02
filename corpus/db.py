@@ -20,8 +20,10 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 
-async def _connect() -> asyncpg.Connection:
-    return await asyncpg.connect(settings.analytics_db_url)
+async def _connect():
+    """Соединение из общего пула (conn.close() вернёт его в пул)."""
+    from db.pool import acquire_analytics
+    return await acquire_analytics()
 
 
 # ── CRUD ─────────────────────────────────────────────────────────────────────

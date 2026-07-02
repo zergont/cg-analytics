@@ -108,6 +108,8 @@ async def lifespan(app: FastAPI):
     await _corpus_worker.stop()
     await _qwen_worker.stop()
     await close_source_pool()
+    from db.pool import close_pools
+    await close_pools()
     logger.info("═══ cg-analytics остановлен ═══")
 
 
