@@ -268,14 +268,7 @@ class OnlineManager:
             logger.warning("OnlineManager: FaultRef не загружен для %s: %s", kb_path_rel, e)
 
         # engine_sn из реестра
-        registry = await db_analytics.get_equipment_registry()
-        eq = next(
-            (e for e in registry
-             if e["router_sn"] == router_sn
-             and e["equip_type"] == equip_type
-             and str(e["panel_id"]) == str(panel_id)),
-            {},
-        )
+        eq = await db_analytics.get_equipment(router_sn, equip_type, panel_id) or {}
         engine_sn = eq.get("engine_sn") or ""
 
         # daily_split_hour из app_settings (дефолт 9 = 09:00)
@@ -283,7 +276,7 @@ class OnlineManager:
         daily_hour_str = await get_app_setting("daily_split_hour", "9")
         daily_hour = int(daily_hour_str)
 
-        return OnlinePollEngine(
+        engine = OnlinePollEngine(
             router_sn=router_sn,
             equip_type=equip_type,
             panel_id=panel_id,
@@ -294,6 +287,10 @@ class OnlineManager:
             tz=get_tz(),
             fault_ref=fault_ref,
         )
+        # Свежесть телеметрии переживает рестарт (иначе до первого цикла — «нет данных»)
+        if obs.get("last_data_ts"):
+            engine.last_data_ts = obs["last_data_ts"]
+        return engine
 
     def _launch(self, engine: OnlinePollEngine) -> None:
         key = engine.key
@@ -371,11 +368,25 @@ class OnlineManager:
             compute_fault_hash, format_status_text, extract_alarm_text,
         )
         from online import db as online_db
+        from db.analytics import get_app_setting
 
         now = datetime.now(timezone.utc)
+        try:
+            stale_sec = int(await get_app_setting("data_stale_threshold_sec", "90"))
+        except Exception:
+            stale_sec = 90
 
         for key, engine in list(self._engines.items()):
             try:
+                # Телеметрия устарела → статус не пересчитываем (остаётся со своим
+                # timestamp'ом), гейт не запускаем — «норма от ИИ» без данных подрывает доверие
+                if engine.last_data_ts is not None and (
+                    (now - engine.last_data_ts).total_seconds() > stale_sec
+                ):
+                    logger.debug("StatusScheduler[%s]: данные устарели (%.0fс) — пропуск",
+                                 key, (now - engine.last_data_ts).total_seconds())
+                    continue
+
                 seg = await online_db.get_open_segment(
                     engine.router_sn, engine.equip_type, engine.panel_id
                 )

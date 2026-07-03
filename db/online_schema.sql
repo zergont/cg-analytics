@@ -172,3 +172,8 @@ CREATE TABLE IF NOT EXISTS history_sync_state (
     last_sync_at TIMESTAMPTZ NOT NULL DEFAULT (now() - interval '7 days'),
     PRIMARY KEY (router_sn, equip_type, panel_id)
 );
+
+-- Миграция v4.9.14: свежесть телеметрии — максимальный ts строки history,
+-- виденной движком этой машины (для data_stale в /api/machines и статус-строки)
+ALTER TABLE online_observations
+    ADD COLUMN IF NOT EXISTS last_data_ts TIMESTAMPTZ;

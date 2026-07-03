@@ -497,6 +497,9 @@ class OnlinePollEngine:
         # Кэш аналоговых данных открытого окна (обнуляется при смене cursor_ts)
         self._open_history_cache: list[dict] | None = None
         self._open_history_cache_ts: datetime | None = None
+        # Свежесть телеметрии: максимальный ts строки history, виденной движком.
+        # None = данных с момента старта ещё не было.
+        self.last_data_ts: datetime | None = None
         # Живые тревоги: scenario → detection_dict (только активные, не закрытые)
         self._active_alerts: dict[str, dict] = {}
 
@@ -949,6 +952,18 @@ class OnlinePollEngine:
 
             self._open_history_cache = history
             self._open_history_cache_ts = max((r["ts"] for r in history), default=None)
+
+            # Свежесть телеметрии: продвинулась — фиксируем в памяти и в БД
+            if self._open_history_cache_ts is not None and (
+                self.last_data_ts is None or self._open_history_cache_ts > self.last_data_ts
+            ):
+                self.last_data_ts = _tz_utc(self._open_history_cache_ts)
+                try:
+                    await online_db.update_observation_last_data_ts(
+                        self.router_sn, self.equip_type, self.panel_id, self.last_data_ts
+                    )
+                except Exception:
+                    logger.warning("OnlineEngine[%s]: не удалось сохранить last_data_ts", self.key, exc_info=True)
 
             _t0 = _time.perf_counter()
             enum_periods, fault_periods, gaps = await asyncio.gather(

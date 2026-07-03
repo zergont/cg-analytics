@@ -84,6 +84,21 @@ async def get_observation(
         await conn.close()
 
 
+async def update_observation_last_data_ts(
+    router_sn: str, equip_type: str, panel_id: int, ts: datetime
+) -> None:
+    """Обновить отметку свежести телеметрии (максимальный виденный ts history)."""
+    conn = await _connect()
+    try:
+        await conn.execute("""
+            UPDATE online_observations
+            SET last_data_ts = $4
+            WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+        """, router_sn, equip_type, panel_id, ts)
+    finally:
+        await conn.close()
+
+
 async def list_observations() -> list[dict[str, Any]]:
     conn = await _connect()
     try:

@@ -817,6 +817,9 @@ async def settings_page(request: Request):
     status_line_interval_min = int(
         await analytics.get_app_setting("status_line_interval_min", "1")
     )
+    data_stale_threshold_sec = int(
+        await analytics.get_app_setting("data_stale_threshold_sec", "90")
+    )
     from llm.router import get_all as _get_router, TASKS as _TASKS, TASK_HINTS as _HINTS
     return templates.TemplateResponse(request, "settings.html", {
         "settings": cfg,
@@ -830,6 +833,7 @@ async def settings_page(request: Request):
         "qwen_auto_analyze":         qwen_auto        == "true",
         "analytics_verify_on_close": analytics_verify == "true",
         "status_line_interval_min":  status_line_interval_min,
+        "data_stale_threshold_sec":  data_stale_threshold_sec,
         "ai_routing":   _get_router(),
         "ai_task_meta": {k: {"label": v[0], "hint": _HINTS.get(k, "")} for k, v in _TASKS.items()},
     })
@@ -841,6 +845,15 @@ async def update_status_line_interval(interval_min: int = Form(...)):
     interval_min = max(1, min(60, interval_min))   # зажимаем в [1, 60]
     await analytics.set_app_setting("status_line_interval_min", str(interval_min))
     logger.info("ИИ-оператор: интервал статус-строки → %d мин", interval_min)
+    return RedirectResponse(url="/settings", status_code=303)
+
+
+@router.post("/settings/data-stale-threshold")
+async def update_data_stale_threshold(stale_sec: int = Form(...)):
+    """Порог устаревания телеметрии: старше → data_stale, статус/гейт замирают."""
+    stale_sec = max(30, min(3600, stale_sec))   # зажимаем в [30с, 1ч]
+    await analytics.set_app_setting("data_stale_threshold_sec", str(stale_sec))
+    logger.info("Порог устаревания телеметрии → %d сек", stale_sec)
     return RedirectResponse(url="/settings", status_code=303)
 
 
@@ -2012,11 +2025,24 @@ async def api_machines():
 
     observations = await odb.list_observations()
     _open_segs = await odb.get_open_segments_all()
+    try:
+        _stale_sec = int(await analytics.get_app_setting("data_stale_threshold_sec", "90"))
+    except Exception:
+        _stale_sec = 90
+    _now = datetime.now(timezone.utc)
     result = []
 
     for obs in observations:
         key = f"{obs['router_sn']}|{obs['equip_type']}|{obs['panel_id']}"
         seg = _open_segs.get(key)
+
+        # Свежесть телеметрии: максимальный ts history, виденный движком.
+        # Нет отметки (наблюдение ни разу не работало) → считаем устаревшим.
+        _last_data = obs.get("last_data_ts")
+        data_stale = (
+            _last_data is None
+            or (_now - _last_data).total_seconds() > _stale_sec
+        )
 
         # Текущее состояние из открытого сегмента
         run_state      = seg.get("run_state")    if seg else None
@@ -2077,6 +2103,10 @@ async def api_machines():
             "alarm_text":       status_struct.get("alarm_text"),
             "status_updated":  status_updated,
             "coking_risk":     coking_risk,            # GREEN / YELLOW / RED
+            # Свежесть телеметрии: при data_stale=true UI должен скрывать блок
+            # аналитики — статус/severity отражают момент last_data_ts, не «сейчас»
+            "last_data_ts":    _last_data.isoformat() if _last_data else None,
+            "data_stale":      data_stale,
             "warning_analysis_md": seg.get("warning_analysis_md") if seg else None,
             "_links": {
                 "segments": f"/api/machine/{obs['router_sn']}/{obs['equip_type']}/{obs['panel_id']}/segments",

@@ -106,6 +106,21 @@
                         <button type="submit" class="btn btn-sm btn-outline-secondary">Сохранить</button>
                     </form>
                 </div>
+
+                <!-- Порог устаревания телеметрии -->
+                <div class="d-flex align-items-center gap-2 mt-2">
+                    <span class="small text-muted me-1"
+                          title="Данные старше порога: data_stale в API, статус-строка и гейт замирают">
+                        📡 Порог устаревания телеметрии:</span>
+                    <form method="post" action="/settings/data-stale-threshold"
+                          class="d-flex align-items-center gap-2">
+                        <input type="number" name="stale_sec"
+                               class="form-control form-control-sm" style="width:90px"
+                               value="{{ data_stale_threshold_sec }}" min="30" max="3600" required>
+                        <span class="text-muted small">сек</span>
+                        <button type="submit" class="btn btn-sm btn-outline-secondary">Сохранить</button>
+                    </form>
+                </div>
             </div>
         </div>
 
