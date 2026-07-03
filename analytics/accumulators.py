@@ -25,6 +25,32 @@ def _tz(ts: datetime) -> datetime:
     return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
 
 
+def _gap_overlap_sec(gaps: list[dict], t_start: datetime, t_end: datetime) -> float:
+    """Суммарное время дыр связи внутри окна [t_start, t_end).
+
+    Незакрытый gap (gap_end IS NULL) считается до t_end — как в data_quality.
+    """
+    total = 0.0
+    for g in gaps:
+        gs = max(_tz(g["gap_start"]), _tz(t_start))
+        ge_raw = g.get("gap_end")
+        ge = min(_tz(ge_raw) if ge_raw else _tz(t_end), _tz(t_end))
+        if ge > gs:
+            total += (ge - gs).total_seconds()
+    return total
+
+
+def _pair_spans_gap(ts1: datetime, ts2: datetime, gaps: list[dict]) -> bool:
+    """True если между соседними строками лежит дыра связи (dt через дыру — не факт)."""
+    for g in gaps:
+        gs = _tz(g["gap_start"])
+        ge_raw = g.get("gap_end")
+        ge = _tz(ge_raw) if ge_raw else _tz(ts2)
+        if gs < _tz(ts2) and ge > _tz(ts1):
+            return True
+    return False
+
+
 def update_accumulators(
     acc: RiskAccumulators,
     by_addr: dict[int, list[dict[str, Any]]],
@@ -33,18 +59,24 @@ def update_accumulators(
     load_zone: str,
     run_state: int,
     cfg: AnalyticsConfig,
+    gaps: list[dict] | None = None,
 ) -> RiskAccumulators:
     """Обновить аккумуляторы рисков по данным одного подсегмента.
 
     Возвращает НОВЫЙ объект RiskAccumulators (иммутабельный стиль).
+    В дырах связи риски НЕ накапливаются (мы не знаем, что делала машина):
+    накопление идёт по effective-длительности (минус дыры), спад теплового
+    риска — по стенному времени (мотор остывает независимо от телеметрии).
     """
     new_acc = acc.copy()
+    gaps = gaps or []
     duration_sec = (_tz(seg_end) - _tz(seg_start)).total_seconds()
+    effective_sec = max(0.0, duration_sec - _gap_overlap_sec(gaps, seg_start, seg_end))
 
     _update_coking(new_acc.coking_risk, by_addr, seg_start, seg_end,
-                   load_zone, run_state, duration_sec, cfg)
+                   load_zone, run_state, effective_sec, cfg, gaps)
     _update_thermal(new_acc.thermal_risk, by_addr, seg_start, seg_end,
-                    load_zone, duration_sec, cfg)
+                    load_zone, effective_sec, duration_sec, cfg, gaps)
 
     return new_acc
 
@@ -72,9 +104,11 @@ def _update_coking(
     seg_end: datetime,
     load_zone: str,
     run_state: int,
-    duration_sec: float,
+    duration_sec: float,   # effective: стенное время минус дыры связи
     cfg: AnalyticsConfig,
+    gaps: list[dict] | None = None,
 ) -> None:
+    gaps = gaps or []
     t_start = _tz(seg_start)
     t_end = _tz(seg_end)
 
@@ -96,6 +130,8 @@ def _update_coking(
         for i, r in enumerate(rows[:-1]):
             v = _fv(r)
             if v is not None and v < below_c:
+                if _pair_spans_gap(r["ts"], rows[i + 1]["ts"], gaps):
+                    continue  # dt через дыру связи — не знаем, что было
                 dt = (_tz(rows[i + 1]["ts"]) - _tz(r["ts"])).total_seconds()
                 cr.coolant_below_60_sec += max(0, dt)
 
@@ -143,9 +179,12 @@ def _update_thermal(
     seg_start: datetime,
     seg_end: datetime,
     load_zone: str,
-    duration_sec: float,
+    effective_sec: float,   # накопление: стенное время минус дыры связи
+    wall_sec: float,        # спад: мотор остывает независимо от телеметрии
     cfg: AnalyticsConfig,
+    gaps: list[dict] | None = None,
 ) -> None:
+    gaps = gaps or []
     t_start = _tz(seg_start)
     t_end = _tz(seg_end)
 
@@ -153,10 +192,10 @@ def _update_thermal(
     # THERMAL — ОБРАТИМЫЙ риск: снятие нагрузки → мотор остывает → риск уходит.
     # Накапливаем в ELEVATED/OVERLOAD, спадаем с настраиваемой скоростью вне них.
     if load_zone in ("ELEVATED", "OVERLOAD"):
-        tr.elevated_zone_sec += duration_sec
+        tr.elevated_zone_sec += effective_sec
     else:
         decay = float(cfg.det("THERMAL_HIGHLOAD", "thermal_decay_rate_per_sec", default=0.5))
-        tr.elevated_zone_sec = max(0.0, tr.elevated_zone_sec - duration_sec * decay)
+        tr.elevated_zone_sec = max(0.0, tr.elevated_zone_sec - wall_sec * decay)
 
     # 2. Время с Т ОЖ вблизи порога HCT Warning (только в ELEVATED/OVERLOAD)
     if load_zone in ("ELEVATED", "OVERLOAD"):
@@ -170,11 +209,13 @@ def _update_thermal(
             for i, r in enumerate(rows[:-1]):
                 v = _fv(r)
                 if v is not None and v >= hct_near:
+                    if _pair_spans_gap(r["ts"], rows[i + 1]["ts"], gaps):
+                        continue  # dt через дыру связи — не знаем, что было
                     dt = (_tz(rows[i + 1]["ts"]) - _tz(r["ts"])).total_seconds()
                     tr.coolant_near_limit_sec += max(0, dt)
     else:
         decay = float(cfg.det("THERMAL_HIGHLOAD", "thermal_decay_rate_per_sec", default=0.5))
-        tr.coolant_near_limit_sec = max(0.0, tr.coolant_near_limit_sec - duration_sec * decay)
+        tr.coolant_near_limit_sec = max(0.0, tr.coolant_near_limit_sec - wall_sec * decay)
 
     # 3. Время с Т масла вблизи порога HOT Warning (только в ELEVATED/OVERLOAD)
     if load_zone in ("ELEVATED", "OVERLOAD"):
@@ -188,11 +229,13 @@ def _update_thermal(
             for i, r in enumerate(rows[:-1]):
                 v = _fv(r)
                 if v is not None and v >= hot_near:
+                    if _pair_spans_gap(r["ts"], rows[i + 1]["ts"], gaps):
+                        continue  # dt через дыру связи — не знаем, что было
                     dt = (_tz(rows[i + 1]["ts"]) - _tz(r["ts"])).total_seconds()
                     tr.oil_near_limit_sec += max(0, dt)
     else:
         decay = float(cfg.det("THERMAL_HIGHLOAD", "thermal_decay_rate_per_sec", default=0.5))
-        tr.oil_near_limit_sec = max(0.0, tr.oil_near_limit_sec - duration_sec * decay)
+        tr.oil_near_limit_sec = max(0.0, tr.oil_near_limit_sec - wall_sec * decay)
 
     # 4. Обновить уровень риска
     yellow_elev = float(cfg.det("THERMAL_HIGHLOAD", "risk_yellow_elevated_sec", default=3600))

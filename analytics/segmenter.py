@@ -317,7 +317,7 @@ def _build_single_subsegment(
 
     chars   = compute_characteristics(sub_chars, char_t_start, t_end, cfg)
     derived = compute_derived_metrics(sub_win, t_start, t_end, gaps, cfg)
-    new_acc = update_accumulators(accumulators, sub_win, t_start, t_end, load_zone, run_state, cfg)
+    new_acc = update_accumulators(accumulators, sub_win, t_start, t_end, load_zone, run_state, cfg, gaps)
 
     faults_in = [
         fp for fp in fault_periods
@@ -470,7 +470,7 @@ def _build_subsegments_for_running(
 
         chars        = compute_characteristics(sub_chars, char_t_start, t_sub_end, cfg)
         derived      = compute_derived_metrics(sub_win, t_sub_start, t_sub_end, gaps, cfg)
-        accumulators = update_accumulators(accumulators, sub_win, t_sub_start, t_sub_end, zone, run_state, cfg)
+        accumulators = update_accumulators(accumulators, sub_win, t_sub_start, t_sub_end, zone, run_state, cfg, gaps)
 
         faults_in_sub = [
             fp for fp in fault_periods_in_seg
