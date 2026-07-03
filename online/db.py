@@ -148,6 +148,23 @@ async def get_last_closed_segment(
         await conn.close()
 
 
+async def get_open_segments_all() -> dict[str, dict[str, Any]]:
+    """Все открытые сегменты одним запросом: {"sn|type|panel": row}.
+
+    Для роутов, отдающих статус всего парка (/api/machines и т.п.) —
+    вместо get_open_segment по каждой машине в цикле.
+    """
+    conn = await _connect()
+    try:
+        rows = await conn.fetch("SELECT * FROM auto_segments WHERE t_end IS NULL")
+        return {
+            f"{r['router_sn']}|{r['equip_type']}|{r['panel_id']}": dict(r)
+            for r in rows
+        }
+    finally:
+        await conn.close()
+
+
 async def get_open_segment(
     router_sn: str, equip_type: str, panel_id: int
 ) -> dict[str, Any] | None:

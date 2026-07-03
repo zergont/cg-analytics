@@ -1227,12 +1227,8 @@ async def online_monitor(request: Request):
 
     observations = await odb.list_observations()
 
-    # Для каждого наблюдения — открытый сегмент (если есть)
-    open_segs: dict[str, dict] = {}
-    for obs in observations:
-        seg = await odb.get_open_segment(obs["router_sn"], obs["equip_type"], obs["panel_id"])
-        if seg:
-            open_segs[f"{obs['router_sn']}|{obs['equip_type']}|{obs['panel_id']}"] = seg
+    # Открытые сегменты всех машин одним запросом
+    open_segs = await odb.get_open_segments_all()
 
     equipment = await analytics.get_equipment_registry()
     tz = get_tz()
@@ -1867,12 +1863,11 @@ async def api_online_status():
 
     now_utc = datetime.now(timezone.utc)
     observations = await odb.list_observations()
+    _open_segs = await odb.get_open_segments_all()
     result = []
     for obs in observations:
         key = f"{obs['router_sn']}|{obs['equip_type']}|{obs['panel_id']}"
-        open_seg = await odb.get_open_segment(
-            obs["router_sn"], obs["equip_type"], obs["panel_id"]
-        )
+        open_seg = _open_segs.get(key)
         cr = None
         run_state = None
         if open_seg and open_seg.get("coking_risk_json"):
@@ -2042,11 +2037,12 @@ async def api_machines():
     import json as _json
 
     observations = await odb.list_observations()
+    _open_segs = await odb.get_open_segments_all()
     result = []
 
     for obs in observations:
         key = f"{obs['router_sn']}|{obs['equip_type']}|{obs['panel_id']}"
-        seg = await odb.get_open_segment(obs["router_sn"], obs["equip_type"], obs["panel_id"])
+        seg = _open_segs.get(key)
 
         # Текущее состояние из открытого сегмента
         run_state      = seg.get("run_state")    if seg else None
