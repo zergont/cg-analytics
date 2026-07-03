@@ -177,3 +177,37 @@ CREATE TABLE IF NOT EXISTS history_sync_state (
 -- виденной движком этой машины (для data_stale в /api/machines и статус-строки)
 ALTER TABLE online_observations
     ADD COLUMN IF NOT EXISTS last_data_ts TIMESTAMPTZ;
+
+-- Миграция v4.9.16: эпизоды тревог — одна строка = один непрерывный эпизод
+-- (панель или аналитика). Открыт: t_close IS NULL. Эпизоды уровня машины,
+-- суточный рез их НЕ закрывает. active_sec тикает только по времени с данными
+-- (в дырах связи эпизод висит, таймер стоит).
+CREATE TABLE IF NOT EXISTS alarm_episodes (
+    id               BIGSERIAL   PRIMARY KEY,
+    router_sn        TEXT        NOT NULL,
+    equip_type       TEXT        NOT NULL,
+    panel_id         INT         NOT NULL,
+    scenario         TEXT        NOT NULL,
+    source           TEXT        NOT NULL DEFAULT 'analytics'
+                     CHECK (source IN ('panel', 'analytics')),
+    -- Максимальный severity за время жизни эпизода
+    severity         TEXT,
+    t_open           TIMESTAMPTZ NOT NULL,
+    t_close          TIMESTAMPTZ,
+    close_reason     TEXT,
+    -- Длительность «под связью», сек: в дырах не тикает
+    active_sec       DOUBLE PRECISION NOT NULL DEFAULT 0,
+    -- Вердикт гейта Claude «отменить»: эпизод живёт и меряется, но из severity исключён
+    gate_suppressed  BOOLEAN     NOT NULL DEFAULT FALSE,
+    -- Снапшот detection.values на момент открытия
+    open_values_json JSONB,
+    -- Контекст аварии (Фаза C, только панельный SHUTDOWN)
+    context_json     JSONB,
+    segment_id_open  BIGINT      REFERENCES auto_segments(id) ON DELETE SET NULL,
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_alarm_episodes_machine
+    ON alarm_episodes (router_sn, equip_type, panel_id, t_open DESC);
+CREATE INDEX IF NOT EXISTS idx_alarm_episodes_open
+    ON alarm_episodes (router_sn, equip_type, panel_id) WHERE t_close IS NULL;

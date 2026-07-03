@@ -510,19 +510,22 @@ async def _analyze_warning_claude(
         ]
         if _alarm_scenarios:
             try:
-                _counts = await online_db.count_detection_events_batch(
+                _counts = await online_db.count_episodes_batch(
                     router_sn, equip_type, panel_id, _alarm_scenarios, 30, _run_origin_ts
                 )
             except Exception:
-                logger.warning("WarningGate: счётчики детекций не получены", exc_info=True)
+                logger.warning("WarningGate: счётчики эпизодов не получены", exc_info=True)
                 _counts = {}  # fail-open: счётчик не критичен
             for alarm in struct.get("analytics_alarms", []):
                 sc = alarm.get("scenario")
-                if sc and sc in _counts:
-                    _cnt_30d, _cnt_startup = _counts[sc]
-                    alarm["history_count_30d"] = _cnt_30d + 1
+                c = _counts.get(sc)
+                if c:
+                    # Текущий эпизод уже в alarm_episodes — без +1
+                    alarm["history_count_30d"]        = c["count_window"]
+                    alarm["history_duration_30d_sec"] = round(c["dur_window"])
                     if _run_origin_ts is not None:
-                        alarm["startup_count"] = _cnt_startup + 1
+                        alarm["startup_count"]        = c["count_since"]
+                        alarm["startup_duration_sec"] = round(c["dur_since"])
 
         user_prompt = build_warning_prompt(struct)
         can_cancel  = struct.get("panel_severity", "норма") == "норма"
@@ -565,6 +568,15 @@ async def _analyze_warning_claude(
                 router_sn, equip_type, panel_id,
                 suppressed_hash=compute_analytics_hash(struct.get("analytics_alarms", [])),
             )
+            # Эпизод живёт и меряется, но помечен: из severity исключён,
+            # копим статистику ложных срабатываний для тюнинга порогов
+            try:
+                await online_db.set_episodes_gate_suppressed(
+                    router_sn, equip_type, panel_id, _alarm_scenarios,
+                )
+            except Exception:
+                logger.warning("WarningGate: не удалось пометить эпизоды gate_suppressed",
+                               exc_info=True)
 
         if analysis:
             await online_db.update_open_segment_warning(

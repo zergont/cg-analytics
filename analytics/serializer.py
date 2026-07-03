@@ -455,10 +455,14 @@ def _append_subsegment(
                 a(f"  - Коды: {d['fault_codes']}")
             count_30d = (d.get("values") or {}).get("history_count_30d")
             if count_30d is not None:
-                a(f"  - Срабатываний этого типа за 30 дней: **{count_30d}**")
+                dur_30d = (d.get("values") or {}).get("history_duration_30d_sec")
+                suffix = f" (суммарно {_fmt_duration(dur_30d)})" if dur_30d else ""
+                a(f"  - Срабатываний этого типа за 30 дней: **{count_30d}**{suffix}")
             startup_count = (d.get("values") or {}).get("startup_count")
             if startup_count is not None:
-                a(f"  - Срабатываний с пуска: **{startup_count}**")
+                dur_startup = (d.get("values") or {}).get("startup_duration_sec")
+                suffix = f" (суммарно {_fmt_duration(dur_startup)})" if dur_startup else ""
+                a(f"  - Срабатываний с пуска: **{startup_count}**{suffix}")
         a("")
     elif not short:
         a("*Обнаружений нет.*")

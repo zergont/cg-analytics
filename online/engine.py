@@ -254,6 +254,14 @@ def _diff_alerts(
     return new_active, journal
 
 
+_SEV_RANK = {"SHUTDOWN": 4, "WARNING": 3, "CAUTION": 2, "INFO": 1}
+
+
+def _max_severity(a: str | None, b: str | None) -> str | None:
+    """Больший из двух severity по шкале SHUTDOWN > WARNING > CAUTION > INFO."""
+    return a if _SEV_RANK.get(a or "", 0) >= _SEV_RANK.get(b or "", 0) else b
+
+
 async def _load_data(
     router_sn: str,
     equip_type: str,
@@ -351,13 +359,16 @@ async def _collect_and_enrich_detections(
     seg_t_end: datetime,
     cfg,
     run_origin_ts: datetime,
+    open_scenarios: set[str] | None = None,
 ) -> list[dict]:
     """Для закрытого сегмента: обогатить детекции счётчиками + вернуть events.
 
     1. Собирает уникальные (scenario, severity, run_state, front_count) из всех подсегментов.
-    2. Запрашивает history_count_30d и startup_count ДО текущего события.
-    3. Мутирует detection.values с +1 (включая текущее событие).
-    4. Возвращает список event-dict для insert_detection_events.
+    2. Для сценариев без живого эпизода (короткий сегмент закрылся внутри одного
+       цикла, например START_FAILURE) — создаёт сразу закрытый эпизод.
+    3. Счётчики фронтов И длительности по alarm_episodes (текущий эпизод уже в БД,
+       поэтому без +1).
+    4. Возвращает список event-dict для insert_detection_events (переходный период).
 
     Мутация до seg.to_dict() / to_markdown() — счётчики попадают в отчёт.
     """
@@ -382,23 +393,43 @@ async def _collect_and_enrich_detections(
     if not seen_scenarios:
         return []
 
-    # Оба счётчика по всем сценариям одним batch-запросом
+    # Эпизоды для эфемерных сценариев — не живших в снимке открытого окна
+    if open_scenarios is not None:
+        for sc, (sev, _rs, _fc) in seen_scenarios.items():
+            if sc in open_scenarios:
+                continue
+            t_open = first_t_detected.get(sc, _tz_utc(seg_t_end))
+            try:
+                await online_db.insert_closed_episode(
+                    router_sn, equip_type, panel_id,
+                    scenario=sc,
+                    source="panel" if sc == "CONTROLLER_FAULT" else "analytics",
+                    severity=sev,
+                    t_open=t_open,
+                    t_close=_tz_utc(seg_t_end),
+                    active_sec=max(0.0, (_tz_utc(seg_t_end) - t_open).total_seconds()),
+                )
+            except Exception:
+                logger.warning("Не удалось создать эпизод для %s", sc, exc_info=True)
+
+    # Счётчики фронтов и длительности по эпизодам одним batch-запросом
     try:
-        counts = await online_db.count_detection_events_batch(
+        counts = await online_db.count_episodes_batch(
             router_sn, equip_type, panel_id, list(seen_scenarios),
             window_days, run_origin_ts,
         )
     except Exception:
-        logger.warning("Счётчики детекций не получены, ставлю 0", exc_info=True)
+        logger.warning("Счётчики эпизодов не получены", exc_info=True)
         counts = {}
 
-    # Мутировать detection.values с +1 (текущее событие включается)
     for sub in seg.subsegments:
         for d in sub.detections:
-            if d.scenario in seen_scenarios:
-                cnt_30d, cnt_startup = counts.get(d.scenario, (0, 0))
-                d.values["history_count_30d"] = cnt_30d + 1
-                d.values["startup_count"] = cnt_startup + 1
+            c = counts.get(d.scenario)
+            if c:
+                d.values["history_count_30d"]        = c["count_window"]
+                d.values["history_duration_30d_sec"] = round(c["dur_window"])
+                d.values["startup_count"]            = c["count_since"]
+                d.values["startup_duration_sec"]     = round(c["dur_since"])
 
     # Подготовить события для вставки в detection_events
     events = [
@@ -439,20 +470,22 @@ async def _enrich_open_seg_detections(
         return
 
     try:
-        counts = await online_db.count_detection_events_batch(
+        counts = await online_db.count_episodes_batch(
             router_sn, equip_type, panel_id, list(seen_scenarios),
             window_days, run_origin_ts,
         )
     except Exception:
-        logger.warning("Счётчики детекций не получены, ставлю 0", exc_info=True)
+        logger.warning("Счётчики эпизодов не получены", exc_info=True)
         counts = {}
 
     for sub in seg.subsegments:
         for d in sub.detections:
-            if d.scenario in seen_scenarios:
-                cnt_30d, cnt_startup = counts.get(d.scenario, (0, 0))
-                d.values["history_count_30d"] = cnt_30d + 1
-                d.values["startup_count"] = cnt_startup + 1
+            c = counts.get(d.scenario)
+            if c:
+                d.values["history_count_30d"]        = c["count_window"]
+                d.values["history_duration_30d_sec"] = round(c["dur_window"])
+                d.values["startup_count"]            = c["count_since"]
+                d.values["startup_duration_sec"]     = round(c["dur_since"])
 
 
 class OnlinePollEngine:
@@ -502,6 +535,12 @@ class OnlinePollEngine:
         self.last_data_ts: datetime | None = None
         # Живые тревоги: scenario → detection_dict (только активные, не закрытые)
         self._active_alerts: dict[str, dict] = {}
+        # Эпизоды тревог: scenario → {"id", "severity", "miss", "first_miss_ts"}
+        self._episodes: dict[str, dict] = {}
+        # База начисления живого времени эпизодов (тикает только по времени с данными)
+        self._episode_accrual_ts: datetime | None = None
+        # id открытого сегмента с прошлого цикла — справочная ссылка новых эпизодов
+        self._last_open_seg_id: int | None = None
 
     @property
     def key(self) -> str:
@@ -592,6 +631,125 @@ class OnlinePollEngine:
                 self.key,
             )
             self._active_alerts = {}
+
+        # Восстановить открытые эпизоды тревог (переживают рестарт)
+        try:
+            eps = await online_db.get_open_episodes(
+                self.router_sn, self.equip_type, self.panel_id
+            )
+            self._episodes = {
+                e["scenario"]: {"id": e["id"], "severity": e.get("severity"),
+                                "miss": 0, "first_miss_ts": None}
+                for e in eps
+            }
+            if self._episodes:
+                logger.info(
+                    "OnlineEngine[%s]: восстановлены открытые эпизоды: %s",
+                    self.key, list(self._episodes),
+                )
+        except Exception:
+            logger.warning(
+                "OnlineEngine[%s]: не удалось восстановить эпизоды тревог",
+                self.key, exc_info=True,
+            )
+            self._episodes = {}
+
+    # ── Эпизоды тревог ────────────────────────────────────────────────────────
+
+    async def _process_episodes(
+        self, curr_dets: list[dict], t_to: datetime, gaps: list[dict]
+    ) -> None:
+        """Материализовать эпизоды тревог из снимка активных детекций.
+
+        Открытие — сразу; закрытие — после N циклов подряд «чисто»
+        (ALARM_EPISODES.close_debounce_cycles в detectors.yaml, default 3 —
+        защита счётчиков от мерцания условия у порога). active_sec тикает
+        только по времени, покрытому данными, минус дыры связи: в дыре
+        эпизод висит, таймер стоит, дебаунс не идёт.
+        """
+        from analytics.accumulators import _gap_overlap_sec
+
+        debounce = int(self.cfg.det("ALARM_EPISODES", "close_debounce_cycles", default=3) or 3)
+        now_ts = _tz_utc(t_to)
+        curr_map = {d["scenario"]: d for d in curr_dets if d.get("scenario")}
+
+        # Приращение живого времени: [прошлая база .. min(t_to, последние данные)] минус дыры
+        delta_sec = 0.0
+        accrue_to = min(now_ts, _tz_utc(self.last_data_ts)) if self.last_data_ts else None
+        if accrue_to is not None:
+            if self._episode_accrual_ts is not None and accrue_to > self._episode_accrual_ts:
+                delta_sec = max(
+                    0.0,
+                    (accrue_to - self._episode_accrual_ts).total_seconds()
+                    - _gap_overlap_sec(gaps, self._episode_accrual_ts, accrue_to),
+                )
+            self._episode_accrual_ts = accrue_to
+
+        # Открытие новых / обновление живущих
+        for sc, d in curr_map.items():
+            ep = self._episodes.get(sc)
+            sev = d.get("severity")
+            if ep is None:
+                t_open = now_ts
+                if d.get("t_detected"):
+                    try:
+                        t_open = _tz_utc(datetime.fromisoformat(d["t_detected"]))
+                    except Exception:
+                        pass
+                try:
+                    ep_id = await online_db.open_episode(
+                        self.router_sn, self.equip_type, self.panel_id,
+                        scenario=sc,
+                        source="panel" if sc == "CONTROLLER_FAULT" else "analytics",
+                        severity=sev,
+                        t_open=t_open,
+                        open_values=d.get("values") or {},
+                        segment_id=self._last_open_seg_id,
+                    )
+                except Exception:
+                    logger.warning("OnlineEngine[%s]: не удалось открыть эпизод %s",
+                                   self.key, sc, exc_info=True)
+                    continue
+                self._episodes[sc] = {"id": ep_id, "severity": sev,
+                                      "miss": 0, "first_miss_ts": None}
+                logger.info("OnlineEngine[%s]: эпизод открыт — %s (severity=%s)",
+                            self.key, sc, sev)
+            else:
+                ep["miss"] = 0
+                ep["first_miss_ts"] = None
+                new_sev = _max_severity(ep.get("severity"), sev)
+                try:
+                    await online_db.update_episode(
+                        ep["id"], active_sec_add=delta_sec,
+                        severity=new_sev if new_sev != ep.get("severity") else None,
+                    )
+                    ep["severity"] = new_sev
+                except Exception:
+                    logger.warning("OnlineEngine[%s]: не удалось обновить эпизод %s",
+                                   self.key, sc, exc_info=True)
+
+        # Дебаунс закрытия — только когда данные реально шли (в дыре всё замирает)
+        if delta_sec <= 0:
+            return
+        for sc in list(self._episodes.keys()):
+            if sc in curr_map:
+                continue
+            ep = self._episodes[sc]
+            ep["miss"] += 1
+            if ep["first_miss_ts"] is None:
+                ep["first_miss_ts"] = now_ts
+            if ep["miss"] < debounce:
+                continue
+            try:
+                await online_db.close_episode(
+                    ep["id"], ep["first_miss_ts"], "condition_cleared"
+                )
+            except Exception:
+                logger.warning("OnlineEngine[%s]: не удалось закрыть эпизод %s",
+                               self.key, sc, exc_info=True)
+                continue
+            logger.info("OnlineEngine[%s]: эпизод закрыт — %s", self.key, sc)
+            self._episodes.pop(sc, None)
 
     # ── Главный цикл ──────────────────────────────────────────────────────────
 
@@ -807,6 +965,7 @@ class OnlinePollEngine:
             _det_events = await _collect_and_enrich_detections(
                 seg, self.router_sn, self.equip_type, self.panel_id,
                 seg_t_end, self.cfg, run_origin_ts=_run_origin,
+                open_scenarios=set(self._episodes),
             )
 
             seg_dict = seg.to_dict()
@@ -1061,6 +1220,7 @@ class OnlinePollEngine:
                 _rs_det_events = await _collect_and_enrich_detections(
                     seg, self.router_sn, self.equip_type, self.panel_id,
                     seg_t_end_rs, self.cfg, run_origin_ts=_rs_run_origin,
+                    open_scenarios=set(self._episodes),
                 )
 
                 try:
@@ -1140,6 +1300,14 @@ class OnlinePollEngine:
             else (chain_origin_ts or _tz_utc(self.cursor_ts))
         )
 
+        # Эпизоды тревог — ДО обогащения: счётчики уже включат текущий эпизод
+        try:
+            _, _raw_curr_dets = _extract_open_segment_data(open_seg)
+            await self._process_episodes(_raw_curr_dets, t_to, gaps)
+        except Exception:
+            logger.warning("OnlineEngine[%s]: ошибка обработки эпизодов тревог",
+                           self.key, exc_info=True)
+
         # Обогатить детекции счётчиками ДО _extract_open_segment_data / to_markdown
         _t0 = _time.perf_counter()
         await _enrich_open_seg_detections(
@@ -1211,6 +1379,8 @@ class OnlinePollEngine:
             self.key, _time.perf_counter() - _t0,
             _time.perf_counter() - _t_cycle_start,
         )
+
+        self._last_open_seg_id = _open_seg_id
 
         # Записать события жизненного цикла тревог (segment_id теперь известен)
         if _alert_events:

@@ -258,8 +258,10 @@ def build_structural_status(
             "trigger":           trigger,
             "fault_codes":       fault_codes,
             "description":       description,
-            "history_count_30d": det_vals.get("history_count_30d"),
-            "startup_count":     det_vals.get("startup_count"),
+            "history_count_30d":        det_vals.get("history_count_30d"),
+            "history_duration_30d_sec": det_vals.get("history_duration_30d_sec"),
+            "startup_count":            det_vals.get("startup_count"),
+            "startup_duration_sec":     det_vals.get("startup_duration_sec"),
         }
         if scenario == "CONTROLLER_FAULT":
             panel_alarms.append(alarm)
@@ -422,8 +424,14 @@ def build_warning_prompt(s: dict) -> str:
             line = f"  [{a['severity']}] {desc}" + (f" (коды: {codes})" if codes else "")
             if count_30d is not None:
                 line += f" — за 30 дней: {count_30d}"
+                dur_30d = a.get("history_duration_30d_sec")
+                if dur_30d:
+                    line += f" ({int(dur_30d) // 60} мин суммарно)"
             if count_startup is not None:
                 line += f", с пуска: {count_startup}"
+                dur_startup = a.get("startup_duration_sec")
+                if dur_startup:
+                    line += f" ({int(dur_startup) // 60} мин)"
             lines.append(line)
 
     kp = s.get("key_params", [])

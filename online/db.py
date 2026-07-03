@@ -732,18 +732,146 @@ async def insert_detection_events(
         await conn.close()
 
 
-async def count_detection_events_batch(
+# ── alarm_episodes ────────────────────────────────────────────────────────────
+
+async def open_episode(
+    router_sn: str, equip_type: str, panel_id: int, *,
+    scenario: str, source: str, severity: str | None,
+    t_open: datetime, open_values: dict | None, segment_id: int | None = None,
+) -> int:
+    """Открыть эпизод тревоги (t_close IS NULL = висит). Возвращает id."""
+    conn = await _connect()
+    try:
+        row = await conn.fetchrow("""
+            INSERT INTO alarm_episodes
+                (router_sn, equip_type, panel_id, scenario, source, severity,
+                 t_open, open_values_json, segment_id_open)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            RETURNING id
+        """, router_sn, equip_type, panel_id, scenario, source, severity,
+             t_open, json.dumps(open_values or {}, ensure_ascii=False, default=str),
+             segment_id)
+        return int(row["id"])
+    finally:
+        await conn.close()
+
+
+async def insert_closed_episode(
+    router_sn: str, equip_type: str, panel_id: int, *,
+    scenario: str, source: str, severity: str | None,
+    t_open: datetime, t_close: datetime, active_sec: float,
+    open_values: dict | None = None,
+) -> int:
+    """Сразу закрытый эпизод — для детекций короткого сегмента, не живших
+    в снимке открытого окна (например START_FAILURE за один цикл)."""
+    conn = await _connect()
+    try:
+        row = await conn.fetchrow("""
+            INSERT INTO alarm_episodes
+                (router_sn, equip_type, panel_id, scenario, source, severity,
+                 t_open, t_close, close_reason, active_sec, open_values_json)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'condition_cleared', $9, $10)
+            RETURNING id
+        """, router_sn, equip_type, panel_id, scenario, source, severity,
+             t_open, t_close, active_sec,
+             json.dumps(open_values or {}, ensure_ascii=False, default=str))
+        return int(row["id"])
+    finally:
+        await conn.close()
+
+
+async def update_episode(
+    episode_id: int, *, active_sec_add: float = 0.0, severity: str | None = None,
+) -> None:
+    """Приращение живого времени и/или эскалация severity открытого эпизода."""
+    conn = await _connect()
+    try:
+        await conn.execute("""
+            UPDATE alarm_episodes
+            SET active_sec = active_sec + $2,
+                severity   = COALESCE($3, severity),
+                updated_at = now()
+            WHERE id = $1
+        """, episode_id, active_sec_add, severity)
+    finally:
+        await conn.close()
+
+
+async def close_episode(episode_id: int, t_close: datetime, reason: str) -> None:
+    conn = await _connect()
+    try:
+        await conn.execute("""
+            UPDATE alarm_episodes
+            SET t_close = $2, close_reason = $3, updated_at = now()
+            WHERE id = $1 AND t_close IS NULL
+        """, episode_id, t_close, reason)
+    finally:
+        await conn.close()
+
+
+async def get_open_episodes(
+    router_sn: str, equip_type: str, panel_id: int,
+) -> list[dict[str, Any]]:
+    conn = await _connect()
+    try:
+        rows = await conn.fetch("""
+            SELECT * FROM alarm_episodes
+            WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+              AND t_close IS NULL
+            ORDER BY t_open
+        """, router_sn, equip_type, panel_id)
+        return [dict(r) for r in rows]
+    finally:
+        await conn.close()
+
+
+async def get_open_episodes_all() -> dict[str, list[dict[str, Any]]]:
+    """Открытые эпизоды всего парка одним запросом: {"sn|type|panel": [rows]}."""
+    conn = await _connect()
+    try:
+        rows = await conn.fetch(
+            "SELECT * FROM alarm_episodes WHERE t_close IS NULL ORDER BY t_open"
+        )
+        result: dict[str, list[dict[str, Any]]] = {}
+        for r in rows:
+            key = f"{r['router_sn']}|{r['equip_type']}|{r['panel_id']}"
+            result.setdefault(key, []).append(dict(r))
+        return result
+    finally:
+        await conn.close()
+
+
+async def set_episodes_gate_suppressed(
+    router_sn: str, equip_type: str, panel_id: int, scenarios: list[str],
+) -> None:
+    """Пометить открытые аналитические эпизоды вердиктом гейта «отменить»."""
+    if not scenarios:
+        return
+    conn = await _connect()
+    try:
+        await conn.execute("""
+            UPDATE alarm_episodes
+            SET gate_suppressed = TRUE, updated_at = now()
+            WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+              AND t_close IS NULL AND scenario = ANY($4::text[])
+        """, router_sn, equip_type, panel_id, scenarios)
+    finally:
+        await conn.close()
+
+
+async def count_episodes_batch(
     router_sn: str,
     equip_type: str,
     panel_id: int,
     scenarios: list[str],
     window_days: int = 30,
     since_ts: datetime | None = None,
-) -> dict[str, tuple[int, int]]:
-    """Оба счётчика фронтов для всех сценариев одним запросом.
+) -> dict[str, dict[str, float]]:
+    """Счётчики эпизодов одним запросом: фронты И суммарная длительность.
 
-    Возвращает {scenario: (за window_days дней, с since_ts)}.
-    Сценарии без событий получают (0, 0); since_ts=None → счётчик «с пуска» = 0.
+    Возвращает {scenario: {count_window, dur_window, count_since, dur_since}}.
+    Считаются эпизоды с t_open в окне (включая ещё открытые); длительность —
+    сумма active_sec (время «под связью»). since_ts=None → счётчики «с пуска» = 0.
     """
     if not scenarios:
         return {}
@@ -751,22 +879,32 @@ async def count_detection_events_batch(
     try:
         rows = await conn.fetch("""
             SELECT scenario,
-                   COALESCE(SUM(front_count) FILTER (
-                       WHERE detected_at > now() - ($5 || ' days')::interval), 0) AS cnt_window,
-                   COALESCE(SUM(front_count) FILTER (
-                       WHERE $6::timestamptz IS NOT NULL AND detected_at >= $6), 0) AS cnt_since
-            FROM detection_events
-            WHERE router_sn = $1
-              AND equip_type = $2
-              AND panel_id   = $3
-              AND scenario   = ANY($4::text[])
-              AND (detected_at > now() - ($5 || ' days')::interval
-                   OR ($6::timestamptz IS NOT NULL AND detected_at >= $6))
+                   COUNT(*) FILTER (
+                       WHERE t_open > now() - ($5 || ' days')::interval) AS count_window,
+                   COALESCE(SUM(active_sec) FILTER (
+                       WHERE t_open > now() - ($5 || ' days')::interval), 0) AS dur_window,
+                   COUNT(*) FILTER (
+                       WHERE $6::timestamptz IS NOT NULL AND t_open >= $6) AS count_since,
+                   COALESCE(SUM(active_sec) FILTER (
+                       WHERE $6::timestamptz IS NOT NULL AND t_open >= $6), 0) AS dur_since
+            FROM alarm_episodes
+            WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+              AND scenario = ANY($4::text[])
+              AND (t_open > now() - ($5 || ' days')::interval
+                   OR ($6::timestamptz IS NOT NULL AND t_open >= $6))
             GROUP BY scenario
         """, router_sn, equip_type, panel_id, scenarios, str(window_days), since_ts)
-        result: dict[str, tuple[int, int]] = {sc: (0, 0) for sc in scenarios}
+        result = {
+            sc: {"count_window": 0, "dur_window": 0.0, "count_since": 0, "dur_since": 0.0}
+            for sc in scenarios
+        }
         for r in rows:
-            result[r["scenario"]] = (int(r["cnt_window"]), int(r["cnt_since"]))
+            result[r["scenario"]] = {
+                "count_window": int(r["count_window"]),
+                "dur_window":   float(r["dur_window"]),
+                "count_since":  int(r["count_since"]),
+                "dur_since":    float(r["dur_since"]),
+            }
         return result
     finally:
         await conn.close()

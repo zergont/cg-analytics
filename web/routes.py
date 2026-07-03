@@ -2025,6 +2025,7 @@ async def api_machines():
 
     observations = await odb.list_observations()
     _open_segs = await odb.get_open_segments_all()
+    _open_eps = await odb.get_open_episodes_all()
     try:
         _stale_sec = int(await analytics.get_app_setting("data_stale_threshold_sec", "90"))
     except Exception:
@@ -2107,6 +2108,18 @@ async def api_machines():
             # аналитики — статус/severity отражают момент last_data_ts, не «сейчас»
             "last_data_ts":    _last_data.isoformat() if _last_data else None,
             "data_stale":      data_stale,
+            # Открытые эпизоды тревог: висят с t_open, duration_sec не тикает в дырах
+            "active_alarms": [
+                {
+                    "scenario":        e["scenario"],
+                    "severity":        e.get("severity"),
+                    "source":          e.get("source"),
+                    "since":           e["t_open"].isoformat() if e.get("t_open") else None,
+                    "duration_sec":    round(e.get("active_sec") or 0),
+                    "gate_suppressed": bool(e.get("gate_suppressed")),
+                }
+                for e in _open_eps.get(key, [])
+            ],
             "warning_analysis_md": seg.get("warning_analysis_md") if seg else None,
             "_links": {
                 "segments": f"/api/machine/{obs['router_sn']}/{obs['equip_type']}/{obs['panel_id']}/segments",
