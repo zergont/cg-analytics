@@ -846,6 +846,7 @@ async def update_status_line_interval(interval_min: int = Form(...)):
 
 @router.post("/settings/llm")
 async def update_llm_settings(
+    llm_provider:    str   = Form("ollama"),
     llm_base_url:    str   = Form(...),
     llm_model:       str   = Form(...),
     llm_temperature: float = Form(...),
@@ -853,16 +854,20 @@ async def update_llm_settings(
     llm_stream:      str   = Form(""),   # checkbox: "on" если отмечен, "" если нет
 ):
     """Сохранить настройки LLM и применить без перезапуска."""
-    from llm.client import apply_llm_settings
+    from llm.client import apply_llm_settings, PROVIDERS
+    if llm_provider not in PROVIDERS:
+        llm_provider = "ollama"
     stream = llm_stream == "on"
-    apply_llm_settings(llm_base_url, llm_model, llm_temperature, llm_num_ctx, stream=stream)
+    apply_llm_settings(llm_base_url, llm_model, llm_temperature, llm_num_ctx,
+                       stream=stream, provider=llm_provider)
+    await analytics.set_app_setting("llm_provider",    llm_provider)
     await analytics.set_app_setting("llm_base_url",    llm_base_url)
     await analytics.set_app_setting("llm_model",       llm_model)
     await analytics.set_app_setting("llm_temperature", str(llm_temperature))
     await analytics.set_app_setting("llm_num_ctx",     str(llm_num_ctx))
     await analytics.set_app_setting("llm_stream",      "true" if stream else "false")
-    logger.info("LLM настройки сохранены: model=%s num_ctx=%d stream=%s",
-                llm_model, llm_num_ctx, stream)
+    logger.info("LLM настройки сохранены: provider=%s model=%s num_ctx=%d stream=%s",
+                llm_provider, llm_model, llm_num_ctx, stream)
     return RedirectResponse(url="/settings", status_code=303)
 
 
@@ -909,45 +914,14 @@ async def ai_playground_run(request: Request):
         raw_chunks: list[str] = []
         try:
             if provider == "llm":
-                import httpx
-                from llm.client import _cfg
-                model = model_override or _cfg["model"]
-                payload = {
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user",   "content": user_message},
-                    ],
-                    "stream": use_stream,
-                    "options": {"temperature": _cfg["temperature"], "num_ctx": _cfg["num_ctx"]},
-                }
-                if use_stream:
-                    async with httpx.AsyncClient(timeout=600.0) as client:
-                        async with client.stream("POST", f"{_cfg['base_url']}/api/chat",
-                                                 json=payload) as resp:
-                            resp.raise_for_status()
-                            async for line in resp.aiter_lines():
-                                if not line:
-                                    continue
-                                try:
-                                    data = _json.loads(line)
-                                    token = data.get("message", {}).get("content", "")
-                                    if token:
-                                        raw_chunks.append(token)
-                                        yield f"data: {_json.dumps({'token': token})}\n\n"
-                                    if data.get("done"):
-                                        break
-                                except _json.JSONDecodeError:
-                                    continue
-                else:
-                    async with httpx.AsyncClient(timeout=600.0) as client:
-                        resp = await client.post(f"{_cfg['base_url']}/api/chat", json=payload)
-                        resp.raise_for_status()
-                        data = resp.json()
-                        content = data.get("message", {}).get("content", "")
-                        raw_chunks.append(content)
-                        yield f"data: {_json.dumps({'token': content})}\n\n"
-                        raw_chunks.append(f"\n\n[raw]\n{_json.dumps(data, ensure_ascii=False, indent=2)}")
+                from llm.client import chat_stream
+                # chat_stream знает текущего провайдера (Ollama/LM Studio) и ретраит сам
+                async for token in chat_stream(
+                    system_prompt, user_message,
+                    model=model_override or None, stream=use_stream,
+                ):
+                    raw_chunks.append(token)
+                    yield f"data: {_json.dumps({'token': token})}\n\n"
 
             else:  # api (Claude)
                 import anthropic, httpx as _httpx

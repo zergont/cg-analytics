@@ -185,30 +185,15 @@ async def _process_segment(
 
 async def _analyse_segment_llm(seg_row: dict, system_prompt: str) -> dict[str, Any]:
     """Анализ сегмента через локальную LLM (без инструментов, простой вызов)."""
-    import httpx, time
-    from llm.client import _cfg
+    import time
+    from llm.client import _cfg, chat
 
     t0 = time.monotonic()
     report_md = seg_row.get("report_md") or ""
 
     try:
-        payload = {
-            "model": _cfg["model"],
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": report_md},
-            ],
-            "stream": False,
-            "options": {
-                "temperature": _cfg["temperature"],
-                "num_ctx":     _cfg["num_ctx"],
-            },
-        }
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            resp = await client.post(f"{_cfg['base_url']}/api/chat", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            content = data.get("message", {}).get("content", "")
+        # chat() сам ретраит сеть/429/5xx и знает текущего провайдера (Ollama/LM Studio)
+        content = await chat(system_prompt, report_md)
 
         return {
             "verdict":            "LLM",

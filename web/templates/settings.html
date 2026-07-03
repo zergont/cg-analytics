@@ -127,23 +127,46 @@
     <!-- ─── Правая колонка ─────────────────────────────────────────────── -->
     <div class="col-md-6">
 
-        <!-- LLM — локальная модель (Ollama) -->
+        <!-- LLM — локальная модель (Ollama / LM Studio) -->
         <div class="card mb-3">
-            <div class="card-header fw-semibold">🤖 LLM — локальная модель (Ollama)</div>
+            <div class="card-header fw-semibold">🤖 LLM — локальная модель</div>
             <div class="card-body">
                 <form method="post" action="/settings/llm">
                     <div class="row g-2 mb-2">
+                        <div class="col-4">
+                            <label class="form-label small fw-semibold mb-1">Провайдер</label>
+                            <select name="llm_provider" id="llm_provider" class="form-select form-select-sm"
+                                    onchange="llmProviderHint()">
+                                <option value="ollama"   {% if llm.provider == "ollama" %}selected{% endif %}>Ollama</option>
+                                <option value="lmstudio" {% if llm.provider == "lmstudio" %}selected{% endif %}>LM Studio</option>
+                            </select>
+                        </div>
                         <div class="col-8">
-                            <label class="form-label small fw-semibold mb-1">URL Ollama</label>
+                            <label class="form-label small fw-semibold mb-1">URL сервера</label>
                             <input type="text" name="llm_base_url" class="form-control form-control-sm"
                                    value="{{ llm.base_url }}" required>
+                            <div class="form-text" id="llm_url_hint" style="font-size:0.75rem"></div>
                         </div>
-                        <div class="col-4">
-                            <label class="form-label small fw-semibold mb-1">Контекст (токенов)</label>
+                    </div>
+                    <div class="row g-2 mb-2">
+                        <div class="col-8">
+                            <label class="form-label small fw-semibold mb-1">Контекст (токенов)
+                                <span class="text-muted fw-normal" id="llm_ctx_hint" style="font-size:0.75rem"></span></label>
                             <input type="number" name="llm_num_ctx" class="form-control form-control-sm"
                                    value="{{ llm.num_ctx }}" min="1024" max="131072" required>
                         </div>
                     </div>
+                    <script>
+                    function llmProviderHint() {
+                        const p = document.getElementById("llm_provider").value;
+                        document.getElementById("llm_url_hint").textContent =
+                            p === "lmstudio" ? "LM Studio: обычно http://localhost:1234"
+                                             : "Ollama: обычно http://localhost:11434";
+                        document.getElementById("llm_ctx_hint").textContent =
+                            p === "lmstudio" ? "(игнорируется — задаётся при загрузке модели в LM Studio)" : "";
+                    }
+                    document.addEventListener("DOMContentLoaded", llmProviderHint);
+                    </script>
                     <div class="row g-2 mb-2">
                         <div class="col-8">
                             <label class="form-label small fw-semibold mb-1">Модель</label>

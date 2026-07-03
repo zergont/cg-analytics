@@ -57,6 +57,7 @@ async def lifespan(app: FastAPI):
         temperature    = float(await get_app_setting("llm_temperature",    str(_defaults["temperature"]))),
         num_ctx        = int(await get_app_setting("llm_num_ctx",       str(_defaults["num_ctx"]))),
         stream         = await get_app_setting("llm_stream", "true") == "true",
+        provider       = await get_app_setting("llm_provider", _defaults.get("provider", "ollama")),
     )
     # Загружаем настройки Claude API из БД
     _claude_defaults = get_claude_settings()

@@ -42,37 +42,12 @@ async def humanize(conclusion_md: str, task_id: str = "human_auto") -> str:
 
 
 async def _humanize_llm(system_prompt: str, user_msg: str) -> str:
-    from llm.client import _cfg, retriable_llm_error
+    from llm.client import chat
 
-    payload = {
-        "model": _cfg["model"],
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_msg},
-        ],
-        "stream": False,
-        "options": {
-            "temperature": _cfg["temperature"],
-            "num_ctx":     _cfg["num_ctx"],
-        },
-    }
-    attempts = 3
-    for attempt in range(1, attempts + 1):
-        try:
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                resp = await client.post(f"{_cfg['base_url']}/api/chat", json=payload)
-                resp.raise_for_status()
-                result = resp.json().get("message", {}).get("content", "").strip()
-                logger.debug("corpus/humanizer LLM: %d символов", len(result))
-                return result
-        except Exception as exc:
-            if attempt == attempts or not retriable_llm_error(exc):
-                raise
-            import asyncio as _aio
-            delay = 2.0 * attempt
-            logger.warning("corpus/humanizer: LLM недоступен (попытка %d/%d), повтор через %.0fс: %r",
-                           attempt, attempts, delay, exc)
-            await _aio.sleep(delay)
+    # chat() сам ретраит сеть/429/5xx и знает текущего провайдера (Ollama/LM Studio)
+    result = await chat(system_prompt, user_msg)
+    logger.debug("corpus/humanizer LLM: %d символов", len(result))
+    return result
 
 
 async def _humanize_api(system_prompt: str, user_msg: str) -> str:
