@@ -83,6 +83,26 @@ class AnalyticsConfig:
                 return addr
         return None
 
+    def role_unit(self, role: str) -> str:
+        """Единица измерения роли (из mapping.yaml)."""
+        for meta in self._register_map.values():
+            if meta.get("role") == role:
+                return meta.get("unit") or ""
+        return ""
+
+    @property
+    def trip_snapshot_roles(self) -> list[str]:
+        """Роли для снапшота контекста аварии (trip_snapshot: true в mapping.yaml).
+
+        Тот же набор — «ключевые показатели» отчёта. Задаётся в KB,
+        не в коде: у другого оборудования свой набор.
+        """
+        return [
+            meta["role"]
+            for meta in self._register_map.values()
+            if meta.get("trip_snapshot") and meta.get("role")
+        ]
+
     def thr(self, *keys: str, default: Any = None) -> Any:
         """Быстрый доступ к вложенному значению в thresholds.
 

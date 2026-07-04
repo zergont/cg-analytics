@@ -11,6 +11,7 @@ registers:
 
   40034:
     role: ACTIVE_POWER_TOTAL
+    trip_snapshot: true
     group: LOAD
     unit: kW
     kind: analog
@@ -131,6 +132,7 @@ registers:
 
   40068:
     role: RPM
+    trip_snapshot: true
     group: LOAD
     unit: rpm
     kind: analog
@@ -139,6 +141,7 @@ registers:
 
   40014:
     role: LOAD_PCT
+    trip_snapshot: true
     group: LOAD
     unit: "%"
     kind: analog
@@ -177,6 +180,7 @@ registers:
 
   40064:
     role: COOLANT_TEMP
+    trip_snapshot: true
     group: THERMO
     unit: "°C"
     kind: analog
@@ -185,6 +189,7 @@ registers:
 
   40063:
     role: OIL_TEMP
+    trip_snapshot: true
     group: THERMO
     unit: "°C"
     kind: analog
@@ -197,6 +202,7 @@ registers:
 
   40062:
     role: OIL_PRESS
+    trip_snapshot: true
     group: HYDRAULIC
     unit: kPa
     kind: analog
@@ -209,6 +215,7 @@ registers:
 
   40044:
     role: FREQUENCY
+    trip_snapshot: true
     group: HEALTH
     unit: Hz
     kind: analog
@@ -217,6 +224,7 @@ registers:
 
   40061:
     role: BATTERY_V
+    trip_snapshot: true
     group: HEALTH
     unit: Vdc
     kind: analog

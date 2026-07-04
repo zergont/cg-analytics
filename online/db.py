@@ -859,6 +859,19 @@ async def set_episodes_gate_suppressed(
         await conn.close()
 
 
+async def set_episode_context(episode_id: int, context: dict) -> None:
+    """Прикрепить контекст аварии (Фаза C) к эпизоду."""
+    conn = await _connect()
+    try:
+        await conn.execute("""
+            UPDATE alarm_episodes
+            SET context_json = $2, updated_at = now()
+            WHERE id = $1
+        """, episode_id, json.dumps(context, ensure_ascii=False, default=str))
+    finally:
+        await conn.close()
+
+
 async def count_episodes_batch(
     router_sn: str,
     equip_type: str,

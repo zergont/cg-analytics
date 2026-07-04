@@ -2117,6 +2117,9 @@ async def api_machines():
                     "since":           e["t_open"].isoformat() if e.get("t_open") else None,
                     "duration_sec":    round(e.get("active_sec") or 0),
                     "gate_suppressed": bool(e.get("gate_suppressed")),
+                    # Контекст аварии (только SHUTDOWN): предыдущий сегмент,
+                    # тренд ключевых параметров, висевшие тревоги, сводка 24ч
+                    "context":         _parse_json(e.get("context_json"), ctx="context_json"),
                 }
                 for e in _open_eps.get(key, [])
             ],

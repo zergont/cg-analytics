@@ -527,7 +527,22 @@ async def _analyze_warning_claude(
                         alarm["startup_count"]        = c["count_since"]
                         alarm["startup_duration_sec"] = round(c["dur_since"])
 
-        user_prompt = build_warning_prompt(struct)
+        # Контекст аварии с SHUTDOWN-эпизода (Фаза C) — если панель в аварийном останове
+        _trip_ctx = None
+        if struct.get("panel_severity") == "авария":
+            try:
+                import json as _json
+                for _e in await online_db.get_open_episodes(router_sn, equip_type, panel_id):
+                    if _e["scenario"] == "CONTROLLER_FAULT" and _e.get("context_json"):
+                        _trip_ctx = _e["context_json"]
+                        if isinstance(_trip_ctx, str):
+                            _trip_ctx = _json.loads(_trip_ctx)
+                        break
+            except Exception:
+                logger.warning("WarningGate: контекст аварии не получен", exc_info=True)
+                _trip_ctx = None
+
+        user_prompt = build_warning_prompt(struct, trip_context=_trip_ctx)
         can_cancel  = struct.get("panel_severity", "норма") == "норма"
 
         # API ходит через прокси из настроек Claude (как corpus/agent и playground)

@@ -714,10 +714,15 @@ class OnlinePollEngine:
                                       "miss": 0, "first_miss_ts": None}
                 logger.info("OnlineEngine[%s]: эпизод открыт — %s (severity=%s)",
                             self.key, sc, sev)
+                if sc == "CONTROLLER_FAULT" and sev == "SHUTDOWN":
+                    await self._attach_trip_context(ep_id, t_open)
             else:
                 ep["miss"] = 0
                 ep["first_miss_ts"] = None
                 new_sev = _max_severity(ep.get("severity"), sev)
+                if (sc == "CONTROLLER_FAULT" and new_sev == "SHUTDOWN"
+                        and ep.get("severity") != "SHUTDOWN"):
+                    await self._attach_trip_context(ep["id"], now_ts)
                 try:
                     await online_db.update_episode(
                         ep["id"], active_sec_add=delta_sec,
@@ -750,6 +755,153 @@ class OnlinePollEngine:
                 continue
             logger.info("OnlineEngine[%s]: эпизод закрыт — %s", self.key, sc)
             self._episodes.pop(sc, None)
+
+    # ── Контекст аварии (Фаза C) ──────────────────────────────────────────────
+
+    async def _attach_trip_context(self, episode_id: int, t_trip: datetime) -> None:
+        """Собрать и прикрепить контекст аварии к SHUTDOWN-эпизоду. Fail-open."""
+        try:
+            ctx = await self._build_trip_context(t_trip)
+            await online_db.set_episode_context(episode_id, ctx)
+            logger.info("OnlineEngine[%s]: контекст аварии собран (эпизод %s)",
+                        self.key, episode_id)
+        except Exception:
+            logger.warning("OnlineEngine[%s]: не удалось собрать контекст аварии",
+                           self.key, exc_info=True)
+
+    async def _build_trip_context(self, t_trip: datetime) -> dict:
+        """Контекст SHUTDOWN: что машина делала до отключения.
+
+        «Стоял 2 суток и нажали кнопку на ТО» и «работал на 100% и отключился» —
+        принципиально разные происшествия. Содержимое: предыдущий закрытый
+        сегмент детально, тренд trip_snapshot-ролей (mapping.yaml KB) за
+        последние минуты, висевшие тревоги, компактная сводка 24ч.
+        """
+        t_trip = _tz_utc(t_trip)
+        ctx: dict[str, Any] = {"t_trip": t_trip.isoformat()}
+
+        # 1. Предыдущий закрытый сегмент — режим, длительность, зоны нагрузки
+        try:
+            prev = await online_db.get_last_closed_segment(
+                self.router_sn, self.equip_type, self.panel_id
+            )
+            if prev:
+                chars = prev.get("characteristics_json")
+                if isinstance(chars, str):
+                    try:
+                        chars = json.loads(chars)
+                    except Exception:
+                        chars = {}
+                chars = chars if isinstance(chars, dict) else {}
+                zones: dict[str, float] = {}
+                for sub in chars.get("subsegments", []):
+                    z = sub.get("load_zone") or "NA"
+                    zones[z] = zones.get(z, 0.0) + float(sub.get("duration_sec") or 0)
+                t_s, t_e = prev.get("t_start"), prev.get("t_end")
+                ctx["prev_segment"] = {
+                    "run_state":       prev.get("run_state"),
+                    "run_state_label": chars.get("run_state_label"),
+                    "t_start":         _tz_utc(t_s).isoformat() if t_s else None,
+                    "t_end":           _tz_utc(t_e).isoformat() if t_e else None,
+                    "duration_sec":    round((_tz_utc(t_e) - _tz_utc(t_s)).total_seconds())
+                                       if t_s and t_e else None,
+                    "cause_close":     prev.get("cause_close"),
+                    "zones_sec":       {z: round(v) for z, v in zones.items()},
+                }
+        except Exception:
+            logger.warning("OnlineEngine[%s]: контекст — предыдущий сегмент не собран",
+                           self.key, exc_info=True)
+
+        # 2. Тренд ключевых параметров перед аварией (из кэша открытого окна)
+        try:
+            window_min = int(self.cfg.det(
+                "ALARM_EPISODES", "trip_trend_window_min", default=15) or 15)
+            t0 = t_trip - timedelta(minutes=window_min)
+            hist = self._open_history_cache or []
+            params: dict[str, dict] = {}
+            for role in self.cfg.trip_snapshot_roles:
+                addr = self.cfg.role_to_addr(role)
+                if not addr:
+                    continue
+                vals = [
+                    float(r["value"]) for r in hist
+                    if r["addr"] == addr and r.get("value") is not None
+                    and t0 <= _tz_utc(r["ts"]) <= t_trip
+                ]
+                if not vals:
+                    continue
+                params[role] = {
+                    "first": round(vals[0], 2),
+                    "last":  round(vals[-1], 2),
+                    "min":   round(min(vals), 2),
+                    "max":   round(max(vals), 2),
+                    "unit":  self.cfg.role_unit(role),
+                }
+            if params:
+                ctx["trend"] = {"window_min": window_min, "params": params}
+        except Exception:
+            logger.warning("OnlineEngine[%s]: контекст — тренд не собран",
+                           self.key, exc_info=True)
+
+        # 3. Висевшие тревоги на момент аварии (кроме самой панельной)
+        try:
+            eps = await online_db.get_open_episodes(
+                self.router_sn, self.equip_type, self.panel_id
+            )
+            open_alarms = [
+                {
+                    "scenario":        e["scenario"],
+                    "severity":        e.get("severity"),
+                    "since":           _tz_utc(e["t_open"]).isoformat(),
+                    "active_sec":      round(e.get("active_sec") or 0),
+                    "gate_suppressed": bool(e.get("gate_suppressed")),
+                }
+                for e in eps if e["scenario"] != "CONTROLLER_FAULT"
+            ]
+            if open_alarms:
+                ctx["open_alarms"] = open_alarms
+        except Exception:
+            logger.warning("OnlineEngine[%s]: контекст — открытые эпизоды не собраны",
+                           self.key, exc_info=True)
+
+        # 4. Компактная сводка 24ч: пуски, наработка, максимальная зона
+        try:
+            segs = await online_db.get_segments_for_calendar(
+                self.router_sn, self.equip_type, self.panel_id,
+                ts_from=t_trip - timedelta(hours=24), ts_to=t_trip,
+            )
+            zone_rank = {"NA": 0, "LOW": 1, "NORMAL": 2, "ELEVATED": 3, "OVERLOAD": 4}
+            starts = 0
+            running_sec = 0.0
+            max_zone = "NA"
+            for s in segs:
+                if s.get("run_state") != 3:
+                    continue
+                starts += 1
+                t_s, t_e = s.get("t_start"), s.get("t_end")
+                if t_s:
+                    running_sec += (_tz_utc(t_e or t_trip) - _tz_utc(t_s)).total_seconds()
+                chars = s.get("characteristics_json")
+                if isinstance(chars, str):
+                    try:
+                        chars = json.loads(chars)
+                    except Exception:
+                        chars = {}
+                if isinstance(chars, dict):
+                    for sub in chars.get("subsegments", []):
+                        z = sub.get("load_zone") or "NA"
+                        if zone_rank.get(z, 0) > zone_rank.get(max_zone, 0):
+                            max_zone = z
+            ctx["last_24h"] = {
+                "starts_count":  starts,
+                "running_sec":   round(running_sec),
+                "max_load_zone": max_zone,
+            }
+        except Exception:
+            logger.warning("OnlineEngine[%s]: контекст — сводка 24ч не собрана",
+                           self.key, exc_info=True)
+
+        return ctx
 
     # ── Главный цикл ──────────────────────────────────────────────────────────
 

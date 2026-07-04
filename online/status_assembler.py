@@ -372,13 +372,56 @@ def extract_alarm_text(s: dict) -> str | None:
     return None
 
 
-def build_warning_prompt(s: dict) -> str:
-    """Промпт для Claude-анализа предупреждения (новые fault-коды)."""
+def build_warning_prompt(s: dict, trip_context: dict | None = None) -> str:
+    """Промпт для Claude-анализа предупреждения (новые fault-коды).
+
+    trip_context — контекст аварии с SHUTDOWN-эпизода (Фаза C): что машина
+    делала до отключения. Передаётся только когда панель в аварийном останове.
+    """
     lines = [
         "Выполни анализ неисправности дизель-генераторной установки.",
         "",
         f"Режим работы: {s['mode_label']} (RUN_STATE={s['run_state']})",
     ]
+
+    if trip_context:
+        lines.append("")
+        lines.append("Контекст аварийного останова:")
+        prev = trip_context.get("prev_segment")
+        if prev:
+            label = prev.get("run_state_label") or f"RUN_STATE={prev.get('run_state')}"
+            dur = prev.get("duration_sec")
+            line = f"  До аварии: {label}"
+            if dur:
+                line += f" длительностью {_fmt_duration(dur)}"
+            zones = prev.get("zones_sec") or {}
+            if zones:
+                zstr = ", ".join(f"{z}: {_fmt_duration(v)}" for z, v in zones.items() if v)
+                if zstr:
+                    line += f" (зоны нагрузки — {zstr})"
+            lines.append(line)
+        trend = trip_context.get("trend")
+        if trend and trend.get("params"):
+            lines.append(f"  Параметры за {trend.get('window_min', 15)} мин до аварии:")
+            for role, v in trend["params"].items():
+                unit = v.get("unit", "")
+                lines.append(
+                    f"    {role}: {v.get('first')} → {v.get('last')} {unit}"
+                    f" (мин {v.get('min')}, макс {v.get('max')})"
+                )
+        for al in trip_context.get("open_alarms", []):
+            supp = " — отменена гейтом" if al.get("gate_suppressed") else ""
+            lines.append(
+                f"  Висела тревога: {al.get('scenario')} [{al.get('severity')}]"
+                f" {_fmt_duration(al.get('active_sec') or 0)}{supp}"
+            )
+        day = trip_context.get("last_24h")
+        if day:
+            lines.append(
+                f"  За 24ч: пусков {day.get('starts_count', 0)}, наработка "
+                f"{_fmt_duration(day.get('running_sec') or 0)}, "
+                f"макс. зона {day.get('max_load_zone', 'NA')}"
+            )
 
     if s.get("load_pct") is not None:
         lines.append(f"Нагрузка: {s['load_pct']:.0f}%")
