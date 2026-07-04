@@ -1622,6 +1622,7 @@ async def online_segment_detail(request: Request, seg_id: int):
             "ts_to":             "открытый",
             "analytics_version": seg.get("analytics_version", "—"),
             "report_md":         seg.get("report_md"),
+            "report_summary_md": seg.get("report_summary_md"),
             "max_severity":      _max_sev_open,
             "_is_auto_seg":      True,
             "_seg_id":           seg_id,
@@ -1675,6 +1676,7 @@ async def online_segment_detail(request: Request, seg_id: int):
         "ts_to":            _fmt_ts(seg.get("t_end")),
         "analytics_version": seg.get("analytics_version", "—"),
         "report_md":        seg.get("report_md"),
+        "report_summary_md": seg.get("report_summary_md"),
         "error":            None,
         "max_severity":     max_sev,
         "segments_count":   1,
@@ -2305,6 +2307,9 @@ async def api_segment_detail(seg_id: int):
         "analytics_version": seg.get("analytics_version"),
         # Аналитический Markdown-отчёт (сегментация + детекции)
         "report_md":     seg.get("report_md"),
+        # Верхняя часть отчёта: вердикт, замечания (эпизоды), ключевые
+        # показатели. UI показывает её сверху, report_md сворачивает
+        "report_summary_md": seg.get("report_summary_md"),
         # ИИ-анализ
         "analysis":      analysis,
         # Онлайн-анализ предупреждения (гейт Claude) — есть и у открытого сегмента

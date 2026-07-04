@@ -298,6 +298,14 @@
       </div>
     </div>
 
+    {# Сводка: вердикт, замечания, ключевые показатели #}
+    {% if run.report_summary_md %}
+    <div class="border rounded p-3 bg-white mb-2">
+      <div id="openSummaryContent"></div>
+    </div>
+    <script id="openSummaryMdSrc" type="text/plain">{{ run.report_summary_md }}</script>
+    {% endif %}
+
     {# Панель: Аналитика #}
     <div id="openAnalyticsPanel" class="border rounded p-3 bg-white">
       {% if has_report %}
@@ -415,6 +423,14 @@
       </div>
     </div>
 
+    {# Сводка: вердикт, замечания, ключевые показатели #}
+    {% if run.report_summary_md %}
+    <div class="border rounded p-3 bg-white mb-2">
+      <div id="summaryContent"></div>
+    </div>
+    <script id="summaryMdSrc" type="text/plain">{{ run.report_summary_md }}</script>
+    {% endif %}
+
     {# Панели #}
     <div id="mdRendered" class="border rounded p-3 bg-white">
       <div id="mdContent"></div>
@@ -495,6 +511,12 @@ window.addEventListener('DOMContentLoaded', () => {
   // Аналитика
   document.getElementById('mdContent').innerHTML = _renderMd(_md);
   document.getElementById('rawMd').value = _md;
+
+  // Сводка (вердикт + замечания)
+  const _sumEl = document.getElementById('summaryMdSrc');
+  if (_sumEl) {
+    document.getElementById('summaryContent').innerHTML = _renderMd(_sumEl.textContent);
+  }
 
   // Claude-заключение: показываем conclusion_md (структурированный markdown от Claude)
   if (_conclusionMd) {
@@ -622,6 +644,10 @@ function copyOpenMd() {
 
 window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('openMdContent').innerHTML = _renderMdOpen(_openMd);
+  const _openSumEl = document.getElementById('openSummaryMdSrc');
+  if (_openSumEl) {
+    document.getElementById('openSummaryContent').innerHTML = _renderMdOpen(_openSumEl.textContent);
+  }
   const raw = document.getElementById('openRawMd');
   if (raw) raw.value = _openMd;
   if (_openConclusionMd)

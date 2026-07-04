@@ -222,6 +222,7 @@ async def upsert_open_segment(data: dict[str, Any]) -> int:
                     continued_from         = $10,
                     characteristics_json   = COALESCE($11::jsonb, characteristics_json),
                     report_md              = COALESCE($12, report_md),
+                    report_summary_md      = COALESCE($13, report_summary_md),
                     updated_at             = now()
                 WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
                   AND t_end IS NULL
@@ -238,6 +239,7 @@ async def upsert_open_segment(data: dict[str, Any]) -> int:
                 json.dumps(data.get("characteristics_json"), ensure_ascii=False)
                     if data.get("characteristics_json") is not None else None,
                 data.get("report_md"),
+                data.get("report_summary_md"),
             )
 
             if row:
@@ -251,8 +253,9 @@ async def upsert_open_segment(data: dict[str, Any]) -> int:
                     run_state, coking_risk_json,
                     analytics_version,
                     current_values_json, active_detections_json,
-                    continued_from, characteristics_json, report_md, updated_at
-                ) VALUES ($1,$2,$3,$4,NULL,$5,$6::jsonb,$7,$8::jsonb,$9::jsonb,$10,$11::jsonb,$12,now())
+                    continued_from, characteristics_json, report_md,
+                    report_summary_md, updated_at
+                ) VALUES ($1,$2,$3,$4,NULL,$5,$6::jsonb,$7,$8::jsonb,$9::jsonb,$10,$11::jsonb,$12,$13,now())
                 RETURNING id
             """,
                 data["router_sn"], data["equip_type"], data["panel_id"],
@@ -266,6 +269,7 @@ async def upsert_open_segment(data: dict[str, Any]) -> int:
                 json.dumps(data.get("characteristics_json"), ensure_ascii=False)
                     if data.get("characteristics_json") is not None else None,
                 data.get("report_md"),
+                data.get("report_summary_md"),
             )
         return row["id"]
     finally:
@@ -284,9 +288,9 @@ async def insert_closed_segment(data: dict[str, Any]) -> int:
                 continued_from,
                 coking_risk_json, forward_fill_json,
                 analytics_version,
-                characteristics_json, report_md,
+                characteristics_json, report_md, report_summary_md,
                 updated_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13::jsonb,$14,now())
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13::jsonb,$14,$15,now())
             ON CONFLICT (router_sn, equip_type, panel_id, t_start)
                 WHERE t_end IS NOT NULL
             DO UPDATE SET
@@ -299,6 +303,7 @@ async def insert_closed_segment(data: dict[str, Any]) -> int:
                 analytics_version   = EXCLUDED.analytics_version,
                 characteristics_json = EXCLUDED.characteristics_json,
                 report_md           = EXCLUDED.report_md,
+                report_summary_md   = EXCLUDED.report_summary_md,
                 updated_at          = now()
             RETURNING id
         """,
@@ -313,6 +318,7 @@ async def insert_closed_segment(data: dict[str, Any]) -> int:
             data.get("analytics_version", "2.2.0"),
             json.dumps(data.get("characteristics_json"), ensure_ascii=False),
             data.get("report_md"),
+            data.get("report_summary_md"),
         )
         seg_id = row["id"]
 
@@ -855,6 +861,25 @@ async def set_episodes_gate_suppressed(
             WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
               AND t_close IS NULL AND scenario = ANY($4::text[])
         """, router_sn, equip_type, panel_id, scenarios)
+    finally:
+        await conn.close()
+
+
+async def get_episodes_overlapping(
+    router_sn: str, equip_type: str, panel_id: int,
+    t_from: datetime, t_to: datetime,
+) -> list[dict[str, Any]]:
+    """Эпизоды, пересекающие окно [t_from, t_to) — «Замечания» отчёта сегмента."""
+    conn = await _connect()
+    try:
+        rows = await conn.fetch("""
+            SELECT * FROM alarm_episodes
+            WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+              AND t_open < $5
+              AND (t_close IS NULL OR t_close > $4)
+            ORDER BY t_open
+        """, router_sn, equip_type, panel_id, t_from, t_to)
+        return [dict(r) for r in rows]
     finally:
         await conn.close()
 

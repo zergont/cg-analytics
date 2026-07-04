@@ -211,3 +211,9 @@ CREATE INDEX IF NOT EXISTS idx_alarm_episodes_machine
     ON alarm_episodes (router_sn, equip_type, panel_id, t_open DESC);
 CREATE INDEX IF NOT EXISTS idx_alarm_episodes_open
     ON alarm_episodes (router_sn, equip_type, panel_id) WHERE t_close IS NULL;
+
+-- Миграция v4.9.18: верхняя часть отчёта сегмента — вердикт, замечания
+-- (эпизоды), ключевые показатели. report_md не меняется (полный отчёт,
+-- UI сворачивает его как «Технические данные»).
+ALTER TABLE auto_segments
+    ADD COLUMN IF NOT EXISTS report_summary_md TEXT;

@@ -139,6 +139,112 @@ def to_json(
 
 # ── Markdown ──────────────────────────────────────────────────────────────────
 
+_SEV_RANK_MD = {"SHUTDOWN": 4, "WARNING": 3, "CAUTION": 2, "INFO": 1}
+_SRC_RU = {"panel": "панель", "analytics": "аналитика"}
+_EPOCH_UTC = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def build_summary_md(
+    segments: list[Segment],
+    episodes: list[dict[str, Any]] | None = None,
+    tz=None,
+    trip_roles: list[str] | None = None,
+) -> str:
+    """Верхняя часть отчёта (report_summary_md): вердикт → замечания → показатели.
+
+    Полные таблицы остаются в report_md — UI сворачивает его как «Технические
+    данные». Отдельное поле вместо HTML <details>: react-markdown в
+    UI-telemetry вырезает сырой HTML.
+
+    Вердикт детерминированный (эпизоды + sequence-проверки), мнение ИИ —
+    отдельными панелями. Эпизоды, отменённые гейтом, в вердикт не входят,
+    но в замечаниях показываются с пометкой.
+    """
+    _fmt_iso = _make_fmt_ts(tz)
+
+    def fmt_ts(v):
+        """Эпизоды из БД несут datetime, сегменты — ISO-строки; принимаем оба."""
+        if isinstance(v, datetime):
+            v = v.isoformat()
+        return _fmt_iso(v)
+
+    episodes = episodes or []
+    lines: list[str] = []
+    a = lines.append
+
+    live = [e for e in episodes if not e.get("gate_suppressed")]
+    panel_bad = [
+        e for e in live
+        if e.get("source") == "panel" and e.get("severity") in ("SHUTDOWN", "WARNING")
+    ]
+    analytics_eps = [e for e in live if e.get("source") == "analytics"]
+    failed_checks = [
+        c for s in segments for c in (getattr(s, "sequence_checks", None) or [])
+        if isinstance(c, dict) and not c.get("passed", True)
+    ]
+
+    # ── Вердикт ──
+    if panel_bad:
+        worst = max(panel_bad, key=lambda e: _SEV_RANK_MD.get(e.get("severity") or "", 0))
+        label = ("аварийный останов" if worst.get("severity") == "SHUTDOWN"
+                 else "тревога панели управления")
+        a(f"## 🔴 ТРЕВОГА — {label}")
+    elif analytics_eps or failed_checks:
+        n = len(analytics_eps) + len(failed_checks)
+        a(f"## 🟡 ЗАМЕЧАНИЯ К РАБОТЕ — {n}")
+    else:
+        a("## 🟢 НОРМА")
+        a("Замечаний к работе нет.")
+
+    # ── Замечания: эпизоды + проваленные sequence-проверки ──
+    if episodes or failed_checks:
+        a("")
+        a("### Замечания")
+        for e in sorted(episodes, key=lambda x: x.get("t_open") or _EPOCH_UTC):
+            emoji = _SEVERITY_EMOJI.get(e.get("severity"), "")
+            t_open, t_close = e.get("t_open"), e.get("t_close")
+            span = fmt_ts(t_open) if t_open else "?"
+            span += f" → {fmt_ts(t_close)}" if t_close else " → **висит**"
+            dur = _fmt_duration(e.get("active_sec") or 0)
+            src_ru = _SRC_RU.get(e.get("source"), e.get("source") or "")
+            line = (f"- {emoji} **{e.get('scenario')}** [{e.get('severity')}, {src_ru}]: "
+                    f"{span}, воздействие {dur}")
+            if e.get("gate_suppressed"):
+                line += " — *отменено ИИ-гейтом*"
+            a(line)
+        for c in failed_checks:
+            name = c.get("name") or c.get("check") or "проверка"
+            det = c.get("details") or c.get("detail") or ""
+            a(f"- ❗ Проверка «{name}» не пройдена" + (f": {det}" if det else ""))
+
+    # ── Ключевые показатели: trip_snapshot-роли последнего рабочего подсегмента ──
+    work_seg = next(
+        (s for s in reversed(segments)
+         if getattr(s, "run_state", None) == 3 and s.subsegments),
+        None,
+    )
+    if work_seg and trip_roles:
+        sub = work_seg.subsegments[-1]
+        rows = [
+            (role, sub.characteristics[role])
+            for role in trip_roles
+            if isinstance(sub.characteristics.get(role), dict)
+        ]
+        if rows:
+            a("")
+            a("### Ключевые показатели")
+            a("| Параметр | Медиана | Мин | Макс | Ед. |")
+            a("|----------|--------:|----:|----:|-----|")
+            for role, ch in rows:
+                a(f"| {role} | {_fmt_val(ch.get('median'))} | {_fmt_val(ch.get('min'))} "
+                  f"| {_fmt_val(ch.get('max'))} | {ch.get('unit', '')} |")
+        cr = sub.risk_accumulators.coking_risk
+        a("")
+        a(f"Закоксовка: **{cr.risk_level}**")
+
+    return "\n".join(lines).strip() + "\n"
+
+
 def to_markdown(
     segments: list[Segment],
     router_sn: str,

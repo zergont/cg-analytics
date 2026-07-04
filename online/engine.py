@@ -903,6 +903,25 @@ class OnlinePollEngine:
 
         return ctx
 
+    # ── Summary-отчёт (Фаза D) ────────────────────────────────────────────────
+
+    async def _build_summary_md_for(
+        self, segments: list, t_from: datetime, t_to: datetime
+    ) -> str | None:
+        """report_summary_md: вердикт + замечания (эпизоды окна) + показатели."""
+        try:
+            eps = await online_db.get_episodes_overlapping(
+                self.router_sn, self.equip_type, self.panel_id,
+                _tz_utc(t_from), _tz_utc(t_to),
+            )
+            from analytics.serializer import build_summary_md as _bsm
+            return _bsm(segments, episodes=eps, tz=self.tz,
+                        trip_roles=self.cfg.trip_snapshot_roles)
+        except Exception:
+            logger.warning("OnlineEngine[%s]: не удалось построить summary-отчёт",
+                           self.key, exc_info=True)
+            return None
+
     # ── Главный цикл ──────────────────────────────────────────────────────────
 
     async def run(self) -> None:
@@ -1141,6 +1160,10 @@ class OnlinePollEngine:
                 logger.exception("OnlineEngine[%s]: не удалось построить отчёт закрытого сегмента, сохраняю без report_md", self.key)
                 report_md = None
 
+            summary_md = await self._build_summary_md_for(
+                [seg], datetime.fromisoformat(seg.t_start), seg_t_end
+            )
+
             db_id = await online_db.insert_closed_segment({
                 "router_sn":          self.router_sn,
                 "equip_type":         self.equip_type,
@@ -1156,6 +1179,7 @@ class OnlinePollEngine:
                 "analytics_version":  ANALYTICS_VERSION,
                 "characteristics_json": seg_dict,
                 "report_md":          report_md,
+                "report_summary_md":  summary_md,
             })
             # ← await выше = event loop обслужил API. Сигналим прогресс сразу.
             _enqueue_segment(db_id)
@@ -1388,6 +1412,10 @@ class OnlinePollEngine:
                     logger.exception("OnlineEngine[%s]: не удалось построить отчёт сегмента RUN_STATE_CHANGE, сохраняю без report_md", self.key)
                     report_md_rs = None
 
+                summary_md_rs = await self._build_summary_md_for(
+                    [seg], datetime.fromisoformat(seg.t_start), seg_t_end_rs
+                )
+
                 _rs_seg_dict = seg.to_dict()
                 _rs_db_id = await online_db.insert_closed_segment({
                     "router_sn":          self.router_sn,
@@ -1403,6 +1431,7 @@ class OnlinePollEngine:
                     "analytics_version":  ANALYTICS_VERSION,
                     "characteristics_json": _rs_seg_dict,
                     "report_md":          report_md_rs,
+                    "report_summary_md":  summary_md_rs,
                 })
                 # ← await выше = прогресс обновляется на каждой смене RUN_STATE
                 _enqueue_segment(_rs_db_id)
@@ -1497,6 +1526,10 @@ class OnlinePollEngine:
         except Exception:
             logger.exception("OnlineEngine[%s]: не удалось построить отчёт открытого сегмента", self.key)
             open_report_md = None
+
+        open_summary_md = await self._build_summary_md_for(
+            [open_seg], self.cursor_ts, t_to
+        )
         logger.debug(
             "TIMING[%s]: to_markdown за %.3fs",
             self.key, _time.perf_counter() - _t0,
@@ -1524,6 +1557,7 @@ class OnlinePollEngine:
                 },
             },
             "report_md":              open_report_md,
+            "report_summary_md":      open_summary_md,
             "continued_from":         open_continued_from,
         })
         logger.debug(
