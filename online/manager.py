@@ -556,11 +556,15 @@ async def _analyze_warning_claude(
         )
         response = await client.messages.create(
             model=claude_cfg["model"],
-            max_tokens=1024,
+            # Лимит из настроек Claude (веб-морда): 1024 обрезало анализ на полуслове
+            max_tokens=claude_cfg["max_tokens"],
             system=get_prompt("warning_claude"),
             tools=[_VERDICT_TOOL],
             messages=[{"role": "user", "content": user_prompt}],
         )
+        if response.stop_reason == "max_tokens":
+            logger.warning("WarningGate: анализ обрезан по max_tokens=%s — увеличьте лимит в настройках Claude",
+                           claude_cfg["max_tokens"])
 
         analysis = "".join(
             b.text for b in response.content if hasattr(b, "text")
