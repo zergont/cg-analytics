@@ -192,7 +192,16 @@ def _extract_open_segment_data(seg) -> tuple[dict, list]:
 
     # Детекции только из последнего подсегмента — текущее состояние детекторов.
     # Накопленная «живая» картина ведётся отдельно через _diff_alerts / alert_journal.
-    active_dets: list[dict] = [d.to_dict() for d in last_sub.detections]
+    # Снятая панелью ошибка (fault_end проставлен) — исторический факт для отчёта,
+    # но НЕ активная тревога: иначе она «залипает» в статусе до границы подсегмента,
+    # потому что её период всегда пересекается с окном последнего подсегмента.
+    active_dets: list[dict] = []
+    for d in last_sub.detections:
+        dd = d.to_dict()
+        if (dd.get("scenario") == "CONTROLLER_FAULT"
+                and (dd.get("values") or {}).get("fault_end")):
+            continue
+        active_dets.append(dd)
 
     return current_values, active_dets
 
