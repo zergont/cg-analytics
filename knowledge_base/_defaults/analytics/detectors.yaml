@@ -1,0 +1,260 @@
+# Параметры детекторов диагностических сценариев KTA50/PCC3300
+# Источник: ТЗ аналитики, раздел 7.1; пороги из thresholds.yaml
+# ХАРДКОД ЗАПРЕЩЁН: числа только здесь, код ссылается на конфиг.
+# Изменение: только через веб-морду (раздел 9 ТЗ)
+
+# ─── LOAD_STEP: Наброс/сброс нагрузки (Класс A — быстрые/электрические) ─────
+# Gate: только RUN_STATE = 3. Вне него понятие «наброс/сброс» бессмысленно.
+LOAD_STEP:
+  enabled: true
+  # Скорость изменения мощности → TRANSIENT-событие (Класс A: мгновенная скорость валидна)
+  dP_dt_threshold_kw_per_s: 50.0   # |ΔP/Δt| > 50 кВт/с → анализировать переход
+
+  # Штатный рампинг PCC: плавное изменение нагрузки управляемым образом.
+  # Если смена нагрузки идёт с суммарной скоростью ≤ ramp_threshold_kw_per_s
+  # в течение ramp_window_sec → это рампинг, а не аварийный сброс → INFO.
+  ramp_window_sec: 20              # PCC Load Share Ramp дефолт, сек
+  ramp_threshold_kw_per_s: 5.0    # "медленная" скорость → рампинг
+
+  # Класс ГУ по ГОСТ ISO 8528-5 (определяет нормативы переходного процесса).
+  # G3 — типичный класс для качественных ДГУ ответственного применения.
+  load_class_iso: G3
+  freq_nominal_hz: 50.0            # номинальная частота
+  freq_settled_pct: 0.5            # коридор «частота восстановлена», % от номинала (±0.25 Гц)
+  # Gate для freq_dip/rise/recovery: если RPM упали ниже этого % от максимума в подсегменте,
+  # то это штатный останов/переход на ХХ, а не нагрузочный переходный процесс.
+  # Артефакт freq_dip_pct=100% при остановке движка (Addendum v1.4, п.3) исключается.
+  rpm_min_pct_for_freq_metrics: 50  # если min(RPM) < max(RPM)*50% → freq_dip не вычислять
+
+  # Нормативы ГОСТ ISO 8528-5 по классам.
+  # ВНИМАНИЕ: значения требуют сверки с официальным текстом ГОСТ!
+  # Помечены _verify: true — использовать только после верификации.
+  # _source: ISO8528-5, _verify: true
+  iso_classes:
+    G1:
+      freq_drop_pct: 15.0    # максимальная просадка частоты при набросе, %
+      freq_rise_pct: 18.0    # максимальный заброс частоты при сбросе, %
+      freq_recovery_sec: 10  # время восстановления до коридора ±0.5%, сек
+    G2:
+      freq_drop_pct: 10.0
+      freq_rise_pct: 12.0
+      freq_recovery_sec: 5
+    G3:
+      freq_drop_pct: 7.0
+      freq_rise_pct: 10.0
+      freq_recovery_sec: 3
+    G4:
+      freq_drop_pct: 5.0
+      freq_rise_pct: 7.0
+      freq_recovery_sec: 2
+  _verify: true  # нормативы ISO 8528-5 требуют сверки с официальным текстом ГОСТ
+  severity_default: INFO
+  _source: ISO8528-5
+
+# ─── NEGATIVE_SEQUENCE: Ток обратной последовательности I₂ ─────────────────
+# Физически корректная метрика несимметрии фаз (Addendum v1.5).
+# Заменяет грубый перекос токов |I_k - I_avg|/I_avg, который НЕ соответствует
+# заводской защите PCC3300 и завышает реальное значение в 6–8 раз.
+#
+# Метод А (точный): I₂ вычисляется через преобразование Фортескью по пофазным
+# P и Q (whitelist дополнен 40035/36/37). Заводская защита (Neg Seq Overcurrent)
+# реагирует именно на I₂, а не на разброс модулей токов.
+#
+# Заводская защита PCC3300 (0900-0670, раздел 8.29.4):
+#   Threshold: 12% от I_nom (дефолт, диапазон 5-25%)
+#   K Factor: 20; t_trip = K / (I₂%)²
+#   Реакция: только Warning (не Shutdown)
+# Мы предупреждаем РАНЬШЕ заводской защиты (сквозной принцип системы).
+NEGATIVE_SEQUENCE:
+  enabled: true
+  method: A                           # A = пофазный Q (точно); B = через U (запасной)
+  # Предупреждаем до заводского порога (сквозной принцип: зазор перед защитой)
+  i2_proximity_warning_pct: 10.0     # I₂% > этого → WARNING (заводской порог 12%)
+  factory_threshold_pct: 12.0        # заводская уставка PCC3300, справочно
+  duration_warning_sec: 60           # держится > 60 сек → срабатывание
+  # Номинальный ток для нормировки I₂%
+  # 0 = вычислять из RATING_KW (предпочтительно); явное значение в A как резерв
+  i_nominal_a: 0
+  u_nominal_v: 400.0                 # линейное напряжение для расчёта I_nom
+  pf_nominal: 0.8                    # номинальный PF для расчёта I_nom
+  # Gate: только RUN_STATE=3 при ненулевом токе
+  valid_run_states: [3]
+  severity_default: CAUTION
+  _source: CONTROLLER  # 12% — уставка neg-seq PCC3300, 0900-0670 раздел 8.29.4
+
+# ─── COOLING_FAILURE: Отказ охлаждения ──────────────────────────────────────
+COOLING_FAILURE:
+  enabled: true
+  # Детектор использует SLOPE (устойчивый тренд за подсегмент), а НЕ
+  # dCoolant_dt_max (мгновенная скорость). Мгновенный максимум на коротком
+  # интервале (~1 мин) давал ложные ALARM при нормальной тепловой качке ±1-2°C.
+  # Slope из линейной регрессии по реальным измерениям фильтрует кратковременные всплески.
+  #
+  # Калибровка на ДГУ 6003790403: нормальные значения slope = -12..+13 °C/ч.
+  # Пороги выбраны заметно выше нормального прогрева, с требованием устойчивости.
+  cooling_slope_warning_c_per_h: 20.0   # Устойчивый тренд > 20 °C/ч → WARNING
+  cooling_slope_alarm_c_per_h:   40.0   # Устойчивый тренд > 40 °C/ч → ALARM
+  # Минимальная длительность подсегмента для применения детектора
+  min_segment_duration_sec: 300         # Короткие сегменты (< 5 мин) игнорируем
+  # Двухфазная логика (Addendum v1.4):
+  # Фаза 1 — прогрев (T < working_range_low): предиктор асимптоты.
+  #   Параметры рабочего диапазона и нормы асимптоты — из thresholds.yaml:
+  #   coolant_temperature.tunable.working_range_low_c = 80
+  #   coolant_temperature.tunable.asymptote_norm_max_c = 92
+  # Фаза 2 — рабочий режим (T >= working_range_low): прямой детектор по slope.
+  #   Пороги ниже — в ед./с (Addendum v1.4: внутрисегментные метрики → /сек).
+  cooling_slope_warning_c_per_s: 0.006  # ~20 °C/ч (slope > этого → WARNING)
+  cooling_slope_alarm_c_per_s:   0.011  # ~40 °C/ч (slope > этого → ALARM)
+  # Гейт по режиму: только RUN_STATE=3 (установившаяся работа)
+  # valid_run_states: задаётся неявно в коде (run_state != 3 → return [])
+  # Приближение к порогу HCT Warning (вторичная проверка по max-значению)
+  proximity_warning_pct: 10          # coolant_max > HCT_warning - 10% → CAUTION
+  severity_default: CAUTION
+  _source: TUNABLE
+
+# ─── OIL_DILUTION: Разжижение/перегрев масла ────────────────────────────────
+OIL_DILUTION:
+  enabled: true
+  # Валидные режимы: давление масла = 0 на остановленном моторе — норма, не диагноз.
+  valid_run_states: [3]
+  # Совместное срабатывание: давление масла падает И температура растёт
+  oil_press_drop_kpa: 50          # падение OIL_PRESS на > 50 кПа от медианы подсегмента
+  oil_temp_rise_c: 10             # одновременный рост OIL_TEMP на > 10 °C
+  concurrent_window_sec: 300      # в пределах 5 минут
+  # Порог по абсолютным значениям (см. thresholds.yaml, oil_pressure.passport.rated_min_kpa)
+  oil_press_abs_warning_kpa: 310  # давление ниже паспортного минимума при номинале
+  severity_default: CAUTION
+  _source: TUNABLE
+
+# ─── COKING_RISK: Закоксовка / wet stacking ─────────────────────────────────
+COKING_RISK:
+  enabled: true
+  # Порог по холостому ходу (idle_duration — сквозной аккумулятор)
+  idle_duration_warning_sec: 600       # > 10 мин на х.х. → WARNING (K38-50_РЭ_и_ТО)
+  # Порог по Т ОЖ < 60°C (из thresholds.yaml, coolant.tunable.below_60_risk_threshold_c)
+  coolant_below_60_warning_sec: 1800   # > 30 мин с Т < 60°C → WARNING
+  # Порог по зоне LOW
+  low_load_zone_warning_sec: 3600      # > 60 мин в зоне LOW → WARNING
+  # Параметры «прожига» (сброс риска): работа ≥30% при прогретом двигателе
+  purge_min_load_pct: 30               # из thresholds.yaml, engine_operation.tunable.purge_min_load_pct
+  purge_min_duration_sec: 300          # и не менее 5 мин непрерывно
+  purge_min_coolant_c: 60             # двигатель должен быть прогрет (ОЖ ≥ 60°C)
+  # Уровни риска (GREEN/YELLOW/RED)
+  risk_yellow_idle_sec: 600
+  risk_red_idle_sec: 1800
+  risk_yellow_low_load_sec: 3600
+  risk_red_low_load_sec: 7200
+  severity_default: CAUTION
+  _source: PASSPORT_РЭ  # idle 600 сек — K38-50_РЭ_и_ТО
+
+# ─── WARMUP_VIOLATION: Нарушение прогрева ───────────────────────────────────
+WARMUP_VIOLATION:
+  enabled: true
+  # Минимальная длительность прогрева при холодном пуске (ОЖ < cold_start_coolant_c)
+  min_warmup_sec: 180              # из thresholds.yaml, engine_operation.passport.warmup_min_sec
+  cold_start_coolant_c: 21        # из thresholds.yaml, engine_operation.passport.cold_start_coolant_c
+  # Требование к прогреву при ГОРЯЧЕМ пуске (ОЖ >= cold_start_coolant_c)
+  # 0 = прогрев не обязателен; можно задать мягкое требование, напр. 60 сек
+  hot_start_warmup_sec: 0
+  severity_default: CAUTION
+  _source: PASSPORT_РЭ
+
+# ─── COOLDOWN_VIOLATION: Нарушение охлаждения перед остановом ───────────────
+COOLDOWN_VIOLATION:
+  enabled: true
+  # Охлаждение обязательно если последний подсегмент был в зоне ELEVATED
+  required_after_zone: ELEVATED
+  # Минимальная длительность охлаждения (RUN_STATE 4 или 5)
+  min_cooldown_sec: 0             # РЭ допускает быстрый останов, но рекомендует 3-5 мин
+  # Считаем нарушением: переход Stop без каких-либо cooldown-фаз после ELEVATED
+  severity_default: CAUTION
+  _source: PASSPORT_РЭ
+
+# ─── START_FAILURE: Проблема пуска ──────────────────────────────────────────
+START_FAILURE:
+  enabled: true
+  # Давление масла не появилось за нормативное время
+  oil_press_rise_time_alarm_sec: 15   # из thresholds.yaml, engine_operation.passport.oil_press_rise_time_sec
+  # Просадка АКБ при прокрутке стартера
+  battery_sag_alarm_v: 19.0           # из thresholds.yaml, battery_voltage.tunable.sag_alarm_v
+  # Длительность RUN_STATE=1 (Time Delay to Start / прокрутка)
+  crank_time_alarm_sec: 45            # > 3 × 15 сек (3 попытки без учёта перерывов)
+  severity_default: CAUTION
+  _source: PASSPORT_РЭ
+
+# ─── THERMAL_HIGHLOAD: Перегрев от высокой нагрузки ─────────────────────────
+THERMAL_HIGHLOAD:
+  enabled: true
+  zone: ELEVATED
+  # Приближение к порогам (берём из thresholds.yaml динамически)
+  coolant_proximity_pct: 10        # coolant > HCT_warning - 10% → WARNING
+  oil_proximity_pct: 10            # oil > HOT_warning - 10% → WARNING
+  # Уровни теплового риска (сквозной аккумулятор)
+  risk_yellow_elevated_sec: 3600   # 60 мин в ELEVATED → YELLOW
+  risk_red_elevated_sec: 7200      # 120 мин в ELEVATED → RED
+  coolant_near_limit_pct: 5        # coolant в пределах 5% от warning → "вблизи порога"
+  oil_near_limit_pct: 5
+  # Спад теплового риска вне зоны ELEVATED (обратимый риск — физика: снятие нагрузки → охлаждение)
+  # Скорость спада: на 1 сек простоя вне ELEVATED накопитель уменьшается на thermal_decay_rate_per_sec сек.
+  # Пример: 0.5 → за 2 мин без нагрузки «прощается» 1 мин теплового риска.
+  thermal_decay_rate_per_sec: 0.5
+  severity_default: CAUTION
+  _source: TUNABLE
+
+# ─── LIMIT_PROXIMITY: Близость к паспортному порогу ─────────────────────────
+LIMIT_PROXIMITY:
+  enabled: true
+  # Валидные режимы: давление масла 0 на стопе — норма, не приближение к аварии.
+  valid_run_states: [3]
+  # Предупреждать когда любой параметр приближается к паспортному/контроллерному порогу
+  proximity_pct: 10               # в пределах X% от порога → CAUTION
+  # Конкретные пороги берутся из thresholds.yaml:
+  # OIL_PRESS → oil_pressure.controller.shutdown_rated_kpa
+  # COOLANT_TEMP → coolant_temperature.controller.shutdown_c
+  # OIL_TEMP → oil_temperature.controller.shutdown_c
+  severity_default: CAUTION
+  _source: TUNABLE
+
+# ─── STOP_PROFILE: Диагностика профиля останова ──────────────────────────────
+# Срабатывает на сегментах RUN_STATE=0 (Stop).
+# Проверяет: обороты снизились до нуля в пределах T_stop_max?
+# Если нет → подозрение на отказ клапана отсечки топлива (пожароопасно!).
+# T_stop_max берётся из segmentation.yaml → transitions.T_stop_max_sec.
+STOP_PROFILE:
+  enabled: true
+  severity_default: WARNING   # отказ клапана отсечки — критичный дефект безопасности
+  _source: TUNABLE
+
+# ─── RPM_UNDERSPEED: Просадка оборотов под нагрузкой ────────────────────────
+# Детектор закрывает дыру: панель (код 1448) глушит только при удержании
+# ниже 90% (1350 об/мин) ~10 сек. Блок ловит мгновенные провалы,
+# которые панель пропускает. Политика «строже панели»: порог 1350 + 10% = 1485.
+# Gate: только RUN_STATE=3 (под нагрузкой).
+# Задержка: НЕТ — любой мгновенный провал ниже порога = детекция.
+# Источник: Addendum v1.6; нормативная опора: код 1448, PCC_3_3_Rus.pdf стр.120.
+RPM_UNDERSPEED:
+  enabled: true
+  threshold_rpm: 1485        # = panel_setpoint_rpm + 10% (политика «строже панели»)
+  panel_setpoint_rpm: 1350   # уставка панели (код 1448, underfreq 90%)
+  rated_rpm: 1500            # справочно: 50 Гц = 1500 об/мин
+  require_run_state: 3       # только под нагрузкой
+  hold_sec: 0                # без задержки — ловим мгновенный провал
+  severity_default: CAUTION
+  fault_code: 1448
+  _source: CONTROLLER        # код 1448 «Пониженная частота», PCC_3_3_Rus.pdf стр.120
+
+# ─── DETECTION_COUNTER: Счётчик срабатываний (универсальный) ─────────────────
+# Считает ФРОНТЫ (события), не точки. Сырые срабатывания ДО гейта.
+# Источник: auto_segments (онлайн); analysis_runs НЕ учитываются (double-count).
+DETECTION_COUNTER:
+  enabled: true
+  window_days: 30            # TUNABLE: окно подсчёта в днях
+
+# ─── CONTROLLER_FAULT: Активная неисправность контроллера ───────────────────
+CONTROLLER_FAULT:
+  enabled: true
+  # Срабатывает при появлении нового бита в fault_history (40400-40415)
+  # Severity берётся из fault_matrix.yaml по severity бита (bitmap_severity_map)
+  # НЕ эвристика — строго по матрице приоритетов
+  severity_default: WARNING
+  _source: CONTROLLER

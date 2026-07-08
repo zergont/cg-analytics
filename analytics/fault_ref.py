@@ -59,29 +59,50 @@ class FaultRef:
     Синглтон не используется — объект создаётся один раз при старте runner/engine.
     """
 
-    def __init__(self, kb_path: str | Path) -> None:
-        self._index: dict[int, dict[str, Any]] = {}
-        self._load(Path(kb_path))
+    def __init__(
+        self,
+        kb_path: "str | Path | None" = None,
+        *,
+        search_paths: "list[str | Path] | None" = None,
+    ) -> None:
+        """Загрузить справочник из одного KB-пути или из списка слоёв.
 
-    def _load(self, base: Path) -> None:
-        for name in _SEARCH_NAMES:
-            p = base / name
-            if p.exists():
-                try:
-                    data = json.loads(p.read_text(encoding="utf-8-sig"))
-                    codes_list = data.get("fault_codes", [])
-                    self._index = {
-                        int(entry["code"]): entry
-                        for entry in codes_list
-                        if "code" in entry
-                    }
-                    logger.info(
-                        "FaultRef: загружено %d кодов из %s", len(self._index), p.name
-                    )
-                    return
-                except Exception as exc:
-                    logger.warning("FaultRef: ошибка загрузки %s: %s", p, exc)
-        logger.warning("FaultRef: справочник кодов не найден в %s", base)
+        `search_paths` перебираются по порядку — берётся первый найденный файл.
+        Для композиции передавать слои от приоритетного к базовому, напр.
+        [engines/<e>, controllers/<c>] — справочник живёт в слое контроллера.
+        """
+        self._index: dict[int, dict[str, Any]] = {}
+        if search_paths is not None:
+            bases = [Path(p) for p in search_paths]
+        elif kb_path is not None:
+            bases = [Path(kb_path)]
+        else:
+            raise ValueError("FaultRef: нужен либо kb_path, либо search_paths")
+        self._load(bases)
+
+    def _load(self, bases: list[Path]) -> None:
+        for base in bases:
+            for name in _SEARCH_NAMES:
+                p = base / name
+                if p.exists():
+                    try:
+                        data = json.loads(p.read_text(encoding="utf-8-sig"))
+                        codes_list = data.get("fault_codes", [])
+                        self._index = {
+                            int(entry["code"]): entry
+                            for entry in codes_list
+                            if "code" in entry
+                        }
+                        logger.info(
+                            "FaultRef: загружено %d кодов из %s", len(self._index), p.name
+                        )
+                        return
+                    except Exception as exc:
+                        logger.warning("FaultRef: ошибка загрузки %s: %s", p, exc)
+        logger.warning(
+            "FaultRef: справочник кодов не найден в %s",
+            ", ".join(str(b) for b in bases),
+        )
 
     # ── Публичный API ─────────────────────────────────────────────────────────
 

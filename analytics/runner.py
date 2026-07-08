@@ -53,7 +53,11 @@ async def run_analysis(
     engine_sn: str,
     ts_from: datetime,
     ts_to: datetime,
-    kb_path: str | Path,
+    kb_root: str | Path,
+    *,
+    controller_id: str | None = None,
+    engine_id: str | None = None,
+    kb_path: str | None = None,
     tz=None,
 ) -> dict[str, Any]:
     """Запустить аналитический прогон за период [ts_from, ts_to).
@@ -79,8 +83,11 @@ async def run_analysis(
         router_sn, equip_type, panel_id, tf.isoformat(), tt.isoformat(),
     )
 
+    from . import binding
     try:
-        cfg = AnalyticsConfig(kb_path)
+        cfg = binding.build_config(
+            kb_root, controller_id=controller_id, engine_id=engine_id, kb_path=kb_path
+        )
     except Exception as exc:
         logger.error("analytics.runner: ошибка загрузки конфигурации: %s", exc)
         return _error_result(str(exc), int((time.monotonic() - t0) * 1000))
@@ -88,8 +95,9 @@ async def run_analysis(
     # Детерминированный справочник кодов неисправностей (заменяет RAG)
     fault_ref = None
     try:
-        from .fault_ref import FaultRef
-        fault_ref = FaultRef(kb_path)
+        fault_ref = binding.build_fault_ref(
+            kb_root, controller_id=controller_id, engine_id=engine_id, kb_path=kb_path
+        )
     except Exception as exc:
         logger.warning("analytics.runner: FaultRef не загружен: %s", exc)
 

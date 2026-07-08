@@ -350,15 +350,17 @@
                             {% else %}
                                 <span class="text-danger small">не заполнено</span>
                             {% endif %}
-                            {% if eq.kb_path %}
-                                <br><span class="badge bg-success-subtle text-success-emphasis" style="font-size:0.7rem">{{ eq.kb_path }}</span>
+                            {% if eq.controller_id and eq.engine_id %}
+                                <br><span class="badge bg-primary-subtle text-primary-emphasis" style="font-size:0.7rem">{{ eq.controller_id }} × {{ eq.engine_id }}</span>
+                            {% elif eq.kb_path %}
+                                <br><span class="badge bg-success-subtle text-success-emphasis" style="font-size:0.7rem">{{ eq.kb_path }} <span class="text-muted">(legacy)</span></span>
                             {% else %}
-                                <br><span class="badge bg-secondary-subtle text-secondary-emphasis" style="font-size:0.7rem">KB не выбрана</span>
+                                <br><span class="badge bg-secondary-subtle text-secondary-emphasis" style="font-size:0.7rem">привязка не задана</span>
                             {% endif %}
                         </td>
                         <td>
                             <button class="btn btn-sm btn-outline-primary me-1"
-                                    onclick="openEdit('{{ eq.router_sn }}','{{ eq.equip_type }}','{{ eq.panel_id }}','{{ eq.name or '' }}','{{ eq.manufacturer or '' }}','{{ eq.model or '' }}','{{ eq.engine_sn or '' }}','{{ eq.kb_path or '' }}')">
+                                    onclick="openEdit('{{ eq.router_sn }}','{{ eq.equip_type }}','{{ eq.panel_id }}','{{ eq.name or '' }}','{{ eq.manufacturer or '' }}','{{ eq.model or '' }}','{{ eq.engine_sn or '' }}','{{ eq.kb_path or '' }}','{{ eq.controller_id or '' }}','{{ eq.engine_id or '' }}')">
                                 ✏
                             </button>
                             <form method="post" action="/settings/equipment/toggle" class="d-inline">
@@ -432,8 +434,33 @@
                                placeholder="Серийный номер двигателя">
                     </div>
 
+                    <div class="row g-2 mb-2">
+                        <div class="col-6">
+                            <label for="edit_controller_id" class="form-label small fw-semibold">Контроллер</label>
+                            <select class="form-select form-select-sm" id="edit_controller_id" name="controller_id">
+                                <option value="">— не выбран —</option>
+                                {% for c in controller_list %}
+                                <option value="{{ c }}">{{ c }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-6">
+                            <label for="edit_engine_id" class="form-label small fw-semibold">Двигатель</label>
+                            <select class="form-select form-select-sm" id="edit_engine_id" name="engine_id">
+                                <option value="">— не выбран —</option>
+                                {% for e in engine_list %}
+                                <option value="{{ e }}">{{ e }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                    </div>
+                    <div class="text-muted small mb-3">
+                        Слои <code>controllers/</code> × <code>engines/</code>. Если выбрана пара —
+                        используется вместо базы знаний ниже.
+                    </div>
+
                     <div class="mb-2">
-                        <label for="edit_kb_path" class="form-label small fw-semibold">База знаний</label>
+                        <label for="edit_kb_path" class="form-label small fw-semibold">База знаний (legacy)</label>
                         <select class="form-select form-select-sm" id="edit_kb_path" name="kb_path">
                             <option value="">— не выбрана —</option>
                             {% for kb in kb_list %}
@@ -441,7 +468,8 @@
                             {% endfor %}
                         </select>
                         <div class="text-muted small mt-1">
-                            Папка из <code>knowledge_base/equipment/</code>
+                            Монолитная папка из <code>knowledge_base/equipment/</code>.
+                            Fallback, когда пара не выбрана.
                         </div>
                     </div>
                 </div>
@@ -455,7 +483,7 @@
 </div>
 
 <script>
-function openEdit(router_sn, equip_type, panel_id, name, manufacturer, model, engine_sn, kb_path) {
+function openEdit(router_sn, equip_type, panel_id, name, manufacturer, model, engine_sn, kb_path, controller_id, engine_id) {
     document.getElementById('edit_router_sn').value = router_sn;
     document.getElementById('edit_equip_type').value = equip_type;
     document.getElementById('edit_panel_id').value = panel_id;
@@ -465,6 +493,8 @@ function openEdit(router_sn, equip_type, panel_id, name, manufacturer, model, en
     document.getElementById('edit_model').value = model;
     document.getElementById('edit_engine_sn').value = engine_sn;
     document.getElementById('edit_kb_path').value = kb_path;
+    document.getElementById('edit_controller_id').value = controller_id || '';
+    document.getElementById('edit_engine_id').value = engine_id || '';
     new bootstrap.Modal(document.getElementById('editModal')).show();
 }
 </script>

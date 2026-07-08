@@ -31,20 +31,32 @@ class AnalyticsConfig:
         "fault_matrix.yaml",
     )
 
-    def __init__(self, kb_path: str | Path) -> None:
-        base = Path(kb_path) / "analytics"
-        if not base.is_dir():
-            raise FileNotFoundError(
-                f"Директория конфигов аналитики не найдена: {base}\n"
-                f"Ожидается: {base / 'mapping.yaml'} и другие файлы."
-            )
+    # Имя папки универсального базового слоя внутри knowledge_base/
+    DEFAULTS_DIRNAME = "_defaults"
 
-        self.mapping: dict[str, Any] = self._load(base / "mapping.yaml")
-        self.thresholds: dict[str, Any] = self._load(base / "thresholds.yaml")
-        self.zones: dict[str, Any] = self._load(base / "zones.yaml")
-        self.segmentation: dict[str, Any] = self._load(base / "segmentation.yaml")
-        self.detectors: dict[str, Any] = self._load(base / "detectors.yaml")
-        self.fault_matrix: dict[str, Any] = self._load(base / "fault_matrix.yaml")
+    def __init__(
+        self,
+        kb_path: str | Path | None = None,
+        *,
+        layers: "list[str | Path] | None" = None,
+    ) -> None:
+        """Загрузить конфиг из одного KB-пути или из упорядоченного списка слоёв.
+
+        Обратная совместимость: `AnalyticsConfig(kb_path)` работает как раньше —
+        читает `kb_path/analytics/*.yaml` (один слой).
+
+        Композиция: `layers=[_defaults, controllers/<c>, engines/<e>]` — каждый из
+        6 YAML собирается deep-merge по слоям (позднейший слой перекрывает ранний).
+        См. `AnalyticsConfig.from_pair`.
+        """
+        self._layers: list[Path] = self._resolve_layer_dirs(kb_path, layers)
+
+        self.mapping: dict[str, Any] = self._load_merged("mapping.yaml")
+        self.thresholds: dict[str, Any] = self._load_merged("thresholds.yaml")
+        self.zones: dict[str, Any] = self._load_merged("zones.yaml")
+        self.segmentation: dict[str, Any] = self._load_merged("segmentation.yaml")
+        self.detectors: dict[str, Any] = self._load_merged("detectors.yaml")
+        self.fault_matrix: dict[str, Any] = self._load_merged("fault_matrix.yaml")
 
         self._register_map: dict[int, dict[str, Any]] = self._build_register_map()
         self._whitelist_analog: frozenset[int] = self._build_whitelist("analog")
@@ -54,7 +66,39 @@ class AnalyticsConfig:
         self._validate()
         self._warn_missing_keys()
 
+    # ── Фабрики ──────────────────────────────────────────────────────────────
+
+    @classmethod
+    def from_pair(
+        cls,
+        kb_root: str | Path,
+        controller_id: str,
+        engine_id: str,
+    ) -> "AnalyticsConfig":
+        """Собрать конфиг из пары (контроллер, двигатель) поверх базового слоя.
+
+        Слои (в порядке возрастания приоритета):
+          kb_root/_defaults  →  kb_root/controllers/<controller_id>  →
+          kb_root/engines/<engine_id>
+
+        Отсутствующий базовый слой `_defaults` пропускается (не обязателен).
+        Слои контроллера и двигателя обязаны существовать.
+        """
+        root = Path(kb_root)
+        layers: list[Path] = []
+        defaults = root / cls.DEFAULTS_DIRNAME
+        if defaults.is_dir():
+            layers.append(defaults)
+        layers.append(root / "controllers" / controller_id)
+        layers.append(root / "engines" / engine_id)
+        return cls(layers=layers)
+
     # ── Публичные свойства ──────────────────────────────────────────────────
+
+    @property
+    def layers(self) -> list[Path]:
+        """Слои конфига в порядке возрастания приоритета (для FaultRef и диагностики)."""
+        return list(self._layers)
 
     @property
     def register_map(self) -> dict[int, dict[str, Any]]:
@@ -309,6 +353,68 @@ class AnalyticsConfig:
                 _log.warning("config: ключ %r отсутствует в detectors.yaml — используется default", label)
 
     # ── Приватные методы ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _resolve_layer_dirs(
+        kb_path: "str | Path | None",
+        layers: "list[str | Path] | None",
+    ) -> list[Path]:
+        """Определить список слоёв. Ровно один из аргументов должен быть задан."""
+        if layers is not None:
+            dirs = [Path(p) for p in layers]
+            if not dirs:
+                raise ValueError("AnalyticsConfig: список layers пуст")
+            return dirs
+        if kb_path is None:
+            raise ValueError("AnalyticsConfig: нужен либо kb_path, либо layers")
+        base = Path(kb_path)
+        if not (base / "analytics").is_dir():
+            raise FileNotFoundError(
+                f"Директория конфигов аналитики не найдена: {base / 'analytics'}\n"
+                f"Ожидается: {base / 'analytics' / 'mapping.yaml'} и другие файлы."
+            )
+        return [base]
+
+    def _load_merged(self, filename: str) -> dict[str, Any]:
+        """Собрать один YAML из всех слоёв: <layer>/analytics/<filename>.
+
+        Слои сливаются deep-merge по порядку (позднейший перекрывает ранний).
+        Файл может отсутствовать в части слоёв, но должен быть хотя бы в одном.
+        """
+        acc: dict[str, Any] = {}
+        found = False
+        for layer in self._layers:
+            path = layer / "analytics" / filename
+            if path.exists():
+                acc = self._deep_merge(acc, self._load(path))
+                found = True
+        if not found:
+            searched = ", ".join(str(l / "analytics" / filename) for l in self._layers)
+            raise FileNotFoundError(
+                f"Файл конфигурации {filename} не найден ни в одном слое: {searched}"
+            )
+        return acc
+
+    @classmethod
+    def _deep_merge(cls, base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+        """Рекурсивное слияние словарей: override поверх base.
+
+        Правила: вложенные dict сливаются по ключам; списки и скаляры —
+        override ЗАМЕНЯЕТ base целиком (не конкатенация). Важно для `zones`,
+        `detectors`, whitelist-подобных списков — двигательный слой задаёт
+        полную замену, а не дополнение.
+        """
+        result = dict(base)
+        for key, val in override.items():
+            if (
+                key in result
+                and isinstance(result[key], dict)
+                and isinstance(val, dict)
+            ):
+                result[key] = cls._deep_merge(result[key], val)
+            else:
+                result[key] = val
+        return result
 
     @staticmethod
     def _load(path: Path) -> dict[str, Any]:

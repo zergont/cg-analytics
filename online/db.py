@@ -103,7 +103,8 @@ async def list_observations() -> list[dict[str, Any]]:
     conn = await _connect()
     try:
         rows = await conn.fetch("""
-            SELECT o.*, e.name, e.manufacturer, e.model, e.engine_sn, e.kb_path
+            SELECT o.*, e.name, e.manufacturer, e.model, e.engine_sn, e.kb_path,
+                   e.controller_id, e.engine_id
             FROM online_observations o
             LEFT JOIN equipment_registry e
                 ON e.router_sn = o.router_sn

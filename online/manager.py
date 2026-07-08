@@ -232,40 +232,48 @@ class OnlineManager:
     async def _build_engine(self, obs: dict) -> OnlinePollEngine | None:
         """Создать экземпляр OnlinePollEngine по записи из online_observations."""
         from db import analytics as db_analytics
-        from analytics.config import AnalyticsConfig
+        from analytics import binding
         from config import settings, get_tz
 
         router_sn  = obs["router_sn"]
         equip_type = obs["equip_type"]
         panel_id   = obs["panel_id"]
 
-        kb_path_rel = await db_analytics.get_equipment_kb_path(
+        bnd = await db_analytics.get_equipment_binding(
             router_sn, equip_type, panel_id
+        ) or {}
+        controller_id = bnd.get("controller_id")
+        engine_id = bnd.get("engine_id")
+        kb_path_rel = bnd.get("kb_path")
+        label = binding.describe_binding(
+            controller_id=controller_id, engine_id=engine_id, kb_path=kb_path_rel
         )
-        if not kb_path_rel:
+        if not ((controller_id and engine_id) or kb_path_rel):
             logger.warning(
-                "OnlineManager: нет kb_path для %s/%s/%s — пропуск",
+                "OnlineManager: нет привязки конфига для %s/%s/%s — пропуск",
                 router_sn, equip_type, panel_id,
             )
             return None
 
-        kb_path = settings.knowledge_base_path / "equipment" / kb_path_rel
+        kb_root = settings.knowledge_base_path
         try:
-            cfg = AnalyticsConfig(kb_path)
+            cfg = binding.build_config(
+                kb_root, controller_id=controller_id, engine_id=engine_id, kb_path=kb_path_rel
+            )
         except Exception as e:
             logger.error(
-                "OnlineManager: ошибка загрузки AnalyticsConfig для %s: %s",
-                kb_path_rel, e,
+                "OnlineManager: ошибка загрузки AnalyticsConfig для %s: %s", label, e,
             )
             return None
 
         # Детерминированный справочник кодов неисправностей
         fault_ref = None
         try:
-            from analytics.fault_ref import FaultRef
-            fault_ref = FaultRef(kb_path)
+            fault_ref = binding.build_fault_ref(
+                kb_root, controller_id=controller_id, engine_id=engine_id, kb_path=kb_path_rel
+            )
         except Exception as e:
-            logger.warning("OnlineManager: FaultRef не загружен для %s: %s", kb_path_rel, e)
+            logger.warning("OnlineManager: FaultRef не загружен для %s: %s", label, e)
 
         # engine_sn из реестра
         eq = await db_analytics.get_equipment(router_sn, equip_type, panel_id) or {}

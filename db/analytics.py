@@ -77,15 +77,18 @@ async def upsert_equipment(equipment: dict[str, Any]) -> None:
     try:
         await conn.execute("""
             INSERT INTO equipment_registry
-                (router_sn, equip_type, panel_id, name, manufacturer, model, engine_sn, kb_path, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+                (router_sn, equip_type, panel_id, name, manufacturer, model, engine_sn,
+                 kb_path, controller_id, engine_id, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
             ON CONFLICT (router_sn, equip_type, panel_id) DO UPDATE SET
-                name         = EXCLUDED.name,
-                manufacturer = EXCLUDED.manufacturer,
-                model        = EXCLUDED.model,
-                engine_sn    = EXCLUDED.engine_sn,
-                kb_path      = EXCLUDED.kb_path,
-                updated_at   = now()
+                name          = EXCLUDED.name,
+                manufacturer  = EXCLUDED.manufacturer,
+                model         = EXCLUDED.model,
+                engine_sn     = EXCLUDED.engine_sn,
+                kb_path       = EXCLUDED.kb_path,
+                controller_id = EXCLUDED.controller_id,
+                engine_id     = EXCLUDED.engine_id,
+                updated_at    = now()
         """,
             equipment["router_sn"],
             equipment["equip_type"],
@@ -95,6 +98,8 @@ async def upsert_equipment(equipment: dict[str, Any]) -> None:
             equipment.get("model"),
             equipment.get("engine_sn"),
             equipment.get("kb_path"),
+            equipment.get("controller_id"),
+            equipment.get("engine_id"),
         )
     finally:
         await conn.close()
@@ -139,6 +144,7 @@ async def get_equipment_registry() -> list[dict[str, Any]]:
         rows = await conn.fetch("""
             SELECT router_sn, equip_type, panel_id,
                    name, manufacturer, model, engine_sn, kb_path,
+                   controller_id, engine_id,
                    active, created_at, updated_at
             FROM equipment_registry
             ORDER BY router_sn, equip_type, panel_id
@@ -157,6 +163,7 @@ async def get_equipment(
         row = await conn.fetchrow("""
             SELECT router_sn, equip_type, panel_id,
                    name, manufacturer, model, engine_sn, kb_path,
+                   controller_id, engine_id,
                    active, created_at, updated_at
             FROM equipment_registry
             WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
@@ -200,6 +207,24 @@ async def get_equipment_kb_path(
             WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
         """, router_sn, equip_type, panel_id)
         return row["kb_path"] if row else None
+    finally:
+        await conn.close()
+
+
+async def get_equipment_binding(
+    router_sn: str, equip_type: str, panel_id: int
+) -> dict[str, Any] | None:
+    """Вернуть привязку конфига: {controller_id, engine_id, kb_path}.
+
+    Используется резолвером analytics.binding для сборки слоёв. None — записи нет.
+    """
+    conn = await _connect()
+    try:
+        row = await conn.fetchrow("""
+            SELECT controller_id, engine_id, kb_path FROM equipment_registry
+            WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+        """, router_sn, equip_type, panel_id)
+        return dict(row) if row else None
     finally:
         await conn.close()
 

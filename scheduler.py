@@ -69,14 +69,15 @@ async def _run_all_equipment() -> None:
     logger.info("Активных ГУ: %d", len(active))
 
     for eq in active:
+        controller_id = eq.get("controller_id")
+        engine_id = eq.get("engine_id")
         kb_path_rel = eq.get("kb_path")
-        if not kb_path_rel:
+        if not ((controller_id and engine_id) or kb_path_rel):
             logger.warning(
-                "Нет kb_path для %s/%s/%s — пропуск",
+                "Нет привязки конфига (пара или kb_path) для %s/%s/%s — пропуск",
                 eq["router_sn"], eq["equip_type"], eq["panel_id"],
             )
             continue
-        kb_path = settings.knowledge_base_path / "equipment" / kb_path_rel
         try:
             result = await run_analysis(
                 router_sn=eq["router_sn"],
@@ -85,7 +86,10 @@ async def _run_all_equipment() -> None:
                 engine_sn=eq.get("engine_sn", ""),
                 ts_from=ts_from,
                 ts_to=ts_to,
-                kb_path=kb_path,
+                kb_root=settings.knowledge_base_path,
+                controller_id=controller_id,
+                engine_id=engine_id,
+                kb_path=kb_path_rel,
             )
             if result.get("error"):
                 logger.error(

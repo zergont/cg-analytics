@@ -131,13 +131,22 @@ async def analyze_stream(
                 yield _evt({"stage": "error", "message": "Конец диапазона должен быть позже начала"})
                 return
 
-            # Конфигурация
-            kb_path_rel = await analytics.get_equipment_kb_path(router_sn, equip_type, panel_id)
-            if not kb_path_rel:
-                yield _evt({"stage": "error", "message": "Не задан kb_path для оборудования"})
+            # Конфигурация (слоистая привязка: пара controller×engine либо legacy kb_path)
+            from analytics import binding as _binding
+            _bnd = await analytics.get_equipment_binding(router_sn, equip_type, panel_id) or {}
+            if not ((_bnd.get("controller_id") and _bnd.get("engine_id")) or _bnd.get("kb_path")):
+                yield _evt({"stage": "error", "message": "Не задана привязка конфига (пара controller×engine или kb_path)"})
                 return
-            kb_path = _cfg.knowledge_base_path / "equipment" / kb_path_rel
-            cfg = AnalyticsConfig(kb_path)
+            try:
+                cfg = _binding.build_config(
+                    _cfg.knowledge_base_path,
+                    controller_id=_bnd.get("controller_id"),
+                    engine_id=_bnd.get("engine_id"),
+                    kb_path=_bnd.get("kb_path"),
+                )
+            except Exception as _e:
+                yield _evt({"stage": "error", "message": f"Ошибка загрузки конфигурации: {_e}"})
+                return
 
             eq = await analytics.get_equipment(router_sn, equip_type, panel_id) or {}
             engine_sn = eq.get("engine_sn") or ""
@@ -811,6 +820,8 @@ async def settings_page(request: Request):
     from corpus.settings import get_claude_settings
     registry = await analytics.get_equipment_registry()
     kb_list = _list_kb_paths(cfg.knowledge_base_path / "equipment")
+    controller_list = _list_layer_dirs(cfg.knowledge_base_path / "controllers")
+    engine_list = _list_layer_dirs(cfg.knowledge_base_path / "engines")
     corpus_auto       = await analytics.get_app_setting("corpus_auto_analyze",       "false")
     qwen_auto         = await analytics.get_app_setting("qwen_auto_analyze",         "false")
     analytics_verify  = await analytics.get_app_setting("analytics_verify_on_close", "false")
@@ -825,6 +836,8 @@ async def settings_page(request: Request):
         "settings": cfg,
         "registry": registry,
         "kb_list": kb_list,
+        "controller_list": controller_list,
+        "engine_list": engine_list,
         "timezone_choices": TIMEZONE_CHOICES,
         "current_timezone": get_tz().key,
         "llm": get_llm_settings(),
@@ -1071,6 +1084,8 @@ async def update_equipment(
     engine_sn: str = Form(""),
     name: str = Form(""),
     kb_path: str = Form(""),
+    controller_id: str = Form(""),
+    engine_id: str = Form(""),
 ):
     """Обновить метаданные оборудования в реестре аналитики."""
     await analytics.upsert_equipment({
@@ -1082,6 +1097,8 @@ async def update_equipment(
         "engine_sn": engine_sn or None,
         "name": name or None,
         "kb_path": kb_path or None,
+        "controller_id": controller_id or None,
+        "engine_id": engine_id or None,
     })
     return RedirectResponse(url="/settings", status_code=303)
 
@@ -2333,10 +2350,24 @@ def _count_lines(path) -> int:
 
 
 def _list_kb_paths(equipment_dir) -> list[str]:
-    """Список папок knowledge base из equipment/."""
+    """Список папок knowledge base из equipment/ (legacy монолиты)."""
     if not equipment_dir.exists():
         return []
     return sorted(d.name for d in equipment_dir.iterdir() if d.is_dir())
+
+
+def _list_layer_dirs(base) -> list[str]:
+    """Список библиотечных папок слоя (controllers/ или engines/).
+
+    Служебные папки (имя с ведущим `_`, напр. `_defaults`) скрыты — их нельзя
+    назначить оборудованию.
+    """
+    if not base.exists():
+        return []
+    return sorted(
+        d.name for d in base.iterdir()
+        if d.is_dir() and not d.name.startswith("_")
+    )
 
 
 # ── База данных: здоровье и настройки ────────────────────────────────────────

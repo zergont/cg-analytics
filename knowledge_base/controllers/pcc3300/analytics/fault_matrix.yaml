@@ -1,0 +1,86 @@
+# Матрица приоритетов неисправностей PCC3300
+# Источник: operation_rules.json → alarm_priority_matrix; A035B516; 0900-0670
+# Используется детектором CONTROLLER_FAULT для определения severity.
+# Шкала: SHUTDOWN / WARNING / CAUTION / INFO (ТЗ, раздел 8.3)
+# Изменение: только через веб-морду (раздел 9 ТЗ)
+
+# ─── МАППИНГ SEVERITY БИТОВ fault_bitmap_map → шкала ТЗ ────────────────────
+# Каждый бит в fault_history имеет поле severity из fault_bitmap_map.jsonl.
+# Переводим в шкалу INFO / WARNING / ALARM / SHUTDOWN.
+bitmap_severity_map:
+  shutdown: SHUTDOWN
+  shutdown_cooldown: SHUTDOWN
+  derate: WARNING
+  warning: WARNING
+  none: INFO
+
+# ─── КОДЫ НЕИСПРАВНОСТЕЙ (регистры 40012/40013 — LAST_FAULT_CODE) ───────────
+# Используется для детекции по коду последней неисправности.
+# Дополняет bitmap-детекцию: одна и та же неисправность может идти через оба канала.
+
+codes:
+
+  # SHUTDOWN (немедленный аварийный останов)
+  234:  {severity: SHUTDOWN, name: "Crankshaft Speed High (Overspeed)", _source: CONTROLLER}
+  415:  {severity: SHUTDOWN, name: "Low Oil Rifle Press", _source: CONTROLLER}
+  151:  {severity: SHUTDOWN, name: "High Coolant Temp", _source: CONTROLLER}
+  155:  {severity: SHUTDOWN, name: "High Intake Manf 1 Temp", _source: CONTROLLER}
+  214:  {severity: SHUTDOWN, name: "High Oil 1 Temp", _source: CONTROLLER}
+  236:  {severity: SHUTDOWN, name: "Both Engine Speed Signals Lost", _source: CONTROLLER}
+  235:  {severity: SHUTDOWN, name: "Low Coolant Level (Shutdown)", _source: CONTROLLER}
+  556:  {severity: SHUTDOWN, name: "Crankcase Pressure High", _source: CONTROLLER}
+  781:  {severity: SHUTDOWN, name: "CAN Data Link Failure", _source: CONTROLLER}
+  1433: {severity: SHUTDOWN, name: "Local Emergency Stop", _source: CONTROLLER}
+  1434: {severity: SHUTDOWN, name: "Remote Emergency Stop", _source: CONTROLLER}
+  1438: {severity: SHUTDOWN, name: "Fail to Crank", _source: CONTROLLER}
+  359:  {severity: SHUTDOWN, name: "Fail to Start", _source: CONTROLLER}
+  1443: {severity: SHUTDOWN, name: "Dead Battery", _source: CONTROLLER}
+  1447: {severity: SHUTDOWN, name: "Low AC Voltage", _source: CONTROLLER}
+  1448: {severity: SHUTDOWN, name: "Under Frequency", _source: CONTROLLER}
+  1459: {severity: SHUTDOWN, name: "Reverse Power (kW)", _source: CONTROLLER}
+  1461: {severity: SHUTDOWN, name: "Loss of Field", _source: CONTROLLER}
+  1472: {severity: SHUTDOWN, name: "Over Current", _source: CONTROLLER}
+  1445: {severity: SHUTDOWN, name: "Short Circuit", _source: CONTROLLER}
+  111:  {severity: SHUTDOWN, name: "Internal ECM Failure", _source: CONTROLLER}
+  115:  {severity: SHUTDOWN, name: "Eng Crank Sensor Error", _source: CONTROLLER}
+  228:  {severity: SHUTDOWN, name: "Low Coolant Pressure", _source: CONTROLLER}
+
+  # SHUTDOWN с охлаждением (тот же уровень — немедленная угроза)
+  1794: {severity: SHUTDOWN, name: "Fire Detected", cooldown: true, _source: CONTROLLER}
+
+  # ALARM (derating / серьёзное отклонение, не немедленный останов)
+  146:  {severity: ALARM, name: "Pre-High Engine Coolant Temperature Derate", _source: CONTROLLER}
+  421:  {severity: ALARM, name: "High Oil Temperature Derate", _source: CONTROLLER}
+  488:  {severity: ALARM, name: "High Intake Manf 1 Temp Derate", _source: CONTROLLER}
+  1243: {severity: ALARM, name: "Engine Derated", _source: CONTROLLER}
+
+  # WARNING
+  143:  {severity: WARNING, name: "Low Oil Rifle Pressure (Warning)", _source: CONTROLLER}
+  144:  {severity: WARNING, name: "High Coolant 1 Temp (Warning)", _source: CONTROLLER}
+  145:  {severity: WARNING, name: "Low Coolant 1 Temp", _source: CONTROLLER}
+  153:  {severity: WARNING, name: "High Intake Manf 1 Temp (Warning)", _source: CONTROLLER}
+  212:  {severity: WARNING, name: "High Oil 1 Temperature (Warning)", _source: CONTROLLER}
+  196:  {severity: WARNING, name: "Low Coolant Level (Warning)", _source: CONTROLLER}
+  197:  {severity: WARNING, name: "Low Coolant Level Warning 2", _source: CONTROLLER}
+  261:  {severity: WARNING, name: "High Fuel Temperature", _source: CONTROLLER}
+  263:  {severity: WARNING, name: "High Fuel Temperature 2", _source: CONTROLLER}
+  271:  {severity: WARNING, name: "Low Fuel Pump Press", _source: CONTROLLER}
+  272:  {severity: WARNING, name: "High Fuel Pump Press", _source: CONTROLLER}
+  418:  {severity: WARNING, name: "High H2O in Fuel", _source: CONTROLLER}
+  427:  {severity: WARNING, name: "CAN Data Link Degraded", _source: CONTROLLER}
+  441:  {severity: WARNING, name: "Low Battery 1 Voltage", _source: CONTROLLER}
+  442:  {severity: WARNING, name: "High Battery 1 Voltage", _source: CONTROLLER}
+  611:  {severity: WARNING, name: "Engine Hot Shut Down (warning)", _source: CONTROLLER}
+  1131: {severity: WARNING, name: "Battle Short Active", _source: CONTROLLER}
+  1357: {severity: WARNING, name: "Oil Remote Level Low", _source: CONTROLLER}
+  1435: {severity: WARNING, name: "Low Coolant Temperature", _source: CONTROLLER}
+  1439: {severity: WARNING, name: "Low Day Tank", _source: CONTROLLER}
+  1441: {severity: WARNING, name: "Low Fuel Level", _source: CONTROLLER}
+  1442: {severity: WARNING, name: "Weak Battery", _source: CONTROLLER}
+  1444: {severity: WARNING, name: "Overload", _source: CONTROLLER}
+  1449: {severity: WARNING, name: "Over Frequency", _source: CONTROLLER}
+  2342: {severity: WARNING, name: "Too Long In Idle", _source: CONTROLLER}
+  1891: {severity: WARNING, name: "Change Oil", _source: CONTROLLER}
+
+# Severity по умолчанию для неизвестных кодов
+default_severity: WARNING

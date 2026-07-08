@@ -21,8 +21,12 @@ CREATE TABLE IF NOT EXISTS equipment_registry (
     manufacturer    TEXT,
     model           TEXT,
     engine_sn       TEXT,
-    -- Папка в knowledge_base/equipment/ (назначается вручную)
+    -- Папка в knowledge_base/equipment/ (legacy, монолитная привязка)
     kb_path         TEXT,
+    -- Слоистая привязка: библиотеки controllers/<id> × engines/<id>.
+    -- Если заданы обе — используются вместо kb_path (см. analytics/binding.py).
+    controller_id   TEXT,
+    engine_id       TEXT,
     -- true = участвует в ежедневной генерации отчётов
     active          BOOLEAN     NOT NULL DEFAULT true,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -32,6 +36,16 @@ CREATE TABLE IF NOT EXISTS equipment_registry (
 
 -- Миграция: добавить kb_path если таблица уже существует
 ALTER TABLE equipment_registry ADD COLUMN IF NOT EXISTS kb_path TEXT;
+-- Миграция (слоистая привязка): пара «контроллер × двигатель»
+ALTER TABLE equipment_registry ADD COLUMN IF NOT EXISTS controller_id TEXT;
+ALTER TABLE equipment_registry ADD COLUMN IF NOT EXISTS engine_id     TEXT;
+
+-- Данные: перевести известную монолитную привязку KTA50/PCC3300 на пару.
+-- Идемпотентно (guard по controller_id IS NULL). kb_path сохраняется как fallback.
+UPDATE equipment_registry
+   SET controller_id = 'pcc3300', engine_id = 'cummins_kta50', updated_at = now()
+ WHERE kb_path = 'cummins_kta50_pcc3300'
+   AND controller_id IS NULL AND engine_id IS NULL;
 
 -- ── Аналитические прогоны v2 ─────────────────────────────────────────────────
 -- Хранит полный контракт аналитики (JSON) + Markdown-отчёт за произвольный период.

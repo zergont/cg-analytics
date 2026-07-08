@@ -1,0 +1,711 @@
+{
+  "metadata": {
+    "engine_model": "Cummins KTA50",
+    "controller": "Cummins PowerCommand PCC3300 (PCC 3.3)",
+    "document_sources": [
+      "A035B516 (Issue 1) — Operator Manual, Generator Set KTA50G3/G8/GS8/G9 with PowerCommand 3.3 Control, 9-2011",
+      "PCC_3_3_Rus — Руководство оператора PowerCommand 3.3, документ 0908-0230-13(RU), выпуск 3, 12-2009",
+      "K38-50_РЭ_и_ТО — Руководство по эксплуатации и техническому обслуживанию двигателей Cummins К38 и К50",
+      "0900-0670 (Issue 10) — Service Manual, Controller PowerCommand 3.3, 4-2012"
+    ],
+    "notes": "Основные пороги защиты двигателя берутся из Service Manual (0900-0670) как наиболее точный источник значений по умолчанию для PCC 3.3. Механические рабочие пределы двигателя (давление масла, температура ОЖ) берутся из РЭ на двигатели К38/К50. Значения температур в Service Manual указаны в °F и переведены в °C. Значения давлений в Service Manual указаны в psig и переведены в кПа. Там, где данные расходятся — указаны оба источника. Некоторые пороги являются настраиваемыми параметрами контроллера (указаны значения по умолчанию)."
+  },
+
+  "pre_start_conditions": {
+    "min_oil_level": "Уровень масла должен быть между метками MIN и MAX на щупе при неработающем двигателе. Источник: A035B516, раздел 5.6.1; K38-50_РЭ_и_ТО, ежедневное ТО.",
+    "min_coolant_level": "Система охлаждения заполнена до нижней отметки горловины в расширительном бачке или радиаторе. На некоторых радиаторах — две горловины, обе должны быть заполнены. Источник: A035B516, стр. 65.",
+    "min_battery_voltage_vdc": {
+      "value": 24,
+      "source": "A035B516, стр. 126 (код 441: 'battery voltage is below 24 VDC'); 0900-0670, Setup: Default Nominal Battery Voltage = 24V"
+    },
+    "max_battery_voltage_vdc": {
+      "value": 32,
+      "source": "A035B516, стр. 126 (код 442: 'approaching a high level (exceeding 32 VDC)')"
+    },
+    "min_fuel_level_pct": {
+      "value": null,
+      "source": null,
+      "notes": "Конкретный минимальный процент заполнения бака в документах не указан. Указано лишь требование: 'Make sure the fuel tank is filled to the normal level'. A035B516, стр. 65."
+    },
+    "min_ambient_temp_c": {
+      "value": -32,
+      "source": "A035B516, стр. 67 (PCC_3_3_Rus, стр. 57): 'most Cummins Power Generation generator sets will start in temperatures down to -32°C (-25°F) when equipped with engine water jacket coolant heaters'"
+    },
+    "block_heater_required_below_c": {
+      "value": 4,
+      "source": "A035B516, стр. 51 и 67 (PCC_3_3_Rus): 'when ambient temperatures are below 4°C (40°F), it might take more than ten seconds to warm the engine up before a load can be applied'. Подогреватель рекомендуется для поддержания ОЖ не ниже 32°C."
+    },
+    "coolant_heater_target_temp_c": {
+      "value": 32,
+      "source": "A035B516, стр. 67; PCC_3_3_Rus, стр. 57: 'maintain the coolant at a minimum of 32°C (90°F)'"
+    },
+    "notes": "Рекомендовано оснащать резервные ГУ подогревателями ОЖ в водяной рубашке для обеспечения приёма аварийной нагрузки за 10 секунд или менее."
+  },
+
+  "startup_sequence": {
+    "max_crank_time_sec": {
+      "value": 15,
+      "source": "A035B516, стр. 64; PCC_3_3_Rus, стр. 51: 'default setting is for three start cycles, composed of fifteen seconds of cranking and 30 seconds of rest'"
+    },
+    "max_crank_attempts": {
+      "value": 3,
+      "source": "A035B516, стр. 64; PCC_3_3_Rus, стр. 51: 'default setting is for three start cycles'. Диапазон настройки: 1–7 циклов."
+    },
+    "rest_between_cranks_sec": {
+      "value": 30,
+      "source": "A035B516, стр. 64; PCC_3_3_Rus, стр. 51: '30 seconds of rest'"
+    },
+    "oil_pressure_rise_timeout_sec": {
+      "value": null,
+      "source": null,
+      "notes": "Конкретный таймаут появления давления масла после начала вращения в документах явно не указан. Упоминается только параметр 'LOP Enable Time' = 10 секунд — время от перехода в режим Running до активации защиты низкого давления масла. Источник: 0900-0670, стр. 277."
+    },
+    "lop_enable_time_sec": {
+      "value": 10,
+      "source": "0900-0670, стр. 277: 'LOP Enable Time — Time spent at Running before feature enables. Default: 10 seconds.'"
+    },
+    "min_oil_pressure_after_start_kpa": {
+      "value": 138,
+      "source": "K38-50_РЭ_и_ТО, раздел V: 'Минимальное при оборотах холостого хода: 138 кПа [20 фунтов/дюйм²]'"
+    },
+    "idle_speed_rpm": {
+      "value": null,
+      "source": null,
+      "notes": "Конкретное значение оборотов холостого хода в документах для KTA50 не приводится в явном виде. Упомянуты 'Idle Warmup' и 'Idle Cooldown' как режимы контроллера, но числовое значение оборотов отсутствует."
+    },
+    "idle_warmup_conditions": {
+      "min_oil_temp_c": {
+        "value": null,
+        "source": null,
+        "notes": "Явно не указано в документах."
+      },
+      "min_coolant_temp_c": {
+        "value": 21,
+        "source": "A035B516, стр. 51; PCC_3_3_Rus: 'cold sensing logic initiates a warning when the engine water jacket coolant temperature falls below 21°C (70°F)'. Ниже этой температуры — предупреждение 'Low Coolant Temperature' (код 1435)."
+      },
+      "min_idle_duration_sec": {
+        "value": null,
+        "source": null,
+        "notes": "Минимальная длительность прогрева на холостом ходу в документах не задана числом. Указан диапазон охлаждения на холостом ходу 0–10 минут при останове."
+      }
+    },
+    "rated_speed_rpm": {
+      "value": "1500 (50 Hz) / 1800 (60 Hz)",
+      "source": "A035B516, стр. 14-15: таблицы 1-4, данные для 1500 и 1800 об/мин"
+    },
+    "time_to_rated_speed_sec": {
+      "value": null,
+      "source": null,
+      "notes": "Точное время выхода на номинальные обороты не указано. Описывается как 'after a few seconds the engine will start'. A035B516, стр. 66."
+    },
+    "time_to_voltage_stable_sec": {
+      "value": null,
+      "source": null,
+      "notes": "Не указано в явном виде."
+    },
+    "time_to_load_ready_sec": {
+      "value": 10,
+      "source": "A035B516, стр. 67; PCC_3_3_Rus, стр. 57: 'accept the emergency load in ten seconds or less' — при условии, что ОЖ поддерживается подогревателем ≥32°C. При температуре окружающей среды ниже 4°C это время может превышать 10 секунд."
+    },
+    "emergency_start_warmup_bypass": {
+      "value": true,
+      "source": "A035B516, стр. 67; PCC_3_3_Rus: 'In the emergency mode, the generator set will omit the warm-up stage and proceed directly to rated speed and voltage.'"
+    },
+    "fail_to_start_definition": "Двигатель вращается стартером, но не запускается в течение заданного числа циклов (по умолчанию 3 × 15 с с перерывами 30 с). Код неисправности: 359 (Fail to Start), Lamp: Shutdown. Источник: A035B516, стр. 116, 125.",
+    "fail_to_crank_definition": "Двигатель не проворачивается стартером. Код неисправности: 1438 (Fail to Crank), Lamp: Shutdown. Источник: A035B516, стр. 120, 127.",
+    "restart_delay_after_fail_sec": {
+      "value": 120,
+      "source": "A035B516, стр. 66; PCC_3_3_Rus, стр. 51: 'wait a minimum of two minutes for the starter motor to cool'"
+    },
+    "notes": "Число циклов и времена проворота/перерыва настраиваются через меню Setup или InPower (диапазон: 1–7 циклов)."
+  },
+
+  "normal_operation": {
+    "engine_speed_rpm": {
+      "idle": {
+        "min": null,
+        "max": null,
+        "notes": "Конкретный диапазон оборотов холостого хода не указан в документах."
+      },
+      "rated": {
+        "value": "1500 (50 Hz) / 1800 (60 Hz)",
+        "tolerance_rpm": null,
+        "source": "A035B516, стр. 14-15"
+      },
+      "overspeed_shutdown": {
+        "value": "1725 (50 Hz) / 2075 (60 Hz)",
+        "source": "0900-0670, стр. 278: 'Overspeed Shutdown Threshold (50Hz), Default: 1725 rpm; (60Hz), Default: 2075 rpm'. Код 234, Lamp: Shutdown."
+      }
+    },
+    "oil_pressure_kpa": {
+      "idle": {
+        "min": 138,
+        "max": null,
+        "source": "K38-50_РЭ_и_ТО, раздел V: 'Минимальное при оборотах холостого хода: 138 кПа [20 psi]'"
+      },
+      "rated": {
+        "min": 310,
+        "max": 483,
+        "source": "K38-50_РЭ_и_ТО, раздел V: 'Минимальное при номинальных оборотах: 310 кПа [45 psi]; Максимальное при номинальных оборотах: 483 кПа [70 psi]'. Масло SAE 15W-40 при 107°C."
+      },
+      "warning_threshold_rated_kpa": {
+        "value": 275.8,
+        "source": "0900-0670, стр. 277: 'LOP Warning Threshold, Default: 40 psig' = 275.8 кПа. Код 143, Lamp: Warning."
+      },
+      "warning_threshold_idle_kpa": {
+        "value": 103.4,
+        "source": "0900-0670, стр. 277: 'LOP Idle Warning Threshold, Default: 15 psig' = 103.4 кПа."
+      },
+      "shutdown_threshold_rated_kpa": {
+        "value": 241.3,
+        "source": "0900-0670, стр. 277: 'LOP Shutdown Threshold, Default: 35 psig' = 241.3 кПа. Код 415, Lamp: Shutdown."
+      },
+      "shutdown_threshold_idle_kpa": {
+        "value": 68.9,
+        "source": "0900-0670, стр. 277: 'LOP Idle Shutdown Threshold, Default: 10 psig' = 68.9 кПа."
+      },
+      "lop_shutdown_set_time_sec": {
+        "value": 8,
+        "source": "0900-0670, стр. 277: 'LOP Shutdown Set Time, Default: 8 seconds'"
+      },
+      "lop_warning_set_time_sec": {
+        "value": 5,
+        "source": "0900-0670, стр. 277: 'LOP Warning Set Time, Default: 5 seconds'"
+      },
+      "notes": "ПРОТИВОРЕЧИЕ: K38-50_РЭ_и_ТО указывает минимум при номинале 310 кПа, тогда как PCC LOP Shutdown Default = 241.3 кПа. Это объясняется тем, что K38-50_РЭ_и_ТО — механический предел нормальной работы, а PCC порог — уставка защитного реле (ниже нормы, при которой уже начинается останов). Для мониторинга нормального режима использовать 310 кПа как минимум нормы, 241.3 кПа как порог аварийного останова."
+    },
+    "oil_temperature_c": {
+      "normal": {
+        "min": null,
+        "max": 120,
+        "source": "K38-50_РЭ_и_ТО, раздел V: 'Температура масла – максимальная: 120°C [250°F]'"
+      },
+      "warning_threshold": {
+        "value": 105.0,
+        "source": "0900-0670, стр. 277: 'HOT Warning Threshold, Default: 221 degF' = 105.0°C. Код 212, Lamp: Warning."
+      },
+      "derate_threshold": {
+        "value": null,
+        "source": null,
+        "notes": "Код 421 (High Oil Temperature Derate) присутствует, но конкретный порог деградации не указан в явном виде. Источник: A035B516, стр. 117."
+      },
+      "shutdown_threshold": {
+        "value": 110.0,
+        "source": "0900-0670, стр. 277: 'HOT Shutdown Threshold, Default: 230 degF' = 110.0°C. Код 214, Lamp: Shutdown."
+      },
+      "shutdown_set_time_sec": {
+        "value": 2,
+        "source": "0900-0670, стр. 277: 'HOT Shutdown Set Time, Default: 2 seconds'"
+      }
+    },
+    "coolant_temperature_c": {
+      "normal": {
+        "min": 70,
+        "max": 95,
+        "source": "K38-50_РЭ_и_ТО, раздел V (для приводов генераторной установки): 'Максимально допустимая температура в верхнем бачке радиатора: 95°C [203°F]; Минимальный предел рекомендованной температуры: 70°C [160°F]'"
+      },
+      "thermostat_opening_range_c": {
+        "value": "80–90",
+        "source": "K38-50_РЭ_и_ТО, раздел V: 'Нормативный температурный диапазон открытия термостата: 80°C–90°C [175°F–195°F]'"
+      },
+      "warning_threshold": {
+        "value": 97.8,
+        "source": "0900-0670, стр. 277: 'HCT Warning Threshold, Default: 208 degF' = 97.8°C. Код 144, Lamp: Warning."
+      },
+      "derate_threshold": {
+        "value": null,
+        "source": null,
+        "notes": "Код 146 (Pre-High Engine Coolant Temperature Derate) присутствует в таблице неисправностей A035B516, стр. 116. Конкретный температурный порог начала деградации в документах не приведён."
+      },
+      "shutdown_with_cooldown_threshold": {
+        "value": 102.2,
+        "source": "0900-0670, стр. 277: 'HCT Shutdown/w Cooldown Threshold, Default: 216 degF' = 102.2°C."
+      },
+      "shutdown_threshold": {
+        "value": 103.9,
+        "source": "0900-0670, стр. 277: 'HCT Shutdown Threshold, Default: 219 degF' = 103.9°C. Код 151, Lamp: Shutdown."
+      },
+      "shutdown_set_time_sec": {
+        "value": 2,
+        "source": "0900-0670, стр. 277: 'HCT Shutdown Set Time, Default: 2 seconds'"
+      },
+      "low_coolant_warning_threshold": {
+        "value": 21,
+        "source": "A035B516, стр. 51; PCC_3_3_Rus, стр. 57: 'cold sensing logic initiates a warning when coolant temperature falls below 21°C (70°F)'. Код 1435, Lamp: Warning."
+      }
+    },
+    "coolant_pressure_kpa": {
+      "normal": {
+        "min": 48,
+        "max": null,
+        "source": "K38-50_РЭ_и_ТО, раздел V: 'Минимальное избыточное давление, поддерживаемое клапаном крышки заливной горловины: 48 кПа [7 psi]'"
+      },
+      "max_excess_pressure_kpa": {
+        "value": 241,
+        "source": "K38-50_РЭ_и_ТО, раздел V (для КТА50): 'Максимальное избыточное давление в системе охлаждения: 241 кПа [35 psi]' (без учёта крышки)"
+      },
+      "warning_threshold": {
+        "value": null,
+        "source": null,
+        "notes": "Код 232 (Low Coolant Pressure Warning) и 231 (High Coolant Pressure Warning) присутствуют в таблице, но конкретные пороги не указаны."
+      },
+      "shutdown_threshold": {
+        "value": null,
+        "source": null,
+        "notes": "Код 228 (Low Coolant Pressure Shutdown) присутствует в таблице A035B516, стр. 116. Конкретный порог в документах не указан."
+      }
+    },
+    "intake_manifold_pressure_kpa": {
+      "rated_load": {
+        "min": null,
+        "max": null,
+        "source": null,
+        "notes": "Нормальный рабочий диапазон давления наддува явно не указан. Диапазон отображения контроллера: 0–1014 кПа. A035B516, стр. 36."
+      },
+      "warning_threshold": {
+        "value": null,
+        "source": null,
+        "notes": "Коды 122/123/124 (Manifold 1 Press High/Low Warning) присутствуют. Конкретные пороги не указаны."
+      },
+      "shutdown_threshold": {
+        "value": null,
+        "source": null
+      }
+    },
+    "intake_manifold_temperature_c": {
+      "normal": {
+        "min": null,
+        "max": null,
+        "source": null
+      },
+      "warning_threshold": {
+        "value": 65.0,
+        "source": "0900-0670, стр. 277: 'High IMT Warning Threshold, Default: 149 degF' = 65.0°C. Код 153, Lamp: Warning."
+      },
+      "derate_threshold": {
+        "value": null,
+        "source": null,
+        "notes": "Код 488 (High Intake Manf 1 Temp, Derate) присутствует. Конкретный порог деградации не указан."
+      },
+      "shutdown_threshold": {
+        "value": 72.2,
+        "source": "0900-0670, стр. 277: 'High IMT Shutdown Threshold, Default: 162 degF' = 72.2°C. Код 155, Lamp: Shutdown."
+      },
+      "shutdown_set_time_sec": {
+        "value": 5,
+        "source": "0900-0670, стр. 277: 'High IMT Shutdown Set Time, Default: 5 seconds'"
+      }
+    },
+    "fuel_pressure_kpa": {
+      "normal": {
+        "min": null,
+        "max": null,
+        "source": null,
+        "notes": "Диапазон отображения контроллера для 'Fuel Supply Pressure': 0–993 кПа. A035B516, стр. 36. Нормальный рабочий диапазон в документах не указан явно."
+      },
+      "warning_threshold": {
+        "value": null,
+        "source": null,
+        "notes": "Коды 271 (Low Fuel Pump Press Warning), 272 (High Fuel Pump Press Warning), 547 (Fuel Delivery Press Low Warning), 546 (Fuel Delivery Press High Warning) присутствуют. Конкретные пороги не указаны."
+      }
+    },
+    "fuel_temperature_c": {
+      "normal": {
+        "min": null,
+        "max": null,
+        "source": null
+      },
+      "warning_threshold": {
+        "value": null,
+        "source": null,
+        "notes": "Код 261/263 (High Fuel Temperature Warning) присутствует. Конкретный порог не указан."
+      },
+      "shutdown_threshold": {
+        "value": null,
+        "source": null,
+        "notes": "Код 266 (High Fuel Temperature Shutdown) присутствует. Конкретный порог не указан."
+      }
+    },
+    "battery_voltage_vdc": {
+      "nominal_system": {
+        "value": 24,
+        "source": "0900-0670, стр. 272: 'Nominal Battery Voltage, Default: 24V'"
+      },
+      "normal": {
+        "min": 24,
+        "max": 32,
+        "source": "A035B516, стр. 126: коды 441 и 442"
+      },
+      "warning_low_running": {
+        "value": 24,
+        "source": "0900-0670, стр. 272: '24V Low Battery Voltage Running Threshold, Default: 24 Vdc'. Код 441, Lamp: Warning."
+      },
+      "warning_weak_cranking": {
+        "value": 14.4,
+        "source": "0900-0670, стр. 272: '24V Weak Battery Voltage Threshold, Default: 14.4 Vdc'. Код 1442, Lamp: Warning (при провороте)."
+      },
+      "shutdown_dead_battery": {
+        "value": null,
+        "source": null,
+        "notes": "Порог 'Dead Battery' (код 1443, Shutdown) — напряжение ниже рабочего уровня контроллера, 3 последовательных сброса. Конкретное значение порога не указано явно."
+      },
+      "warning_high": {
+        "value": 32,
+        "source": "0900-0670, стр. 272: '24V High Battery Voltage Threshold, Default: 32 Vdc'. Код 442, Lamp: Warning."
+      }
+    },
+    "generator_voltage_vac": {
+      "rated": {
+        "value": null,
+        "tolerance_pct": null,
+        "source": null,
+        "notes": "Номинальное напряжение зависит от конкретной конфигурации установки (указано на паспортной табличке). Диапазон настройки: 100–600 Vac. 0900-0670, стр. 272."
+      },
+      "warning_low": {
+        "value": null,
+        "source": null,
+        "notes": "Код 1225 (Genset Undervoltage Warning) и код 1447 (Low AC Voltage Shutdown) присутствуют. Конкретные пороги в % от номинала — параметры, настраиваемые через InPower."
+      },
+      "warning_high": {
+        "value": null,
+        "source": null,
+        "notes": "Код 1224 (Genset Overvoltage Warning) и код 1446 (High AC Voltage Shutdown) присутствуют."
+      },
+      "shutdown_low": {
+        "value": null,
+        "source": null,
+        "notes": "Код 1447 (Low AC Voltage Shutdown). Порог настраивается."
+      },
+      "shutdown_high": {
+        "value": null,
+        "source": null,
+        "notes": "Код 1446 (High AC Voltage Shutdown). Порог настраивается."
+      }
+    },
+    "generator_frequency_hz": {
+      "rated": {
+        "value": "50 или 60",
+        "tolerance_hz": null,
+        "source": "A035B516, стр. 14-15: 1500 rpm / 50 Hz, 1800 rpm / 60 Hz"
+      },
+      "warning_high": {
+        "value": null,
+        "source": null,
+        "notes": "Код 1449 (Over Frequency Warning). Порог настраивается."
+      },
+      "shutdown_low": {
+        "value": "90% от номинала",
+        "source": "A035B516, стр. 128; PCC_3_3_Rus: код 1448 (Under Frequency Shutdown) — 'frequency has dropped below 90% of nominal for approximately ten seconds'."
+      },
+      "shutdown_low_set_time_sec": {
+        "value": 10,
+        "source": "A035B516, стр. 128: код 1448 — 'approximately ten seconds'"
+      },
+      "shutdown_high": {
+        "value": null,
+        "source": null,
+        "notes": "Код 1449 упоминается как Warning в таблице A035B516. Аварийного останова по превышению частоты отдельным кодом нет (превышение оборотов → Overspeed, код 234)."
+      }
+    },
+    "load_pct": {
+      "continuous_max": {
+        "value": 100,
+        "source": "PCC_3_3_Rus, раздел 5.4.6.1: 'до 100% непрерывной мощности в течение неограниченного числа часов'"
+      },
+      "min_recommended_load_pct": {
+        "value": 30,
+        "source": "A035B516, стр. 63: 'A minimum loading of 30% is recommended. This loading will help to prevent the build up of carbon deposits in the injectors'"
+      },
+      "overload_allowed_pct": {
+        "value": null,
+        "duration_sec": null,
+        "source": null,
+        "notes": "Код 1444 (Overload Warning) и код 1472 (Over Current Shutdown) присутствуют. Конкретное допустимое кратковременное превышение в документах не указано."
+      },
+      "notes": "Рекомендуется нагрузка не менее 30%. Длительная работа на холостом ходу (без нагрузки) не рекомендуется из-за риска нагарообразования и разжижения масла топливом. Коды: 2342 (Too Long In Idle Warning)."
+    }
+  },
+
+  "expected_parameter_behavior": {
+    "after_cold_start": {
+      "oil_pressure_stabilize_sec": {
+        "value": 10,
+        "source": "0900-0670, стр. 277: 'LOP Enable Time — Time spent at Running before feature enables, Default: 10 seconds'. Косвенно указывает на ожидаемое время стабилизации давления."
+      },
+      "coolant_temp_rise_rate_c_per_min": {
+        "value": null,
+        "source": null,
+        "notes": "Скорость прогрева ОЖ в документах не указана."
+      },
+      "time_to_operating_temp_min": {
+        "value": null,
+        "source": null,
+        "notes": "Не указано явно. Рекомендуется контрольные включения под нагрузкой не менее 30 минут для достижения нормальной рабочей температуры. Источник: PCC_3_3_Rus, стр. 52."
+      }
+    },
+    "load_step_acceptance": {
+      "max_frequency_dip_hz": {
+        "value": null,
+        "source": null,
+        "notes": "Не указано. Имеется только порог аварийного останова (90% от номинала)."
+      },
+      "frequency_recovery_sec": {
+        "value": null,
+        "source": null
+      },
+      "max_voltage_dip_pct": {
+        "value": null,
+        "source": null
+      },
+      "voltage_recovery_sec": {
+        "value": null,
+        "source": null
+      }
+    },
+    "load_rejection": {
+      "max_frequency_rise_hz": {
+        "value": null,
+        "source": null,
+        "notes": "Не указано. Порог Overspeed Shutdown = 1725/2075 об/мин является защитным пределом."
+      },
+      "frequency_recovery_sec": {
+        "value": null,
+        "source": null
+      }
+    },
+    "during_standstill": {
+      "coolant_temp_drop_rate_normal": "Медленное снижение до температуры окружающей среды. Если ОЖ не подогревается — ниже 21°C активируется предупреждение Low Coolant Temperature (код 1435).",
+      "oil_pressure_expected": "0 кПа — насос не работает.",
+      "battery_voltage_expected": "Номинальное напряжение батареи (24 VDC). При падении ниже 24 VDC — предупреждение (код 441).",
+      "notes": ""
+    }
+  },
+
+  "shutdown_sequence": {
+    "normal_shutdown": {
+      "cooldown_at_idle": true,
+      "cooldown_duration_min": {
+        "value": "0–10",
+        "source": "A035B516, стр. 68; PCC_3_3_Rus, стр. 68: 'Cooldown at Idle (zero to ten minutes) or longer, if necessary to obtain normal operating temperature before shutdown'"
+      },
+      "recommended_pre_stop_no_load_min": {
+        "value": "3–5",
+        "source": "A035B516, стр. 68; PCC_3_3_Rus, стр. 66: 'Run the generator set at no load for three to five minutes before stopping'"
+      },
+      "cooldown_skip_conditions": "При двукратном нажатии кнопки Stop в ручном режиме — немедленный останов без охлаждения. При Stop в Auto-режиме — также немедленный останов. Рекомендуется избегать горячих остановов (Hot Shutdown Warning, код 611).",
+      "max_coolant_temp_before_stop_c": {
+        "value": null,
+        "source": null,
+        "notes": "Конкретная максимальная температура ОЖ перед плановым остановом не указана. Рекомендуется охлаждение до 'normal operating temperature'."
+      }
+    },
+    "emergency_shutdown": {
+      "immediate_stop": true,
+      "no_cooldown": true,
+      "typical_triggers": [
+        "Низкое давление масла — Low Oil Rifle Press (код 415, Lamp: Shutdown)",
+        "Высокая температура ОЖ — High Coolant Temp (код 151, Lamp: Shutdown)",
+        "Высокая температура всасываемого воздуха — High Intake Manf 1 Temp (код 155, Lamp: Shutdown)",
+        "Высокая температура масла — High Oil 1 Temp (код 214, Lamp: Shutdown)",
+        "Заброс оборотов — Crankshaft Speed High / Overspeed (код 234, Lamp: Shutdown)",
+        "Потеря сигналов оборотов — Both Engine Speed Signals Lost (код 236, Lamp: Shutdown)",
+        "Отказ запуска — Fail to Start (код 359, Lamp: Shutdown)",
+        "Отказ проворачивания — Fail to Crank (код 1438, Lamp: Shutdown)",
+        "Нажатие кнопки местного аварийного останова (код 1433, Lamp: Shutdown)",
+        "Нажатие кнопки дистанционного аварийного останова (код 1434, Lamp: Shutdown)",
+        "Разряженная батарея — Dead Battery (код 1443, Lamp: Shutdown)",
+        "Низкое AC напряжение — Low AC Voltage (код 1447, Lamp: Shutdown)",
+        "Низкая частота — Under Frequency (код 1448, Lamp: Shutdown)",
+        "Перегрузка по току — Over Current (код 1472, Lamp: Shutdown)",
+        "Обрыв канала CAN — CAN Data Link Failure (код 781, Lamp: Shutdown)",
+        "Низкий уровень ОЖ — Low Coolant Level (код 235, Lamp: Shutdown)",
+        "Высокое давление картера — Crankcase Pressure High (код 556, Lamp: Shutdown)",
+        "Обнаружение пожара — Fire Detected (код 1794, Lamp: Shutdown with Cooldown)"
+      ]
+    },
+    "shutdown_with_cooldown": {
+      "description": "Особый режим останова: двигатель переводится на обороты холостого хода для охлаждения перед окончательным остановом. Применяется при определённых условиях (например, обнаружение пожара — код 1794). Также может применяться при высокой температуре ОЖ (порог HCT Shutdown/w Cooldown Threshold).",
+      "cooldown_duration_min": {
+        "value": "0–10",
+        "source": "A035B516, стр. 68: 'Cooldown at Idle (zero to ten minutes) or longer, if necessary'. Код 1336 (Cooldown Complete, Shutdown) — фиксирует завершение режима охлаждения."
+      }
+    }
+  },
+
+  "derating_conditions": {
+    "high_coolant_temp": {
+      "derate_start_c": {
+        "value": null,
+        "source": null,
+        "notes": "Код 146 (Pre-High Engine Coolant Temperature, Derate) присутствует в таблице. Конкретный порог начала деградации мощности при высокой температуре ОЖ в документах не указан."
+      },
+      "derate_rate_pct_per_degree": {
+        "value": null,
+        "source": null
+      }
+    },
+    "high_intake_temp": {
+      "derate_start_c": {
+        "value": null,
+        "source": null,
+        "notes": "Код 488 (High Intake Manf 1 Temp, Derate) присутствует. Конкретный порог деградации не указан."
+      }
+    },
+    "high_oil_temp": {
+      "derate_start_c": {
+        "value": null,
+        "source": null,
+        "notes": "Код 421 (High Oil Temperature, Derate) присутствует. Конкретный порог деградации не указан."
+      }
+    },
+    "high_altitude": {
+      "derate_start_m": {
+        "value": null,
+        "source": null
+      },
+      "derate_rate_pct_per_300m": {
+        "value": null,
+        "source": null
+      },
+      "notes": "Деградация мощности по высоте упоминается косвенно ('temperatures or altitudes exceeding those shown on the nameplate'). PCC_3_3_Rus, стр. 56. Конкретные значения не указаны."
+    },
+    "high_ambient_temp": {
+      "rated_up_to_c": {
+        "value": null,
+        "source": null,
+        "notes": "Максимальная допустимая температура окружающей среды указана на паспортной табличке установки. PCC_3_3_Rus, стр. 57."
+      },
+      "derate_above_c": {
+        "value": null,
+        "source": null
+      }
+    },
+    "notes": "Информация по условиям деградации мощности в данных документах представлена на уровне кодов неисправностей, без конкретных числовых значений порогов деградации и её скорости. Для точных данных необходим Engine Data Sheet для конкретного исполнения KTA50."
+  },
+
+  "maintenance_intervals": {
+    "engine_oil_change_hours": {
+      "value": 250,
+      "source": "K38-50_РЭ_и_ТО, График ТО: 'ТО через 250 моточасов или 6 месяцев: Смените моторное масло'"
+    },
+    "engine_oil_change_months": {
+      "value": 6,
+      "source": "K38-50_РЭ_и_ТО, График ТО: '250 моточасов или 6 месяцев (что наступит раньше)'"
+    },
+    "oil_filter_change_hours": {
+      "value": 250,
+      "source": "K38-50_РЭ_и_ТО, График ТО: 'ТО через 250 м/ч: Смените фильтры: Полнопоточный масляный, Перепускной масляный'"
+    },
+    "fuel_filter_change_hours": {
+      "value": 250,
+      "source": "K38-50_РЭ_и_ТО, График ТО: 'ТО через 250 м/ч: Смените фильтры: Топливный'"
+    },
+    "air_filter_check_hours": {
+      "value": "Еженедельно + при необходимости",
+      "source": "K38-50_РЭ_и_ТО, Еженедельное ТО: 'Проверьте состояние воздухоочистителя: индикатор загрязнённости, если необходимо — замените элемент'"
+    },
+    "coolant_filter_change_hours": {
+      "value": 250,
+      "source": "K38-50_РЭ_и_ТО, График ТО: 'ТО через 250 м/ч: Смените фильтры: Водяной'"
+    },
+    "coolant_change_hours": {
+      "value": 6000,
+      "source": "K38-50_РЭ_и_ТО, раздел V: 'Требования по замене охлаждающей жидкости: После 6000 моточасов'"
+    },
+    "coolant_change_years": {
+      "value": 2,
+      "source": "K38-50_РЭ_и_ТО, раздел V: 'После 2-х лет эксплуатации двигателя или 6000 моточасов (что наступит раньше)'"
+    },
+    "valve_adjustment_hours": {
+      "value": 1500,
+      "source": "K38-50_РЭ_и_ТО, График ТО: 'ТО через 1500 м/ч: Отрегулируйте клапаны и форсунки'. Последующая регулировка — через 6000 м/ч."
+    },
+    "injector_check_hours": {
+      "value": 6000,
+      "source": "K38-50_РЭ_и_ТО, График ТО: 'ТО через 6000 м/ч или 2 года: Очистите и откалибруйте форсунки и топливный насос'"
+    },
+    "belt_check_hours": {
+      "value": 250,
+      "source": "K38-50_РЭ_и_ТО, График ТО: 'ТО через 250 м/ч: Проверьте ремни. Проверьте натяжение ремней'"
+    },
+    "cooling_system_flush_hours": {
+      "value": 6000,
+      "source": "K38-50_РЭ_и_ТО, График ТО: 'ТО через 6000 м/ч: Очистите и промойте систему охлаждения'"
+    },
+    "engine_protection_calibration_hours": {
+      "value": 6000,
+      "source": "K38-50_РЭ_и_ТО, График ТО: 'ТО через 6000 м/ч: Откалибруйте систему защиты двигателя'"
+    },
+    "coolant_concentration_check_hours": {
+      "value": 250,
+      "source": "K38-50_РЭ_и_ТО, График ТО: 'ТО через 250 м/ч: Проверьте концентрацию присадок в системе охлаждения'"
+    },
+    "change_oil_warning_code": {
+      "value": 1891,
+      "source": "A035B516, стр. 120: 'CODE 1891, Warning: Change Oil'"
+    },
+    "notes": "Интервал смены масла может определяться альтернативным методом (анализ масла). Для всех интервалов применяется принцип 'что наступит раньше — моточасы или календарное время'."
+  },
+
+  "alarm_priority_matrix": {
+    "immediate_shutdown_triggers": [
+      "234 — Crankshaft Speed High (Overspeed): обороты превысили порог Overspeed Shutdown Threshold (по умолчанию: 1725 rpm для 50Hz, 2075 rpm для 60Hz)",
+      "415 — Low Oil Rifle Press: давление масла упало ниже LOP Shutdown Threshold (по умолчанию 241.3 кПа при номинале, 68.9 кПа на холостом ходу)",
+      "151 — High Coolant Temp: температура ОЖ превысила HCT Shutdown Threshold (по умолчанию 103.9°C)",
+      "155 — High Intake Manf 1 Temp: температура воздуха на впуске превысила High IMT Shutdown Threshold (по умолчанию 72.2°C)",
+      "214 — High Oil 1 Temp: температура масла превысила HOT Shutdown Threshold (по умолчанию 110.0°C)",
+      "236 — Both Engine Speed Signals Lost",
+      "235 — Low Coolant Level (при настройке на Shutdown)",
+      "556 — Crankcase Pressure High",
+      "781 — CAN Data Link Failure (потеря связи ECM-PCC)",
+      "1433 — Local Emergency Stop",
+      "1434 — Remote Emergency Stop",
+      "1438 — Fail to Crank",
+      "359 — Fail to Start",
+      "1443 — Dead Battery",
+      "1447 — Low AC Voltage",
+      "1448 — Under Frequency (ниже 90% номинала в течение ~10 секунд)",
+      "1459 — Reverse Power",
+      "1461 — Loss of Field (Reverse KVAR)",
+      "1472 — Over Current",
+      "1445 — Short Circuit",
+      "111 — Internal ECM Failure",
+      "115 — Eng Crank Sensor Error",
+      "228 — Low Coolant Pressure"
+    ],
+    "shutdown_with_cooldown_triggers": [
+      "1794 — Fire Detected: аварийный останов с принудительным охлаждением",
+      "HCT Shutdown/w Cooldown: температура ОЖ в диапазоне 102.2°C–103.9°C (HCT Shutdown/w Cooldown Threshold Default: 102.2°C)"
+    ],
+    "derate_triggers": [
+      "146 — Pre-High Engine Coolant Temperature Derate (код: Derate)",
+      "421 — High Oil Temperature Derate (код: Derate)",
+      "488 — High Intake Manf 1 Temp Derate (код: Derate)",
+      "1243 — Engine Derated (общий код деградации)"
+    ],
+    "warning_only_triggers": [
+      "143 — Low Oil Rifle Pressure (ниже LOP Warning Threshold, по умолчанию 275.8 кПа)",
+      "144 — High Coolant 1 Temp (выше HCT Warning Threshold, по умолчанию 97.8°C)",
+      "145 — Low Coolant 1 Temp",
+      "153 — High Intake Manf 1 Temp (выше IMT Warning Threshold, по умолчанию 65.0°C)",
+      "212 — High Oil 1 Temperature (выше HOT Warning Threshold, по умолчанию 105.0°C)",
+      "196/197 — Low Coolant Level (при настройке на Warning)",
+      "261/263 — High Fuel Temperature",
+      "271/272 — Low/High Fuel Pump Press",
+      "418 — High H2O in Fuel",
+      "427 — CAN Data Link Degraded",
+      "441 — Low Battery 1 Voltage (ниже 24 VDC)",
+      "442 — High Battery 1 Voltage (выше 32 VDC)",
+      "611 — Engine Hot Shut Down (предупреждение о горячем останове)",
+      "1131 — Battle Short Active",
+      "1357 — Oil Remote Level Low",
+      "1435 — Low Coolant Temperature (ниже 21°C — предупреждение 'холодный двигатель')",
+      "1439/1441 — Low Day Tank / Low Fuel Level",
+      "1442 — Weak Battery",
+      "1449 — Over Frequency",
+      "1444 — Overload",
+      "2342 — Too Long In Idle",
+      "1891 — Change Oil"
+    ]
+  }
+}
