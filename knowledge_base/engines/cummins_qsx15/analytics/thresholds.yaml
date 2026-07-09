@@ -1,0 +1,148 @@
+# Пороговые значения двигателя Cummins QSX15 (генераторное исполнение, 50 Гц / 1500 об/мин)
+# Слой ДВИГАТЕЛЯ: перекрывает thresholds поверх _defaults + controllers/pcc3300.
+#
+# Источники:
+#   QSX15_DS10349 — Cummins Engine Data Sheet DS-10349 / FR-10349 (QSX15-G9, 27Apr07):
+#                   паспортные пределы смазки/охлаждения/х.х. общие для семейства QSX15.
+#   PCC3300_DEFAULT — дефолтные уставки панели PCC3300 (0900-0670 / A035B516),
+#                   НЕ подтверждены для данной установки.
+#   ESTIMATE      — инженерная оценка по типовым уставкам Cummins ECM.
+#
+# ВНИМАНИЕ (_verify: true): значения контроллерного класса ОБЯЗАТЕЛЬНО сверить
+# с фактической конфигурацией панели этой установки (Setup PCC3300) и РЭ QSX15.
+# Нормальное давление масла QSX15 (242-276 кПа) НИЖЕ порога LOP Warning KTA50
+# (275.8 кПа) — уставки KTA50 к этому мотору неприменимы.
+#
+# Изменение: только через веб-морду (раздел 9 ТЗ)
+
+# ─── ДАВЛЕНИЕ МАСЛА ─────────────────────────────────────────────────────────
+oil_pressure:
+  passport:
+    idle_min_kpa: 138         # DS-10349: Oil Pressure @ Idle Speed (Minimum) 20 psi
+    rated_min_kpa: 242        # DS-10349: Pressure Range Warm 35-40 psi — нижняя граница
+    rated_max_kpa: 276        # DS-10349: Pressure Range Warm — верхняя граница
+    cold_max_kpa: 900         # DS-10349: Cold — up to 130 psi (холодный пуск)
+    _source: QSX15_DS10349
+  controller:
+    warning_rated_kpa: 207    # ESTIMATE: 30 psi — ниже норм. диапазона 242-276; СВЕРИТЬ с панелью
+    warning_idle_kpa: 103     # ESTIMATE: 15 psi (мин. допустимое на х.х. при 93°C масла)
+    shutdown_rated_kpa: 172   # ESTIMATE: 25 psi; СВЕРИТЬ с панелью
+    shutdown_idle_kpa: 69     # ESTIMATE: 10 psi (типовой Cummins LOP Idle Shutdown)
+    lop_enable_time_sec: 10   # PCC3300_DEFAULT: LOP Enable Time
+    warning_set_time_sec: 5   # PCC3300_DEFAULT: LOP Warning Set Time
+    shutdown_set_time_sec: 8  # PCC3300_DEFAULT: LOP Shutdown Set Time
+    _source: ESTIMATE
+    _verify: true
+  tunable:
+    proximity_warning_pct: 15 # предупреждать при подходе на X% к порогу shutdown_rated_kpa
+    _source: TUNABLE
+
+# ─── ТЕМПЕРАТУРА МАСЛА ──────────────────────────────────────────────────────
+oil_temperature:
+  passport:
+    max_c: 121                # DS-10349: Maximum Oil Temperature 250°F
+    _source: QSX15_DS10349
+  controller:
+    warning_c: 105.0          # PCC3300_DEFAULT: HOT Warning 221°F; СВЕРИТЬ с панелью
+    shutdown_c: 110.0         # PCC3300_DEFAULT: HOT Shutdown 230°F; СВЕРИТЬ с панелью
+    shutdown_set_time_sec: 2  # PCC3300_DEFAULT
+    _source: PCC3300_DEFAULT
+    _verify: true
+  tunable:
+    proximity_warning_pct: 10 # % от controller.warning_c
+    _source: TUNABLE
+
+# ─── ТЕМПЕРАТУРА ОЖ ─────────────────────────────────────────────────────────
+coolant_temperature:
+  passport:
+    normal_min_c: 70          # общий ориентир Cummins: рабочая Т ОЖ не ниже 70°C
+    normal_max_c: 104         # DS-10349: Max Top Tank (Prime Power) 220°F; Standby 110°C
+    thermostat_open_c: 82     # DS-10349: Standard Thermostat Range 180-200°F — начало открытия
+    thermostat_full_c: 93     # DS-10349: полное открытие термостата
+    top_tank_max_standby_c: 110  # DS-10349: Max Top Tank (Standby) 230°F — справочно
+    _source: QSX15_DS10349
+  controller:
+    warning_c: 97.8           # PCC3300_DEFAULT: HCT Warning 208°F; СВЕРИТЬ с панелью
+    shutdown_with_cooldown_c: 102.2  # PCC3300_DEFAULT: HCT Shutdown/w Cooldown 216°F
+    shutdown_c: 103.9         # PCC3300_DEFAULT: HCT Shutdown 219°F; СВЕРИТЬ с панелью
+    low_warning_c: 21         # PCC3300_DEFAULT: Low Coolant Temperature warning; код 1435
+    shutdown_set_time_sec: 2  # PCC3300_DEFAULT
+    _source: PCC3300_DEFAULT
+    _verify: true
+  tunable:
+    below_60_risk_threshold_c: 60  # Т ОЖ < 60°C → риск wet stacking / закоксовки
+    proximity_warning_pct: 10      # % от controller.warning_c
+    # Двухфазный COOLING_FAILURE: рабочий диапазон по термостату QSX15 (82-93°C)
+    working_range_low_c: 82        # нижняя граница рабочего диапазона ОЖ (термостат открывается)
+    working_range_high_c: 93       # верхняя граница (прогрев завершён)
+    asymptote_norm_max_c: 95       # макс. допустимая асимптота прогрева (термостат 93 + запас)
+    _source: TUNABLE
+
+# ─── НАПРЯЖЕНИЕ АКБ ─────────────────────────────────────────────────────────
+battery_voltage:
+  passport:
+    nominal_v: 24             # DS-10349: Cranking Motor 24 volt; Min Battery 1425 CCA
+    _source: QSX15_DS10349
+  controller:
+    normal_min_v: 24          # PCC3300_DEFAULT: код 441
+    normal_max_v: 32          # PCC3300_DEFAULT: код 442
+    weak_cranking_v: 14.4     # PCC3300_DEFAULT: Weak Battery Threshold; код 1442
+    warning_low_v: 24         # PCC3300_DEFAULT: 24V Low Battery Running Threshold
+    warning_high_v: 32        # PCC3300_DEFAULT: 24V High Battery Voltage
+    _source: PCC3300_DEFAULT
+    _verify: true
+  tunable:
+    sag_alarm_v: 19.0         # провальное напряжение при пуске → START_FAILURE
+    _source: TUNABLE
+
+# ─── ЧАСТОТА ────────────────────────────────────────────────────────────────
+frequency:
+  passport:
+    nominal_hz: 50.0          # установка на данном объекте: 50 Гц / 1500 об/мин (QSX15-G8)
+    rated_rpm: 1500
+    _source: QSX15_DS10349    # G-Drive 50 Гц исполнение; СВЕРИТЬ фактический рейтинг ГУ
+  controller:
+    overspeed_rpm: 1725       # PCC3300_DEFAULT: Overspeed Shutdown (50Hz); код 234
+    underfreq_pct: 90         # PCC3300_DEFAULT: Under Frequency < 90%; код 1448
+    underfreq_set_time_sec: 10
+    _source: PCC3300_DEFAULT
+    _verify: true
+  tunable:
+    deviation_warning_hz: 1.0
+    stability_mad_warning: 0.3
+    _source: TUNABLE
+
+# ─── ОБОРОТЫ ────────────────────────────────────────────────────────────────
+rpm:
+  passport:
+    rated_rpm: 1500           # 50 Гц генераторное исполнение
+    idle_min_rpm: 675         # DS-10349: Engine Idle Speed 675-775 rpm
+    idle_max_rpm_passport: 775
+    _source: QSX15_DS10349
+  controller:
+    overspeed_rpm: 1725       # PCC3300_DEFAULT (50 Hz)
+    _source: PCC3300_DEFAULT
+    _verify: true
+  tunable:
+    idle_max_rpm: 1100        # выше этого — уже не х.х. (х.х. QSX15 = 675-775)
+    stability_mad_warning: 5
+    _source: TUNABLE
+
+# ─── РЕЖИМЫ РАБОТЫ ДВИГАТЕЛЯ ─────────────────────────────────────────────────
+engine_operation:
+  passport:
+    idle_max_duration_sec: 600  # общая рекомендация Cummins: >10 мин х.х. — wet stacking
+    min_load_pct: 30            # рекомендуемый минимум нагрузки дизель-ГУ
+    warmup_min_sec: 180         # прогрев 3-5 мин (общая практика Cummins G-Drive)
+    warmup_max_sec: 300
+    cooldown_min_sec: 0
+    cooldown_max_sec: 600
+    oil_press_rise_time_sec: 15 # появление давления масла после пуска
+    lop_enable_sec: 10          # до активации защиты LOP
+    cold_start_coolant_c: 21    # порог «холодного» пуска (ОЖ < 21°C → прогрев обязателен)
+    _source: ESTIMATE           # СВЕРИТЬ с РЭ QSX15 (руководство 4021334 / owner's manual)
+    _verify: true
+  tunable:
+    purge_min_load_pct: 30
+    purge_min_duration_sec: 300
+    _source: TUNABLE
