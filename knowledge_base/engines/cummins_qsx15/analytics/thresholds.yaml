@@ -4,6 +4,8 @@
 # Источники:
 #   QSX15_DS10349 — Cummins Engine Data Sheet DS-10349 / FR-10349 (QSX15-G9, 27Apr07):
 #                   паспортные пределы смазки/охлаждения/х.х. общие для семейства QSX15.
+#   QSX15_OM_22523849 — Cummins QSX15 Owner's Manual 22523849 (изд. Ingersoll Rand):
+#                   раздел V (Maintenance Specifications) + раздел 1 (Operating Instructions).
 #   PCC3300_DEFAULT — дефолтные уставки панели PCC3300 (0900-0670 / A035B516),
 #                   НЕ подтверждены для данной установки.
 #   ESTIMATE      — инженерная оценка по типовым уставкам Cummins ECM.
@@ -18,11 +20,12 @@
 # ─── ДАВЛЕНИЕ МАСЛА ─────────────────────────────────────────────────────────
 oil_pressure:
   passport:
-    idle_min_kpa: 138         # DS-10349: Oil Pressure @ Idle Speed (Minimum) 20 psi
-    rated_min_kpa: 242        # DS-10349: Pressure Range Warm 35-40 psi — нижняя граница
-    rated_max_kpa: 276        # DS-10349: Pressure Range Warm — верхняя граница
-    cold_max_kpa: 900         # DS-10349: Cold — up to 130 psi (холодный пуск)
-    _source: QSX15_DS10349
+    idle_min_kpa: 103         # OM 22523849, V-2: минимум на х.х. при 93°C масла (15 psi).
+                              # DS-10349 даёт 138 (20 psi) без оговорки по Т — берём РЭ.
+    rated_min_kpa: 242        # OM V-2 + DS-10349: Warm Engine 35-40 psi — нижняя граница
+    rated_max_kpa: 276        # OM V-2 + DS-10349: верхняя граница
+    cold_max_kpa: 900         # OM V-2 + DS-10349: Cold — up to 130 psi (холодный пуск)
+    _source: QSX15_OM_22523849
   controller:
     warning_rated_kpa: 207    # ESTIMATE: 30 psi — ниже норм. диапазона 242-276; СВЕРИТЬ с панелью
     warning_idle_kpa: 103     # ESTIMATE: 15 psi (мин. допустимое на х.х. при 93°C масла)
@@ -131,17 +134,20 @@ rpm:
 # ─── РЕЖИМЫ РАБОТЫ ДВИГАТЕЛЯ ─────────────────────────────────────────────────
 engine_operation:
   passport:
-    idle_max_duration_sec: 600  # общая рекомендация Cummins: >10 мин х.х. — wet stacking
-    min_load_pct: 30            # рекомендуемый минимум нагрузки дизель-ГУ
-    warmup_min_sec: 180         # прогрев 3-5 мин (общая практика Cummins G-Drive)
-    warmup_max_sec: 300
-    cooldown_min_sec: 0
-    cooldown_max_sec: 600
-    oil_press_rise_time_sec: 15 # появление давления масла после пуска
-    lop_enable_sec: 10          # до активации защиты LOP
-    cold_start_coolant_c: 21    # порог «холодного» пуска (ОЖ < 21°C → прогрев обязателен)
-    _source: ESTIMATE           # СВЕРИТЬ с РЭ QSX15 (руководство 4021334 / owner's manual)
-    _verify: true
+    idle_max_duration_sec: 600  # OM 1-4: долгий х.х. при холодной ОЖ — разжижение масла,
+                                # нагар, залипание клапанов (числа нет — оставлен 10 мин)
+    min_load_pct: 30            # рекомендуемый минимум нагрузки дизель-ГУ (общий Cummins)
+    warmup_min_sec: 180         # OM 1-4: «Idle the engine 3 to 5 minutes before operating
+    warmup_max_sec: 300         #   with a load» — прогрев 3-5 мин ПОДТВЕРЖДЁН РЭ
+    cooldown_min_sec: 180       # OM 1-8: «Allow the engine to idle 3 to 5 minutes before
+    cooldown_max_sec: 300       #   shutting it off after full-load» — охлаждение 3-5 мин
+    oil_press_rise_time_sec: 15 # OM 1-3: давление масла ≤15 сек после пуска, иначе стоп
+    crank_max_sec: 30           # OM 1-3: не крутить стартер более 30 сек
+    crank_pause_sec: 120        # OM 1-3: пауза 2 мин между попытками (электростартер)
+    start_attempts_max: 3       # OM 1-3: после 3 неудачных попыток — проверка топливоподачи
+    lop_enable_sec: 10          # PCC3300_DEFAULT: до активации защиты LOP
+    cold_start_coolant_c: 21    # PCC3300_DEFAULT: порог «холодного» пуска
+    _source: QSX15_OM_22523849
   tunable:
     purge_min_load_pct: 30
     purge_min_duration_sec: 300
