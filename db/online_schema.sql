@@ -217,3 +217,11 @@ CREATE INDEX IF NOT EXISTS idx_alarm_episodes_open
 -- UI сворачивает его как «Технические данные»).
 ALTER TABLE auto_segments
     ADD COLUMN IF NOT EXISTS report_summary_md TEXT;
+
+-- Миграция v4.9.22: per-fault ключ панельных аварий. Один scenario
+-- CONTROLLER_FAULT покрывает все биты панели — чтобы аварии не затирали
+-- друг друга (severity, счётчики, журнал), эпизод ключуется по (scenario,
+-- addr, bit). addr/bit NULL — для аналитических сценариев (они уникальны).
+ALTER TABLE alarm_episodes
+    ADD COLUMN IF NOT EXISTS addr INT,
+    ADD COLUMN IF NOT EXISTS bit  INT;

@@ -2133,6 +2133,10 @@ async def api_machines():
                     "scenario":        e["scenario"],
                     "severity":        e.get("severity"),
                     "source":          e.get("source"),
+                    # per-fault: панельные аварии различаются по addr/bit
+                    "addr":            e.get("addr"),
+                    "bit":             e.get("bit"),
+                    "name":            (_parse_json(e.get("open_values_json")) or {}).get("fault_name"),
                     "since":           e["t_open"].isoformat() if e.get("t_open") else None,
                     "duration_sec":    round(e.get("active_sec") or 0),
                     "gate_suppressed": bool(e.get("gate_suppressed")),

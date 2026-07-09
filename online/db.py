@@ -741,10 +741,21 @@ async def insert_detection_events(
 
 # ── alarm_episodes ────────────────────────────────────────────────────────────
 
+def episode_key(scenario: str | None, addr, bit) -> str:
+    """Ключ тревоги: панельные — по-битно, аналитика — по сценарию.
+
+    Должен совпадать с engine._alert_key (тот берёт addr/bit из detection.values).
+    """
+    if scenario == "CONTROLLER_FAULT":
+        return f"CONTROLLER_FAULT|{addr}|{bit}"
+    return scenario or "?"
+
+
 async def open_episode(
     router_sn: str, equip_type: str, panel_id: int, *,
     scenario: str, source: str, severity: str | None,
     t_open: datetime, open_values: dict | None, segment_id: int | None = None,
+    addr: int | None = None, bit: int | None = None,
 ) -> int:
     """Открыть эпизод тревоги (t_close IS NULL = висит). Возвращает id."""
     conn = await _connect()
@@ -752,12 +763,12 @@ async def open_episode(
         row = await conn.fetchrow("""
             INSERT INTO alarm_episodes
                 (router_sn, equip_type, panel_id, scenario, source, severity,
-                 t_open, open_values_json, segment_id_open)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 t_open, open_values_json, segment_id_open, addr, bit)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING id
         """, router_sn, equip_type, panel_id, scenario, source, severity,
              t_open, json.dumps(open_values or {}, ensure_ascii=False, default=str),
-             segment_id)
+             segment_id, addr, bit)
         return int(row["id"])
     finally:
         await conn.close()
@@ -768,6 +779,7 @@ async def insert_closed_episode(
     scenario: str, source: str, severity: str | None,
     t_open: datetime, t_close: datetime, active_sec: float,
     open_values: dict | None = None,
+    addr: int | None = None, bit: int | None = None,
 ) -> int:
     """Сразу закрытый эпизод — для детекций короткого сегмента, не живших
     в снимке открытого окна (например START_FAILURE за один цикл)."""
@@ -776,12 +788,13 @@ async def insert_closed_episode(
         row = await conn.fetchrow("""
             INSERT INTO alarm_episodes
                 (router_sn, equip_type, panel_id, scenario, source, severity,
-                 t_open, t_close, close_reason, active_sec, open_values_json)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'condition_cleared', $9, $10)
+                 t_open, t_close, close_reason, active_sec, open_values_json, addr, bit)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'condition_cleared', $9, $10, $11, $12)
             RETURNING id
         """, router_sn, equip_type, panel_id, scenario, source, severity,
              t_open, t_close, active_sec,
-             json.dumps(open_values or {}, ensure_ascii=False, default=str))
+             json.dumps(open_values or {}, ensure_ascii=False, default=str),
+             addr, bit)
         return int(row["id"])
     finally:
         await conn.close()
@@ -917,7 +930,7 @@ async def count_episodes_batch(
     conn = await _connect()
     try:
         rows = await conn.fetch("""
-            SELECT scenario,
+            SELECT scenario, addr, bit,
                    COUNT(*) FILTER (
                        WHERE t_open > now() - ($5 || ' days')::interval) AS count_window,
                    COALESCE(SUM(active_sec) FILTER (
@@ -931,14 +944,12 @@ async def count_episodes_batch(
               AND scenario = ANY($4::text[])
               AND (t_open > now() - ($5 || ' days')::interval
                    OR ($6::timestamptz IS NOT NULL AND t_open >= $6))
-            GROUP BY scenario
+            GROUP BY scenario, addr, bit
         """, router_sn, equip_type, panel_id, scenarios, str(window_days), since_ts)
-        result = {
-            sc: {"count_window": 0, "dur_window": 0.0, "count_since": 0, "dur_since": 0.0}
-            for sc in scenarios
-        }
+        # Ключ — per-fault (совпадает с engine._alert_key)
+        result: dict[str, dict[str, float]] = {}
         for r in rows:
-            result[r["scenario"]] = {
+            result[episode_key(r["scenario"], r["addr"], r["bit"])] = {
                 "count_window": int(r["count_window"]),
                 "dur_window":   float(r["dur_window"]),
                 "count_since":  int(r["count_since"]),
@@ -997,13 +1008,13 @@ async def get_active_alerts(
     conn = await _connect()
     try:
         rows = await conn.fetch("""
-            SELECT DISTINCT ON (scenario)
+            SELECT DISTINCT ON (scenario, values_json->>'addr', values_json->>'bit')
                 scenario, event_type, ts, severity, trigger_text, values_json, segment_id
             FROM alert_journal
             WHERE router_sn = $1
               AND equip_type = $2
               AND panel_id   = $3
-            ORDER BY scenario, ts DESC
+            ORDER BY scenario, values_json->>'addr', values_json->>'bit', ts DESC
         """, router_sn, equip_type, panel_id)
         result = []
         for r in rows:
