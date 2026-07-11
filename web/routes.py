@@ -1870,10 +1870,23 @@ async def api_online_status():
     now_utc = datetime.now(timezone.utc)
     observations = await odb.list_observations()
     _open_segs = await odb.get_open_segments_all()
+    try:
+        _stale_sec = int(await analytics.get_app_setting("data_stale_threshold_sec", "90"))
+    except Exception:
+        _stale_sec = 90
     result = []
     for obs in observations:
         key = f"{obs['router_sn']}|{obs['equip_type']}|{obs['panel_id']}"
         open_seg = _open_segs.get(key)
+
+        # Свежесть телеметрии: last_data_ts — максимальный ts реальных данных.
+        # «Онлайн»/отставание считаются по обработке (processed_to догоняет
+        # wall-clock даже на пустых окнах) — поэтому отдельно отдаём data_stale.
+        _last_data = obs.get("last_data_ts")
+        data_stale = (
+            _last_data is None
+            or (now_utc - _last_data).total_seconds() > _stale_sec
+        )
         cr = None
         run_state = None
         if open_seg and open_seg.get("coking_risk_json"):
@@ -1961,6 +1974,9 @@ async def api_online_status():
                 open_seg["t_start"].isoformat()
                 if open_seg and open_seg.get("t_start") else None
             ),
+            # Свежесть телеметрии: data_stale=true → данных нет дольше порога
+            "last_data_ts":      _last_data.isoformat() if _last_data else None,
+            "data_stale":        data_stale,
             # ИИ-оператор Уровень 1
             "status_text":       status_text,
             "severity_level":    severity_level,

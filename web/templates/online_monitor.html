@@ -426,7 +426,9 @@ async function refreshStatus() {
             statusLine.className = 'status-line mt-1 ' + (sevColor[item.severity_level] || 'text-secondary');
           }
           statusLine.dataset.text    = item.status_text;
-          statusLine.dataset.updated = item.processed_to || item.status_updated || '';
+          // «N назад» — по времени реального расчёта статуса, не по обработке
+          // (processed_to догоняет wall-clock даже без данных)
+          statusLine.dataset.updated = item.status_updated || item.processed_to || '';
           tickStatusAge(statusLine);
           statusLine.style.display = '';
         } else {
@@ -444,6 +446,20 @@ async function refreshStatus() {
 
       if (!item.engine_live) {
         if (statusBadge) { statusBadge.className = 'badge bg-warning text-dark status-badge'; statusBadge.textContent = '⚠ Движок не запущен'; }
+        return;
+      }
+
+      // Нет свежих данных дольше порога — связь с оборудованием потеряна.
+      // «Онлайн»/отставание считаются по обработке пустых окон, поэтому
+      // data_stale имеет приоритет: показываем реальную слепоту, а не зелёный.
+      if (item.data_stale) {
+        const lastMs = item.last_data_ts ? new Date(item.last_data_ts).getTime() : null;
+        if (statusBadge) { statusBadge.className = 'badge bg-danger status-badge'; statusBadge.textContent = '⚠ Нет связи'; }
+        if (cursorLabel) cursorLabel.textContent = lastMs
+          ? 'последние данные: ' + fmtTs(item.last_data_ts) : 'данных не было';
+        if (progBar) progBar.style.display = 'none';
+        if (progLabel) progLabel.textContent = lastMs
+          ? 'нет связи ' + fmtDur((now - lastMs) / 1000) : '';
         return;
       }
 
