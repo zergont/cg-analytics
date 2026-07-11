@@ -10,7 +10,6 @@
 """FastAPI роуты Web UI аналитики."""
 import asyncio
 import logging
-import re
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -779,31 +778,6 @@ async def kb_upload_file(rel: str = Form(...), file: UploadFile = File(...)):
 
 
 
-# ── KB: HTML-справочник кодов неисправностей ─────────────────────────────────
-
-@router.get("/knowledge/{kb_path}/faultref", response_class=HTMLResponse)
-async def kb_faultref(kb_path: str):
-    """Открыть HTML-справочник кодов неисправностей прямо в браузере."""
-    base = _kb_base(kb_path)
-    html_files = sorted(base.glob("*.html"))
-    if not html_files:
-        raise HTTPException(status_code=404, detail="HTML-справочник не найден в этой KB")
-    return HTMLResponse(content=html_files[0].read_text(encoding="utf-8"))
-
-
-# ── KB: управление файлами ────────────────────────────────────────────────────
-
-_KB_NAME_RE = re.compile(r"^[a-z0-9_]+$")
-_KB_DATA_FILES = [
-    "register_map.jsonl",
-    "fault_bitmap_map.jsonl",
-    "enum_map.json",
-    "operation_rules.json",
-    "pcc3300_fault_codes.json",   # детерминированный справочник кодов неисправностей
-]
-_KB_ALLOWED_EXT = {".jsonl", ".json", ".pdf"}
-
-
 def _is_within(path: Path, base: Path) -> bool:
     """path внутри base (traversal-защита)."""
     try:
@@ -813,139 +787,12 @@ def _is_within(path: Path, base: Path) -> bool:
         return False
 
 
-def _kb_base(kb_path: str) -> Path:
-    """Вернуть абсолютный путь к папке KB с валидацией имени."""
-    from config import settings as _cfg
-    if not _KB_NAME_RE.match(kb_path):
-        raise HTTPException(status_code=400, detail="Недопустимое имя KB")
-    p = _cfg.knowledge_base_path / "equipment" / kb_path
-    if not p.exists():
-        raise HTTPException(status_code=404, detail="KB не найдена")
-    return p
-
-
-def _safe_filename(filename: str) -> str:
-    """Валидировать имя файла — без path-traversal."""
-    if not filename or "/" in filename or "\\" in filename or ".." in filename:
-        raise HTTPException(status_code=400, detail="Недопустимое имя файла")
-    return filename
-
-
 def _fmt_size(b: int) -> str:
     if b < 1024:
         return f"{b} Б"
     if b < 1024 * 1024:
         return f"{b / 1024:.1f} КБ"
     return f"{b / (1024 * 1024):.1f} МБ"
-
-
-@router.get("/knowledge/{kb_path}/files", response_class=JSONResponse)
-async def kb_files(kb_path: str):
-    """Список файлов KB (для модального окна)."""
-    base = _kb_base(kb_path)
-
-    from config import kb_read
-    data_files = []
-    for name in _KB_DATA_FILES:
-        p = kb_read(base / name)
-        data_files.append({
-            "name": name,
-            "exists": p.exists(),
-            "size_fmt": _fmt_size(p.stat().st_size) if p.exists() else None,
-        })
-
-    pdf_files = []
-    docs_dir = base / "docs"
-    if docs_dir.exists():
-        for pdf in sorted(docs_dir.glob("*.pdf")):
-            pdf_files.append({"name": pdf.name, "size_fmt": _fmt_size(kb_read(pdf).stat().st_size)})
-
-    analytics_files = []
-    analytics_dir = base / "analytics"
-    for name in _ANALYTICS_CONFIG_FILES:
-        p = kb_read(analytics_dir / name)
-        analytics_files.append({
-            "name": name,
-            "exists": p.exists(),
-            "size_fmt": _fmt_size(p.stat().st_size) if p.exists() else None,
-        })
-
-    return JSONResponse({"data_files": data_files, "pdf_files": pdf_files, "analytics_files": analytics_files})
-
-
-@router.get("/knowledge/{kb_path}/download/{filename}")
-async def kb_download(kb_path: str, filename: str):
-    """Скачать файл KB."""
-    base = _kb_base(kb_path)
-    _safe_filename(filename)
-
-    from config import kb_read, settings as _cfg
-    # Traversal-защита: _safe_filename уже проверил имя; резолвим оба корня
-    # (git-эталон и рабочий оверлей) как допустимые базы
-    _bases = [base.resolve(), (_cfg.knowledge_base_work_path / "equipment" / kb_path).resolve()]
-    for candidate in [kb_read(base / filename), kb_read(base / "docs" / filename)]:
-        if candidate.exists() and candidate.is_file():
-            if not any(_is_within(candidate.resolve(), b) for b in _bases):
-                raise HTTPException(status_code=403, detail="Доступ запрещён")
-            return FileResponse(path=str(candidate), filename=filename)
-
-    raise HTTPException(status_code=404, detail="Файл не найден")
-
-
-@router.post("/knowledge/{kb_path}/upload")
-async def kb_upload(kb_path: str, file: UploadFile = File(...)):
-    """Загрузить или заменить файл KB."""
-    base = _kb_base(kb_path)
-    filename = _safe_filename(file.filename or "")
-
-    suffix = Path(filename).suffix.lower()
-    if suffix not in _KB_ALLOWED_EXT:
-        raise HTTPException(status_code=400, detail=f"Недопустимое расширение: {suffix}")
-
-    if suffix == ".pdf":
-        dest = base / "docs" / filename
-        dest.parent.mkdir(exist_ok=True)
-    elif filename in _KB_DATA_FILES:
-        dest = base / filename
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Неизвестный файл данных: {filename}. Разрешены: {', '.join(_KB_DATA_FILES)}",
-        )
-
-    content = await file.read()
-
-    # Валидация JSON-файлов (кроме .jsonl — построчные)
-    if suffix == ".json":
-        try:
-            import json as _json
-            _json.loads(content)
-        except Exception as _je:
-            raise HTTPException(status_code=400, detail=f"Невалидный JSON: {_je}")
-
-    from config import kb_write
-    kb_write(dest).write_bytes(content)   # правка идёт в рабочий оверлей, не в git
-    logger.info("KB upload: %s / %s (%d байт)", kb_path, filename, len(content))
-    return RedirectResponse(url="/knowledge", status_code=303)
-
-
-@router.post("/knowledge/{kb_path}/delete")
-async def kb_delete_file(kb_path: str, filename: str = Form(...)):
-    """Удалить PDF из docs/."""
-    base = _kb_base(kb_path)
-    _safe_filename(filename)
-
-    if not filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Удалять можно только PDF-файлы")
-
-    p = base / "docs" / filename
-    if not p.exists():
-        raise HTTPException(status_code=404, detail="Файл не найден")
-
-    p.unlink()
-    logger.info("KB delete PDF: %s / docs/%s", kb_path, filename)
-    return RedirectResponse(url="/knowledge", status_code=303)
-
 
 
 # ── Настройки ─────────────────────────────────────────────────────────────────
@@ -1286,66 +1133,6 @@ async def sync_equipment():
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-_ANALYTICS_CONFIG_FILES = [
-    "mapping.yaml",
-    "thresholds.yaml",
-    "zones.yaml",
-    "segmentation.yaml",
-    "detectors.yaml",
-    "fault_matrix.yaml",
-]
-
-
-@router.get("/knowledge/{kb_path}/analytics-config", response_class=JSONResponse)
-async def analytics_config_files(kb_path: str):
-    """Список YAML-конфигов аналитики для KB."""
-    base = _kb_base(kb_path)
-    analytics_dir = base / "analytics"
-    files = []
-    for name in _ANALYTICS_CONFIG_FILES:
-        p = analytics_dir / name
-        files.append({
-            "name": name,
-            "exists": p.exists(),
-            "size_fmt": _fmt_size(p.stat().st_size) if p.exists() else None,
-        })
-    return JSONResponse({"files": files, "dir_exists": analytics_dir.exists()})
-
-
-@router.get("/knowledge/{kb_path}/analytics-config/download/{filename}")
-async def analytics_config_download(kb_path: str, filename: str):
-    """Скачать YAML-конфиг аналитики."""
-    base = _kb_base(kb_path)
-    _safe_filename(filename)
-    if filename not in _ANALYTICS_CONFIG_FILES:
-        raise HTTPException(status_code=400, detail="Недопустимое имя файла конфига")
-    p = base / "analytics" / filename
-    if not p.exists():
-        raise HTTPException(status_code=404, detail="Файл не найден")
-    return FileResponse(path=str(p), filename=filename, media_type="application/x-yaml")
-
-
-@router.post("/knowledge/{kb_path}/analytics-config/upload")
-async def analytics_config_upload(kb_path: str, file: UploadFile = File(...)):
-    """Загрузить (заменить) YAML-конфиг аналитики."""
-    base = _kb_base(kb_path)
-    filename = _safe_filename(file.filename or "")
-    if filename not in _ANALYTICS_CONFIG_FILES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Недопустимое имя файла. Разрешены: {', '.join(_ANALYTICS_CONFIG_FILES)}",
-        )
-    content = await file.read()
-    # Базовая валидация: YAML должен парситься
-    try:
-        import yaml as _yaml
-        _yaml.safe_load(content)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Невалидный YAML: {e}")
-    from config import kb_write
-    kb_write(base / "analytics" / filename).write_bytes(content)   # правка в рабочий оверлей
-    logger.info("Analytics config upload: %s / analytics/%s (%d байт)", kb_path, filename, len(content))
-    return RedirectResponse(url="/knowledge", status_code=303)
 
 
 # ── Онлайн-мониторинг ────────────────────────────────────────────────────────
@@ -2494,15 +2281,6 @@ async def api_segment_detail(seg_id: int):
             "segments": f"/api/machine/{seg['router_sn']}/{seg['equip_type']}/{seg['panel_id']}/segments",
         },
     })
-
-
-def _count_lines(path) -> int:
-    if not path or not path.exists():
-        return 0
-    try:
-        return sum(1 for line in path.open(encoding="utf-8") if line.strip())
-    except OSError:
-        return 0
 
 
 def _list_kb_paths(equipment_dir) -> list[str]:
