@@ -81,9 +81,10 @@ class FaultRef:
         self._load(bases)
 
     def _load(self, bases: list[Path]) -> None:
+        from config import kb_read
         for base in bases:
             for name in _SEARCH_NAMES:
-                p = base / name
+                p = kb_read(base / name)   # рабочий оверлей поверх git-эталона
                 if p.exists():
                     try:
                         data = json.loads(p.read_text(encoding="utf-8-sig"))

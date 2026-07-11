@@ -381,11 +381,12 @@ class AnalyticsConfig:
         Слои сливаются deep-merge по порядку (позднейший перекрывает ранний).
         Файл может отсутствовать в части слоёв, но должен быть хотя бы в одном.
         """
+        from config import kb_read
         acc: dict[str, Any] = {}
         found = False
         for layer in self._layers:
             path = layer / "analytics" / filename
-            if path.exists():
+            if kb_read(path).exists():   # git-эталон ИЛИ рабочий оверлей
                 acc = self._deep_merge(acc, self._load(path))
                 found = True
         if not found:
@@ -418,6 +419,9 @@ class AnalyticsConfig:
 
     @staticmethod
     def _load(path: Path) -> dict[str, Any]:
+        # Рабочий оверлей поверх git-эталона (правки из веб-морды)
+        from config import kb_read
+        path = kb_read(path)
         if not path.exists():
             raise FileNotFoundError(f"Файл конфигурации не найден: {path}")
         with path.open(encoding="utf-8") as f:

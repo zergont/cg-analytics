@@ -16,3 +16,6 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# Рабочий оверлей KB — правки из веб-морды (эталон везёт git)
+knowledge_base_work/

@@ -621,13 +621,14 @@ async def knowledge_page(request: Request):
         for kb_dir in sorted(equipment_dir.iterdir()):
             if not kb_dir.is_dir():
                 continue
-            reg_count = _count_lines(kb_dir / "register_map.jsonl")
-            fault_count = _count_lines(kb_dir / "fault_bitmap_map.jsonl")
-            has_rules = (kb_dir / "operation_rules.json").exists()
+            from config import kb_read as _kb_read
+            reg_count = _count_lines(_kb_read(kb_dir / "register_map.jsonl"))
+            fault_count = _count_lines(_kb_read(kb_dir / "fault_bitmap_map.jsonl"))
+            has_rules = _kb_read(kb_dir / "operation_rules.json").exists()
             pdf_count = len(list((kb_dir / "docs").glob("*.pdf"))) if (kb_dir / "docs").exists() else 0
 
             # Справочник кодов неисправностей
-            fault_ref_path = kb_dir / "pcc3300_fault_codes.json"
+            fault_ref_path = _kb_read(kb_dir / "pcc3300_fault_codes.json")
             fault_ref_codes = 0
             if fault_ref_path.exists():
                 try:
@@ -678,6 +679,15 @@ _KB_DATA_FILES = [
 _KB_ALLOWED_EXT = {".jsonl", ".json", ".pdf"}
 
 
+def _is_within(path: Path, base: Path) -> bool:
+    """path внутри base (traversal-защита)."""
+    try:
+        path.relative_to(base)
+        return True
+    except ValueError:
+        return False
+
+
 def _kb_base(kb_path: str) -> Path:
     """Вернуть абсолютный путь к папке KB с валидацией имени."""
     from config import settings as _cfg
@@ -709,9 +719,10 @@ async def kb_files(kb_path: str):
     """Список файлов KB (для модального окна)."""
     base = _kb_base(kb_path)
 
+    from config import kb_read
     data_files = []
     for name in _KB_DATA_FILES:
-        p = base / name
+        p = kb_read(base / name)
         data_files.append({
             "name": name,
             "exists": p.exists(),
@@ -722,12 +733,12 @@ async def kb_files(kb_path: str):
     docs_dir = base / "docs"
     if docs_dir.exists():
         for pdf in sorted(docs_dir.glob("*.pdf")):
-            pdf_files.append({"name": pdf.name, "size_fmt": _fmt_size(pdf.stat().st_size)})
+            pdf_files.append({"name": pdf.name, "size_fmt": _fmt_size(kb_read(pdf).stat().st_size)})
 
     analytics_files = []
     analytics_dir = base / "analytics"
     for name in _ANALYTICS_CONFIG_FILES:
-        p = analytics_dir / name
+        p = kb_read(analytics_dir / name)
         analytics_files.append({
             "name": name,
             "exists": p.exists(),
@@ -743,13 +754,13 @@ async def kb_download(kb_path: str, filename: str):
     base = _kb_base(kb_path)
     _safe_filename(filename)
 
-    # Сначала ищем в корне KB, затем в docs/
-    for candidate in [base / filename, base / "docs" / filename]:
+    from config import kb_read, settings as _cfg
+    # Traversal-защита: _safe_filename уже проверил имя; резолвим оба корня
+    # (git-эталон и рабочий оверлей) как допустимые базы
+    _bases = [base.resolve(), (_cfg.knowledge_base_work_path / "equipment" / kb_path).resolve()]
+    for candidate in [kb_read(base / filename), kb_read(base / "docs" / filename)]:
         if candidate.exists() and candidate.is_file():
-            # Проверяем что файл внутри папки KB
-            try:
-                candidate.resolve().relative_to(base.resolve())
-            except ValueError:
+            if not any(_is_within(candidate.resolve(), b) for b in _bases):
                 raise HTTPException(status_code=403, detail="Доступ запрещён")
             return FileResponse(path=str(candidate), filename=filename)
 
@@ -787,7 +798,8 @@ async def kb_upload(kb_path: str, file: UploadFile = File(...)):
         except Exception as _je:
             raise HTTPException(status_code=400, detail=f"Невалидный JSON: {_je}")
 
-    dest.write_bytes(content)
+    from config import kb_write
+    kb_write(dest).write_bytes(content)   # правка идёт в рабочий оверлей, не в git
     logger.info("KB upload: %s / %s (%d байт)", kb_path, filename, len(content))
     return RedirectResponse(url="/knowledge", status_code=303)
 
@@ -1198,8 +1210,6 @@ async def analytics_config_upload(kb_path: str, file: UploadFile = File(...)):
             status_code=400,
             detail=f"Недопустимое имя файла. Разрешены: {', '.join(_ANALYTICS_CONFIG_FILES)}",
         )
-    analytics_dir = base / "analytics"
-    analytics_dir.mkdir(exist_ok=True)
     content = await file.read()
     # Базовая валидация: YAML должен парситься
     try:
@@ -1207,7 +1217,8 @@ async def analytics_config_upload(kb_path: str, file: UploadFile = File(...)):
         _yaml.safe_load(content)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Невалидный YAML: {e}")
-    (analytics_dir / filename).write_bytes(content)
+    from config import kb_write
+    kb_write(base / "analytics" / filename).write_bytes(content)   # правка в рабочий оверлей
     logger.info("Analytics config upload: %s / analytics/%s (%d байт)", kb_path, filename, len(content))
     return RedirectResponse(url="/knowledge", status_code=303)
 

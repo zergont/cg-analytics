@@ -43,6 +43,14 @@ class Settings:
 
         kb = data.get("knowledge_base", {})
         self.knowledge_base_path: Path = Path(kb.get("path", "./knowledge_base"))
+        # Рабочий оверлей KB (правки из веб-морды). НЕ в git — эталон везёт git,
+        # рабочая версия перекрывает его пофайлно (kb_read/kb_write в config.py).
+        # git pull не конфликтует; не тронутые файлы едут из git и обновляются сами.
+        _kb_work = kb.get("work_path")
+        self.knowledge_base_work_path: Path = Path(_kb_work) if _kb_work else (
+            self.knowledge_base_path.parent
+            / (self.knowledge_base_path.name + "_work")
+        )
 
         web = data.get("web", {})
         self.web_host: str = web.get("host", "0.0.0.0")
@@ -86,6 +94,41 @@ def set_tz(tz_name: str) -> None:
     """Обновить часовой пояс в памяти. Вызывается при загрузке из БД или смене через UI."""
     global _current_tz
     _current_tz = ZoneInfo(tz_name)
+
+
+# ── KB: оверлей рабочей версии поверх git-эталона (Вариант 2) ─────────────────
+# git трекает эталон в knowledge_base_path; правки из веб-морды живут в
+# knowledge_base_work_path (gitignored). Резолвинг пофайлный: рабочая версия
+# перекрывает эталон, если существует. git pull не конфликтует.
+
+def kb_read(path: Path) -> Path:
+    """Путь для ЧТЕНИЯ KB-файла: рабочий оверлей если есть, иначе git-эталон.
+
+    path — абсолютный/относительный путь под knowledge_base_path. Если он вне
+    KB-дерева — возвращается как есть (оверлей не применяется).
+    """
+    path = Path(path)
+    try:
+        rel = path.resolve().relative_to(settings.knowledge_base_path.resolve())
+    except (ValueError, OSError):
+        return path
+    work = settings.knowledge_base_work_path / rel
+    return work if work.exists() else path
+
+
+def kb_write(path: Path) -> Path:
+    """Путь для ЗАПИСИ KB-файла: всегда в рабочий оверлей (создаёт папки).
+
+    Правки из веб-морды идут только в work — эталон git остаётся нетронутым.
+    """
+    path = Path(path)
+    try:
+        rel = path.resolve().relative_to(settings.knowledge_base_path.resolve())
+    except (ValueError, OSError):
+        return path
+    work = settings.knowledge_base_work_path / rel
+    work.parent.mkdir(parents=True, exist_ok=True)
+    return work
 
 
 # Список часовых поясов, доступных в UI (IANA-имя → метка)
