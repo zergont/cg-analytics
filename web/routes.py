@@ -611,46 +611,171 @@ def _build_analysis_md(
 
 # ── Knowledge Base ────────────────────────────────────────────────────────────
 
+# ── KB: слоевой экран (эталон git ↔ рабочий оверлей) ─────────────────────────
+
+_KB_TEXT_EXT = {".yaml", ".yml", ".json", ".jsonl", ".txt", ".md"}
+
+
+def _kb_validate_rel(rel: str) -> "Path":
+    """Проверить относительный путь KB-файла и вернуть git-путь.
+
+    Защита от traversal: путь обязан резолвиться внутри knowledge_base_path.
+    """
+    from config import settings as _cfg
+    rel = (rel or "").strip().replace("\\", "/")
+    if not rel or ".." in rel.split("/"):
+        raise HTTPException(status_code=400, detail="Недопустимый путь")
+    gp = (_cfg.knowledge_base_path / rel)
+    if not _is_within(gp.resolve(), _cfg.knowledge_base_path.resolve()):
+        raise HTTPException(status_code=400, detail="Путь вне KB")
+    return gp
+
+
+def _kb_layer_dir_files(layer_rel: str) -> list[dict]:
+    """Файлы слоя (union git+overlay) со статусом git/оверлей."""
+    from config import settings as _cfg
+    root = _cfg.knowledge_base_path
+    work = _cfg.knowledge_base_work_path
+    seen: dict[str, dict] = {}
+    for base in (root / layer_rel, work / layer_rel):
+        if not base.exists():
+            continue
+        # analytics/*.yaml, root *.json/*.jsonl, docs/*
+        scan = [
+            ("analytics", {".yaml", ".yml"}, "Аналитика"),
+            ("",          {".json", ".jsonl"}, "Данные"),
+            ("docs",      None, "Документы"),
+        ]
+        for sub, exts, group in scan:
+            d = (base / sub) if sub else base
+            if not d.is_dir():
+                continue
+            for f in sorted(d.iterdir()):
+                if not f.is_file():
+                    continue
+                if exts is not None and f.suffix.lower() not in exts:
+                    continue
+                rel = (Path(layer_rel) / ((Path(sub) / f.name) if sub else f.name)).as_posix()
+                seen.setdefault(rel, {"rel": rel, "name": f.name, "group": group})
+    out: list[dict] = []
+    for rel, info in sorted(seen.items(), key=lambda kv: (kv[1]["group"], kv[0])):
+        gp = root / rel
+        wp = work / rel
+        eff = wp if wp.exists() else gp
+        info["git_exists"] = gp.exists()
+        info["overridden"] = wp.exists()
+        info["size"] = _fmt_size(eff.stat().st_size) if eff.exists() else "—"
+        info["is_text"] = eff.suffix.lower() in _KB_TEXT_EXT
+        out.append(info)
+    return out
+
+
+def _kb_scan_layers() -> list[dict]:
+    """Все слои KB (то, что реально читает аналитика): _defaults, controllers/*, engines/*."""
+    from config import settings as _cfg
+    root = _cfg.knowledge_base_path
+    work = _cfg.knowledge_base_work_path
+    groups: list[dict] = []
+    if (root / "_defaults").exists() or (work / "_defaults").exists():
+        groups.append({"title": "Базовый слой", "id": "_defaults", "layer_rel": "_defaults",
+                       "files": _kb_layer_dir_files("_defaults")})
+    for sub, title in (("controllers", "Контроллер"), ("engines", "Двигатель")):
+        ids: set[str] = set()
+        for b in (root / sub, work / sub):
+            if b.exists():
+                ids |= {d.name for d in b.iterdir() if d.is_dir()}
+        for i in sorted(ids):
+            groups.append({"title": f"{title}", "id": i, "layer_rel": f"{sub}/{i}",
+                           "files": _kb_layer_dir_files(f"{sub}/{i}")})
+    return groups
+
+
 @router.get("/knowledge", response_class=HTMLResponse)
 async def knowledge_page(request: Request):
-    from config import settings
-    equipment_dir = settings.knowledge_base_path / "equipment"
+    from config import settings as _cfg
+    layers = _kb_scan_layers()
+    overrides = sum(1 for g in layers for f in g["files"] if f["overridden"])
+    return templates.TemplateResponse(request, "knowledge.html", {
+        "layers": layers,
+        "overrides_count": overrides,
+        "work_path": str(_cfg.knowledge_base_work_path),
+    })
 
-    models = []
-    if equipment_dir.exists():
-        for kb_dir in sorted(equipment_dir.iterdir()):
-            if not kb_dir.is_dir():
-                continue
-            from config import kb_read as _kb_read
-            reg_count = _count_lines(_kb_read(kb_dir / "register_map.jsonl"))
-            fault_count = _count_lines(_kb_read(kb_dir / "fault_bitmap_map.jsonl"))
-            has_rules = _kb_read(kb_dir / "operation_rules.json").exists()
-            pdf_count = len(list((kb_dir / "docs").glob("*.pdf"))) if (kb_dir / "docs").exists() else 0
 
-            # Справочник кодов неисправностей
-            fault_ref_path = _kb_read(kb_dir / "pcc3300_fault_codes.json")
-            fault_ref_codes = 0
-            if fault_ref_path.exists():
-                try:
-                    import json as _json
-                    data = _json.loads(fault_ref_path.read_text(encoding="utf-8-sig"))
-                    fault_ref_codes = data.get("statistics", {}).get("total_codes", 0) \
-                                      or len(data.get("fault_codes", []))
-                except Exception:
-                    fault_ref_codes = -1  # файл есть, но не распарсился
+@router.get("/knowledge/file", response_class=JSONResponse)
+async def kb_file_detail(rel: str):
+    """Содержимое файла: эталон git + рабочая версия (для сравнения)."""
+    from config import settings as _cfg
+    gp = _kb_validate_rel(rel)
+    wp = _cfg.knowledge_base_work_path / gp.resolve().relative_to(_cfg.knowledge_base_path.resolve())
+    is_text = gp.suffix.lower() in _KB_TEXT_EXT
 
-            models.append({
-                "kb_path": kb_dir.name,
-                "registers": reg_count,
-                "faults": fault_count,
-                "has_rules": has_rules,
-                "pdfs": pdf_count,
-                "has_fault_ref": fault_ref_path.exists(),
-                "fault_ref_codes": fault_ref_codes,
-                "has_faultref_html": bool(list(kb_dir.glob("*.html"))),
-            })
+    def _read(pth):
+        if not pth.exists():
+            return None
+        if not is_text:
+            return None
+        try:
+            return pth.read_text(encoding="utf-8-sig")
+        except Exception:
+            return None
 
-    return templates.TemplateResponse(request, "knowledge.html", {"models": models})
+    return JSONResponse({
+        "rel": rel,
+        "name": gp.name,
+        "is_text": is_text,
+        "git_exists": gp.exists(),
+        "overridden": wp.exists(),
+        "git_text": _read(gp),
+        "work_text": _read(wp),
+    })
+
+
+@router.get("/knowledge/download-file")
+async def kb_download_file(rel: str):
+    """Скачать эффективную версию файла (оверлей поверх git)."""
+    from config import kb_read
+    gp = _kb_validate_rel(rel)
+    eff = kb_read(gp)
+    if not eff.exists() or not eff.is_file():
+        raise HTTPException(status_code=404, detail="Файл не найден")
+    return FileResponse(path=str(eff), filename=gp.name)
+
+
+@router.post("/knowledge/revert")
+async def kb_revert(rel: str = Form(...)):
+    """Вернуть файл к эталону git — удалить рабочий оверлей."""
+    from config import settings as _cfg
+    gp = _kb_validate_rel(rel)
+    wp = _cfg.knowledge_base_work_path / gp.resolve().relative_to(_cfg.knowledge_base_path.resolve())
+    if wp.exists():
+        wp.unlink()
+        logger.info("KB revert: %s → эталон git (оверлей удалён)", rel)
+    return RedirectResponse(url="/knowledge", status_code=303)
+
+
+@router.post("/knowledge/upload-file")
+async def kb_upload_file(rel: str = Form(...), file: UploadFile = File(...)):
+    """Загрузить свою версию файла в рабочий оверлей (эталон git не трогается)."""
+    from config import kb_write
+    gp = _kb_validate_rel(rel)
+    content = await file.read()
+    suffix = gp.suffix.lower()
+    if suffix in (".json",):
+        try:
+            import json as _json
+            _json.loads(content)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Невалидный JSON: {e}")
+    elif suffix in (".yaml", ".yml"):
+        try:
+            import yaml as _yaml
+            _yaml.safe_load(content)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Невалидный YAML: {e}")
+    kb_write(gp).write_bytes(content)
+    logger.info("KB overlay upload: %s (%d байт)", rel, len(content))
+    return RedirectResponse(url="/knowledge", status_code=303)
 
 
 

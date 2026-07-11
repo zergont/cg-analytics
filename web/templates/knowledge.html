@@ -2,261 +2,177 @@
 {% block title %}База знаний — cg-analytics{% endblock %}
 
 {% block content %}
-<h5 class="mb-3">Knowledge Base — модели оборудования</h5>
-
-{% if not models %}
-<div class="alert alert-secondary">
-    База знаний пуста. Добавьте папку в
-    <code>knowledge_base/equipment/{название}/</code>
-    с файлами <code>register_map.jsonl</code>, <code>fault_bitmap_map.jsonl</code>, <code>enum_map.json</code>.
+<div class="d-flex align-items-center gap-2 mb-1">
+  <h5 class="mb-0">База знаний — слои конфигурации</h5>
+  {% if overrides_count %}
+  <span class="badge bg-warning text-dark" title="Файлов с рабочей версией поверх git-эталона">
+    оверлеев: {{ overrides_count }}
+  </span>
+  {% endif %}
 </div>
-{% else %}
-<table class="table table-sm table-hover">
-    <thead class="table-dark">
-        <tr>
-            <th>База знаний</th>
-            <th>Регистров</th>
-            <th>Fault-битов</th>
-            <th>Правила работы</th>
-            <th>Справочник кодов</th>
-            <th>PDF</th>
-            <th></th>
-        </tr>
-    </thead>
-    <tbody>
-    {% for m in models %}
-    <tr>
-        <td><code>{{ m.kb_path }}</code></td>
-        <td>{{ m.registers }}</td>
-        <td>{{ m.faults }}</td>
-        <td>
-            {% if m.has_rules %}
-                <span class="badge bg-success-subtle text-success-emphasis">есть</span>
-            {% else %}
-                <span class="badge bg-secondary-subtle text-secondary-emphasis">нет</span>
-            {% endif %}
-        </td>
-        <td>
-            {% if m.has_fault_ref %}
-                <span class="badge bg-success-subtle text-success-emphasis"
-                      title="{{ m.fault_ref_codes }} кодов">{{ m.fault_ref_codes }} кодов</span>
-            {% else %}
-                <span class="badge bg-secondary-subtle text-secondary-emphasis">нет</span>
-            {% endif %}
-        </td>
-        <td>{{ m.pdfs }}</td>
-        <td class="text-end">
-            {% if m.has_faultref_html %}
-            <a href="/knowledge/{{ m.kb_path }}/faultref" target="_blank"
-               class="btn btn-sm btn-outline-success me-1">
-                📋 Справочник
-            </a>
-            {% endif %}
-            <button class="btn btn-sm btn-outline-info"
-                    onclick="openKbModal('{{ m.kb_path }}')">
-                📁 Файлы
-            </button>
-        </td>
-    </tr>
-    {% endfor %}
-    </tbody>
-</table>
+<p class="text-muted small mb-3">
+  Эталон везёт git; правки живут в рабочем оверлее
+  <code>{{ work_path }}</code> и перекрывают эталон пофайлно.
+  <code>git pull</code> не конфликтует — не тронутые файлы едут из git и
+  обновляются автоматически. Аналитика читает эффективную (оверлей поверх git) версию.
+</p>
+
+{% if not layers %}
+<div class="alert alert-secondary">
+  Слои не найдены. Ожидаются <code>knowledge_base/{_defaults,controllers/&lt;id&gt;,engines/&lt;id&gt;}</code>.
+</div>
 {% endif %}
 
-{# ── Модальное окно управления файлами ── #}
-<div class="modal fade" id="kbModal" tabindex="-1" aria-labelledby="kbModalLabel" aria-hidden="true">
-  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+{% for g in layers %}
+<div class="card mb-3">
+  <div class="card-header py-2 d-flex align-items-center gap-2">
+    <span class="fw-semibold">{{ g.title }}</span>
+    {% if g.id and g.id != "_defaults" %}<code>{{ g.id }}</code>{% endif %}
+    <span class="ms-auto text-muted small">{{ g.files|length }} файл(ов)</span>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm mb-0 align-middle">
+      <thead class="table-light">
+        <tr>
+          <th style="width:34%">Файл</th>
+          <th style="width:14%">Раздел</th>
+          <th style="width:16%">Статус</th>
+          <th class="text-end" style="width:10%">Размер</th>
+          <th class="text-end">Действия</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for f in g.files %}
+        <tr>
+          <td><code style="font-size:.8rem">{{ f.name }}</code></td>
+          <td class="text-muted small">{{ f.group }}</td>
+          <td>
+            {% if f.overridden and f.git_exists %}
+              <span class="badge bg-warning text-dark">своя версия</span>
+            {% elif f.overridden and not f.git_exists %}
+              <span class="badge bg-info text-dark">только оверлей</span>
+            {% else %}
+              <span class="badge bg-secondary-subtle text-secondary-emphasis">из git</span>
+            {% endif %}
+          </td>
+          <td class="text-end text-muted small">{{ f.size }}</td>
+          <td class="text-end text-nowrap">
+            {% if f.is_text and f.overridden and f.git_exists %}
+            <button class="btn btn-sm btn-outline-primary py-0"
+                    onclick="kbDiff('{{ f.rel }}')">сравнить</button>
+            {% endif %}
+            <a class="btn btn-sm btn-outline-secondary py-0"
+               href="/knowledge/download-file?rel={{ f.rel|urlencode }}">↓</a>
+            <button class="btn btn-sm btn-outline-success py-0"
+                    onclick="kbUpload('{{ f.rel }}','{{ f.name }}')">своя ↑</button>
+            {% if f.overridden %}
+            <form method="post" action="/knowledge/revert" class="d-inline"
+                  onsubmit="return confirm('Вернуть {{ f.name }} к эталону git? Рабочая версия будет удалена.')">
+              <input type="hidden" name="rel" value="{{ f.rel }}">
+              <button class="btn btn-sm btn-outline-danger py-0" type="submit"
+                      title="Удалить оверлей — аналитика возьмёт эталон git">к git</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      {% if not g.files %}
+        <tr><td colspan="5" class="text-center text-muted small py-3">Файлов нет</td></tr>
+      {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endfor %}
+
+{# ── Модалка сравнения git ↔ рабочая ── #}
+<div class="modal fade" id="kbDiffModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
     <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title" id="kbModalLabel">
-            Файлы базы знаний: <code id="kbModalKbPath"></code>
-        </h5>
+      <div class="modal-header py-2">
+        <h6 class="modal-title mb-0">Сравнение: <code id="kbDiffName"></code></h6>
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
-      <div class="modal-body" id="kbModalBody">
-        <div class="text-center py-4">
-            <div class="spinner-border spinner-border-sm text-secondary"></div>
+      <div class="modal-body">
+        <div class="row g-2">
+          <div class="col-6">
+            <div class="small fw-semibold text-secondary mb-1">Эталон (git)</div>
+            <pre id="kbDiffGit" class="border rounded p-2 mb-0"
+                 style="font-size:.72rem;max-height:65vh;overflow:auto;white-space:pre-wrap"></pre>
+          </div>
+          <div class="col-6">
+            <div class="small fw-semibold text-warning mb-1">Рабочая (оверлей)</div>
+            <pre id="kbDiffWork" class="border rounded p-2 mb-0"
+                 style="font-size:.72rem;max-height:65vh;overflow:auto;white-space:pre-wrap"></pre>
+          </div>
         </div>
+        <div class="form-text mt-2">Изменённые строки подсвечены: <span class="kb-add px-1">только в рабочей</span> · <span class="kb-del px-1">только в git</span></div>
       </div>
     </div>
   </div>
 </div>
 
+{# ── Модалка загрузки своей версии ── #}
+<div class="modal fade" id="kbUploadModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <form method="post" action="/knowledge/upload-file" enctype="multipart/form-data">
+        <div class="modal-header py-2">
+          <h6 class="modal-title mb-0">Своя версия: <code id="kbUpName"></code></h6>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" name="rel" id="kbUpRel">
+          <input type="file" name="file" class="form-control form-control-sm" required>
+          <div class="form-text mt-2 text-warning">
+            ⚠ Файл ляжет в рабочий оверлей поверх git-эталона и повлияет на все
+            последующие прогоны аналитики. git-эталон не изменится.
+          </div>
+        </div>
+        <div class="modal-footer py-2">
+          <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Отмена</button>
+          <button type="submit" class="btn btn-sm btn-primary">Загрузить в оверлей</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
+<style>
+  .kb-add { background: rgba(25,135,84,.18); }
+  .kb-del { background: rgba(220,53,69,.18); }
+</style>
 <script>
-// ── Файловый менеджер KB ───────────────────────────────────────────────────
-let _currentKbPath = '';
+function _esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-function openKbModal(kbPath) {
-    _currentKbPath = kbPath;
-    document.getElementById('kbModalKbPath').textContent = kbPath;
-    document.getElementById('kbModalBody').innerHTML =
-        '<div class="text-center py-4"><div class="spinner-border spinner-border-sm text-secondary"></div></div>';
-    new bootstrap.Modal(document.getElementById('kbModal')).show();
-    loadKbFiles(kbPath);
+// Наивная построчная подсветка: строки, которых нет в другой версии
+function _renderDiff(gitText, workText) {
+  const g = (gitText || '').split('\n');
+  const w = (workText || '').split('\n');
+  const gSet = new Set(g), wSet = new Set(w);
+  const gitEl = document.getElementById('kbDiffGit');
+  const workEl = document.getElementById('kbDiffWork');
+  gitEl.innerHTML  = g.map(l => wSet.has(l) ? _esc(l) : '<span class="kb-del">'+_esc(l)+'</span>').join('\n');
+  workEl.innerHTML = w.map(l => gSet.has(l) ? _esc(l) : '<span class="kb-add">'+_esc(l)+'</span>').join('\n');
 }
 
-function loadKbFiles(kbPath) {
-    fetch('/knowledge/' + encodeURIComponent(kbPath) + '/files')
-        .then(r => r.json())
-        .then(data => renderKbFiles(kbPath, data))
-        .catch(() => {
-            document.getElementById('kbModalBody').innerHTML =
-                '<div class="alert alert-danger">Ошибка загрузки списка файлов</div>';
-        });
+function kbDiff(rel) {
+  fetch('/knowledge/file?rel=' + encodeURIComponent(rel))
+    .then(r => r.json())
+    .then(d => {
+      document.getElementById('kbDiffName').textContent = d.name;
+      _renderDiff(d.git_text, d.work_text);
+      new bootstrap.Modal(document.getElementById('kbDiffModal')).show();
+    })
+    .catch(() => alert('Не удалось загрузить содержимое файла'));
 }
 
-function renderKbFiles(kbPath, data) {
-    const enc = encodeURIComponent(kbPath);
-    let html = '';
-
-    // Файлы данных
-    html += '<h6 class="fw-semibold mb-2">Файлы данных</h6>';
-    html += '<table class="table table-sm table-bordered mb-3"><thead class="table-light"><tr><th>Файл</th><th class="text-end">Размер</th><th></th></tr></thead><tbody>';
-    for (const f of data.data_files) {
-        const exists = f.exists;
-        const sizeCell = exists
-            ? `<span class="text-success">${f.size_fmt}</span>`
-            : '<span class="text-muted fst-italic">отсутствует</span>';
-        const dlBtn = exists
-            ? `<a href="/knowledge/${enc}/download/${encodeURIComponent(f.name)}"
-                  class="btn btn-sm btn-outline-secondary me-1" download>⬇</a>`
-            : '';
-        html += `<tr>
-            <td><code>${f.name}</code></td>
-            <td class="text-end">${sizeCell}</td>
-            <td class="text-end text-nowrap">
-                ${dlBtn}
-                <button class="btn btn-sm btn-outline-primary"
-                        onclick="showUploadForm('${kbPath}','${f.name}',false)">
-                    ⬆ Загрузить
-                </button>
-            </td>
-        </tr>`;
-    }
-    html += '</tbody></table>';
-
-    // PDF-документы
-    html += '<h6 class="fw-semibold mb-2">PDF-документы</h6>';
-    html += '<table class="table table-sm table-bordered mb-3"><thead class="table-light"><tr><th>Файл</th><th class="text-end">Размер</th><th></th></tr></thead><tbody>';
-    if (data.pdf_files.length === 0) {
-        html += '<tr><td colspan="3" class="text-center text-muted fst-italic">Нет PDF-документов</td></tr>';
-    }
-    for (const f of data.pdf_files) {
-        html += `<tr>
-            <td><code>${f.name}</code></td>
-            <td class="text-end">${f.size_fmt}</td>
-            <td class="text-end text-nowrap">
-                <a href="/knowledge/${enc}/download/${encodeURIComponent(f.name)}"
-                   class="btn btn-sm btn-outline-secondary me-1" download>⬇</a>
-                <form method="post" action="/knowledge/${enc}/delete" class="d-inline"
-                      onsubmit="return confirm('Удалить ${f.name.replace(/'/g,"\\'")}?')">
-                    <input type="hidden" name="filename" value="${f.name}">
-                    <button type="submit" class="btn btn-sm btn-outline-danger">✕</button>
-                </form>
-            </td>
-        </tr>`;
-    }
-    html += '</tbody></table>';
-
-    // Кнопка добавить PDF
-    html += `<button class="btn btn-sm btn-outline-success mb-3"
-                     onclick="showUploadForm('${kbPath}',null,true)">
-                 + Добавить PDF
-             </button>`;
-
-    // YAML-конфиги аналитики
-    html += '<h6 class="fw-semibold mb-2">YAML-конфиги аналитики</h6>';
-    html += '<table class="table table-sm table-bordered mb-3"><thead class="table-light"><tr><th>Файл</th><th class="text-end">Размер</th><th></th></tr></thead><tbody>';
-    for (const f of (data.analytics_files || [])) {
-        const sizeCell = f.exists
-            ? `<span class="text-success">${f.size_fmt}</span>`
-            : '<span class="text-muted fst-italic">отсутствует</span>';
-        const dlBtn = f.exists
-            ? `<a href="/knowledge/${enc}/analytics-config/download/${encodeURIComponent(f.name)}"
-                  class="btn btn-sm btn-outline-secondary me-1" download>⬇</a>`
-            : '';
-        html += `<tr>
-            <td><code>${f.name}</code></td>
-            <td class="text-end">${sizeCell}</td>
-            <td class="text-end text-nowrap">
-                ${dlBtn}
-                <button class="btn btn-sm btn-outline-primary"
-                        onclick="showAnalyticsUploadForm('${kbPath}','${f.name}')">
-                    ⬆ Загрузить
-                </button>
-            </td>
-        </tr>`;
-    }
-    html += '</tbody></table>';
-
-    // Форма загрузки analytics config (скрыта)
-    html += `<div id="analyticsUploadBlock" style="display:none" class="border rounded p-3 bg-light mb-3">
-        <h6 id="analyticsUploadTitle" class="mb-2"></h6>
-        <form method="post" action="/knowledge/${enc}/analytics-config/upload"
-              enctype="multipart/form-data" id="analyticsUploadForm">
-            <div class="input-group input-group-sm">
-                <input type="file" name="file" id="analyticsUploadInput" class="form-control"
-                       required accept=".yaml,.yml">
-                <button type="submit" class="btn btn-primary">Загрузить</button>
-                <button type="button" class="btn btn-secondary"
-                        onclick="document.getElementById('analyticsUploadBlock').style.display='none'">
-                    Отмена
-                </button>
-            </div>
-            <div class="form-text mt-1 text-warning">
-                ⚠ Изменение конфигов аналитики влияет на все последующие прогоны. Делай бэкап перед заменой.
-            </div>
-        </form>
-    </div>`;
-
-    // Форма загрузки (скрыта)
-    html += `<div id="uploadBlock" style="display:none" class="border rounded p-3 bg-light">
-        <h6 id="uploadTitle" class="mb-2"></h6>
-        <form method="post" action="/knowledge/${enc}/upload"
-              enctype="multipart/form-data" id="uploadForm">
-            <div class="input-group input-group-sm">
-                <input type="file" name="file" id="uploadInput" class="form-control"
-                       required accept=".jsonl,.json,.pdf">
-                <button type="submit" class="btn btn-primary">Загрузить</button>
-                <button type="button" class="btn btn-secondary"
-                        onclick="document.getElementById('uploadBlock').style.display='none'">
-                    Отмена
-                </button>
-            </div>
-            <div class="form-text mt-1" id="uploadHint"></div>
-        </form>
-    </div>`;
-
-    document.getElementById('kbModalBody').innerHTML = html;
-}
-
-function showAnalyticsUploadForm(kbPath, filename) {
-    const block = document.getElementById('analyticsUploadBlock');
-    const title = document.getElementById('analyticsUploadTitle');
-    block.style.display = 'block';
-    title.textContent = 'Заменить конфиг: ' + filename;
-    block.scrollIntoView({ behavior: 'smooth' });
-}
-
-function showUploadForm(kbPath, filename, isPdf) {
-    const block = document.getElementById('uploadBlock');
-    const title = document.getElementById('uploadTitle');
-    const input = document.getElementById('uploadInput');
-    const hint  = document.getElementById('uploadHint');
-    block.style.display = 'block';
-    if (isPdf) {
-        title.textContent  = 'Добавить PDF-документ';
-        input.accept       = '.pdf';
-        hint.textContent   = 'Выберите PDF-файл. Имя файла сохранится как есть.';
-    } else {
-        title.textContent  = 'Заменить файл: ' + filename;
-        input.accept       = filename.endsWith('.pdf') ? '.pdf' : '.jsonl,.json';
-        hint.textContent   = 'Имя загружаемого файла должно точно совпадать: ' + filename;
-    }
-    block.scrollIntoView({ behavior: 'smooth' });
+function kbUpload(rel, name) {
+  document.getElementById('kbUpRel').value = rel;
+  document.getElementById('kbUpName').textContent = name;
+  new bootstrap.Modal(document.getElementById('kbUploadModal')).show();
 }
 </script>
 {% endblock %}
