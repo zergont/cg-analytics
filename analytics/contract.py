@@ -208,6 +208,9 @@ class Subsegment:
     risk_accumulators: RiskAccumulators
     detections: list[Detection]
     data_quality: float                    # 0.0 – 1.0
+    # Интервалы потери связи внутри подсегмента (обрезаны по его границам).
+    # Каждый: {"start": iso, "end": iso, "duration_sec": float}. Пусто = связь ровная.
+    data_gaps: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -224,6 +227,7 @@ class Subsegment:
             "risk_accumulators": self.risk_accumulators.to_dict(),
             "detections": [d.to_dict() for d in self.detections],
             "data_quality": self.data_quality,
+            "data_gaps": self.data_gaps,
         }
 
 

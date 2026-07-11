@@ -499,6 +499,17 @@ def _append_subsegment(
             a(f"| Причина закрытия | {sub.cause_close} |")
         a("")
 
+    # Интервалы потери связи (слепые зоны) — где именно данных не было
+    gaps = getattr(sub, "data_gaps", None) or []
+    if gaps:
+        total = sum(g.get("duration_sec", 0) for g in gaps)
+        a(f"**⚠ Потеря связи ({len(gaps)}, суммарно {_fmt_duration(total)}):**")
+        a("")
+        for g in gaps:
+            a(f"- {fmt_ts(g.get('start'))} → {fmt_ts(g.get('end'))} "
+              f"({_fmt_duration(g.get('duration_sec', 0))})")
+        a("")
+
     # Характеристики
     if sub.characteristics:
         a("**Характеристики:**")

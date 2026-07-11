@@ -84,6 +84,32 @@ def _filter_gaps(
     return result
 
 
+def _clip_gap_intervals(
+    gaps: list[dict],
+    t_start: datetime,
+    t_end: datetime,
+) -> list[dict]:
+    """Интервалы дыр связи, обрезанные по [t_start, t_end), для отчёта.
+
+    Возвращает список {"start": iso, "end": iso, "duration_sec": float},
+    отсортированный по времени. Незакрытый gap (gap_end IS NULL) тянется до t_end.
+    """
+    t0, t1 = _tz(t_start), _tz(t_end)
+    out: list[dict] = []
+    for g in gaps:
+        gs = max(_tz(g["gap_start"]), t0)
+        ge_raw = g.get("gap_end")
+        ge = min(_tz(ge_raw) if ge_raw else t1, t1)
+        if ge > gs:
+            out.append({
+                "start": gs.isoformat(),
+                "end": ge.isoformat(),
+                "duration_sec": (ge - gs).total_seconds(),
+            })
+    out.sort(key=lambda x: x["start"])
+    return out
+
+
 def _build_ts_index(by_addr: dict[int, list[dict]]) -> dict[int, list[datetime]]:
     """Tz-нормализованный индекс меток времени для bisect-срезов."""
     return {addr: [_tz(r["ts"]) for r in rows] for addr, rows in by_addr.items()}
@@ -345,6 +371,7 @@ def _build_single_subsegment(
         risk_accumulators=new_acc,
         detections=detections,
         data_quality=dq,
+        data_gaps=_clip_gap_intervals(gaps, t_start, t_end),
     )
     return subseg, new_acc
 
@@ -499,6 +526,7 @@ def _build_subsegments_for_running(
             risk_accumulators=accumulators,
             detections=detections,
             data_quality=dq,
+            data_gaps=_clip_gap_intervals(sub_gaps, t_sub_start, t_sub_end),
         )
         subsegments.append(subseg)
         prev_sub_zone = zone
