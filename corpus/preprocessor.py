@@ -86,6 +86,168 @@ def _fmt_detections(detections: list[dict]) -> str:
     return "; ".join(parts)
 
 
+# ── Агрегированные «Обнаружения» для БЛОКА 1 заключения ──────────────────────
+# Человеческие названия сценариев аналитики (соответствуют detectors.yaml)
+SCENARIO_RU: dict[str, str] = {
+    "LOAD_STEP":          "Резкий наброс/сброс нагрузки",
+    "NEGATIVE_SEQUENCE":  "Несимметрия фаз",
+    "COOLING_FAILURE":    "Отклонения температуры охлаждающей жидкости",
+    "OIL_DILUTION":       "Пониженное давление масла",
+    "COKING_RISK":        "Длительная работа на малой нагрузке (риск нагара)",
+    "WARMUP_VIOLATION":   "Нарушение прогрева",
+    "COOLDOWN_VIOLATION": "Нарушение охлаждения перед остановом",
+    "START_FAILURE":      "Проблема пуска",
+    "THERMAL_HIGHLOAD":   "Перегрев под высокой нагрузкой",
+    "LIMIT_PROXIMITY":    "Приближение к паспортному порогу",
+    "STOP_PROFILE":       "Отклонение профиля останова",
+    "RPM_UNDERSPEED":     "Просадка оборотов",
+    "DETECTION_COUNTER":  "Повторные срабатывания за период",
+    "CONTROLLER_FAULT":   "Неисправность по данным контроллера",
+}
+
+_SEV_RU = {"SHUTDOWN": "авария", "ALARM": "авария", "WARNING": "внимание",
+           "CAUTION": "предупреждение", "INFO": "инфо"}
+_SEV_RANK = {"SHUTDOWN": 4, "ALARM": 4, "WARNING": 3, "CAUTION": 2, "INFO": 1}
+
+
+def _fmt_dur(sec: float) -> str:
+    s = int(sec)
+    h, m = s // 3600, (s % 3600) // 60
+    if h:
+        return f"{h}ч {m:02d}м"
+    if m:
+        return f"{m}м"
+    return f"{s}с"
+
+
+def _plural_hits(n: int) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} срабатывание"
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return f"{n} срабатывания"
+    return f"{n} срабатываний"
+
+
+def _group_worst(scenario: str, values_list: list[dict]) -> str | None:
+    """Худший показатель группы за период — вместо дампа каждого срабатывания."""
+    def _nums(key):
+        return [v[key] for v in values_list
+                if isinstance(v.get(key), (int, float))]
+
+    if scenario == "OIL_DILUTION":
+        mins = _nums("oil_press_min")
+        passports = _nums("passport_min_kpa")
+        if mins:
+            base = f"мин. {min(mins):.0f} кПа"
+            return base + (f" при паспорте ≥{passports[0]:.0f}" if passports else "")
+    elif scenario == "LIMIT_PROXIMITY":
+        vals, limits = _nums("value"), _nums("shutdown_limit")
+        if vals and limits:
+            return f"макс. {max(vals):.0f} при пороге {limits[0]:.0f}"
+    elif scenario == "RPM_UNDERSPEED":
+        mins = _nums("rpm_min")
+        if mins:
+            return f"мин. {min(mins):.0f} об/мин"
+    elif scenario == "COKING_RISK":
+        secs = _nums("low_load_zone_sec")
+        if secs:
+            return f"до {_fmt_dur(max(secs))} подряд"
+    elif scenario == "COOLING_FAILURE":
+        temps = _nums("coolant_temp_max")
+        slopes = _nums("coolant_slope_c_per_s")
+        if temps:
+            return f"макс. {max(temps):.0f}°C"
+        if slopes:
+            return f"тренд до {max(slopes):.4f} °C/с"
+    return None
+
+
+def _fmt_detections_hierarchy(chars_json: Any) -> str:
+    """Агрегированные обнаружения для БЛОКА 1: иерархия панель→аналитика,
+    по-русски, с количеством срабатываний, длительностью и худшим показателем.
+
+    Длительность = сумма длительностей подсегментов, где сценарий срабатывал
+    (у самой детекции длительности нет).
+    """
+    parsed = _parse_json(chars_json)
+    subsegments = (parsed or {}).get("subsegments", [])
+
+    # key → агрегат; ключ различает панельные аварии по имени,
+    # LIMIT_PROXIMITY — по параметру (из префикса триггера: «Температура масла: …»)
+    groups: dict[tuple, dict] = {}
+    for sub in subsegments:
+        if not isinstance(sub, dict):
+            continue
+        sub_dur = sub.get("duration_sec") or 0
+        seen_in_sub: set[tuple] = set()
+        for d in sub.get("detections", []):
+            if not isinstance(d, dict):
+                continue
+            scenario = d.get("scenario", "?")
+            severity = d.get("severity", "INFO")
+            trigger = d.get("trigger", "") or ""
+            is_panel = d.get("source") == "CONTROLLER_FAULT" or scenario == "CONTROLLER_FAULT"
+
+            if is_panel:
+                # «Имя неисправности (addr=…, bit=…)» → имя без адресов
+                name = trigger.split(" (addr=")[0].strip() or SCENARIO_RU["CONTROLLER_FAULT"]
+                key = ("panel", name)
+            elif scenario == "LIMIT_PROXIMITY" and ":" in trigger:
+                param = trigger.split(":", 1)[0].strip()
+                name = f"{param} у паспортного порога"
+                key = ("analytics", scenario, param)
+            else:
+                name = SCENARIO_RU.get(scenario, scenario)
+                key = ("analytics", scenario)
+
+            g = groups.setdefault(key, {
+                "name": name, "scenario": scenario, "panel": is_panel,
+                "sev_rank": 0, "severity": severity,
+                "count": 0, "dur_sec": 0.0, "values": [],
+                "fault_codes": set(),
+            })
+            g["count"] += 1
+            if _SEV_RANK.get(severity, 0) > g["sev_rank"]:
+                g["sev_rank"] = _SEV_RANK.get(severity, 0)
+                g["severity"] = severity
+            if isinstance(d.get("values"), dict):
+                g["values"].append(d["values"])
+            for fc in d.get("fault_codes") or []:
+                g["fault_codes"].add(fc)
+            if key not in seen_in_sub:
+                seen_in_sub.add(key)
+                g["dur_sec"] += sub_dur
+
+    def _render(g: dict) -> str:
+        parts = [_plural_hits(g["count"])]
+        if g["count"] > 1 and g["dur_sec"] > 0:
+            parts.append(f"суммарно {_fmt_dur(g['dur_sec'])}")
+        worst = _group_worst(g["scenario"], g["values"])
+        if worst:
+            parts.append(worst)
+        line = f"  • {g['name']} [{_SEV_RU.get(g['severity'], g['severity'])}] — {', '.join(parts)}"
+        if g["panel"] and g["fault_codes"]:
+            codes = "/".join(str(c) for c in sorted(g["fault_codes"]))
+            line += f" (код {codes})"
+        return line
+
+    ordered = sorted(groups.values(), key=lambda g: (-g["sev_rank"], -g["count"]))
+    panel_alarm = [g for g in ordered if g["panel"] and g["sev_rank"] >= 4]
+    panel_warn  = [g for g in ordered if g["panel"] and g["sev_rank"] < 4]
+    analytics   = [g for g in ordered if not g["panel"]]
+
+    lines: list[str] = []
+    for title, items in (("Аварии панели", panel_alarm),
+                         ("Предупреждения панели", panel_warn),
+                         ("Предупреждения аналитики", analytics)):
+        if items:
+            lines.append(f"- {title}:")
+            lines.extend(_render(g) for g in items)
+        else:
+            lines.append(f"- {title}: нет")
+    return "\n".join(lines)
+
+
 def build_claude_input(segment_row: dict) -> str:
     """Сформировать полный вход для Claude: шапка вердикта + report_md as-is."""
     chars_json = segment_row.get("characteristics_json")

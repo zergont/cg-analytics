@@ -240,7 +240,7 @@ def _build_conclusion(
 ) -> str:
     """Собрать полное структурированное заключение: Блок1 + Блок2 + Блок3."""
     from datetime import datetime, timezone
-    from corpus.preprocessor import RUN_STATE_RU, _extract_detections, _fmt_detections
+    from corpus.preprocessor import RUN_STATE_RU, _fmt_detections_hierarchy
 
     try:
         from analytics.runner import ANALYTICS_VERSION
@@ -254,8 +254,7 @@ def _build_conclusion(
     )
 
     chars_json = segment_row.get("characteristics_json")
-    detections = _extract_detections(chars_json)
-    dets_str = _fmt_detections(detections)
+    dets_block = _fmt_detections_hierarchy(chars_json)
 
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -264,7 +263,7 @@ def _build_conclusion(
         f"**Вердикт:** {verdict}\n"
         f"**Уровень тревоги:** {alarm_level}\n"
         f"**Режим:** {run_state_label} (RUN_STATE={run_state})\n"
-        f"**Обнаружения:** {dets_str}\n\n"
+        f"**Обнаружения:**\n{dets_block}\n\n"
     )
 
     block3 = (
