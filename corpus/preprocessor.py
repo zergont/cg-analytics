@@ -119,23 +119,8 @@ def _fmt_detections(detections: list[dict]) -> str:
 
 
 # ── Агрегированные «Обнаружения» для БЛОКА 1 заключения ──────────────────────
-# Человеческие названия сценариев аналитики (соответствуют detectors.yaml)
-SCENARIO_RU: dict[str, str] = {
-    "LOAD_STEP":          "Резкий наброс/сброс нагрузки",
-    "NEGATIVE_SEQUENCE":  "Несимметрия фаз",
-    "COOLING_FAILURE":    "Отклонения температуры охлаждающей жидкости",
-    "OIL_DILUTION":       "Пониженное давление масла",
-    "COKING_RISK":        "Длительная работа на малой нагрузке (риск нагара)",
-    "WARMUP_VIOLATION":   "Нарушение прогрева",
-    "COOLDOWN_VIOLATION": "Нарушение охлаждения перед остановом",
-    "START_FAILURE":      "Проблема пуска",
-    "THERMAL_HIGHLOAD":   "Перегрев под высокой нагрузкой",
-    "LIMIT_PROXIMITY":    "Приближение к паспортному порогу",
-    "STOP_PROFILE":       "Отклонение профиля останова",
-    "RPM_UNDERSPEED":     "Просадка оборотов",
-    "DETECTION_COUNTER":  "Повторные срабатывания за период",
-    "CONTROLLER_FAULT":   "Неисправность по данным контроллера",
-}
+# Человеческие названия сценариев — канонический словарь в analytics/serializer
+from analytics.serializer import SCENARIO_RU  # noqa: E402
 
 _SEV_EMOJI = {"SHUTDOWN": "🔴", "ALARM": "🟠", "WARNING": "🟠",
               "CAUTION": "🟡", "INFO": "🔵"}

@@ -30,6 +30,25 @@ _SEVERITY_EMOJI = {
     "INFO":     "🔵",
 }
 
+# Человеческие названия сценариев аналитики (соответствуют detectors.yaml).
+# Канонический словарь — corpus/preprocessor импортирует отсюда.
+SCENARIO_RU: dict[str, str] = {
+    "LOAD_STEP":          "Резкий наброс/сброс нагрузки",
+    "NEGATIVE_SEQUENCE":  "Несимметрия фаз",
+    "COOLING_FAILURE":    "Отклонения температуры охлаждающей жидкости",
+    "OIL_DILUTION":       "Пониженное давление масла",
+    "COKING_RISK":        "Длительная работа на малой нагрузке (риск нагара)",
+    "WARMUP_VIOLATION":   "Нарушение прогрева",
+    "COOLDOWN_VIOLATION": "Нарушение охлаждения перед остановом",
+    "START_FAILURE":      "Проблема пуска",
+    "THERMAL_HIGHLOAD":   "Перегрев под высокой нагрузкой",
+    "LIMIT_PROXIMITY":    "Приближение к паспортному порогу",
+    "STOP_PROFILE":       "Отклонение профиля останова",
+    "RPM_UNDERSPEED":     "Просадка оборотов",
+    "DETECTION_COUNTER":  "Повторные срабатывания за период",
+    "CONTROLLER_FAULT":   "Неисправность по данным контроллера",
+}
+
 _SEVERITY_LABEL = {
     "SHUTDOWN": "АВАРИЯ (SHUTDOWN)",
     "WARNING":  "АВАРИЯ (WARNING)",
@@ -150,7 +169,6 @@ def to_json(
 
 _SEV_RANK_MD = {"SHUTDOWN": 4, "WARNING": 3, "CAUTION": 2, "INFO": 1}
 _SRC_RU = {"panel": "панель", "analytics": "аналитика"}
-_EPOCH_UTC = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def build_summary_md(
@@ -169,58 +187,96 @@ def build_summary_md(
     отдельными панелями. Эпизоды, отменённые гейтом, в вердикт не входят,
     но в замечаниях показываются с пометкой.
     """
-    _fmt_iso = _make_fmt_ts(tz)
-
-    def fmt_ts(v):
-        """Эпизоды из БД несут datetime, сегменты — ISO-строки; принимаем оба."""
-        if isinstance(v, datetime):
-            v = v.isoformat()
-        return _fmt_iso(v)
-
     episodes = episodes or []
     lines: list[str] = []
     a = lines.append
 
     live = [e for e in episodes if not e.get("gate_suppressed")]
-    panel_bad = [
+    panel_shutdown = [
         e for e in live
-        if e.get("source") == "panel" and e.get("severity") in ("SHUTDOWN", "WARNING")
+        if e.get("source") == "panel" and e.get("severity") == "SHUTDOWN"
+    ]
+    panel_warning = [
+        e for e in live
+        if e.get("source") == "panel" and e.get("severity") == "WARNING"
     ]
     analytics_eps = [e for e in live if e.get("source") == "analytics"]
+    suppressed = [e for e in episodes if e.get("gate_suppressed")]
     failed_checks = [
         c for s in segments for c in (getattr(s, "sequence_checks", None) or [])
         if isinstance(c, dict) and not c.get("passed", True)
     ]
 
-    # ── Вердикт ──
-    if panel_bad:
-        worst = max(panel_bad, key=lambda e: _SEV_RANK_MD.get(e.get("severity") or "", 0))
-        label = ("аварийный останов" if worst.get("severity") == "SHUTDOWN"
-                 else "тревога панели управления")
-        a(f"## 🔴 ТРЕВОГА — {label}")
+    # ── Вердикт (догма v4.9.32: SHUTDOWN🔴 / WARNING🟠 / CAUTION🟡 / НОРМА🟢) ──
+    if panel_shutdown:
+        a("## 🔴 АВАРИЯ — аварийный останов панели")
+    elif panel_warning:
+        a("## 🟠 ВНИМАНИЕ — предупреждение панели управления")
     elif analytics_eps or failed_checks:
         n = len(analytics_eps) + len(failed_checks)
         a(f"## 🟡 ЗАМЕЧАНИЯ К РАБОТЕ — {n}")
+    elif suppressed:
+        a("## 🟢 НОРМА")
+        a(f"Предупреждения аналитики ({len(suppressed)}) сняты ИИ.")
     else:
         a("## 🟢 НОРМА")
         a("Замечаний к работе нет.")
 
-    # ── Замечания: эпизоды + проваленные sequence-проверки ──
+    # ── Замечания: агрегируем эпизоды по причине (поэпизодный список — в полном отчёте) ──
     if episodes or failed_checks:
         a("")
         a("### Замечания")
-        for e in sorted(episodes, key=lambda x: x.get("t_open") or _EPOCH_UTC):
-            emoji = _SEVERITY_EMOJI.get(e.get("severity"), "")
-            t_open, t_close = e.get("t_open"), e.get("t_close")
-            span = fmt_ts(t_open) if t_open else "?"
-            span += f" → {fmt_ts(t_close)}" if t_close else " → **висит**"
-            dur = _fmt_duration(e.get("active_sec") or 0)
-            src_ru = _SRC_RU.get(e.get("source"), e.get("source") or "")
-            line = (f"- {emoji} **{e.get('scenario')}** [{e.get('severity')}, {src_ru}]: "
-                    f"{span}, воздействие {dur}")
+
+        def _group_key(e: dict):
+            if e.get("source") == "panel":
+                return ("panel", e.get("addr"), e.get("bit"))
+            return ("analytics", e.get("scenario"))
+
+        def _group_name(e: dict) -> str:
+            if e.get("source") == "panel":
+                vals = e.get("open_values_json")
+                if isinstance(vals, str):
+                    try:
+                        vals = json.loads(vals)
+                    except Exception:
+                        vals = {}
+                name = (vals or {}).get("fault_name")
+                return name or f"Неисправность панели (addr={e.get('addr')}, bit={e.get('bit')})"
+            sc = e.get("scenario") or "?"
+            return SCENARIO_RU.get(sc, sc)
+
+        groups: dict[tuple, dict] = {}
+        for e in episodes:
+            g = groups.setdefault(_group_key(e), {
+                "name": _group_name(e), "source": e.get("source"),
+                "sev_rank": 0, "severity": e.get("severity"),
+                "count": 0, "active_sec": 0.0, "suppressed": 0, "open": 0,
+            })
+            g["count"] += 1
+            g["active_sec"] += e.get("active_sec") or 0
+            rank = _SEV_RANK_MD.get(e.get("severity") or "", 0)
+            if rank > g["sev_rank"]:
+                g["sev_rank"], g["severity"] = rank, e.get("severity")
             if e.get("gate_suppressed"):
-                line += " — *отменено ИИ-гейтом*"
+                g["suppressed"] += 1
+            if not e.get("t_close"):
+                g["open"] += 1
+
+        _eps_ru = lambda n: ("эпизод" if n % 10 == 1 and n % 100 != 11 else
+                             "эпизода" if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else
+                             "эпизодов")
+        for g in sorted(groups.values(), key=lambda g: (-g["sev_rank"], -g["active_sec"])):
+            emoji = _SEVERITY_EMOJI.get(g["severity"], "")
+            src_ru = _SRC_RU.get(g["source"], g["source"] or "")
+            line = (f"- {emoji} **{g['name']}** [{src_ru}]: {g['count']} {_eps_ru(g['count'])}, "
+                    f"воздействие {_fmt_duration(g['active_sec'])}")
+            if g["suppressed"]:
+                line += (" — *снято ИИ*" if g["suppressed"] == g["count"]
+                         else f" — *снято ИИ: {g['suppressed']} из {g['count']}*")
+            if g["open"]:
+                line += " — **активен на конец периода**"
             a(line)
+
         for c in failed_checks:
             name = c.get("name") or c.get("check") or "проверка"
             det = c.get("details") or c.get("detail") or ""
