@@ -296,12 +296,21 @@ registers:
     group: STATE
     unit: ~
     kind: analog
-    description: Тип последней неисправности (enum)
+    description: Тип последней неисправности (enum, справочно)
+    states:
+      0: None
+      1: Warning
+      2: Derate
+      3: Shutdown with Cooldown
+      4: Shutdown
     _source: PASSPORT_РЭ
 
   # ═══════════════════════════════════════════════════════════════
-  # FAULT MASKS 40400–40415  (kind: fault_bitmap → из fault_history)
-  # Регистры хранятся как периоды активных битов
+  # FAULT MASKS 40400–40428  (kind: fault_bitmap → из fault_history)
+  # Маски АКТИВНЫХ неисправностей — требуют внимания.
+  # Регистры выше (40440+) — информационные события, в детекцию не идут.
+  # Регистры хранятся как периоды активных битов.
+  # Незадокументированные биты отсеивает декодер источника.
   # ═══════════════════════════════════════════════════════════════
 
   40400: {role: FAULT_MASK_0,  group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
@@ -320,3 +329,16 @@ registers:
   40413: {role: FAULT_MASK_13, group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
   40414: {role: FAULT_MASK_14, group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
   40415: {role: FAULT_MASK_15, group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40416: {role: FAULT_MASK_16, group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40417: {role: FAULT_MASK_17, group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40418: {role: FAULT_MASK_18, group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40419: {role: FAULT_MASK_19, group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40420: {role: FAULT_MASK_20, group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40421: {role: FAULT_MASK_21, group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40422: {role: FAULT_MASK_22, group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40423: {role: FAULT_MASK_23, group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40424: {role: FAULT_MASK_24, group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40425: {role: FAULT_MASK_25, group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40426: {role: FAULT_MASK_26, group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40427: {role: FAULT_MASK_27, group: FAULT, kind: fault_bitmap, _source: CONTROLLER}
+  40428: {role: FAULT_MASK_28, group: FAULT, kind: fault_bitmap, _source: CONTROLLER}

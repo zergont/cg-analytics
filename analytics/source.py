@@ -12,7 +12,7 @@
 Читает ТОЛЬКО whitelist-регистры (ТЗ, раздел 2.3):
 - аналоговые → history_rich (addr IN whitelist_analog)
 - enum-периоды → enum_history (addr IN [40011, 40010])
-- fault-периоды → fault_history (addr IN 40400-40415)
+- fault-периоды → fault_history (addr IN 40400-40428)
 - пропуски связи → data_gaps
 """
 from __future__ import annotations
@@ -186,12 +186,12 @@ async def get_fault_periods(
 ) -> list[dict[str, Any]]:
     """Периоды активных fault-битов из fault_history, пересекающиеся с [ts_from, ts_to).
 
-    По умолчанию — адреса 40400-40415.
+    По умолчанию — адреса 40400-40428 (маски активных неисправностей).
     Колонки: addr, bit, fault_start, fault_end, fault_name_ru, fault_name, severity, duration_sec.
     fault_end IS NULL → неисправность активна прямо сейчас.
     """
     if fault_addrs is None:
-        fault_addrs = frozenset(range(40400, 40416))
+        fault_addrs = frozenset(range(40400, 40429))
 
     async with _get_pool().acquire() as conn:
         rows = await conn.fetch(

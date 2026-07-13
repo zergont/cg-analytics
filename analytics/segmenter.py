@@ -19,7 +19,7 @@
 Входные данные (уже загружены runner-ом из БД):
   enum_periods   — из enum_history (addr=40011 RUN_STATE, addr=40010 SWITCH_POS)
   history        — из history_rich  (аналоговые whitelist-регистры)
-  fault_periods  — из fault_history (addr 40400–40415)
+  fault_periods  — из fault_history (addr 40400–40428)
   gaps           — из data_gaps
 """
 from __future__ import annotations

@@ -253,8 +253,11 @@ DETECTION_COUNTER:
 # ─── CONTROLLER_FAULT: Активная неисправность контроллера ───────────────────
 CONTROLLER_FAULT:
   enabled: true
-  # Срабатывает при появлении нового бита в fault_history (40400-40415)
+  # Срабатывает при появлении нового бита в fault_history (диапазон по whitelist mapping.yaml)
   # Severity берётся из fault_matrix.yaml по severity бита (bitmap_severity_map)
   # НЕ эвристика — строго по матрице приоритетов
   severity_default: WARNING
+  # CommonAlarm-паттерн (несброшенная неисправность → CAUTION) настраивается
+  # в слое контроллера/оборудования: common_alarm_addr / common_alarm_bit /
+  # unconfirmed_severity. Без этих ключей паттерн выключен.
   _source: CONTROLLER

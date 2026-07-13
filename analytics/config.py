@@ -184,14 +184,6 @@ class AnalyticsConfig:
             raw_severity, self.fault_matrix.get("default_severity", "WARNING")
         )
 
-    def code_severity(self, code: int) -> str:
-        """Severity для кода неисправности из fault_matrix.codes."""
-        codes = self.fault_matrix.get("codes", {})
-        entry = codes.get(code) or codes.get(str(code))
-        if entry:
-            return entry.get("severity", self.fault_matrix.get("default_severity", "WARNING"))
-        return self.fault_matrix.get("default_severity", "WARNING")
-
     def zone_boundaries(self) -> dict[str, tuple[float, float]]:
         """Вернуть {zone_name: (min_pct, max_pct)} для всех зон кроме NA."""
         result = {}

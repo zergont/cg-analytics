@@ -57,6 +57,15 @@ RUN_STATE_RU: dict[int, str] = {
 
 _RISK_EMOJI = {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴"}
 
+# Тип последней неисправности (регистр 40013, enum PCC3300)
+_FAULT_TYPE_RU: dict[int, str] = {
+    0: "Нет",
+    1: "Предупреждение (Warning)",
+    2: "Снижение мощности (Derate)",
+    3: "Останов с охлаждением (Shutdown with Cooldown)",
+    4: "Немедленный останов (Shutdown)",
+}
+
 
 def _fmt_duration(sec: float) -> str:
     """Форматировать длительность в «Xч Yм Zс» (без нулевых компонентов)."""
@@ -407,26 +416,48 @@ def _append_segment(
             a(f"- {_SEVERITY_EMOJI.get(sev, '')} `{name}` @ {t}{dur_s}")
         a("")
 
-    # Расшифровка кодов неисправностей из справочника (детерминированный lookup)
-    # Источники: LAST_FAULT_CODE (регистр 40012) + fault_codes из обнаружений
+    # Несброшенная неисправность + расшифровка кодов из справочника
     if fault_ref:
-        codes_to_show: list[int] = []
-        seen_codes: set[int] = set()
-
-        # 1. LAST_FAULT_CODE из характеристик подсегментов
-        for sub in seg.subsegments:
+        # А. Несброшенная неисправность: код 40012 на КОНЕЦ сегмента (value_end,
+        # не median — если сброс нажали внутри окна, конец уже чист). Регистр
+        # latched: сбрасывается только кнопкой после устранения причины —
+        # пока не сброшен, блок ставится в каждый отчёт закрытия.
+        unacked_code = 0
+        unacked_type: int | None = None
+        for sub in reversed(seg.subsegments):
             lfc = sub.characteristics.get("LAST_FAULT_CODE") or {}
-            raw_val = lfc.get("median") if lfc.get("median") else lfc.get("max")
-            if raw_val is not None:
-                try:
-                    code = int(raw_val)
-                    if code > 0 and code not in seen_codes:
-                        codes_to_show.append(code)
-                        seen_codes.add(code)
-                except (ValueError, TypeError):
-                    pass
+            raw_val = lfc.get("value_end")
+            if raw_val is None:
+                continue
+            try:
+                unacked_code = int(raw_val)
+            except (ValueError, TypeError):
+                unacked_code = 0
+            lft = sub.characteristics.get("LAST_FAULT_TYPE") or {}
+            try:
+                unacked_type = int(lft["value_end"]) if lft.get("value_end") is not None else None
+            except (ValueError, TypeError):
+                unacked_type = None
+            break
 
-        # 2. fault_codes из всех обнаружений
+        seen_codes: set[int] = set()
+        if unacked_code > 0:
+            seen_codes.add(unacked_code)
+            type_str = ""
+            if unacked_type is not None:
+                type_str = f" — тип: {_FAULT_TYPE_RU.get(unacked_type, f'код типа {unacked_type}')}"
+            a(f"**⚠ Несброшенная неисправность:** код `{unacked_code}` (регистр 40012){type_str}")
+            a("")
+            a("Код не сброшен кнопкой сброса на панели — неисправность считается не устранённой.")
+            a("")
+            desc = fault_ref.format_for_report(unacked_code)
+            if desc:
+                for line in desc.split("\n"):
+                    a(line)
+                a("")
+
+        # Б. fault_codes из обнаружений
+        codes_to_show: list[int] = []
         for sub in seg.subsegments:
             for _d in sub.detections:
                 d = _as_dict(_d)

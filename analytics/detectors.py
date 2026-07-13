@@ -84,7 +84,9 @@ def run_all_detectors(
         detections.extend(_detect_limit_proximity(characteristics, seg_start, cfg))
 
     if cfg.det("CONTROLLER_FAULT", "enabled", default=True):
-        detections.extend(_detect_controller_faults(fault_periods_in_seg, seg_start, seg_end, cfg))
+        detections.extend(_detect_controller_faults(
+            fault_periods_in_seg, characteristics, seg_start, seg_end, cfg
+        ))
 
     if cfg.det("RPM_UNDERSPEED", "enabled", default=True) and run_state == 3:
         detections.extend(_detect_rpm_underspeed(characteristics, derived, seg_start, cfg))
@@ -696,6 +698,7 @@ def _limit_detection(role, val, limit, label, fcodes, seg_start, cfg) -> Detecti
 
 def _detect_controller_faults(
     fault_periods: list[dict[str, Any]],
+    characteristics: dict[str, Any],
     seg_start: datetime,
     seg_end: datetime,
     cfg: AnalyticsConfig,
@@ -703,6 +706,13 @@ def _detect_controller_faults(
     results: list[Detection] = []
     t_start = _tz(seg_start)
     t_end = _tz(seg_end)
+
+    # CommonAlarm (Общая авария) — индикаторный INFO-бит «есть ошибка».
+    # Запоминаем его период отдельно: в связке с несброшенным кодом 40012
+    # при молчащих остальных активных битах он даёт CAUTION (см. ниже).
+    ca_addr = cfg.det("CONTROLLER_FAULT", "common_alarm_addr", default=None)
+    ca_bit = cfg.det("CONTROLLER_FAULT", "common_alarm_bit", default=None)
+    common_alarm_fp: dict[str, Any] | None = None
 
     for fp in fault_periods:
         fs = _tz(fp["fault_start"])
@@ -718,6 +728,8 @@ def _detect_controller_faults(
         raw_sev = fp.get("severity") or "none"
         severity = cfg.bitmap_severity(raw_sev)
         if severity == "INFO":
+            if ca_addr is not None and fp.get("addr") == ca_addr and fp.get("bit") == ca_bit:
+                common_alarm_fp = fp
             continue  # информационные биты (ReadyToLoad, NotInAuto и т.п.) не детектируем
 
         name = fp.get("fault_name_ru") or fp.get("fault_name") or f"addr={fp['addr']} bit={fp['bit']}"
@@ -730,7 +742,7 @@ def _detect_controller_faults(
             t_detected=_iso(fs),
             source="CONTROLLER_FAULT",
             trigger=f"{name} (addr={addr}, bit={bit})",
-            related_roles=[f"FAULT_MASK_{addr - 40400}" if 40400 <= addr <= 40415 else str(addr)],
+            related_roles=[f"FAULT_MASK_{addr - 40400}" if 40400 <= addr <= 40428 else str(addr)],
             fault_codes=[],
             description_key=f"CONTROLLER_FAULT.addr_{addr}_bit_{bit}",
             values={
@@ -743,6 +755,44 @@ def _detect_controller_faults(
                 "raw_severity": raw_sev,
             },
         ))
+
+    # Несброшенная неисправность: CommonAlarm активен, остальные активные
+    # не-INFO биты молчат, код 40012 на конец окна не сброшен (сбрасывается
+    # только кнопкой после устранения) → промежуточное состояние между
+    # НОРМОЙ и WARNING → CAUTION.
+    if common_alarm_fp is not None and not results:
+        lfc = characteristics.get("LAST_FAULT_CODE") or {}
+        try:
+            code = int(lfc.get("value_end") or 0)
+        except (TypeError, ValueError):
+            code = 0
+        if code > 0:
+            lft = characteristics.get("LAST_FAULT_TYPE") or {}
+            try:
+                ftype = int(lft["value_end"]) if lft.get("value_end") is not None else None
+            except (TypeError, ValueError):
+                ftype = None
+            fs = _tz(common_alarm_fp["fault_start"])
+            fe_raw = common_alarm_fp.get("fault_end")
+            results.append(Detection(
+                scenario="CONTROLLER_FAULT",
+                severity=cfg.det("CONTROLLER_FAULT", "unconfirmed_severity", default="CAUTION"),
+                t_detected=_iso(fs),
+                source="CONTROLLER_FAULT",
+                trigger=f"Общая авария (CommonAlarm) при несброшенном коде неисправности {code}",
+                related_roles=[f"FAULT_MASK_{ca_addr - 40400}", "LAST_FAULT_CODE"],
+                fault_codes=[code],
+                description_key="CONTROLLER_FAULT.common_alarm_unconfirmed",
+                values={
+                    "addr": ca_addr,
+                    "bit": ca_bit,
+                    "fault_name": "CommonAlarm (Общая авария)",
+                    "last_fault_code": code,
+                    "last_fault_type": ftype,
+                    "fault_start": _iso(fs),
+                    "fault_end": _iso(_tz(fe_raw)) if fe_raw else None,
+                },
+            ))
 
     return results
 
