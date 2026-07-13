@@ -240,7 +240,10 @@ def _build_conclusion(
 ) -> str:
     """Собрать полное структурированное заключение: Блок1 + Блок2 + Блок3."""
     from datetime import datetime, timezone
-    from corpus.preprocessor import RUN_STATE_RU, _fmt_detections_hierarchy
+    from corpus.preprocessor import (
+        ALARM_LEVEL_META, RUN_STATE_RU,
+        _extract_detections, _fmt_detections_hierarchy, _gate_suppressed,
+    )
 
     try:
         from analytics.runner import ANALYTICS_VERSION
@@ -256,22 +259,30 @@ def _build_conclusion(
     chars_json = segment_row.get("characteristics_json")
     dets_block = _fmt_detections_hierarchy(chars_json)
 
-    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    emoji, level_ru = ALARM_LEVEL_META.get(alarm_level, ("⚪", alarm_level))
+    level_note = level_ru
+    if alarm_level == "НОРМА" and _gate_suppressed(
+        segment_row, _extract_detections(chars_json)
+    ):
+        level_note = "предупреждения аналитики сняты ИИ"
+
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     block1 = (
-        f"═══ БЛОК 1 — детерминированный блок аналитики ═══\n"
-        f"**Вердикт:** {verdict}\n"
-        f"**Уровень тревоги:** {alarm_level}\n"
-        f"**Режим:** {run_state_label} (RUN_STATE={run_state})\n"
-        f"**Обнаружения:**\n{dets_block}\n\n"
+        f"### 🤖 Детерминированная аналитика\n\n"
+        f"| | |\n"
+        f"|---|---|\n"
+        f"| Вердикт | {emoji} **{verdict}** |\n"
+        f"| Уровень тревоги | {emoji} {alarm_level} *({level_note})* |\n"
+        f"| Режим | {run_state_label} |\n\n"
+        f"**Обнаружения**\n\n"
+        f"{dets_block}\n\n"
     )
 
     block3 = (
-        f"\n\n═══ БЛОК 3 — метаданные ═══\n"
-        f"**Модель:** {model}\n"
-        f"**Версия аналитики:** {ANALYTICS_VERSION}\n"
-        f"**Источник:** черновик_claude\n"
-        f"**Дата:** {now_str}\n"
+        f"\n\n---\n"
+        f"*Модель: {model} · Версия аналитики: {ANALYTICS_VERSION} · "
+        f"Источник: черновик_claude · {now_str}*\n"
     )
 
     return block1 + claude_block2 + block3

@@ -82,18 +82,26 @@ async def _humanize_api(system_prompt: str, user_msg: str) -> str:
 
 
 def _extract_block2(conclusion_md: str) -> str:
-    """Извлечь Блок 2 (аналитика) из полного заключения."""
+    """Извлечь Блок 2 (аналитика) из полного заключения.
+
+    Поддерживает оба формата: легаси-маркеры «═══ БЛОК 3» и новый
+    футер-курсив «*Модель: …» (v4.9.32+, перед ним стоит `---`).
+    """
     lines = conclusion_md.split("\n")
     block2_lines: list[str] = []
     in_meta = True
 
     for line in lines:
-        if "═══ БЛОК 3" in line:
+        if "═══ БЛОК 3" in line or line.startswith("*Модель:"):
             break
         if line.startswith("## "):
             in_meta = False
         if not in_meta:
             block2_lines.append(line)
+
+    # Отрезать хвостовой разделитель футера (--- перед «*Модель:»)
+    while block2_lines and block2_lines[-1].strip() in ("", "---"):
+        block2_lines.pop()
 
     text = "\n".join(block2_lines).strip()
     return text if text else conclusion_md

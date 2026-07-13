@@ -51,26 +51,58 @@ def _extract_detections(chars_json: Any) -> list[dict]:
     return detections
 
 
-def _extract_verdict(detections: list[dict]) -> tuple[str, str]:
+def _gate_suppressed(segment_row: dict, detections: list[dict]) -> bool:
+    """Снял ли гейт (ИИ) аналитические предупреждения сегмента.
+
+    Вердикт «отменить» действует, пока состав аналитических детекций
+    не изменился — сверяем hash состава с gate_suppressed_hash сегмента.
+    """
+    suppressed = segment_row.get("gate_suppressed_hash")
+    if not suppressed:
+        return False
+    from online.status_assembler import compute_analytics_hash
+    has_analytics = any(
+        isinstance(d, dict) and d.get("scenario") != "CONTROLLER_FAULT"
+        for d in detections
+    )
+    return has_analytics and compute_analytics_hash(detections) == suppressed
+
+
+def _extract_verdict(detections: list[dict], gate_suppressed: bool = False) -> tuple[str, str]:
     """Вычислить вердикт и уровень тревоги из списка детекций.
+
+    Шкала серьёзности (4 уровня, ALARM исключён — в панелях его нет):
+        НОРМА    🟢 — детекций нет / только INFO / аналитика снята ИИ
+        CAUTION  🟡 — предупреждение аналитики (не снятое ИИ)
+        WARNING  🟠 — предупреждение панели
+        SHUTDOWN 🔴 — авария панели
 
     Returns:
         (verdict, alarm_level)
-        verdict:     норма / требует_внимания / отклонение
-        alarm_level: нет / INFO / WARNING / ALARM / SHUTDOWN
+        verdict:     норма / требует внимания / авария
+        alarm_level: НОРМА / CAUTION / WARNING / SHUTDOWN
     """
-    if not detections:
-        return "норма", "нет"
-
-    sevs = {d.get("severity") for d in detections if d.get("severity")}
+    sevs = {d.get("severity") for d in detections if isinstance(d, dict) and d.get("severity")}
 
     if "SHUTDOWN" in sevs:
-        return "отклонение", "SHUTDOWN"
-    if "ALARM" in sevs:
-        return "отклонение", "ALARM"
-    if "WARNING" in sevs:
-        return "требует_внимания", "WARNING"
-    return "норма", "INFO"
+        return "авария", "SHUTDOWN"
+    if "WARNING" in sevs or "ALARM" in sevs:   # ALARM — легаси старых сегментов
+        return "требует внимания", "WARNING"
+    if "CAUTION" in sevs:
+        if gate_suppressed:
+            return "норма", "НОРМА"
+        return "требует внимания", "CAUTION"
+    return "норма", "НОРМА"
+
+
+# Визуальные метки уровней: emoji + русская расшифровка (мелко в отчёте).
+# Emoji вердикта берётся от уровня тревоги — цвет у них общий.
+ALARM_LEVEL_META: dict[str, tuple[str, str]] = {
+    "НОРМА":    ("🟢", "всё в порядке"),
+    "CAUTION":  ("🟡", "предупреждение аналитики"),
+    "WARNING":  ("🟠", "предупреждение панели"),
+    "SHUTDOWN": ("🔴", "авария панели"),
+}
 
 
 def _fmt_detections(detections: list[dict]) -> str:
@@ -105,9 +137,9 @@ SCENARIO_RU: dict[str, str] = {
     "CONTROLLER_FAULT":   "Неисправность по данным контроллера",
 }
 
-_SEV_RU = {"SHUTDOWN": "авария", "ALARM": "авария", "WARNING": "внимание",
-           "CAUTION": "предупреждение", "INFO": "инфо"}
-_SEV_RANK = {"SHUTDOWN": 4, "ALARM": 4, "WARNING": 3, "CAUTION": 2, "INFO": 1}
+_SEV_EMOJI = {"SHUTDOWN": "🔴", "ALARM": "🟠", "WARNING": "🟠",
+              "CAUTION": "🟡", "INFO": "🔵"}
+_SEV_RANK = {"SHUTDOWN": 4, "ALARM": 3, "WARNING": 3, "CAUTION": 2, "INFO": 1}
 
 
 def _fmt_dur(sec: float) -> str:
@@ -225,7 +257,8 @@ def _fmt_detections_hierarchy(chars_json: Any) -> str:
         worst = _group_worst(g["scenario"], g["values"])
         if worst:
             parts.append(worst)
-        line = f"  • {g['name']} [{_SEV_RU.get(g['severity'], g['severity'])}] — {', '.join(parts)}"
+        emoji = _SEV_EMOJI.get(g["severity"], "⚪")
+        line = f"    - {emoji} {g['name']} — {', '.join(parts)}"
         if g["panel"] and g["fault_codes"]:
             codes = "/".join(str(c) for c in sorted(g["fault_codes"]))
             line += f" (код {codes})"
@@ -237,14 +270,14 @@ def _fmt_detections_hierarchy(chars_json: Any) -> str:
     analytics   = [g for g in ordered if not g["panel"]]
 
     lines: list[str] = []
-    for title, items in (("Аварии панели", panel_alarm),
-                         ("Предупреждения панели", panel_warn),
-                         ("Предупреждения аналитики", analytics)):
+    for emoji, title, items in (("🔴", "Аварии панели", panel_alarm),
+                                ("🟠", "Предупреждения панели", panel_warn),
+                                ("🟡", "Предупреждения аналитики", analytics)):
         if items:
-            lines.append(f"- {title}:")
+            lines.append(f"- {emoji} **{title}:**")
             lines.extend(_render(g) for g in items)
         else:
-            lines.append(f"- {title}: нет")
+            lines.append(f"- {emoji} **{title}** — нет")
     return "\n".join(lines)
 
 
@@ -255,7 +288,9 @@ def build_claude_input(segment_row: dict) -> str:
     report_md = segment_row.get("report_md") or ""
 
     detections = _extract_detections(chars_json)
-    verdict, alarm_level = _extract_verdict(detections)
+    verdict, alarm_level = _extract_verdict(
+        detections, _gate_suppressed(segment_row, detections)
+    )
     run_state_label = (
         RUN_STATE_RU.get(run_state, str(run_state))
         if run_state is not None
@@ -279,4 +314,4 @@ def extract_verdict_alarm(segment_row: dict) -> tuple[str, str]:
     """Публичный метод: (verdict, alarm_level) для записи в БД."""
     chars_json = segment_row.get("characteristics_json")
     detections = _extract_detections(chars_json)
-    return _extract_verdict(detections)
+    return _extract_verdict(detections, _gate_suppressed(segment_row, detections))
