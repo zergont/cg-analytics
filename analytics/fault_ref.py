@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,20 @@ _SEV_LABEL: dict[str, str] = {
     "de": "DERATE",
     "ev": "EVENT",
 }
+
+# Совместимость severity бита (fault_bitmap_map) ↔ severity кода (справочник).
+# Порядок в кортеже = приоритет при разрешении неоднозначности имени.
+_BITMAP_SEV_COMPAT: dict[str, tuple[str, ...]] = {
+    "shutdown": ("sh", "sc"),
+    "shutdown_cooldown": ("sc", "sh"),
+    "derate": ("de",),
+    "warning": ("wa",),
+}
+
+
+def _norm_name(s: str) -> str:
+    """Нормализация имени для сопоставления бит ↔ код: без регистра и пунктуации."""
+    return re.sub(r"[^a-z0-9]", "", s.lower())
 
 
 class FaultRef:
@@ -72,6 +87,7 @@ class FaultRef:
         [engines/<e>, controllers/<c>] — справочник живёт в слое контроллера.
         """
         self._index: dict[int, dict[str, Any]] = {}
+        self._name_index: dict[str, list[dict[str, Any]]] = {}
         if search_paths is not None:
             bases = [Path(p) for p in search_paths]
         elif kb_path is not None:
@@ -94,6 +110,13 @@ class FaultRef:
                             for entry in codes_list
                             if "code" in entry
                         }
+                        # Индекс по нормализованному EN-имени: для сопоставления
+                        # битов fault_bitmap_map (у них нет поля code) с кодами.
+                        self._name_index = {}
+                        for entry in self._index.values():
+                            en = (entry.get("description") or {}).get("en") or ""
+                            if en:
+                                self._name_index.setdefault(_norm_name(en), []).append(entry)
                         logger.info(
                             "FaultRef: загружено %d кодов из %s", len(self._index), p.name
                         )
@@ -110,6 +133,30 @@ class FaultRef:
     def lookup(self, code: int) -> dict[str, Any] | None:
         """Точный lookup по коду. Возвращает запись из справочника или None."""
         return self._index.get(int(code))
+
+    def lookup_by_name(
+        self, name: str, raw_severity: str | None = None
+    ) -> dict[str, Any] | None:
+        """Сопоставить имя бита (fault_bitmap_map) с кодом справочника.
+
+        Матч по нормализованному EN-имени. Неоднозначность (одно имя — несколько
+        кодов, напр. Low Coolant Level → 197 warning / 235 shutdown) разрешается
+        по severity бита; если и после этого неоднозначно — None (не гадаем).
+        Имена битов в стиле J1939 (напр. «...: Vtg Above Normal») в справочнике
+        отсутствуют — для них тоже None.
+        """
+        if not name:
+            return None
+        candidates = getattr(self, "_name_index", {}).get(_norm_name(name)) or []
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1 and raw_severity:
+            compat = _BITMAP_SEV_COMPAT.get(raw_severity.lower(), ())
+            for sev in compat:
+                matched = [e for e in candidates if e.get("severity") == sev]
+                if len(matched) == 1:
+                    return matched[0]
+        return None
 
     def format_for_report(self, code: int) -> str | None:
         """Форматировать расшифровку кода для вставки в Markdown-отчёт.

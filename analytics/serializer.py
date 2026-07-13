@@ -416,12 +416,52 @@ def _append_segment(
             a(f"- {_SEVERITY_EMOJI.get(sev, '')} `{name}` @ {t}{dur_s}")
         a("")
 
-    # Несброшенная неисправность + расшифровка кодов из справочника
+    # Активные неисправности + несброшенный код 40012 + коды из обнаружений
     if fault_ref:
-        # А. Несброшенная неисправность: код 40012 на КОНЕЦ сегмента (value_end,
-        # не median — если сброс нажали внутри окна, конец уже чист). Регистр
-        # latched: сбрасывается только кнопкой после устранения причины —
-        # пока не сброшен, блок ставится в каждый отчёт закрытия.
+        seen_codes: set[int] = set()
+
+        # А. Активные на закрытие сегмента биты (warning и выше) из битмапов.
+        # Сортировка по серьёзности; расшифровка из справочника — по имени бита
+        # (у битов нет поля code, сопоставление по EN-имени покрывает часть).
+        # INFO-биты (статусные) и закрывшиеся внутри окна остаются в «Событиях журнала».
+        _raw_rank = {"shutdown": 0, "shutdown_cooldown": 0, "derate": 1, "warning": 1}
+        active_bits: list[tuple[int, dict]] = []
+        for ev in seg.events:
+            if ev.get("type") != "FAULT":
+                continue
+            rank = _raw_rank.get((ev.get("severity") or "").lower())
+            if rank is None:
+                continue
+            fe = ev.get("fault_end")
+            if fe is not None and seg.t_end is not None and fe < seg.t_end:
+                continue
+            active_bits.append((rank, ev))
+        active_bits.sort(key=lambda x: (x[0], x[1].get("t") or ""))
+
+        if active_bits:
+            a("**⚠ Активные неисправности (не сброшены на закрытие сегмента):**")
+            a("")
+            for rank, ev in active_bits:
+                sev_scale = "SHUTDOWN" if rank == 0 else "WARNING"
+                name_ru = ev.get("name_ru") or ev.get("name") or "?"
+                a(f"- {_SEVERITY_EMOJI[sev_scale]} `{name_ru}` "
+                  f"({ev.get('addr')}/{ev.get('bit')}) — активна с {fmt_ts(ev.get('t'))}")
+                entry = fault_ref.lookup_by_name(ev.get("name") or "", ev.get("severity"))
+                if entry and entry.get("code") is not None:
+                    code = int(entry["code"])
+                    if code not in seen_codes:
+                        seen_codes.add(code)
+                        desc = fault_ref.format_for_report(code)
+                        if desc:
+                            for line in desc.split("\n"):
+                                a(f"  {line}")
+            a("")
+
+        # Б. Несброшенный код 40012 — смотрим В ПОСЛЕДНЮЮ очередь: в большинстве
+        # случаев он дублирует активные битмапы (расшифрованы выше); только
+        # несущественная ошибка (не отражённая в масках) живёт здесь одна.
+        # Берём value_end, не median — если сброс нажали внутри окна, конец чист.
+        # Регистр latched: сбрасывается только кнопкой после устранения причины.
         unacked_code = 0
         unacked_type: int | None = None
         for sub in reversed(seg.subsegments):
@@ -440,23 +480,27 @@ def _append_segment(
                 unacked_type = None
             break
 
-        seen_codes: set[int] = set()
         if unacked_code > 0:
-            seen_codes.add(unacked_code)
-            type_str = ""
-            if unacked_type is not None:
-                type_str = f" — тип: {_FAULT_TYPE_RU.get(unacked_type, f'код типа {unacked_type}')}"
-            a(f"**⚠ Несброшенная неисправность:** код `{unacked_code}` (регистр 40012){type_str}")
-            a("")
-            a("Код не сброшен кнопкой сброса на панели — неисправность считается не устранённой.")
-            a("")
-            desc = fault_ref.format_for_report(unacked_code)
-            if desc:
-                for line in desc.split("\n"):
-                    a(line)
+            if unacked_code in seen_codes:
+                a(f"**Последний код неисправности (регистр 40012):** `{unacked_code}` — "
+                  f"дублирует активную неисправность выше.")
                 a("")
+            else:
+                seen_codes.add(unacked_code)
+                type_str = ""
+                if unacked_type is not None:
+                    type_str = f" — тип: {_FAULT_TYPE_RU.get(unacked_type, f'код типа {unacked_type}')}"
+                a(f"**⚠ Несброшенная неисправность:** код `{unacked_code}` (регистр 40012){type_str}")
+                a("")
+                a("Код не сброшен кнопкой сброса на панели — неисправность считается не устранённой.")
+                a("")
+                desc = fault_ref.format_for_report(unacked_code)
+                if desc:
+                    for line in desc.split("\n"):
+                        a(line)
+                    a("")
 
-        # Б. fault_codes из обнаружений
+        # В. fault_codes из обнаружений
         codes_to_show: list[int] = []
         for sub in seg.subsegments:
             for _d in sub.detections:

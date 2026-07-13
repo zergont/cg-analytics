@@ -1060,9 +1060,12 @@ def segment(
         # Fault-события сегмента (для events[])
         events: list[dict[str, Any]] = []
         for fp in fault_periods_in_seg:
+            fe = fp.get("fault_end")
             events.append({
                 "type": "FAULT",
                 "t": _tz(fp["fault_start"]).isoformat(),
+                # None → неисправность не закрылась (активна на момент анализа)
+                "fault_end": _tz(fe).isoformat() if fe else None,
                 "addr": fp.get("addr"),
                 "bit": fp.get("bit"),
                 "name_ru": fp.get("fault_name_ru"),
