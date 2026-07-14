@@ -45,6 +45,32 @@ def _tz_utc(ts: datetime) -> datetime:
     return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
 
 
+def _filter_window_episodes(
+    eps: list[dict], t_from: datetime, t_to: datetime, tail_sec: float,
+) -> list[dict]:
+    """Эпизоды, реально относящиеся к окну сегмента (для сводки).
+
+    get_episodes_overlapping отдаёт и «дебаунс-хвосты»: эпизод родился в конце
+    предыдущего сегмента, детекция умерла на смене режима, но закрытие
+    задержал close_debounce — эпизод формально пересёк окно с нулевым
+    воздействием. Его место в сводке сегмента, где он родился.
+
+    Остаются: родившиеся в окне; живые на конец окна (висящая авария обязана
+    показываться в каждом суточном сегменте); закрывшиеся в окне после
+    реального пересечения (> tail_sec ≈ дебаунс + цикл опроса).
+    """
+    out = []
+    for e in eps:
+        t_open, t_close = e.get("t_open"), e.get("t_close")
+        if t_open is not None and _tz_utc(t_open) >= t_from:
+            out.append(e)
+        elif t_close is None or _tz_utc(t_close) >= t_to:
+            out.append(e)
+        elif (_tz_utc(t_close) - t_from).total_seconds() > tail_sec:
+            out.append(e)
+    return out
+
+
 def _enqueue_segment(seg_id: int | None) -> None:
     """Добавить закрытый сегмент в очередь Claude-анализа (Этап 2).
 
@@ -948,6 +974,12 @@ class OnlinePollEngine:
             eps = await online_db.get_episodes_overlapping(
                 self.router_sn, self.equip_type, self.panel_id,
                 _tz_utc(t_from), _tz_utc(t_to),
+            )
+            debounce = int(self.cfg.det(
+                "ALARM_EPISODES", "close_debounce_cycles", default=3) or 3)
+            eps = _filter_window_episodes(
+                eps, _tz_utc(t_from), _tz_utc(t_to),
+                tail_sec=(debounce + 1) * self.poll_interval_sec,
             )
             from analytics.serializer import build_summary_md as _bsm
             return _bsm(segments, episodes=eps, tz=self.tz,
