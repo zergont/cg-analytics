@@ -443,6 +443,7 @@ async def _collect_and_enrich_detections(
                     "scenario": d.scenario, "severity": d.severity,
                     "run_state": seg.run_state, "fc": fc,
                     "addr": v.get("addr"), "bit": v.get("bit"), "t_open": t_open,
+                    "values": v,
                 }
 
     if not seen:
@@ -463,6 +464,7 @@ async def _collect_and_enrich_detections(
                     t_open=t_open,
                     t_close=_tz_utc(seg_t_end),
                     active_sec=max(0.0, (_tz_utc(seg_t_end) - t_open).total_seconds()),
+                    open_values=info["values"],
                     addr=info["addr"], bit=info["bit"],
                 )
             except Exception:
