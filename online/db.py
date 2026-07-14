@@ -489,15 +489,18 @@ async def get_segments_for_calendar(
         params.append(limit)
         where = " AND ".join(conditions)
         rows = await conn.fetch(f"""
-            SELECT id, t_start, t_end, run_state, cause_close,
-                   split_reason, continued_from, continues_to,
-                   coking_risk_json, analytics_version,
-                   active_detections_json, characteristics_json,
-                   gate_suppressed_hash
-            FROM auto_segments
-            WHERE {where}
+            SELECT * FROM (
+                SELECT id, t_start, t_end, run_state, cause_close,
+                       split_reason, continued_from, continues_to,
+                       coking_risk_json, analytics_version,
+                       active_detections_json, characteristics_json,
+                       gate_suppressed_hash
+                FROM auto_segments
+                WHERE {where}
+                ORDER BY t_start DESC
+                LIMIT ${idx}
+            ) recent
             ORDER BY t_start ASC
-            LIMIT ${idx}
         """, *params)
         return [dict(r) for r in rows]
     finally:
