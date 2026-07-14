@@ -225,3 +225,11 @@ ALTER TABLE auto_segments
 ALTER TABLE alarm_episodes
     ADD COLUMN IF NOT EXISTS addr INT,
     ADD COLUMN IF NOT EXISTS bit  INT;
+
+-- Миграция v4.9.36: история разборов гейта. warning_analysis_md перезаписывался
+-- при каждой смене состава тревог (сброс + кнопка останова затирали разбор
+-- исходной аварии). warning_analyses — append-only массив
+-- {t, fault_hash, alarm_text, md}; warning_analysis_md остаётся «последним»
+-- для обратной совместимости.
+ALTER TABLE auto_segments
+    ADD COLUMN IF NOT EXISTS warning_analyses JSONB;

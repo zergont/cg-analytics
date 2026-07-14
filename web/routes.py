@@ -2274,6 +2274,9 @@ async def api_segment_detail(seg_id: int):
         "analysis":      analysis,
         # Онлайн-анализ предупреждения (гейт Claude) — есть и у открытого сегмента
         "warning_analysis_md": seg.get("warning_analysis_md"),
+        # История разборов гейта [{t, fault_hash, alarm_text, md}] — смена
+        # состава тревог не затирает разбор исходной аварии (v4.9.36)
+        "warning_analyses": _parse_json(seg.get("warning_analyses"), [], ctx="warning_analyses") or [],
         # Для открытого сегмента — живые данные
         "status_text":   seg.get("status_text") if is_open else None,
         "_links": {

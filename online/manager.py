@@ -493,7 +493,9 @@ async def _analyze_warning_claude(
     from corpus.settings import get_claude_settings
     from config import settings as app_settings
     from llm.router import get_prompt
-    from online.status_assembler import build_warning_prompt, compute_analytics_hash
+    from online.status_assembler import (
+        build_warning_prompt, compute_analytics_hash, extract_alarm_text,
+    )
     from online import db as online_db
 
     logger.info("WarningGate: анализ для %s/%s/%s (hash=%s)",
@@ -550,7 +552,37 @@ async def _analyze_warning_claude(
                 logger.warning("WarningGate: контекст аварии не получен", exc_info=True)
                 _trip_ctx = None
 
-        user_prompt = build_warning_prompt(struct, trip_context=_trip_ctx)
+        # Предыдущие разборы сегмента: новый состав тревог (сброс, кнопка) —
+        # продолжение той же истории, Claude должен видеть исходную аварию
+        _prev_analyses: list = []
+        if _seg_row and _seg_row.get("warning_analyses"):
+            import json as _json
+            _wa = _seg_row["warning_analyses"]
+            if isinstance(_wa, str):
+                try:
+                    _wa = _json.loads(_wa)
+                except Exception:
+                    _wa = []
+            if isinstance(_wa, list):
+                _prev_analyses = [x for x in _wa if isinstance(x, dict)]
+
+        # Хронология эпизодов сегмента (fail-open: не критична для разбора)
+        _timeline: list = []
+        if _seg_row and _seg_row.get("t_start"):
+            try:
+                _timeline = await online_db.get_episodes_overlapping(
+                    router_sn, equip_type, panel_id,
+                    _seg_row["t_start"], datetime.now(timezone.utc),
+                )
+            except Exception:
+                logger.warning("WarningGate: хронология эпизодов не получена", exc_info=True)
+
+        user_prompt = build_warning_prompt(
+            struct,
+            trip_context=_trip_ctx,
+            prev_analyses=_prev_analyses,
+            episode_timeline=_timeline,
+        )
         can_cancel  = struct.get("panel_severity", "норма") == "норма"
 
         # API ходит через прокси из настроек Claude (как corpus/agent и playground)
@@ -610,6 +642,7 @@ async def _analyze_warning_claude(
                 router_sn, equip_type, panel_id,
                 analysis_md=analysis,
                 fault_hash=fault_hash,
+                alarm_text=extract_alarm_text(struct),
             )
 
         # Обязательный журнал гейта — пишется при любом исходе

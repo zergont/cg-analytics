@@ -372,17 +372,55 @@ def extract_alarm_text(s: dict) -> str | None:
     return None
 
 
-def build_warning_prompt(s: dict, trip_context: dict | None = None) -> str:
+def build_warning_prompt(
+    s: dict,
+    trip_context: dict | None = None,
+    prev_analyses: list[dict] | None = None,
+    episode_timeline: list[dict] | None = None,
+) -> str:
     """Промпт для Claude-анализа предупреждения (новые fault-коды).
 
     trip_context — контекст аварии с SHUTDOWN-эпизода (Фаза C): что машина
     делала до отключения. Передаётся только когда панель в аварийном останове.
+    prev_analyses — предыдущие разборы ЭТОГО сегмента (смена состава тревог:
+    сброс, кнопка останова): новый разбор — продолжение истории, а не
+    изолированный анализ последнего события.
+    episode_timeline — хронология эпизодов тревог сегмента.
     """
     lines = [
         "Выполни анализ неисправности дизель-генераторной установки.",
         "",
         f"Режим работы: {s['mode_label']} (RUN_STATE={s['run_state']})",
     ]
+
+    if prev_analyses:
+        lines.append("")
+        lines.append(
+            "Предыдущие разборы этого сегмента (события развиваются — новые "
+            "сигналы могут быть следствием исходной аварии или действий персонала):"
+        )
+        for pa in prev_analyses:
+            t = (pa.get("t") or "")[:16].replace("T", " ")
+            alarm = pa.get("alarm_text") or "состав тревог не записан"
+            lines.append(f"--- Разбор {t} UTC — {alarm} ---")
+            lines.append(pa.get("md") or "")
+        lines.append("--- Конец предыдущих разборов ---")
+
+    if episode_timeline:
+        lines.append("")
+        lines.append("Хронология тревог сегмента:")
+        for e in episode_timeline:
+            t_open = e.get("t_open")
+            t_open_s = t_open.strftime("%H:%M:%S") if hasattr(t_open, "strftime") else str(t_open or "?")
+            t_close = e.get("t_close")
+            span = f"{t_open_s} → " + (
+                t_close.strftime("%H:%M:%S") if hasattr(t_close, "strftime") else "активна"
+            )
+            supp = " — отменена гейтом" if e.get("gate_suppressed") else ""
+            lines.append(
+                f"  [{e.get('severity')}] {e.get('scenario')}: {span}, "
+                f"воздействие {_fmt_duration(e.get('active_sec') or 0)}{supp}"
+            )
 
     if trip_context:
         lines.append("")

@@ -612,18 +612,33 @@ async def get_run_state_origin_ts(seg_id: int):
 async def update_open_segment_warning(
     router_sn: str, equip_type: str, panel_id: int,
     analysis_md: str, fault_hash: str,
+    alarm_text: str | None = None,
 ) -> None:
-    """Сохранить Claude-анализ предупреждения в открытый сегмент."""
+    """Сохранить Claude-анализ предупреждения в открытый сегмент.
+
+    warning_analysis_md/warning_analyzed_hash — последний разбор (совместимость);
+    warning_analyses — append-only история: смена состава тревог (сброс, кнопка
+    останова) не затирает разбор исходной аварии.
+    """
+    import json as _json
+    from datetime import datetime, timezone
+    entry = _json.dumps({
+        "t":          datetime.now(timezone.utc).isoformat(),
+        "fault_hash": fault_hash,
+        "alarm_text": alarm_text,
+        "md":         analysis_md,
+    }, ensure_ascii=False)
     conn = await _connect()
     try:
         await conn.execute("""
             UPDATE auto_segments
             SET warning_analysis_md   = $4,
                 warning_analyzed_hash = $5,
+                warning_analyses      = COALESCE(warning_analyses, '[]'::jsonb) || $6::jsonb,
                 updated_at            = now()
             WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
               AND t_end IS NULL
-        """, router_sn, equip_type, panel_id, analysis_md, fault_hash)
+        """, router_sn, equip_type, panel_id, analysis_md, fault_hash, entry)
     finally:
         await conn.close()
 
