@@ -1141,6 +1141,7 @@ async def sync_equipment():
 _COKING_COLORS = {"GREEN": "success", "YELLOW": "warning", "RED": "danger"}
 _CAUSE_CLOSE_RU = {
     "RUN_STATE_CHANGE": "Смена режима",
+    "FAULT_CLEARED":    "Неисправности устранены",
     "DAILY_BOUNDARY":   "Суточный рез",
     "OPERATOR_STOP":    "Стоп оператором",
 }

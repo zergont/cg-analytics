@@ -110,6 +110,110 @@ def _clip_gap_intervals(
     return out
 
 
+def _merge_intervals(ivals: list[tuple[datetime, datetime]]) -> list[tuple[datetime, datetime]]:
+    """Объединить пересекающиеся интервалы (вход не обязан быть отсортирован)."""
+    if not ivals:
+        return []
+    ivals = sorted(ivals)
+    out = [ivals[0]]
+    for s, e in ivals[1:]:
+        if s <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], e))
+        else:
+            out.append((s, e))
+    return out
+
+
+def _split_stop_on_fault_cleared(
+    run_state_periods: list[dict],
+    fault_periods: list[dict],
+    all_by_addr: dict[int, list[dict]],
+    cfg,
+    tt: datetime,
+) -> list[dict]:
+    """Разрезать СТОП-периоды (RUN_STATE=0) по устранению неисправностей.
+
+    «Грязно» = активен не-INFO бит масок ИЛИ несброшенный код в регистре
+    LAST_FAULT_CODE (40012, обнуляется только кнопкой сброса после устранения).
+    Граница ставится на момент первого чистого замера, если чистота
+    продержалась ≥ stable_clean_sec (защита от «сброс → через минуту кнопка»:
+    вернувшиеся коды отменяют рез). Первый кусок закрывается FAULT_CLEARED.
+
+    Правило детерминировано из history — перечитка воспроизводит границы.
+    """
+    if not bool(cfg.seg("fault_cleared", "enabled", default=True)):
+        return run_state_periods
+    stable_sec = float(cfg.seg("fault_cleared", "stable_clean_sec", default=300))
+    lfc_addr = int(cfg.seg("fault_cleared", "last_fault_code_addr", default=40012))
+    tt = _tz(tt)
+
+    # Не-INFO периоды битов масок (severity по bitmap KB)
+    dirty_bits: list[tuple[datetime, datetime]] = []
+    for fp in fault_periods:
+        if cfg.bitmap_severity(fp.get("severity") or "none") == "INFO":
+            continue
+        fs = _tz(fp["fault_start"])
+        fe = _tz(fp["fault_end"]) if fp.get("fault_end") else tt
+        if fe > fs:
+            dirty_bits.append((fs, fe))
+
+    # Интервалы несброшенного кода 40012 (step-функция по замерам)
+    lfc_rows = all_by_addr.get(lfc_addr) or []
+    prev_ts, prev_dirty = None, False
+    for r in lfc_rows:
+        v = _fv(r)
+        is_dirty = v is not None and v != 0
+        ts = _tz(r["ts"])
+        if prev_dirty and prev_ts is not None:
+            dirty_bits.append((prev_ts, ts))
+        prev_ts, prev_dirty = ts, is_dirty
+    if prev_dirty and prev_ts is not None and tt > prev_ts:
+        dirty_bits.append((prev_ts, tt))
+
+    dirty = _merge_intervals(dirty_bits)
+    if not dirty:
+        return run_state_periods
+
+    out: list[dict] = []
+    for period in run_state_periods:
+        if int(period["value"]) != 0:
+            out.append(period)
+            continue
+        p_start = _tz(period["state_start"])
+        p_end_raw = period.get("state_end")
+        p_end = _tz(p_end_raw) if p_end_raw else tt
+
+        # Грязные интервалы, обрезанные по периоду
+        in_period = [
+            (max(s, p_start), min(e, p_end))
+            for s, e in dirty
+            if s < p_end and e > p_start
+        ]
+        # Границы: конец грязи, после которого чисто ≥ stable_sec
+        boundaries: list[datetime] = []
+        for i, (_, e) in enumerate(in_period):
+            nxt = in_period[i + 1][0] if i + 1 < len(in_period) else p_end
+            if e < p_end and (nxt - e).total_seconds() >= stable_sec:
+                boundaries.append(e)
+
+        if not boundaries:
+            out.append(period)
+            continue
+
+        cuts = [p_start] + boundaries + [p_end]
+        for i in range(len(cuts) - 1):
+            part = dict(period)
+            part["state_start"] = cuts[i]
+            is_last = i == len(cuts) - 2
+            part["state_end"] = p_end_raw if is_last else cuts[i + 1]
+            if i > 0:
+                part["cause_open"] = "FAULT_CLEARED"
+            if not is_last:
+                part["cause_close"] = "FAULT_CLEARED"
+            out.append(part)
+    return out
+
+
 def _build_ts_index(by_addr: dict[int, list[dict]]) -> dict[int, list[datetime]]:
     """Tz-нормализованный индекс меток времени для bisect-срезов."""
     return {addr: [_tz(r["ts"]) for r in rows] for addr, rows in by_addr.items()}
@@ -955,6 +1059,13 @@ def segment(
         key=lambda p: _tz(p["state_start"]),
     )
 
+    # Рез СТОП-периодов по устранению неисправностей: «СТОП (авария)» →
+    # FAULT_CLEARED → «СТОП (готов к пуску)». Живой движок и перечитка
+    # получают одинаковые границы — правило детерминировано из history.
+    run_state_periods = _split_stop_on_fault_cleared(
+        run_state_periods, fault_periods, all_by_addr, cfg, tt,
+    )
+
     segments: list[Segment] = []
     accumulators = RiskAccumulators()
     if initial_coking_risk is not None:
@@ -1011,11 +1122,11 @@ def segment(
         # Мото-часы на начало сегмента
         engine_hours_start = _get_engine_hours(seg_by_addr, seg_start, cfg)
 
-        # Причины открытия/закрытия
-        cause_open = (
+        # Причины открытия/закрытия (FAULT_CLEARED проставляет сплит СТОП-периодов)
+        cause_open = period.get("cause_open") or (
             "REPORT_START" if p_start < tf else "RUN_STATE_CHANGE"
         )
-        cause_close: str | None = (
+        cause_close: str | None = period.get("cause_close") or (
             None if p_end_raw is None or _tz(p_end_raw) >= tt
             else "RUN_STATE_CHANGE"
         )

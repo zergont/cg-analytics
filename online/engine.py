@@ -1422,8 +1422,9 @@ class OnlinePollEngine:
             except Exception:
                 logger.warning("OnlineEngine[%s]: не удалось получить начало запуска для счётчика «с пуска»", self.key, exc_info=True)
 
-        # Новые закрытые сегменты (смены RUN_STATE внутри открытого окна)
-        closed_segs = [s for s in segments if s.cause_close == "RUN_STATE_CHANGE"]
+        # Новые закрытые сегменты: смены RUN_STATE и устранение неисправностей
+        # (FAULT_CLEARED режет СТОП-период — границу ставит сегментатор)
+        closed_segs = [s for s in segments if s.cause_close in ("RUN_STATE_CHANGE", "FAULT_CLEARED")]
         if closed_segs:
             # Сохранить характеристики открытого сегмента для верификации (до удаления)
             _rs_open_row = await online_db.get_open_segment(
@@ -1491,7 +1492,7 @@ class OnlinePollEngine:
                     "t_start":            _tz_utc(datetime.fromisoformat(seg.t_start)),
                     "t_end":              seg_t_end_rs,
                     "run_state":          seg.run_state,
-                    "cause_close":        "RUN_STATE_CHANGE",
+                    "cause_close":        seg.cause_close or "RUN_STATE_CHANGE",
                     "split_reason":       None,
                     "continued_from":     carry_continued_from,
                     "coking_risk_json":   coking_risk.to_dict(),

@@ -222,6 +222,32 @@ def build_summary_md(
         a("## 🟢 НОРМА")
         a("Замечаний к работе нет.")
 
+    # Сегмент закрыт по устранению неисправностей → время до устранения (MTTR):
+    # от первого фронта панельного кода до момента чистоты (границы сегмента)
+    if segments and getattr(segments[-1], "cause_close", None) == "FAULT_CLEARED":
+        panel_eps = [
+            e for e in episodes
+            if e.get("source") == "panel"
+            and e.get("severity") in ("SHUTDOWN", "WARNING")
+            and e.get("t_open")
+        ]
+        t_first = min((e["t_open"] for e in panel_eps), default=None)
+        t_end_iso = getattr(segments[-1], "t_end", None)
+        if t_first is not None and t_end_iso:
+            try:
+                t_end = datetime.fromisoformat(t_end_iso)
+                if t_end.tzinfo is None:
+                    t_end = t_end.replace(tzinfo=timezone.utc)
+                if t_first.tzinfo is None:
+                    t_first = t_first.replace(tzinfo=timezone.utc)
+                mttr = (t_end - t_first).total_seconds()
+                if mttr > 0:
+                    a("")
+                    a(f"⏱ **Неисправности устранены** — время до устранения: "
+                      f"**{_fmt_duration(mttr)}** (от первого кода до сброса)")
+            except (ValueError, TypeError):
+                pass
+
     # ── Замечания: агрегируем эпизоды по причине (поэпизодный список — в полном отчёте) ──
     if episodes or failed_checks:
         a("")

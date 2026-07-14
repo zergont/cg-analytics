@@ -266,6 +266,32 @@ def _build_conclusion(
     ):
         level_note = "предупреждения аналитики сняты ИИ"
 
+    # Сегмент закрыт по устранению неисправностей → строка MTTR
+    # (от первого фронта панельного кода до момента чистоты)
+    mttr_row = ""
+    if segment_row.get("cause_close") == "FAULT_CLEARED" and segment_row.get("t_end"):
+        from corpus.preprocessor import _fmt_dur
+        starts = [
+            d.get("values", {}).get("fault_start")
+            for d in _extract_detections(chars_json)
+            if d.get("source") == "CONTROLLER_FAULT"
+            and d.get("severity") in ("SHUTDOWN", "WARNING")
+        ]
+        starts = [s for s in starts if s]
+        if starts:
+            try:
+                t_first = datetime.fromisoformat(min(starts))
+                if t_first.tzinfo is None:
+                    t_first = t_first.replace(tzinfo=timezone.utc)
+                t_end = segment_row["t_end"]
+                if t_end.tzinfo is None:
+                    t_end = t_end.replace(tzinfo=timezone.utc)
+                mttr = (t_end - t_first).total_seconds()
+                if mttr > 0:
+                    mttr_row = f"| Устранение | ⏱ за {_fmt_dur(mttr)} (от первого кода до сброса) |\n"
+            except (ValueError, TypeError):
+                pass
+
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     block1 = (
@@ -274,7 +300,8 @@ def _build_conclusion(
         f"|---|---|\n"
         f"| Вердикт | {emoji} **{verdict}** |\n"
         f"| Уровень тревоги | {emoji} {alarm_level} *({level_note})* |\n"
-        f"| Режим | {run_state_label} |\n\n"
+        f"| Режим | {run_state_label} |\n"
+        f"{mttr_row}\n"
         f"**Обнаружения**\n\n"
         f"{dets_block}\n\n"
     )
