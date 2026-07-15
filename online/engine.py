@@ -360,6 +360,40 @@ async def _load_data(
     return await asyncio.gather(history_task, enum_task, fault_task, gaps_task)
 
 
+def _synth_connectivity_gap(
+    history: list[dict],
+    t_from: datetime,
+    t_to: datetime,
+    cfg,
+) -> dict | None:
+    """Синтетический «хвостовой» гэп на случай ещё не разрешённого обрыва связи.
+
+    data_gaps пишет внешний ingest-сервис только постфактум — строка
+    появляется лишь при следующем успешно принятом пакете (INSERT+UPDATE
+    одной транзакцией). Пока связи нет, в data_gaps по этому обрыву нет ни
+    одной записи, и суточный рез, закрывающийся строго по wall-clock, не
+    может о нём узнать. Оцениваем по факту: берём максимальный ts уже
+    загруженной history этого окна — если он заметно отстаёт от t_to,
+    считаем, что данных не было с этого момента и добавляем гэп с открытым
+    концом (gap_end=None) — дальше его подхватывает штатный клиппинг
+    (_clip_gap_intervals/_compute_data_quality уже умеют gap_end IS NULL).
+    """
+    t_from = _tz_utc(t_from)
+    t_to = _tz_utc(t_to)
+    last_ts = max(
+        (_tz_utc(r["ts"]) for r in history if r.get("ts") and _tz_utc(r["ts"]) < t_to),
+        default=None,
+    )
+    gap_start = last_ts if last_ts is not None else t_from
+    if gap_start >= t_to:
+        return None
+    heartbeat = float(cfg.seg("data_quality", "heartbeat_nominal_sec", default=30) or 30)
+    max_mult  = float(cfg.seg("data_quality", "heartbeat_max_multiplier", default=3) or 3)
+    if (t_to - gap_start).total_seconds() <= heartbeat * max_mult:
+        return None
+    return {"gap_start": gap_start, "gap_end": None}
+
+
 async def _run_segment(
     router_sn: str,
     equip_type: str,
@@ -381,6 +415,9 @@ async def _run_segment(
     history, enum_periods, fault_periods, gaps = await _load_data(
         router_sn, equip_type, panel_id, ts_from, ts_to, cfg
     )
+    synth_gap = _synth_connectivity_gap(history, ts_from, ts_to, cfg)
+    if synth_gap is not None:
+        gaps = gaps + [synth_gap]
     segments = await asyncio.to_thread(
         functools.partial(
             _segment,
@@ -1390,6 +1427,10 @@ class OnlinePollEngine:
                 self.key, len(enum_periods), len(fault_periods), len(gaps),
                 _time.perf_counter() - _t0,
             )
+
+            synth_gap = _synth_connectivity_gap(history, ts_from_utc, ts_to_utc, self.cfg)
+            if synth_gap is not None:
+                gaps = gaps + [synth_gap]
 
             segments = await asyncio.to_thread(
                 functools.partial(
