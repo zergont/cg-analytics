@@ -19,7 +19,11 @@ from config import settings
 from db.analytics import init_db, get_app_setting
 from analytics.source import init_source_pool, close_source_pool
 from llm.client import apply_llm_settings, get_llm_settings
-from llm.router import apply_task, TASKS as _ROUTER_TASKS
+from llm.router import (
+    apply_task, TASKS as _ROUTER_TASKS,
+    apply_warning_level_route, WARNING_LEVELS as _WARNING_LEVELS,
+    get_all_warning_level_routes as _get_warning_level_routes,
+)
 from corpus.settings import apply_claude_settings, get_claude_settings
 from scheduler import start_scheduler, stop_scheduler
 from web.routes import router, _apply_tz
@@ -73,6 +77,13 @@ async def lifespan(app: FastAPI):
         _prompt   = await get_app_setting(f"ai_task_{_task_id}_prompt",   _def_prompt)
         apply_task(_task_id, _provider, _prompt)
     logger.info("AI router загружен (%d задач)", len(_ROUTER_TASKS))
+    # Загружаем маршрутизацию гейта предупреждений по уровням серьёзности
+    _wl_defaults = _get_warning_level_routes()
+    for _level in _WARNING_LEVELS:
+        _wl_provider = await get_app_setting(f"ai_warning_level_{_level}_provider", _wl_defaults[_level]["provider"])
+        _wl_model    = await get_app_setting(f"ai_warning_level_{_level}_model",    _wl_defaults[_level]["model"])
+        apply_warning_level_route(_level, _wl_provider, _wl_model)
+    logger.info("Гейт предупреждений: маршрутизация по уровням загружена (%d уровня)", len(_WARNING_LEVELS))
     # Загрузить режим источника телеметрии
     from db.source import set_source_mode as _set_source_mode
     _set_source_mode(await get_app_setting("source_mode", "external"))

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -478,31 +479,119 @@ _VERDICT_TOOL = {
 }
 
 
+async def _run_warning_gate_api(
+    user_prompt: str, model: str, claude_cfg: dict,
+) -> tuple[str, str, str, int, int]:
+    """Гейт через Claude API: анализ + машинно-читаемый вердикт (tool_use verdict).
+
+    Returns (analysis, decision, reason, tokens_in, tokens_out).
+    """
+    import anthropic
+    import httpx
+    from config import settings as app_settings
+    from llm.router import get_prompt
+
+    http_client = None
+    try:
+        if claude_cfg.get("proxy"):
+            http_client = httpx.AsyncClient(proxy=claude_cfg["proxy"])
+        client = anthropic.AsyncAnthropic(
+            api_key=app_settings.anthropic_api_key,
+            http_client=http_client,
+            # SDK сам ретраит 429/5xx/сетевые ошибки с экспоненциальным backoff
+            max_retries=3,
+        )
+        response = await client.messages.create(
+            model=model,
+            # Лимит из настроек Claude (веб-морда): 1024 обрезало анализ на полуслове
+            max_tokens=claude_cfg["max_tokens"],
+            system=get_prompt("warning_claude"),
+            tools=[_VERDICT_TOOL],
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        if response.stop_reason == "max_tokens":
+            logger.warning("WarningGate: анализ обрезан по max_tokens=%s — увеличьте лимит в настройках Claude",
+                           claude_cfg["max_tokens"])
+
+        analysis = "".join(
+            b.text for b in response.content if hasattr(b, "text")
+        ).strip()
+        decision, reason = "pass", "вердикт не вынесен (fail-open)"
+        for b in response.content:
+            if getattr(b, "type", "") == "tool_use" and b.name == "verdict":
+                decision = str(b.input.get("decision", "pass"))
+                reason   = str(b.input.get("reason", "")).strip() or "без обоснования"
+                break
+        return analysis, decision, reason, response.usage.input_tokens, response.usage.output_tokens
+    finally:
+        if http_client:
+            await http_client.aclose()
+
+
+# Локальная LLM не умеет tool_use — вердикт просим текстовым маркером в конце
+# ответа. Приписка добавляется только на этой ветке (в код, не в редактируемый
+# в веб-морде системный промпт задачи warning_claude — тот остаётся единым).
+_LLM_VERDICT_RE = re.compile(r"ВЕРДИКТ\s*:\s*(cancel|pass)", re.IGNORECASE)
+_LLM_VERDICT_SUFFIX = (
+    "\n\nВ САМОМ КОНЦЕ ответа, отдельной последней строкой, укажи вердикт "
+    "строго в формате «ВЕРДИКТ: cancel» или «ВЕРДИКТ: pass» (без кавычек)."
+)
+
+
+async def _run_warning_gate_llm(
+    user_prompt: str, model: str,
+) -> tuple[str, str, str, int, int]:
+    """Гейт через локальную LLM (Ollama/LM Studio): вердикт — текстовый маркер, не tool_use.
+
+    Fail-open: если маркер не найден в ответе — pass, как и при ошибке Claude.
+    Токены локальной генерации не учитываются (chat() их не отдаёт) — tokens_in/out=0.
+    """
+    from llm.client import chat
+    from llm.router import get_prompt
+
+    system = get_prompt("warning_claude") + _LLM_VERDICT_SUFFIX
+    raw = await chat(system, user_prompt, model=model or None)
+
+    m = _LLM_VERDICT_RE.search(raw)
+    if m:
+        decision = m.group(1).lower()
+        reason   = "локальная модель — обоснование см. в тексте анализа"
+        analysis = _LLM_VERDICT_RE.sub("", raw).strip()
+    else:
+        decision, reason = "pass", "вердикт не вынесен (fail-open)"
+        analysis = raw.strip()
+    return analysis, decision, reason, 0, 0
+
+
 async def _analyze_warning_claude(
     router_sn: str, equip_type: str, panel_id: int,
     struct: dict, fault_hash: str,
 ) -> None:
-    """Гейт предупреждений: Claude анализирует сигнал и выносит вердикт.
+    """Гейт предупреждений: анализирует сигнал и выносит вердикт cancel/pass.
 
-    cancel (только для чисто аналитических предупреждений) — подавляет аналитику
-    до изменения состава детекций или закрытия сегмента; pass — предупреждение
-    идёт дальше. Любой исход логируется в gate_log сегмента. Fail-open: при
-    ошибке/недоступности Claude предупреждение проходит без отмены.
+    Провайдер и модель настраиваются ПО УРОВНЮ серьёзности (см. llm.router
+    get_warning_level_route) — системный промпт единый для всех уровней.
+    cancel (только для чисто аналитических предупреждений) — подавляет
+    аналитику до изменения состава детекций или закрытия сегмента; pass —
+    предупреждение идёт дальше. Любой исход логируется в gate_log сегмента.
+    Fail-open: при ошибке/недоступности провайдера предупреждение проходит
+    без отмены.
     """
-    import anthropic
     from corpus.settings import get_claude_settings
-    from config import settings as app_settings
-    from llm.router import get_prompt
+    from llm.router import get_warning_level_route
     from online.status_assembler import (
         build_warning_prompt, compute_analytics_hash, extract_alarm_text,
     )
     from online import db as online_db
 
-    logger.info("WarningGate: анализ для %s/%s/%s (hash=%s)",
-                router_sn, equip_type, panel_id, fault_hash)
-    http_client = None
+    level    = struct.get("severity_level", "")
+    route    = get_warning_level_route(level)
+    provider = route.get("provider", "api")
+    model    = route.get("model", "")
+
+    logger.info("WarningGate: анализ для %s/%s/%s (hash=%s, уровень=%s, provider=%s, model=%s)",
+                router_sn, equip_type, panel_id, fault_hash, level, provider, model)
     try:
-        import httpx
         claude_cfg  = get_claude_settings()
 
         # Обогатить analytics_alarms счётчиками до передачи в промпт (свежие запросы)
@@ -585,36 +674,14 @@ async def _analyze_warning_claude(
         )
         can_cancel  = struct.get("panel_severity", "норма") == "норма"
 
-        # API ходит через прокси из настроек Claude (как corpus/agent и playground)
-        if claude_cfg.get("proxy"):
-            http_client = httpx.AsyncClient(proxy=claude_cfg["proxy"])
-        client = anthropic.AsyncAnthropic(
-            api_key=app_settings.anthropic_api_key,
-            http_client=http_client,
-            # SDK сам ретраит 429/5xx/сетевые ошибки с экспоненциальным backoff
-            max_retries=3,
-        )
-        response = await client.messages.create(
-            model=claude_cfg["model"],
-            # Лимит из настроек Claude (веб-морда): 1024 обрезало анализ на полуслове
-            max_tokens=claude_cfg["max_tokens"],
-            system=get_prompt("warning_claude"),
-            tools=[_VERDICT_TOOL],
-            messages=[{"role": "user", "content": user_prompt}],
-        )
-        if response.stop_reason == "max_tokens":
-            logger.warning("WarningGate: анализ обрезан по max_tokens=%s — увеличьте лимит в настройках Claude",
-                           claude_cfg["max_tokens"])
-
-        analysis = "".join(
-            b.text for b in response.content if hasattr(b, "text")
-        ).strip()
-        decision, reason = "pass", "вердикт не вынесен (fail-open)"
-        for b in response.content:
-            if getattr(b, "type", "") == "tool_use" and b.name == "verdict":
-                decision = str(b.input.get("decision", "pass"))
-                reason   = str(b.input.get("reason", "")).strip() or "без обоснования"
-                break
+        if provider == "llm":
+            analysis, decision, reason, tokens_in, tokens_out = await _run_warning_gate_llm(
+                user_prompt, model,
+            )
+        else:
+            analysis, decision, reason, tokens_in, tokens_out = await _run_warning_gate_api(
+                user_prompt, model, claude_cfg,
+            )
 
         # Отмена допустима только для чисто аналитического предупреждения
         applied = decision == "cancel" and can_cancel
@@ -662,9 +729,10 @@ async def _analyze_warning_claude(
                 "decision":         decision,
                 "decision_applied": applied,
                 "reason":           reason,
-                "model":            claude_cfg["model"],
-                "tokens_in":        response.usage.input_tokens,
-                "tokens_out":       response.usage.output_tokens,
+                "provider":         provider,
+                "model":            model,
+                "tokens_in":        tokens_in,
+                "tokens_out":       tokens_out,
             },
         )
         logger.info("WarningGate: %s/%s/%s — decision=%s applied=%s (%d симв. анализа)",
@@ -674,6 +742,3 @@ async def _analyze_warning_claude(
         # Fail-open: предупреждение остаётся видимым, подавление не ставится
         logger.exception("WarningGate: ошибка для %s/%s/%s",
                          router_sn, equip_type, panel_id)
-    finally:
-        if http_client:
-            await http_client.aclose()

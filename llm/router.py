@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import logging
 
+from config import settings as _app_cfg
+
 logger = logging.getLogger(__name__)
 
 # ── Дефолтные промпты ────────────────────────────────────────────────────────
@@ -129,7 +131,7 @@ TASKS: dict[str, tuple[str, str, str]] = {
     "human_auto":    ("Авто-хуманизация",         "llm", _HUMANIZER_PROMPT),
     "human_manual":  ("Ручная хуманизация",       "llm", _HUMANIZER_PROMPT),
     "analyze_page":  ("Страница «Ручной анализ»", "llm", _ANALYZE_PAGE_PROMPT),
-    "warning_claude": ("Гейт предупреждений (онлайн, только Claude)", "api", _WARNING_GATE_PROMPT),
+    "warning_claude": ("Гейт предупреждений (онлайн)", "api", _WARNING_GATE_PROMPT),
     "daily_agent":   ("Суточный агент-аналитик (только Claude)", "api", _DAILY_AGENT_PROMPT),
 }
 
@@ -141,10 +143,51 @@ TASK_HINTS: dict[str, str] = {
     "human_manual":  "Кнопка «Хуманизировать» на странице сегмента.",
     "analyze_page":  "Страница «Ручной анализ»: заключение по MD-пакету телеметрии.",
     "warning_claude": "Онлайн-гейт: предупреждение стабильно 60 с → анализ и вердикт cancel/pass; "
-                      "cancel подавляет аналитику до смены состава детекций. Провайдер всегда Claude.",
+                      "cancel подавляет аналитику до смены состава детекций. Промпт общий для всех "
+                      "уровней; провайдер и модель — по уровню серьёзности, см. карточку ниже.",
     "daily_agent":   "Суточный отчёт: паспорт оборудования и RAG-контекст добавляются автоматически. "
                       "Провайдер всегда Claude (tool-use).",
 }
+
+# ── Гейт предупреждений: провайдер и модель ПО УРОВНЮ серьёзности ──────────────
+# Промпт задачи "warning_claude" общий для всех уровней (см. выше) — здесь только
+# провайдер/модель, отдельно на каждое значение status_assembler.compute_severity_level().
+
+WARNING_LEVELS: tuple[str, ...] = ("предупреждение", "внимание", "авария")
+
+WARNING_LEVEL_SLUGS: dict[str, str] = {
+    "предупреждение": "caution",
+    "внимание":       "warning",
+    "авария":         "shutdown",
+}
+
+WARNING_LEVEL_LABELS: dict[str, str] = {
+    "предупреждение": "🟡 Предупреждение — аналитика, панель молчит",
+    "внимание":       "🟠 Внимание — сигналит панель",
+    "авария":         "🔴 Авария — аварийный останов",
+}
+
+_warning_level_routing: dict[str, dict[str, str]] = {
+    level: {"provider": "api", "model": _app_cfg.anthropic_model}
+    for level in WARNING_LEVELS
+}
+
+
+def get_warning_level_route(level: str) -> dict[str, str]:
+    """Провайдер+модель гейта для уровня серьёзности (неизвестный уровень → «предупреждение»)."""
+    return dict(_warning_level_routing.get(level, _warning_level_routing[WARNING_LEVELS[0]]))
+
+
+def apply_warning_level_route(level: str, provider: str, model: str) -> None:
+    if level not in WARNING_LEVELS:
+        raise ValueError(f"Неизвестный уровень гейта: {level}")
+    _warning_level_routing[level] = {"provider": provider.strip(), "model": model.strip()}
+    logger.debug("ai_router: гейт[%s] → provider=%s model=%s", level, provider, model)
+
+
+def get_all_warning_level_routes() -> dict[str, dict[str, str]]:
+    return {k: dict(v) for k, v in _warning_level_routing.items()}
+
 
 # ── Runtime-состояние ────────────────────────────────────────────────────────
 

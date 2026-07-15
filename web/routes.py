@@ -815,7 +815,12 @@ async def settings_page(request: Request):
     data_stale_threshold_sec = int(
         await analytics.get_app_setting("data_stale_threshold_sec", "90")
     )
-    from llm.router import get_all as _get_router, TASKS as _TASKS, TASK_HINTS as _HINTS
+    from llm.router import (
+        get_all as _get_router, TASKS as _TASKS, TASK_HINTS as _HINTS,
+        WARNING_LEVELS as _WL, WARNING_LEVEL_LABELS as _WL_LABELS,
+        WARNING_LEVEL_SLUGS as _WL_SLUGS, get_all_warning_level_routes as _get_wl_routes,
+    )
+    _wl_routes = _get_wl_routes()
     return templates.TemplateResponse(request, "settings.html", {
         "settings": cfg,
         "registry": registry,
@@ -833,6 +838,10 @@ async def settings_page(request: Request):
         "data_stale_threshold_sec":  data_stale_threshold_sec,
         "ai_routing":   _get_router(),
         "ai_task_meta": {k: {"label": v[0], "hint": _HINTS.get(k, "")} for k, v in _TASKS.items()},
+        "warning_gate_levels": [
+            {"level": lvl, "slug": _WL_SLUGS[lvl], "label": _WL_LABELS[lvl], "route": _wl_routes[lvl]}
+            for lvl in _WL
+        ],
     })
 
 
@@ -883,16 +892,37 @@ async def update_llm_settings(
 
 @router.post("/settings/ai-routing")
 async def update_ai_routing(request: Request):
-    """Сохранить маршрутизацию AI-задач (провайдер + промпт для каждой задачи)."""
-    from llm.router import apply_task, TASKS as _TASKS
+    """Сохранить маршрутизацию AI-задач (провайдер + промпт для каждой задачи).
+
+    Провайдер для warning_claude в форме не отображается (см. отдельную карточку
+    «Гейт предупреждений — по уровню серьёзности») — дефолт берёт текущее
+    значение, чтобы отсутствующее в форме поле не затирало его на "llm".
+    """
+    from llm.router import apply_task, get_provider, TASKS as _TASKS
     form = await request.form()
     for task_id in _TASKS:
-        provider = str(form.get(f"ai_{task_id}_provider", "llm")).strip()
+        provider = str(form.get(f"ai_{task_id}_provider", get_provider(task_id))).strip()
         prompt   = str(form.get(f"ai_{task_id}_prompt",   "")).strip()
         apply_task(task_id, provider, prompt)
         await analytics.set_app_setting(f"ai_task_{task_id}_provider", provider)
         await analytics.set_app_setting(f"ai_task_{task_id}_prompt",   prompt)
     logger.info("AI routing сохранён (%d задач)", len(_TASKS))
+    return RedirectResponse(url="/settings#ai-routing", status_code=303)
+
+
+@router.post("/settings/warning-gate-routing")
+async def update_warning_gate_routing(request: Request):
+    """Гейт предупреждений: провайдер + модель отдельно по уровню серьёзности."""
+    from llm.router import apply_warning_level_route, WARNING_LEVELS as _LEVELS, WARNING_LEVEL_SLUGS as _SLUGS
+    form = await request.form()
+    for level in _LEVELS:
+        slug     = _SLUGS[level]
+        provider = str(form.get(f"wl_{slug}_provider", "api")).strip()
+        model    = str(form.get(f"wl_{slug}_model",    "")).strip()
+        apply_warning_level_route(level, provider, model)
+        await analytics.set_app_setting(f"ai_warning_level_{level}_provider", provider)
+        await analytics.set_app_setting(f"ai_warning_level_{level}_model",    model)
+    logger.info("Гейт предупреждений: маршрутизация по уровням сохранена")
     return RedirectResponse(url="/settings#ai-routing", status_code=303)
 
 

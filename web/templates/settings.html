@@ -264,6 +264,9 @@
                 <div class="border rounded p-3 mb-3">
                     <div class="d-flex align-items-center gap-3 mb-1">
                         <span class="fw-semibold" style="min-width:260px">{{ meta.label }}</span>
+                        {% if task_id == 'warning_claude' %}
+                        <span class="text-muted small">Провайдер/модель — по уровню серьёзности, карточка ниже ↓</span>
+                        {% else %}
                         <div class="d-flex gap-3">
                             <div class="form-check form-check-inline">
                                 <input class="form-check-input" type="radio"
@@ -282,6 +285,7 @@
                                 </label>
                             </div>
                         </div>
+                        {% endif %}
                     </div>
                     {% if meta.hint %}
                     <div class="text-muted small mb-2">{{ meta.hint }}</div>
@@ -296,6 +300,58 @@
                 </div>
                 {% endfor %}
                 <button type="submit" class="btn btn-sm btn-primary">Сохранить маршрутизацию</button>
+                <span class="text-muted small ms-2">Вступает в силу немедленно, без перезапуска.</span>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ─── Гейт предупреждений: провайдер/модель по уровню серьёзности ──── -->
+<div class="row g-3 mt-0">
+    <div class="col-12">
+        <div class="card mb-3">
+            <div class="card-header fw-semibold">🚦 Гейт предупреждений — модель по уровню серьёзности</div>
+            <div class="card-body">
+                <div class="text-muted small mb-3">
+                    Системный промпт один для всех уровней (карточка «Гейт предупреждений» выше).
+                    Здесь — какой провайдер/модель разбирает срабатывание на каждом уровне:
+                    «предупреждение» срабатывает чаще всего и не критично к ошибке (fail-open,
+                    подавление легко отменяется) — кандидат на дешёвую модель; «внимание»/«авария»
+                    реже и решение гейта там уже ни на что не влияет (сигнал панели важнее), но
+                    текст разбора видит оператор.
+                </div>
+                <form method="post" action="/settings/warning-gate-routing">
+                {% for wl in warning_gate_levels %}
+                <div class="border rounded p-3 mb-3">
+                    <div class="d-flex align-items-center gap-3 flex-wrap">
+                        <span class="fw-semibold" style="min-width:300px">{{ wl.label }}</span>
+                        <div class="d-flex gap-3">
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio"
+                                       name="wl_{{ wl.slug }}_provider" id="wl_{{ wl.slug }}_api"
+                                       value="api" {% if wl.route.provider == 'api' %}checked{% endif %}>
+                                <label class="form-check-label small" for="wl_{{ wl.slug }}_api">
+                                    ✨ Claude API
+                                </label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio"
+                                       name="wl_{{ wl.slug }}_provider" id="wl_{{ wl.slug }}_llm"
+                                       value="llm" {% if wl.route.provider == 'llm' %}checked{% endif %}>
+                                <label class="form-check-label small" for="wl_{{ wl.slug }}_llm">
+                                    🤖 Локальная LLM
+                                </label>
+                            </div>
+                        </div>
+                        <input type="text" name="wl_{{ wl.slug }}_model"
+                               class="form-control form-control-sm" style="max-width:280px"
+                               value="{{ wl.route.model }}"
+                               placeholder="claude-haiku-4-5 / claude-sonnet-5 / qwen2.5:14b">
+                    </div>
+                </div>
+                {% endfor %}
+                <button type="submit" class="btn btn-sm btn-primary">Сохранить маршрутизацию гейта</button>
                 <span class="text-muted small ms-2">Вступает в силу немедленно, без перезапуска.</span>
                 </form>
             </div>
