@@ -809,6 +809,7 @@ async def settings_page(request: Request):
     corpus_auto       = await analytics.get_app_setting("corpus_auto_analyze",       "false")
     qwen_auto         = await analytics.get_app_setting("qwen_auto_analyze",         "false")
     analytics_verify  = await analytics.get_app_setting("analytics_verify_on_close", "false")
+    ai_signature      = await analytics.get_app_setting("ai_signature_enabled",      "true")
     status_line_interval_min = int(
         await analytics.get_app_setting("status_line_interval_min", "1")
     )
@@ -834,6 +835,7 @@ async def settings_page(request: Request):
         "corpus_auto_analyze":       corpus_auto      == "true",
         "qwen_auto_analyze":         qwen_auto        == "true",
         "analytics_verify_on_close": analytics_verify == "true",
+        "ai_signature_enabled":      ai_signature     == "true",
         "status_line_interval_min":  status_line_interval_min,
         "data_stale_threshold_sec":  data_stale_threshold_sec,
         "ai_routing":   _get_router(),
@@ -1056,6 +1058,17 @@ async def analytics_verify_toggle(enabled: str = Form("off")):
         "Финальная проверка характеристик: %s",
         "включена" if value == "true" else "выключена",
     )
+    return RedirectResponse(url="/settings", status_code=303)
+
+
+@router.post("/settings/ai-signature-toggle")
+async def ai_signature_toggle(enabled: str = Form("off")):
+    """Включить / выключить подпись модели в конце разборов (corpus/humanizer/гейт)."""
+    from llm.router import set_signature_enabled
+    value = "true" if enabled == "on" else "false"
+    await analytics.set_app_setting("ai_signature_enabled", value)
+    set_signature_enabled(value == "true")
+    logger.info("Подпись модели в разборах: %s", "включена" if value == "true" else "выключена")
     return RedirectResponse(url="/settings", status_code=303)
 
 

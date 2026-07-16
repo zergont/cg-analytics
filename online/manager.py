@@ -682,6 +682,9 @@ async def _analyze_warning_claude(
             analysis, decision, reason, tokens_in, tokens_out = await _run_warning_gate_api(
                 user_prompt, model, claude_cfg,
             )
+        if analysis:
+            from llm.router import format_ai_signature
+            analysis = analysis + format_ai_signature(model)
 
         # Отмена допустима только для чисто аналитического предупреждения
         applied = decision == "cancel" and can_cancel

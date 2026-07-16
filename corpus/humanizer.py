@@ -26,16 +26,21 @@ async def humanize(conclusion_md: str, task_id: str = "human_auto") -> str:
     if not block2_text:
         return ""
 
-    from llm.router import get_provider, get_prompt
+    from llm.router import get_provider, get_prompt, format_ai_signature
     provider = get_provider(task_id)
     system_prompt = get_prompt(task_id)
     user_msg = f"Перепиши для оператора:\n\n{block2_text}"
 
     try:
         if provider == "api":
-            return await _humanize_api(system_prompt, user_msg)
+            from corpus.settings import get_claude_settings
+            result = await _humanize_api(system_prompt, user_msg)
+            model = get_claude_settings()["model"]
         else:
-            return await _humanize_llm(system_prompt, user_msg)
+            from llm.client import get_llm_settings
+            result = await _humanize_llm(system_prompt, user_msg)
+            model = get_llm_settings()["model"]
+        return result + format_ai_signature(model) if result else result
     except Exception as exc:
         logger.warning("corpus/humanizer: ошибка (некритично): %s", repr(exc))
         return ""

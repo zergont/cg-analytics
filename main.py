@@ -23,6 +23,7 @@ from llm.router import (
     apply_task, TASKS as _ROUTER_TASKS,
     apply_warning_level_route, WARNING_LEVELS as _WARNING_LEVELS,
     get_all_warning_level_routes as _get_warning_level_routes,
+    set_signature_enabled,
 )
 from corpus.settings import apply_claude_settings, get_claude_settings
 from scheduler import start_scheduler, stop_scheduler
@@ -84,6 +85,8 @@ async def lifespan(app: FastAPI):
         _wl_model    = await get_app_setting(f"ai_warning_level_{_level}_model",    _wl_defaults[_level]["model"])
         apply_warning_level_route(_level, _wl_provider, _wl_model)
     logger.info("Гейт предупреждений: маршрутизация по уровням загружена (%d уровня)", len(_WARNING_LEVELS))
+    # Загружаем настройку подписи модели в разборах (corpus/humanizer/гейт)
+    set_signature_enabled(await get_app_setting("ai_signature_enabled", "true") == "true")
     # Загрузить режим источника телеметрии
     from db.source import set_source_mode as _set_source_mode
     _set_source_mode(await get_app_setting("source_mode", "external"))

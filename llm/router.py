@@ -220,3 +220,27 @@ def get_all() -> dict[str, dict[str, str]]:
 def get_default_prompt(task_id: str) -> str:
     """Дефолтный промпт для задачи (для кнопки «Сбросить»)."""
     return TASKS[task_id][2]
+
+
+# ── Подпись модели в разборах (corpus-агент/humanizer/гейт) ────────────────────
+# Общий тумблер: один флаг на все три места, где ИИ пишет текст для человека.
+
+_signature_enabled: bool = True
+
+
+def get_signature_enabled() -> bool:
+    return _signature_enabled
+
+
+def set_signature_enabled(enabled: bool) -> None:
+    global _signature_enabled
+    _signature_enabled = enabled
+
+
+def format_ai_signature(model: str) -> str:
+    """Строка-подпись модели в конце разбора (гейт/humanizer). Пусто, если подпись выключена."""
+    if not _signature_enabled:
+        return ""
+    from datetime import datetime, timezone
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return f"\n\n---\n*Модель: {model} · {now_str}*\n"

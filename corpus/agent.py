@@ -294,6 +294,13 @@ def _build_conclusion(
 
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
+    from llm.router import get_signature_enabled
+    block3 = (
+        f"\n\n---\n"
+        f"*Модель: {model} · Версия аналитики: {ANALYTICS_VERSION} · "
+        f"Источник: черновик_claude · {now_str}*\n"
+    ) if get_signature_enabled() else ""
+
     block1 = (
         f"### 🤖 Детерминированная аналитика\n\n"
         f"| | |\n"
@@ -304,12 +311,6 @@ def _build_conclusion(
         f"{mttr_row}\n"
         f"**Обнаружения**\n\n"
         f"{dets_block}\n\n"
-    )
-
-    block3 = (
-        f"\n\n---\n"
-        f"*Модель: {model} · Версия аналитики: {ANALYTICS_VERSION} · "
-        f"Источник: черновик_claude · {now_str}*\n"
     )
 
     return block1 + claude_block2 + block3
