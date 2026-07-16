@@ -531,7 +531,17 @@ async def _run_warning_gate_api(
 # Локальная LLM не умеет tool_use — вердикт просим текстовым маркером в конце
 # ответа. Приписка добавляется только на этой ветке (в код, не в редактируемый
 # в веб-морде системный промпт задачи warning_claude — тот остаётся единым).
-_LLM_VERDICT_RE = re.compile(r"ВЕРДИКТ\s*:\s*(cancel|pass)", re.IGNORECASE)
+#
+# Базовый промпт (общий для Claude и LLM) описывает Claude-инструмент verdict
+# буквально как decision="cancel"/"pass" reason="...". Claude это трактует как
+# вызов инструмента, а локальная модель без tool_use иногда копирует этот же
+# синтаксис как обычный текст вместо (или вместе с) запрошенного ниже маркера
+# «ВЕРДИКТ: ...» — оба варианта реально встречаются, регэксп должен ловить оба.
+_LLM_VERDICT_RE = re.compile(
+    r'ВЕРДИКТ\s*:\s*(?P<v1>cancel|pass)\b'
+    r'|decision\s*=\s*"(?P<v2>cancel|pass)"(?:\s*,?\s*reason\s*=\s*"(?P<reason>[^"]*)")?',
+    re.IGNORECASE,
+)
 _LLM_VERDICT_SUFFIX = (
     "\n\nСНАЧАЛА напиши краткий текстовый анализ (несколько предложений) — "
     "это обязательная часть ответа, не пропускай её. И только В САМОМ КОНЦЕ, "
@@ -560,8 +570,9 @@ async def _run_warning_gate_llm(
 
     m = _LLM_VERDICT_RE.search(raw)
     if m:
-        decision = m.group(1).lower()
-        reason   = "локальная модель — обоснование см. в тексте анализа"
+        decision = (m.group("v1") or m.group("v2")).lower()
+        extracted_reason = m.group("reason")
+        reason   = extracted_reason.strip() if extracted_reason else "локальная модель — обоснование см. в тексте анализа"
         analysis = _LLM_VERDICT_RE.sub("", raw).strip() or raw
     else:
         decision, reason = "pass", "вердикт не вынесен (fail-open)"
