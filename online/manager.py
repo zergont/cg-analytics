@@ -533,8 +533,10 @@ async def _run_warning_gate_api(
 # в веб-морде системный промпт задачи warning_claude — тот остаётся единым).
 _LLM_VERDICT_RE = re.compile(r"ВЕРДИКТ\s*:\s*(cancel|pass)", re.IGNORECASE)
 _LLM_VERDICT_SUFFIX = (
-    "\n\nВ САМОМ КОНЦЕ ответа, отдельной последней строкой, укажи вердикт "
-    "строго в формате «ВЕРДИКТ: cancel» или «ВЕРДИКТ: pass» (без кавычек)."
+    "\n\nСНАЧАЛА напиши краткий текстовый анализ (несколько предложений) — "
+    "это обязательная часть ответа, не пропускай её. И только В САМОМ КОНЦЕ, "
+    "отдельной последней строкой, добавь вердикт строго в формате "
+    "«ВЕРДИКТ: cancel» или «ВЕРДИКТ: pass» (без кавычек)."
 )
 
 
@@ -544,22 +546,26 @@ async def _run_warning_gate_llm(
     """Гейт через локальную LLM (Ollama/LM Studio): вердикт — текстовый маркер, не tool_use.
 
     Fail-open: если маркер не найден в ответе — pass, как и при ошибке Claude.
-    Токены локальной генерации не учитываются (chat() их не отдаёт) — tokens_in/out=0.
+    Текст анализа никогда не теряется: если модель ответила ТОЛЬКО маркером
+    (без анализа), после вырезания маркера остался бы пустой analysis — тогда
+    сохраняем исходный необрезанный ответ, чтобы событие не пропадало из
+    истории «немо». Токены локальной генерации не учитываются (chat() их не
+    отдаёт) — tokens_in/out=0.
     """
     from llm.client import chat
     from llm.router import get_prompt
 
     system = get_prompt("warning_claude") + _LLM_VERDICT_SUFFIX
-    raw = await chat(system, user_prompt, model=model or None)
+    raw = (await chat(system, user_prompt, model=model or None)).strip()
 
     m = _LLM_VERDICT_RE.search(raw)
     if m:
         decision = m.group(1).lower()
         reason   = "локальная модель — обоснование см. в тексте анализа"
-        analysis = _LLM_VERDICT_RE.sub("", raw).strip()
+        analysis = _LLM_VERDICT_RE.sub("", raw).strip() or raw
     else:
         decision, reason = "pass", "вердикт не вынесен (fail-open)"
-        analysis = raw.strip()
+        analysis = raw or "(локальная модель вернула пустой ответ)"
     return analysis, decision, reason, 0, 0
 
 

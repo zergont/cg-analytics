@@ -15,7 +15,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from config import settings
+from config import settings, get_tz
 from db.analytics import init_db, get_app_setting
 from analytics.source import init_source_pool, close_source_pool
 from llm.client import apply_llm_settings, get_llm_settings
@@ -30,18 +30,31 @@ from scheduler import start_scheduler, stop_scheduler
 from web.routes import router, _apply_tz
 import online.manager as _online_mgr
 
-logging.basicConfig(
-    level=settings.log_level,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+class _TzFormatter(logging.Formatter):
+    """%(asctime)s в часовом поясе приложения (config.get_tz()), а не в поясе ОС сервера.
+
+    Обычный logging.Formatter берёт time.localtime() — если ОС сервера в UTC,
+    текст записи расходится с часовым поясом, в котором вся остальная БД/UI
+    показывают время (виден 3-часовой сдвиг МСК против сырого UTC в тексте).
+    """
+    def formatTime(self, record, datefmt=None):
+        from datetime import datetime
+        dt = datetime.fromtimestamp(record.created, tz=get_tz())
+        return dt.strftime(datefmt) if datefmt else dt.isoformat()
+
+
+_log_formatter = _TzFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+
+logging.basicConfig(level=settings.log_level)
+for _h in logging.getLogger().handlers:
+    _h.setFormatter(_log_formatter)
 logger = logging.getLogger(__name__)
 
 from web.log_buffer import BufferHandler as _BufHandler
 _root_logger = logging.getLogger()
 if not any(isinstance(h, _BufHandler) for h in _root_logger.handlers):
     _bh = _BufHandler()
-    _bh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"))
+    _bh.setFormatter(_TzFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"))
     _root_logger.addHandler(_bh)
 
 
