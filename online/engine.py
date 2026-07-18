@@ -341,7 +341,7 @@ async def _load_data(
         _src.get_enum_periods(
             router_sn, equip_type, panel_id,
             ts_from_utc, ts_to_utc,
-            addrs=[40011, 40010],
+            addrs=_src.ENUM_READ_ADDRS,
         )
     )
     fault_task = asyncio.create_task(
@@ -357,7 +357,12 @@ async def _load_data(
             ts_from_utc, ts_to_utc,
         )
     )
-    return await asyncio.gather(history_task, enum_task, fault_task, gaps_task)
+    history, enum_periods, fault_periods, gaps = await asyncio.gather(
+        history_task, enum_task, fault_task, gaps_task
+    )
+    # 40012/40013 — из постоянного enum_history (не из history_rich с ретенцией).
+    history = _src.apply_fault_code_source_swap(history, enum_periods)
+    return history, enum_periods, fault_periods, gaps
 
 
 def _synth_connectivity_gap(
@@ -1410,7 +1415,7 @@ class OnlinePollEngine:
             enum_periods, fault_periods, gaps = await asyncio.gather(
                 _src.get_enum_periods(
                     self.router_sn, self.equip_type, self.panel_id,
-                    ts_from_utc, ts_to_utc, addrs=[40011, 40010],
+                    ts_from_utc, ts_to_utc, addrs=_src.ENUM_READ_ADDRS,
                 ),
                 _src.get_fault_periods(
                     self.router_sn, self.equip_type, self.panel_id,
@@ -1431,6 +1436,10 @@ class OnlinePollEngine:
             synth_gap = _synth_connectivity_gap(history, ts_from_utc, ts_to_utc, self.cfg)
             if synth_gap is not None:
                 gaps = gaps + [synth_gap]
+
+            # 40012/40013 — из постоянного enum_history (после synth_gap: связность
+            # считаем по исходной аналоговой истории, до подмены кодов).
+            history = _src.apply_fault_code_source_swap(history, enum_periods)
 
             segments = await asyncio.to_thread(
                 functools.partial(

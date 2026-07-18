@@ -336,6 +336,90 @@ registers:
       4: Shutdown
     _source: PASSPORT_РЭ
 
+  # ── Командные/исполнительные регистры — реконструкция действий (Следователь) ──
+  # kind: enum → периоды из enum_history. Пока читаются только 40010/40011;
+  # роли заведены для будущего широкого ридера и классификатора причины.
+  40599:
+    role: RUN_COMMAND
+    domain: CONTROLLER
+    group: STATE
+    unit: ~
+    kind: enum
+    description: Genset Run Command (0 EmergencyStop / 1 Stop / 2 LoadDemandStop / 3 Run)
+    _source: PASSPORT_РЭ
+
+  40598:
+    role: FUEL_SOLENOID
+    domain: CONTROLLER
+    group: STATE
+    unit: ~
+    kind: enum
+    description: Команда топливного электромагнита (Active = подача топлива есть)
+    _source: PASSPORT_РЭ
+
+  40586:
+    role: EXCITATION
+    domain: CONTROLLER
+    group: STATE
+    unit: ~
+    kind: enum
+    description: Состояние возбуждения генератора (Disabled/Enabled)
+    _source: PASSPORT_РЭ
+
+  40563:
+    role: ESTOP_EVENT
+    domain: CONTROLLER
+    group: STATE
+    unit: ~
+    kind: enum
+    description: Событие общего аварийного останова (Inactive/Active)
+    _source: PASSPORT_РЭ
+
+  40569:
+    role: FAULT_RESET
+    domain: CONTROLLER
+    group: STATE
+    unit: ~
+    kind: enum
+    description: Сброс детектирования неисправностей (маркер действий восстановления)
+    _source: PASSPORT_РЭ
+
+  40584:
+    role: PARALLEL_READY
+    domain: CONTROLLER
+    group: STATE
+    unit: ~
+    kind: enum
+    description: Индикатор готовности к параллельной работе (Inactive/Active)
+    _source: PASSPORT_РЭ
+
+  43560:
+    role: GENSET_CB_CLOSE_CMD
+    domain: CONTROLLER
+    group: STATE
+    unit: ~
+    kind: enum
+    description: Команда на включение выключателя генераторной установки
+    _source: PASSPORT_РЭ
+
+  43562:
+    role: GENSET_CB_POS
+    domain: CONTROLLER
+    group: STATE
+    unit: ~
+    kind: enum
+    description: Положение выключателя генераторной установки (Open/Closed)
+    _source: PASSPORT_РЭ
+
+  46109:
+    role: ENGINE_OP_STATE
+    domain: CONTROLLER
+    group: STATE
+    unit: ~
+    kind: enum
+    description: Рабочее состояние двигателя (enum, справочно)
+    _source: PASSPORT_РЭ
+
   # ═══════════════════════════════════════════════════════════════
   # FAULT MASKS 40400–40428  (kind: fault_bitmap → из fault_history)
   # Маски АКТИВНЫХ неисправностей — требуют внимания.

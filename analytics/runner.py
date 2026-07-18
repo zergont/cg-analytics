@@ -220,7 +220,7 @@ async def _load_data(
         analytics_source.get_enum_periods(
             router_sn, equip_type, panel_id,
             ts_from, ts_to,
-            addrs=[40011, 40010],
+            addrs=analytics_source.ENUM_READ_ADDRS,
         )
     )
     fault_task = asyncio.create_task(
@@ -240,6 +240,9 @@ async def _load_data(
     history, enum_periods, fault_periods, gaps = await asyncio.gather(
         history_task, enum_task, fault_task, gaps_task
     )
+    # Коды неисправностей (40012/40013) — из постоянного enum_history, не из
+    # тающего history_rich (ретенция ~30 дней). Пайплайн ниже не меняется.
+    history = analytics_source.apply_fault_code_source_swap(history, enum_periods)
     return history, enum_periods, fault_periods, gaps
 
 

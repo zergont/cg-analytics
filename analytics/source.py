@@ -176,6 +176,43 @@ async def get_enum_periods(
     return [dict(r) for r in rows]
 
 
+# ── Коды неисправностей: постоянный источник enum_history ──────────────────────
+# 40012 (LAST_FAULT_CODE) / 40013 (LAST_FAULT_TYPE) — enum-типа. Декодер дублирует
+# их и в history_rich, но у той таблицы ретенция ~30 дней: на переразборе старых
+# сегментов analog-канал пуст. enum_history — полный и постоянный. Читаем оттуда,
+# синтезируем analog-строки и подменяем в history — пайплайн характеристик и
+# fault_cleared остаётся без изменений (роли LAST_FAULT_CODE/LAST_FAULT_TYPE, kind=analog).
+FAULT_CODE_ADDRS: tuple[int, ...] = (40012, 40013)
+
+# enum-адреса для чтения из enum_history: сегментация (40011/40010) + коды (40012/40013)
+ENUM_READ_ADDRS: list[int] = [40011, 40010, *FAULT_CODE_ADDRS]
+
+
+def apply_fault_code_source_swap(
+    history: list[dict[str, Any]],
+    enum_periods: list[dict[str, Any]],
+    addrs: tuple[int, ...] = FAULT_CODE_ADDRS,
+) -> list[dict[str, Any]]:
+    """Подменить analog-строки fault-code регистров синтезом из enum_history.
+
+    Каждый enum-период → analog-строка {addr, ts=state_start, value=код}. Строки
+    прочих адресов не трогаются; enum_periods упорядочены (addr, state_start), так
+    что синтез по каждому addr уже отсортирован по ts (как ждёт _build_by_addr).
+    Fail-safe: если enum-данных по addrs нет — возвращаем history как есть.
+    """
+    swap = set(addrs)
+    synth = [
+        {"addr": p["addr"], "ts": p["state_start"], "value": p["value"],
+         "is_carried_forward": False}
+        for p in enum_periods
+        if p.get("addr") in swap and p.get("value") is not None
+    ]
+    if not synth:
+        return history
+    kept = [r for r in history if r.get("addr") not in swap]
+    return kept + synth
+
+
 async def get_fault_periods(
     router_sn: str,
     equip_type: str,
