@@ -115,6 +115,13 @@ ALTER TABLE auto_segments
     ADD COLUMN IF NOT EXISTS gate_suppressed_hash TEXT,
     ADD COLUMN IF NOT EXISTS gate_log             JSONB;
 
+-- Миграция v4.9.49: Следователь — аварийные остановы (падение работа→не-штат)
+-- incident_json: лента реконструкции действий + вердикт характер-гейта
+--   (немедленный/контролируемый) + позже черновик акта аварийной остановки.
+-- Заполняется ТОЛЬКО для стоп-сегментов с is_incident; обычные сегменты — NULL.
+ALTER TABLE auto_segments
+    ADD COLUMN IF NOT EXISTS incident_json JSONB;
+
 -- Миграция v4.9.0: универсальный счётчик срабатываний детекторов (Addendum v1.6)
 -- Одна строка = одно событие (фронт) — один сегмент с данным сценарием детектора.
 -- severity / run_state опциональны: заполняются для статистики паттернов.

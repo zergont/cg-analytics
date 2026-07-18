@@ -290,8 +290,9 @@ async def insert_closed_segment(data: dict[str, Any]) -> int:
                 coking_risk_json, forward_fill_json,
                 analytics_version,
                 characteristics_json, report_md, report_summary_md,
+                incident_json,
                 updated_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13::jsonb,$14,$15,now())
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13::jsonb,$14,$15,$16::jsonb,now())
             ON CONFLICT (router_sn, equip_type, panel_id, t_start)
                 WHERE t_end IS NOT NULL
             DO UPDATE SET
@@ -305,6 +306,7 @@ async def insert_closed_segment(data: dict[str, Any]) -> int:
                 characteristics_json = EXCLUDED.characteristics_json,
                 report_md           = EXCLUDED.report_md,
                 report_summary_md   = EXCLUDED.report_summary_md,
+                incident_json       = EXCLUDED.incident_json,
                 updated_at          = now()
             RETURNING id
         """,
@@ -320,6 +322,8 @@ async def insert_closed_segment(data: dict[str, Any]) -> int:
             json.dumps(data.get("characteristics_json"), ensure_ascii=False),
             data.get("report_md"),
             data.get("report_summary_md"),
+            json.dumps(data.get("incident_json"), ensure_ascii=False)
+                if data.get("incident_json") is not None else None,
         )
         seg_id = row["id"]
 

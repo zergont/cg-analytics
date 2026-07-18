@@ -139,16 +139,62 @@ def classify_stop_character(
     else:
         character, confidence = "unknown", "low"
 
+    # Падение именно ИЗ РАБОТЫ: перед остановом машина не стояла. Отсекает
+    # под-сегменты реза stopped→stopped (rs_before=0), которые иначе ложно
+    # попали бы в immediate по «нет cooldown + резалка».
+    is_fall_from_work = rs_before is not None and rs_before != _RS_STOP
+
     return {
         "character": character,
-        "is_incident": character == "immediate",
+        "is_incident": character == "immediate" and is_fall_from_work,
         "confidence": confidence,
         "signals": {
             "passed_cooldown": passed_cooldown,
             "run_state_before": rs_before,
+            "is_fall_from_work": is_fall_from_work,
             "run_command_path": rc_path,
             "fault_type_40013": fault_type,
         },
         "immediate_votes": immediate,
         "controlled_votes": controlled,
+    }
+
+
+_INVESTIGATOR_VERSION = "1.0"
+
+
+def build_stop_incident(
+    enum_periods: list[dict[str, Any]],
+    fault_periods: list[dict[str, Any]],
+    stop_ts: datetime,
+    t_end: datetime | None = None,
+    cfg: Any = None,
+    preamble_sec: int = 300,
+) -> dict[str, Any] | None:
+    """incident_json для падения работа→не-штат; иначе None.
+
+    Вызывается при закрытии стоп-сегмента (stop_ts = его начало). Если характер
+    не immediate или это не падение из работы — None (обычная схема, без тяжёлого
+    артефакта). Иначе: вердикт характера + лента [stop-preamble, t_end] (onset).
+    Возвращает JSON-совместимый dict (datetime → ISO) для хранения в JSONB.
+    """
+    verdict = classify_stop_character(enum_periods, stop_ts, cfg)
+    if not verdict["is_incident"]:
+        return None
+
+    from .reconstructor import build_chronology, serialize_chronology
+
+    stop_ts = _tz(stop_ts)
+    win_from = stop_ts - timedelta(seconds=preamble_sec)
+    win_to = _tz(t_end) if t_end is not None else None
+    chrono = build_chronology(
+        enum_periods, fault_periods, cfg, window_from=win_from, window_to=win_to
+    )
+    return {
+        "kind": "stop_incident",
+        "stop_ts": stop_ts.isoformat(),
+        "character": verdict,
+        "chronology": serialize_chronology(chrono),
+        "investigator_version": _INVESTIGATOR_VERSION,
+        "created_at": datetime.now(timezone.utc).isoformat(),
     }

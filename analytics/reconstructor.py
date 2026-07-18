@@ -72,6 +72,8 @@ def build_chronology(
     enum_periods: list[dict[str, Any]],
     fault_periods: list[dict[str, Any]],
     cfg: Any = None,
+    window_from: datetime | None = None,
+    window_to: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Слить enum-журнал и fault-фронты в одну ленту, отсортированную по началу.
 
@@ -80,13 +82,38 @@ def build_chronology(
     без него имена берутся из label/адреса. Порядок стабилен: при равном ts
     сначала смены состояний (state), затем фронты (fault) — состояние-причина
     предшествует своему следствию-фолту при одном замере.
+
+    window_from/window_to — фильтр по НАЧАЛУ события (onset-in-window): в ленту
+    попадают только переходы, СЛУЧИВШИЕСЯ в окне, а не фоновые состояния, которые
+    активны с прошлого. Без окна — все переданные периоды.
     """
     reg = getattr(cfg, "register_map", {}) if cfg is not None else {}
     events: list[dict[str, Any]] = []
     events.extend(_state_event(p, reg) for p in enum_periods)
     events.extend(_fault_event(f) for f in fault_periods)
 
+    wf = _tz(window_from)
+    wt = _tz(window_to)
+    if wf is not None or wt is not None:
+        events = [
+            e for e in events
+            if e["ts"] is not None
+            and (wf is None or e["ts"] >= wf)
+            and (wt is None or e["ts"] < wt)
+        ]
+
     _kind_rank = {"state": 0, "fault": 1}
     _far = datetime.max.replace(tzinfo=timezone.utc)
     events.sort(key=lambda e: (e["ts"] or _far, _kind_rank.get(e["kind"], 9)))
     return events
+
+
+def serialize_chronology(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Лента → JSON-совместимый вид (datetime → ISO) для хранения в incident_json."""
+    out = []
+    for e in events:
+        r = dict(e)
+        r["ts"] = e["ts"].isoformat() if e.get("ts") else None
+        r["end"] = e["end"].isoformat() if e.get("end") else None
+        out.append(r)
+    return out

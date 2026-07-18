@@ -408,7 +408,7 @@ async def _run_segment(
     ts_to: datetime,
     cfg,
     initial_coking_risk: CokingRisk,
-) -> list:
+) -> tuple[list, dict[str, dict]]:
     """Загрузить данные и запустить segment() в отдельном потоке.
 
     segment() — CPU-bound синхронная функция. asyncio.to_thread() выносит её
@@ -440,7 +440,22 @@ async def _run_segment(
             initial_coking_risk=copy.deepcopy(initial_coking_risk),
         )
     )
-    return segments
+    # Аварийные остановы: incident_json для стоп-сегментов, являющихся падением
+    # работа→не-штат (характер-гейт). Ключ — seg.t_start (как в цикле персиста).
+    incidents: dict[str, dict] = {}
+    try:
+        from analytics import classifier as _clf
+        for seg in segments:
+            if seg.run_state != 0:
+                continue
+            _st = _tz_utc(datetime.fromisoformat(seg.t_start))
+            _te = _tz_utc(datetime.fromisoformat(seg.t_end)) if seg.t_end else None
+            inc = _clf.build_stop_incident(enum_periods, fault_periods, _st, _te, cfg)
+            if inc is not None:
+                incidents[seg.t_start] = inc
+    except Exception:
+        logger.warning("_run_segment: не удалось построить incident_json", exc_info=True)
+    return segments, incidents
 
 
 async def _collect_and_enrich_detections(
@@ -1114,7 +1129,7 @@ class OnlinePollEngine:
         from analytics.runner import ANALYTICS_VERSION
 
         try:
-            segments = await _run_segment(
+            segments, incidents = await _run_segment(
                 self.router_sn, self.equip_type, self.panel_id, self.engine_sn,
                 t_from, t_to, self.cfg,
                 self.inherited_coking_risk,
@@ -1291,6 +1306,7 @@ class OnlinePollEngine:
                 "characteristics_json": seg_dict,
                 "report_md":          report_md,
                 "report_summary_md":  summary_md,
+                "incident_json":      incidents.get(seg.t_start),
             })
             # ← await выше = event loop обслужил API. Сигналим прогресс сразу.
             _enqueue_segment(db_id)
@@ -1537,6 +1553,18 @@ class OnlinePollEngine:
                 )
 
                 _rs_seg_dict = seg.to_dict()
+                _rs_incident = None
+                if seg.run_state == 0:
+                    try:
+                        from analytics import classifier as _clf
+                        _rs_incident = _clf.build_stop_incident(
+                            enum_periods, fault_periods,
+                            _tz_utc(datetime.fromisoformat(seg.t_start)),
+                            seg_t_end_rs, self.cfg,
+                        )
+                    except Exception:
+                        logger.warning("OnlineEngine[%s]: incident_json не построен (RS-change)",
+                                       self.key, exc_info=True)
                 _rs_db_id = await online_db.insert_closed_segment({
                     "router_sn":          self.router_sn,
                     "equip_type":         self.equip_type,
@@ -1552,6 +1580,7 @@ class OnlinePollEngine:
                     "characteristics_json": _rs_seg_dict,
                     "report_md":          report_md_rs,
                     "report_summary_md":  summary_md_rs,
+                    "incident_json":      _rs_incident,
                 })
                 # ← await выше = прогресс обновляется на каждой смене RUN_STATE
                 _enqueue_segment(_rs_db_id)
