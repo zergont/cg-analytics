@@ -266,8 +266,54 @@ def _fmt_detections_hierarchy(chars_json: Any) -> str:
     return "\n".join(lines)
 
 
+def _format_incident(incident_json: Any) -> str:
+    """Секция «Реконструкция аварийного останова» для промпта Claude (лента целиком).
+
+    Только для аварийных сегментов (падение работа→не-штат): вердикт характер-гейта
+    + полная лента действий (журнал состояний + фронты неисправностей). Обычные
+    сегменты incident_json не имеют → пустая строка, вход не меняется.
+    """
+    if not incident_json:
+        return ""
+    if isinstance(incident_json, str):
+        try:
+            incident_json = json.loads(incident_json)
+        except (ValueError, TypeError):
+            return ""
+    if not isinstance(incident_json, dict):
+        return ""
+
+    ch = incident_json.get("character") or {}
+    sig = ch.get("signals") or {}
+    out: list[str] = [
+        "## Реконструкция аварийного останова",
+        "",
+        f"**Характер:** {ch.get('character', '?')} "
+        f"(уверенность {ch.get('confidence', '?')}); падение из работы: {sig.get('is_fall_from_work')}",
+        f"**Сигналы:** cooldown пройден={sig.get('passed_cooldown')}, "
+        f"RunCommand={sig.get('run_command_path')}, RUN_STATE перед остановом={sig.get('run_state_before')}, "
+        f"тип 40013={sig.get('fault_type_40013')}",
+    ]
+    if ch.get("immediate_votes"):
+        out.append(f"**За немедленный:** {'; '.join(ch['immediate_votes'])}")
+    if ch.get("controlled_votes"):
+        out.append(f"**За контролируемый:** {'; '.join(ch['controlled_votes'])}")
+    out += ["", "**Лента действий (время UTC; при равном ts состояние-причина перед фолтом-следствием):**", "", "```"]
+    for e in incident_json.get("chronology") or []:
+        ts = (e.get("ts") or "")[11:19]
+        kind = "СОБЫТИЕ  " if e.get("kind") == "fault" else "состояние"
+        bit = e.get("bit")
+        a = f"{e.get('addr')}/{bit}" if bit is not None else str(e.get("addr"))
+        name = e.get("name") or ""
+        val = f" = {e.get('label')}" if (e.get("kind") == "state" and e.get("label")) else ""
+        sev = f"  [{e.get('severity')}]" if e.get("severity") else ""
+        out.append(f"{ts}  {kind} {a:9} {name}{val}{sev}")
+    out += ["```", "", "---", ""]
+    return "\n".join(out)
+
+
 def build_claude_input(segment_row: dict) -> str:
-    """Сформировать полный вход для Claude: шапка вердикта + report_md as-is."""
+    """Сформировать полный вход для Claude: шапка вердикта + реконструкция + report_md."""
     chars_json = segment_row.get("characteristics_json")
     run_state = segment_row.get("run_state")
     report_md = segment_row.get("report_md") or ""
@@ -292,7 +338,8 @@ def build_claude_input(segment_row: dict) -> str:
         f"Не пересматривай вердикт. Не ищи дополнительных проблем.\n"
         f"---\n\n"
     )
-    return header + report_md
+    incident_md = _format_incident(segment_row.get("incident_json"))
+    return header + incident_md + report_md
 
 
 def extract_verdict_alarm(segment_row: dict) -> tuple[str, str]:
