@@ -214,6 +214,76 @@ def _split_stop_on_fault_cleared(
     return out
 
 
+def _split_stop_on_shutdown(
+    run_state_periods: list[dict],
+    fault_periods: list[dict],
+    cfg,
+    tt: datetime,
+) -> list[dict]:
+    """Разрезать СТОП-периоды (RUN_STATE=0) по пересечению уровня в АВАРИЮ.
+
+    SHUTDOWN-severity фронт (E-Stop и т.п.) на УЖЕ стоящей машине не должен красить
+    весь стоп-сегмент: режем на входе в аварию и на возврате, чтобы красный
+    аварийный интервал стал отдельным сегментом, а сегмент-причина сохранил свой
+    уровень и разбор (инцидент 17.07: E-Stop в 17:10 хоронил горячий останов 16:33).
+    Severity падает естественно из состава фолтов суб-сегмента — резать достаточно.
+
+    Границы — строго ВНУТРИ периода: если авария активна с его начала, реза нет
+    (пересечения «снизу вверх» не было). cause_close реза = RUN_STATE_CHANGE
+    (безопасно для CHECK и распознаётся путями персиста); метка реза — в cause_open.
+    Правило детерминировано из history — перечитка воспроизводит границы.
+    """
+    if not bool(cfg.seg("shutdown_split", "enabled", default=True)):
+        return run_state_periods
+    tt = _tz(tt)
+
+    shutdown_iv: list[tuple[datetime, datetime]] = []
+    for fp in fault_periods:
+        if cfg.bitmap_severity(fp.get("severity") or "none") != "SHUTDOWN":
+            continue
+        fs = _tz(fp["fault_start"])
+        fe = _tz(fp["fault_end"]) if fp.get("fault_end") else tt
+        if fe > fs:
+            shutdown_iv.append((fs, fe))
+    shutdown_iv = _merge_intervals(shutdown_iv)
+    if not shutdown_iv:
+        return run_state_periods
+
+    out: list[dict] = []
+    for period in run_state_periods:
+        if int(period["value"]) != 0:
+            out.append(period)
+            continue
+        p_start = _tz(period["state_start"])
+        p_end_raw = period.get("state_end")
+        p_end = _tz(p_end_raw) if p_end_raw else tt
+
+        # Границы = входы/выходы SHUTDOWN-интервалов, строго внутри периода
+        bounds: set[datetime] = set()
+        for s, e in shutdown_iv:
+            if p_start < s < p_end:
+                bounds.add(s)
+            if p_start < e < p_end:
+                bounds.add(e)
+        if not bounds:
+            out.append(period)
+            continue
+
+        cuts = [p_start] + sorted(bounds) + [p_end]
+        for i in range(len(cuts) - 1):
+            part = dict(period)
+            part["state_start"] = cuts[i]
+            is_last = i == len(cuts) - 2
+            part["state_end"] = p_end_raw if is_last else cuts[i + 1]
+            in_red = any(s <= cuts[i] < e for s, e in shutdown_iv)
+            if i > 0:
+                part["cause_open"] = "SHUTDOWN_ON_STOPPED" if in_red else "SHUTDOWN_STOPPED_CLEARED"
+            if not is_last:
+                part["cause_close"] = "RUN_STATE_CHANGE"
+            out.append(part)
+    return out
+
+
 def _build_ts_index(by_addr: dict[int, list[dict]]) -> dict[int, list[datetime]]:
     """Tz-нормализованный индекс меток времени для bisect-срезов."""
     return {addr: [_tz(r["ts"]) for r in rows] for addr, rows in by_addr.items()}
@@ -1064,6 +1134,13 @@ def segment(
     # получают одинаковые границы — правило детерминировано из history.
     run_state_periods = _split_stop_on_fault_cleared(
         run_state_periods, fault_periods, all_by_addr, cfg, tt,
+    )
+
+    # Рез СТОП-периодов по пересечению уровня в АВАРИЮ: SHUTDOWN-фронт на стоящей
+    # машине (E-Stop и т.п.) выделяется в отдельный красный сегмент, не хороня
+    # сегмент-причину. Границы детерминированы из history.
+    run_state_periods = _split_stop_on_shutdown(
+        run_state_periods, fault_periods, cfg, tt,
     )
 
     segments: list[Segment] = []
