@@ -184,8 +184,16 @@ async def get_enum_periods(
 # fault_cleared остаётся без изменений (роли LAST_FAULT_CODE/LAST_FAULT_TYPE, kind=analog).
 FAULT_CODE_ADDRS: tuple[int, ...] = (40012, 40013)
 
-# enum-адреса для чтения из enum_history: сегментация (40011/40010) + коды (40012/40013)
-ENUM_READ_ADDRS: list[int] = [40011, 40010, *FAULT_CODE_ADDRS]
+def enum_read_addrs(cfg: Any) -> list[int]:
+    """Все state-регистры для чтения из enum_history: kind=enum из mapping ∪ коды.
+
+    Широкий ридер (Следователь, Фаза 2): журнал ключа 40010 / RUN_STATE 40011 /
+    RunCommand 40599 / топл. соленоида / возбуждения / GensetCB / Сброса / кодов
+    40012-40013 — всё, из чего реконструктор строит ленту действий. 40012/40013
+    kind=analog, но читаются из enum_history (см. apply_fault_code_source_swap),
+    поэтому добавляются явно.
+    """
+    return sorted(set(cfg.whitelist_enum) | set(FAULT_CODE_ADDRS))
 
 
 def apply_fault_code_source_swap(

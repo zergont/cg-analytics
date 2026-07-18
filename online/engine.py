@@ -341,7 +341,7 @@ async def _load_data(
         _src.get_enum_periods(
             router_sn, equip_type, panel_id,
             ts_from_utc, ts_to_utc,
-            addrs=_src.ENUM_READ_ADDRS,
+            addrs=_src.enum_read_addrs(cfg),
         )
     )
     fault_task = asyncio.create_task(
@@ -1415,7 +1415,7 @@ class OnlinePollEngine:
             enum_periods, fault_periods, gaps = await asyncio.gather(
                 _src.get_enum_periods(
                     self.router_sn, self.equip_type, self.panel_id,
-                    ts_from_utc, ts_to_utc, addrs=_src.ENUM_READ_ADDRS,
+                    ts_from_utc, ts_to_utc, addrs=_src.enum_read_addrs(self.cfg),
                 ),
                 _src.get_fault_periods(
                     self.router_sn, self.equip_type, self.panel_id,

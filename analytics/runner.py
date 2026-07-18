@@ -220,7 +220,7 @@ async def _load_data(
         analytics_source.get_enum_periods(
             router_sn, equip_type, panel_id,
             ts_from, ts_to,
-            addrs=analytics_source.ENUM_READ_ADDRS,
+            addrs=analytics_source.enum_read_addrs(cfg),
         )
     )
     fault_task = asyncio.create_task(
