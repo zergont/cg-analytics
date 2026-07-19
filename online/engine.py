@@ -361,7 +361,11 @@ async def _load_data(
         history_task, enum_task, fault_task, gaps_task
     )
     # 40012/40013 — из постоянного enum_history (не из history_rich с ретенцией).
-    history = _src.apply_fault_code_source_swap(history, enum_periods)
+    # window_from = начало загруженного аналога: несброшенный код из прошлого
+    # прижимается к границе окна, иначе он не попадёт в срез сегмента.
+    history = _src.apply_fault_code_source_swap(
+        history, enum_periods, window_from=ts_history_from
+    )
     return history, enum_periods, fault_periods, gaps
 
 
@@ -1455,7 +1459,9 @@ class OnlinePollEngine:
 
             # 40012/40013 — из постоянного enum_history (после synth_gap: связность
             # считаем по исходной аналоговой истории, до подмены кодов).
-            history = _src.apply_fault_code_source_swap(history, enum_periods)
+            history = _src.apply_fault_code_source_swap(
+                history, enum_periods, window_from=ts_from_utc
+            )
 
             segments = await asyncio.to_thread(
                 functools.partial(

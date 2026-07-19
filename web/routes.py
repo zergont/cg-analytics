@@ -166,7 +166,9 @@ async def analyze_stream(
             )
             yield _evt({"stage": "enum", "status": "done", "count": len(enum_periods)})
             # 40012/40013 — из постоянного enum_history (не из history_rich с ретенцией).
-            history = _asrc.apply_fault_code_source_swap(history, enum_periods)
+            history = _asrc.apply_fault_code_source_swap(
+                history, enum_periods, window_from=ts_from_utc
+            )
 
             # Этап 3: Fault-периоды
             yield _evt({"stage": "fault", "status": "running", "label": "События и неисправности"})

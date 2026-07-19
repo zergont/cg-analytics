@@ -242,7 +242,9 @@ async def _load_data(
     )
     # Коды неисправностей (40012/40013) — из постоянного enum_history, не из
     # тающего history_rich (ретенция ~30 дней). Пайплайн ниже не меняется.
-    history = analytics_source.apply_fault_code_source_swap(history, enum_periods)
+    history = analytics_source.apply_fault_code_source_swap(
+        history, enum_periods, window_from=ts_from
+    )
     return history, enum_periods, fault_periods, gaps
 
 
