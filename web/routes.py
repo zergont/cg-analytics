@@ -2092,7 +2092,9 @@ async def api_machines():
             "name":          obs.get("name") or obs["router_sn"],
             "manufacturer":  obs.get("manufacturer"),
             "model":         obs.get("model"),
-            "status":        obs["status"],            # running / stopped
+            # Состояние движка мониторинга (ПУСК/СТОП ОНЛАЙН), НЕ режим машины —
+            # тот отдаёт run_state. См. online/manager.py start_machine/stop_machine.
+            "monitoring_status": obs["status"],        # running / stopped
             "run_state":     run_state,
             "run_state_label": _RUN_STATE_LABELS.get(run_state, str(run_state)) if run_state is not None else None,
             # Уровень однозначно кодирует источник: предупреждение — только аналитика,
@@ -2134,10 +2136,6 @@ async def api_machines():
                 for e in _open_eps.get(key, [])
             ],
             "warning_analysis_md": seg.get("warning_analysis_md") if seg else None,
-            "_links": {
-                "segments": f"/api/machine/{obs['router_sn']}/{obs['equip_type']}/{obs['panel_id']}/segments",
-                "calendar":  f"/online/calendar/{obs['router_sn']}/{obs['equip_type']}/{obs['panel_id']}",
-            },
         })
 
     return JSONResponse(result)
@@ -2241,10 +2239,6 @@ async def api_machine_segments(
             "has_report":    bool(seg.get("report_md") if "report_md" in (seg or {}) else None),
             "has_claude":    ai_status.get("status") == "done",
             "has_qwen":      bool(ai_status.get("humanized_md")),
-            "_links": {
-                "detail": f"/api/segment/{seg_id}",
-                "view":   f"/online/segment/{seg_id}",
-            },
         })
 
     return JSONResponse(result)
@@ -2327,10 +2321,6 @@ async def api_segment_detail(seg_id: int):
         "warning_analyses": _parse_json(seg.get("warning_analyses"), [], ctx="warning_analyses") or [],
         # Для открытого сегмента — живые данные
         "status_text":   seg.get("status_text") if is_open else None,
-        "_links": {
-            "view":     f"/online/segment/{seg_id}",
-            "segments": f"/api/machine/{seg['router_sn']}/{seg['equip_type']}/{seg['panel_id']}/segments",
-        },
     })
 
 
