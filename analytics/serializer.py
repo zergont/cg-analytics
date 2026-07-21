@@ -304,9 +304,8 @@ def build_summary_md(
             a(line)
 
         for c in failed_checks:
-            name = c.get("name") or c.get("check") or "проверка"
             det = c.get("details") or c.get("detail") or ""
-            a(f"- ❗ Проверка «{name}» не пройдена" + (f": {det}" if det else ""))
+            a(f"- ❗ {det}" if det else "- ❗ проверка не пройдена")
 
     # ── Ключевые показатели: trip_snapshot-роли последнего рабочего подсегмента ──
     work_seg = next(

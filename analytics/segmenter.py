@@ -725,11 +725,31 @@ def _sequence_checks(
 
     if run_state == 3:
         # Проверка: все подсегменты имеют данные
-        empty = [s.id for s in subsegments if s.data_quality == 0.0]
+        empty_idx = [i for i, s in enumerate(subsegments) if s.data_quality == 0.0]
+        details = "ok"
+        if empty_idx:
+            def _hms(iso: str) -> str:
+                from datetime import datetime as _DT
+                return _DT.fromisoformat(iso).strftime("%H:%M:%S")
+
+            # Группируем подряд идущие пустые подсегменты в непрерывные интервалы
+            runs: list[list[int]] = []
+            for i in empty_idx:
+                if runs and i == runs[-1][-1] + 1:
+                    runs[-1].append(i)
+                else:
+                    runs.append([i])
+
+            ranges = [
+                f"{_hms(subsegments[run[0]].t_start)}–{_hms(subsegments[run[-1]].t_end)}"
+                for run in runs
+            ]
+            details = "отсутствие связи/данных: " + ", ".join(ranges)
+
         checks.append({
             "check": "subseg_data_coverage",
-            "passed": len(empty) == 0,
-            "details": f"empty_subsegments={empty}" if empty else "ok",
+            "passed": len(empty_idx) == 0,
+            "details": details,
         })
 
     # Проверка: нет активных критических fault в конце сегмента
@@ -741,7 +761,8 @@ def _sequence_checks(
         "check": "no_active_shutdown_fault",
         "passed": len(shutdown_faults) == 0,
         "details": (
-            f"active_shutdown_faults={[fp.get('fault_name') for fp in shutdown_faults]}"
+            "в конце сегмента остаётся активная аварийная неисправность: "
+            + ", ".join(fp.get("fault_name") or "?" for fp in shutdown_faults)
             if shutdown_faults else "ok"
         ),
     })
