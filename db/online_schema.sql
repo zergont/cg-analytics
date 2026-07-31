@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS auto_segments (
                          CHECK (cause_close IN (
                              'RUN_STATE_CHANGE',
                              'DAILY_BOUNDARY',
-                             'OPERATOR_STOP'
+                             'OPERATOR_STOP',
+                             'FAULT_CLEARED'
                          ) OR cause_close IS NULL),
     -- Для суточного реза
     split_reason         TEXT,                  -- 'DAILY_BOUNDARY' если применимо
@@ -240,3 +241,14 @@ ALTER TABLE alarm_episodes
 -- для обратной совместимости.
 ALTER TABLE auto_segments
     ADD COLUMN IF NOT EXISTS warning_analyses JSONB;
+
+-- Миграция v4.9.56: FAULT_CLEARED — валидное значение cause_close.
+-- Суб-сегмент СТОП закрывается по устранению неисправности (сброс маски /
+-- обнуление LAST_FAULT_CODE 40012) — сегментатор проставляет это значение
+-- уже давно (analytics/segmenter.py), а констрейнт его не разрешал: вставка
+-- падала CheckViolationError, цикл движка ломался на каждой машине с таким
+-- суб-сегментом.
+ALTER TABLE auto_segments DROP CONSTRAINT IF EXISTS auto_segments_cause_close_check;
+ALTER TABLE auto_segments ADD CONSTRAINT auto_segments_cause_close_check
+    CHECK (cause_close IN ('RUN_STATE_CHANGE', 'DAILY_BOUNDARY', 'OPERATOR_STOP', 'FAULT_CLEARED')
+           OR cause_close IS NULL);
