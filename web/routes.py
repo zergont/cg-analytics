@@ -1434,7 +1434,11 @@ async def online_calendar(
         s["t_start"] = local
         if s.get("t_end"):
             s["t_end"] = s["t_end"].astimezone(tz)
-        s["violation_level"] = _violation_level(s.get("characteristics_json"))
+        _chars = _parse_json(s.get("characteristics_json"), ctx="characteristics_json в календаре")
+        s["violation_level"] = _violation_level(_chars)
+        # Закрытый сегмент без единой строки телеметрии — «нет связи»
+        _dq = _chars.get("data_quality") if isinstance(_chars, dict) else None
+        s["no_data"] = seg.get("t_end") is not None and _dq == 0.0
         segs_by_day[op_date].append(s)
 
     # Сетка месяца (недели с Пн)
@@ -1448,7 +1452,13 @@ async def online_calendar(
                 row.append(None)
             else:
                 d = date(year, month, day_num)
-                row.append({"date": d, "segments": segs_by_day.get(d, [])})
+                day_segs = segs_by_day.get(d, [])
+                row.append({
+                    "date": d,
+                    "segments": day_segs,
+                    # Весь день без связи: все сегменты дня пустые (открытый не в счёт)
+                    "all_no_data": bool(day_segs) and all(s.get("no_data") for s in day_segs),
+                })
         grid.append(row)
 
     prev_y, prev_m = (year - 1, 12) if month == 1 else (year, month - 1)
@@ -2112,8 +2122,9 @@ async def api_machines():
             "alarm_text":       status_struct.get("alarm_text"),
             "status_updated":  status_updated,
             "coking_risk":     coking_risk,            # GREEN / YELLOW / RED
-            # Свежесть телеметрии: при data_stale=true UI должен скрывать блок
-            # аналитики — статус/severity отражают момент last_data_ts, не «сейчас»
+            # Свежесть телеметрии: при data_stale=true UI глушит ТОЛЬКО живой
+            # статус (severity, режим, тревоги «сейчас») — они отражают момент
+            # last_data_ts. История и календарь ретроспективны и доступны всегда.
             "last_data_ts":    _last_data.isoformat() if _last_data else None,
             "data_stale":      data_stale,
             # Открытые эпизоды тревог: висят с t_open, duration_sec не тикает в дырах
@@ -2162,6 +2173,11 @@ async def api_machine_segments(
       "WARNING"  — панель: тревога
       "CAUTION"  — детекция аналитики  ← было "INFO" до v4.8.9
       null       — нет детекций / аналитика отменена гейтом
+
+    Пустые сегменты (v4.9.57+): `no_data=true` — закрытый сегмент без единой
+    строки телеметрии (`data_quality == 0`, полный обрыв связи). UI рисует
+    такие сегменты серым/штриховкой «нет связи», а не по run_state. Сегодняшнюю
+    ячейку при живом обрыве красить по `data_stale` из /api/machines.
     """
     from online import db as odb
     from datetime import datetime, timezone, timedelta
@@ -2211,6 +2227,8 @@ async def api_machine_segments(
             seg.get("gate_suppressed_hash"),
         )
         run_state = seg.get("run_state")
+        _chars    = _parse_json(seg.get("characteristics_json"), ctx="characteristics_json в /segments")
+        dq        = _chars.get("data_quality") if isinstance(_chars, dict) else None
         dur       = None
         if seg.get("t_start") and seg.get("t_end"):
             dur = (seg["t_end"] - seg["t_start"]).total_seconds()
@@ -2233,6 +2251,8 @@ async def api_machine_segments(
             "cause_close":   seg.get("cause_close"),
             "severity":      sev,                         # SHUTDOWN/WARNING/CAUTION/None (было INFO до v4.8.9)
             "gate_checked":  gate_ok,                     # срабатывание аналитики отменено гейтом
+            "data_quality":  dq,                          # 0.0–1.0, null у старых сегментов
+            "no_data":       (not is_open) and dq == 0.0, # весь сегмент без связи → «нет связи» в UI
             "coking_risk":   None,                        # в calendar-запросе не грузим JSONB полностью
             "analytics_version": seg.get("analytics_version"),
             # Наличие ИИ-анализа

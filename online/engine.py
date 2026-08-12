@@ -1223,6 +1223,10 @@ class OnlinePollEngine:
 
             coking_risk = _extract_coking_risk_from_segments([seg])
 
+            # Сегмент без единой строки телеметрии (полный обрыв связи):
+            # заглушка вместо отчёта, без corpus-анализа, цепочка ff рвётся.
+            _seg_no_data = seg.data_quality == 0.0
+
             # DAILY_BOUNDARY пропускаем если переходное состояние (RS ≠ 0 и ≠ 3).
             # Переходные состояния кратковременны — сегмент закроется RUN_STATE_CHANGE.
             if is_last and close_reason == "DAILY_BOUNDARY" and seg.run_state not in {0, 3}:
@@ -1238,9 +1242,10 @@ class OnlinePollEngine:
             seg_inherited_rs = running_rs_sec if i == 0 else {}
 
             # forward-fill память + накопленное время RS для суточного реза
+            # (пустой сегмент память не строит — значения до обрыва не переносятся)
             ff_json = None
             updated_rs_sec: dict[int, float] | None = None
-            if is_last and close_reason == "DAILY_BOUNDARY":
+            if is_last and close_reason == "DAILY_BOUNDARY" and not _seg_no_data:
                 if i == 0:
                     updated_rs_sec = dict(running_rs_sec)
                     updated_rs_sec[seg.run_state] = (
@@ -1263,7 +1268,7 @@ class OnlinePollEngine:
             )
 
             # Обогатить детекции счётчиками ДО to_dict() / to_markdown()
-            _det_events = await _collect_and_enrich_detections(
+            _det_events = [] if _seg_no_data else await _collect_and_enrich_detections(
                 seg, self.router_sn, self.equip_type, self.panel_id,
                 seg_t_end, self.cfg, run_origin_ts=_run_origin,
                 open_keys=set(self._episodes),
@@ -1277,22 +1282,30 @@ class OnlinePollEngine:
             ps = segments[i - 1] if i > 0 else self._prev_seg_hint
 
             # Генерация Markdown-отчёта для закрытого сегмента
-            try:
-                from analytics.serializer import to_markdown as _to_md
-                report_md = _to_md(
-                    [seg], self.router_sn, self.equip_type, self.panel_id,
+            if _seg_no_data:
+                from analytics.serializer import build_no_data_report as _nd_report
+                report_md, summary_md = _nd_report(
+                    self.router_sn, self.equip_type, self.panel_id,
                     _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end,
-                    ANALYTICS_VERSION, tz=self.tz, prev_seg=ps,
-                    fault_ref=self._fault_ref,
-                    inherited_run_state_sec=seg_inherited_rs,
+                    tz=self.tz, last_data_ts=self.last_data_ts,
                 )
-            except Exception:
-                logger.exception("OnlineEngine[%s]: не удалось построить отчёт закрытого сегмента, сохраняю без report_md", self.key)
-                report_md = None
+            else:
+                try:
+                    from analytics.serializer import to_markdown as _to_md
+                    report_md = _to_md(
+                        [seg], self.router_sn, self.equip_type, self.panel_id,
+                        _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end,
+                        ANALYTICS_VERSION, tz=self.tz, prev_seg=ps,
+                        fault_ref=self._fault_ref,
+                        inherited_run_state_sec=seg_inherited_rs,
+                    )
+                except Exception:
+                    logger.exception("OnlineEngine[%s]: не удалось построить отчёт закрытого сегмента, сохраняю без report_md", self.key)
+                    report_md = None
 
-            summary_md = await self._build_summary_md_for(
-                [seg], datetime.fromisoformat(seg.t_start), seg_t_end
-            )
+                summary_md = await self._build_summary_md_for(
+                    [seg], datetime.fromisoformat(seg.t_start), seg_t_end
+                )
 
             db_id = await online_db.insert_closed_segment({
                 "router_sn":          self.router_sn,
@@ -1310,10 +1323,16 @@ class OnlinePollEngine:
                 "characteristics_json": seg_dict,
                 "report_md":          report_md,
                 "report_summary_md":  summary_md,
-                "incident_json":      incidents.get(seg.t_start),
+                "incident_json":      None if _seg_no_data else incidents.get(seg.t_start),
             })
             # ← await выше = event loop обслужил API. Сигналим прогресс сразу.
-            _enqueue_segment(db_id)
+            if _seg_no_data:
+                logger.info(
+                    "OnlineEngine[%s]: сегмент %s пустой (нет связи весь период) — corpus-анализ пропущен",
+                    self.key, db_id,
+                )
+            else:
+                _enqueue_segment(db_id)
 
             # Записать события детекций (segment_id теперь известен)
             if _det_events:
@@ -1334,7 +1353,9 @@ class OnlinePollEngine:
                 last_saved_id = db_id
                 self.cursor_ts = _tz_utc(t_to)
                 self.inherited_coking_risk = coking_risk
-                if close_reason == "DAILY_BOUNDARY":
+                # Пустой сегмент рвёт суточную цепочку: forward-fill и счётчик
+                # «с пуска» из данных до обрыва — не контекст, а устаревшие данные.
+                if close_reason == "DAILY_BOUNDARY" and not _seg_no_data:
                     self.inherited_run_state_sec = updated_rs_sec  # type: ignore[assignment]
                     if seg.run_state in {0, 3}:  # стабильные состояния: тянем цепочку
                         self.continued_from_id = db_id
@@ -1526,6 +1547,8 @@ class OnlinePollEngine:
                 coking_risk = _extract_coking_risk_from_segments([seg])
                 seg_t_end_rs = _tz_utc(datetime.fromisoformat(seg.t_end))
                 ps_rs = closed_segs[ci - 1] if ci > 0 else self._prev_seg_hint
+                # Пустой сегмент (нет связи весь период): заглушка, без corpus-анализа
+                _rs_no_data = seg.data_quality == 0.0
 
                 # Начало запуска: ci==0 продолжает цепочку, ci>0 — новый запуск
                 _rs_run_origin = (
@@ -1535,32 +1558,40 @@ class OnlinePollEngine:
                 )
 
                 # Обогатить детекции счётчиками ДО to_dict() / to_markdown()
-                _rs_det_events = await _collect_and_enrich_detections(
+                _rs_det_events = [] if _rs_no_data else await _collect_and_enrich_detections(
                     seg, self.router_sn, self.equip_type, self.panel_id,
                     seg_t_end_rs, self.cfg, run_origin_ts=_rs_run_origin,
                     open_keys=set(self._episodes),
                 )
 
-                try:
-                    from analytics.serializer import to_markdown as _to_md
-                    report_md_rs = _to_md(
-                        [seg], self.router_sn, self.equip_type, self.panel_id,
+                if _rs_no_data:
+                    from analytics.serializer import build_no_data_report as _nd_report
+                    report_md_rs, summary_md_rs = _nd_report(
+                        self.router_sn, self.equip_type, self.panel_id,
                         _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end_rs,
-                        ANALYTICS_VERSION, tz=self.tz, prev_seg=ps_rs,
-                        fault_ref=self._fault_ref,
-                        inherited_run_state_sec=_rs_inherited_before if ci == 0 else {},
+                        tz=self.tz, last_data_ts=self.last_data_ts,
                     )
-                except Exception:
-                    logger.exception("OnlineEngine[%s]: не удалось построить отчёт сегмента RUN_STATE_CHANGE, сохраняю без report_md", self.key)
-                    report_md_rs = None
+                else:
+                    try:
+                        from analytics.serializer import to_markdown as _to_md
+                        report_md_rs = _to_md(
+                            [seg], self.router_sn, self.equip_type, self.panel_id,
+                            _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end_rs,
+                            ANALYTICS_VERSION, tz=self.tz, prev_seg=ps_rs,
+                            fault_ref=self._fault_ref,
+                            inherited_run_state_sec=_rs_inherited_before if ci == 0 else {},
+                        )
+                    except Exception:
+                        logger.exception("OnlineEngine[%s]: не удалось построить отчёт сегмента RUN_STATE_CHANGE, сохраняю без report_md", self.key)
+                        report_md_rs = None
 
-                summary_md_rs = await self._build_summary_md_for(
-                    [seg], datetime.fromisoformat(seg.t_start), seg_t_end_rs
-                )
+                    summary_md_rs = await self._build_summary_md_for(
+                        [seg], datetime.fromisoformat(seg.t_start), seg_t_end_rs
+                    )
 
                 _rs_seg_dict = seg.to_dict()
                 _rs_incident = None
-                if seg.run_state == 0:
+                if seg.run_state == 0 and not _rs_no_data:
                     try:
                         from analytics import classifier as _clf
                         _rs_incident = _clf.build_stop_incident(
@@ -1589,7 +1620,13 @@ class OnlinePollEngine:
                     "incident_json":      _rs_incident,
                 })
                 # ← await выше = прогресс обновляется на каждой смене RUN_STATE
-                _enqueue_segment(_rs_db_id)
+                if _rs_no_data:
+                    logger.info(
+                        "OnlineEngine[%s]: сегмент %s пустой (нет связи весь период) — corpus-анализ пропущен",
+                        self.key, _rs_db_id,
+                    )
+                else:
+                    _enqueue_segment(_rs_db_id)
 
                 # Записать события детекций (segment_id теперь известен)
                 if _rs_det_events:

@@ -335,6 +335,48 @@ def build_summary_md(
     return "\n".join(lines).strip() + "\n"
 
 
+def build_no_data_report(
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    t_start: datetime,
+    t_end: datetime,
+    tz=None,
+    last_data_ts: "datetime | None" = None,
+) -> tuple[str, str]:
+    """Заглушка отчёта для сегмента без единой строки телеметрии (data_quality == 0).
+
+    Возвращает (report_md, report_summary_md). Штатный to_markdown для таких
+    сегментов не вызывается: метрики там строятся из преамбулы/forward-fill,
+    т.е. из данных ДО обрыва связи, и читаются как актуальный анализ.
+    """
+    fmt_ts = _make_fmt_ts(tz)
+    period = f"{fmt_ts(t_start.isoformat())} — {fmt_ts(t_end.isoformat())}"
+    last_line = (
+        f"Последние данные получены: {fmt_ts(last_data_ts.isoformat())}."
+        if last_data_ts is not None
+        else "Данных за период нет."
+    )
+
+    report_md = "\n".join([
+        f"# Аналитический отчёт — ДГУ `{router_sn}` / панель {panel_id}",
+        "",
+        f"**Период анализа:** {period}",
+        f"**Тип оборудования:** {equip_type}",
+        "",
+        "## ⚠ Связь с оборудованием отсутствовала весь период",
+        "",
+        "Телеметрия за период не поступала (качество данных 0%), анализ невозможен.",
+        last_line,
+        "",
+    ])
+    summary_md = (
+        f"## ⚠ Нет связи\n\nСвязь с оборудованием отсутствовала весь период "
+        f"({period}). {last_line}\n"
+    )
+    return report_md, summary_md
+
+
 def to_markdown(
     segments: list[Segment],
     router_sn: str,

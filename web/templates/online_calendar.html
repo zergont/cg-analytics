@@ -48,6 +48,10 @@
 .rs-4  { background:#f8d7da; color:#842029; }
 .rs-5  { background:#d1ecf1; color:#0c5460; }
 .rs-na { background:#f8f9fa; color:#6c757d; }
+/* Пустой сегмент — связи не было весь период (data_quality = 0) */
+.seg-event.no-data { background:repeating-linear-gradient(45deg,#f1f3f5,#f1f3f5 6px,#e9ecef 6px,#e9ecef 12px);
+                     color:#868e96; }
+.cal-cell.no-data-day { background:repeating-linear-gradient(45deg,#fdfdfe,#fdfdfe 8px,#f1f3f5 8px,#f1f3f5 16px); }
 </style>
 
 <nav aria-label="breadcrumb" class="mb-2">
@@ -125,7 +129,7 @@
     <div class="cal-cell other-month"></div>
   {% else %}
   {% set is_today = (cell.date == today) %}
-  <div class="cal-cell {% if is_today %}today-cell{% endif %}{% if not cell.segments %} empty-cell{% endif %}">
+  <div class="cal-cell {% if is_today %}today-cell{% endif %}{% if not cell.segments %} empty-cell{% endif %}{% if cell.all_no_data %} no-data-day{% endif %}">
     <div class="cal-day-num {% if is_today %}today-num{% endif %}">
       {{ cell.date.day }}
     </div>
@@ -144,7 +148,9 @@
     {% set cr_lv = cr.get("risk_level","GREEN") if cr else "GREEN" %}
 
     {% set vlv = seg.violation_level %}
-    {% set sev_cls = {"норма": "sev-ok",
+    {# Пустой сегмент: нейтральный борт — «предупреждение» тут лишь заваленная
+       проверка subseg_data_coverage, сам факт обрыва показывает штриховка #}
+    {% set sev_cls = "sev-na" if seg.no_data else {"норма": "sev-ok",
                       "предупреждение": "sev-warning",
                       "внимание": "sev-attention",
                       "авария": "sev-alarm"}.get(vlv, "sev-na") %}
@@ -154,8 +160,8 @@
                         "авария": "Авария — панель: SHUTDOWN"}.get(vlv, "Нет данных по серьёзности") %}
     {% set ai = ai_statuses.get(seg.id) if ai_statuses else none %}
     <a href="/online/segment/{{ seg.id }}"
-       class="seg-event rs-{{ rs if rs is not none else 'na' }} {{ sev_cls }}"
-       title="{{ sev_title }}">
+       class="seg-event rs-{{ rs if rs is not none else 'na' }} {{ sev_cls }}{% if seg.no_data %} no-data{% endif %}"
+       title="{% if seg.no_data %}Связь с оборудованием отсутствовала весь период{% else %}{{ sev_title }}{% endif %}">
       {# Маркер открытого сегмента #}
       {% if is_open %}
         <span class="open-dot" title="Открытый сегмент"></span>
@@ -192,7 +198,11 @@
         {% endif %}
       </div>
       {# Режим #}
+      {% if seg.no_data %}
+      <div><strong>⚠ Нет связи</strong></div>
+      {% else %}
       <div><strong>{{ run_state_labels.get(rs, "RS=" ~ rs) if rs is not none else "—" }}</strong></div>
+      {% endif %}
       {# Длительность #}
       {% if not is_open and seg.t_start and seg.t_end %}
       {% set dur = (seg.t_end - seg.t_start).total_seconds()|int %}
