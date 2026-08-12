@@ -2283,6 +2283,8 @@ async def api_segment_detail(seg_id: int):
 
     is_open   = seg.get("t_end") is None
     run_state = seg.get("run_state")
+    _chars    = _parse_json(seg.get("characteristics_json"), ctx="characteristics_json в /segment")
+    dq        = _chars.get("data_quality") if isinstance(_chars, dict) else None
     sev       = _seg_severity(seg.get("characteristics_json"), seg.get("active_detections_json"),
                               gate_suppressed_hash=seg.get("gate_suppressed_hash"))
     gate_ok   = _seg_gate_checked(
@@ -2326,6 +2328,8 @@ async def api_segment_detail(seg_id: int):
         "cause_close":   seg.get("cause_close"),
         "severity":      sev,
         "gate_checked":  gate_ok,
+        "data_quality":  dq,                          # 0.0–1.0, null у старых сегментов
+        "no_data":       (not is_open) and dq == 0.0, # весь сегмент без связи
         "analytics_version": seg.get("analytics_version"),
         # Аналитический Markdown-отчёт (сегментация + детекции)
         "report_md":     seg.get("report_md"),
