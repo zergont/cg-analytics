@@ -254,9 +254,13 @@ async def ping_entry(entry: dict) -> dict:
     provider = entry.get("provider")
     if provider == "anthropic":
         import os
-        has_key = bool(os.environ.get("ANTHROPIC_API_KEY") or entry.get("api_key"))
+        from config import settings as _app_settings
+        has_key = bool(_app_settings.anthropic_api_key
+                       or os.environ.get("ANTHROPIC_API_KEY")
+                       or entry.get("api_key"))
         return {"ok": has_key,
-                "detail": "ключ API найден" if has_key else "ANTHROPIC_API_KEY не задан"}
+                "detail": "ключ API найден (config.yml)" if has_key
+                          else "ключ не задан ни в config.yml, ни в ANTHROPIC_API_KEY"}
     url = (f"{entry['base_url']}/api/tags" if provider == "ollama"
            else f"{entry['base_url']}/v1/models")
     headers = {"Authorization": f"Bearer {entry['api_key']}"} if entry.get("api_key") else {}
