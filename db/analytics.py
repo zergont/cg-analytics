@@ -69,6 +69,18 @@ async def set_app_setting(key: str, value: str) -> None:
         await conn.close()
 
 
+async def delete_app_settings_by_prefix(prefix: str) -> int:
+    """Удалить настройки по префиксу ключа (зачистка осиротевших ключей)."""
+    conn = await _connect()
+    try:
+        result = await conn.execute(
+            "DELETE FROM app_settings WHERE key LIKE $1 || '%'", prefix
+        )
+        return int(result.split()[-1])
+    finally:
+        await conn.close()
+
+
 # ── Equipment registry ────────────────────────────────────────────────────────
 
 async def upsert_equipment(equipment: dict[str, Any]) -> None:

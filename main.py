@@ -91,6 +91,11 @@ async def lifespan(app: FastAPI):
         _prompt   = await get_app_setting(f"ai_task_{_task_id}_prompt",   _def_prompt)
         apply_task(_task_id, _provider, _prompt)
     logger.info("AI router загружен (%d задач)", len(_ROUTER_TASKS))
+    # Зачистка ключей удалённой задачи daily_agent (суточный агент выпилен в v4.9.3)
+    from db.analytics import delete_app_settings_by_prefix as _del_settings
+    _orphaned = await _del_settings("ai_task_daily_agent_")
+    if _orphaned:
+        logger.info("Удалены осиротевшие настройки daily_agent (%d шт.)", _orphaned)
     # Реестр моделей ИИ: загрузка из БД, при пустом — миграция из legacy-настроек
     from llm import registry as _llm_registry
     _reg_count = _llm_registry.load_registry(
