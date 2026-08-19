@@ -16,7 +16,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from config import settings, get_tz
-from db.analytics import init_db, get_app_setting
+from db.analytics import init_db, get_app_setting, set_app_setting
 from analytics.source import init_source_pool, close_source_pool
 from llm.client import apply_llm_settings, get_llm_settings
 from llm.router import (
@@ -91,6 +91,30 @@ async def lifespan(app: FastAPI):
         _prompt   = await get_app_setting(f"ai_task_{_task_id}_prompt",   _def_prompt)
         apply_task(_task_id, _provider, _prompt)
     logger.info("AI router загружен (%d задач)", len(_ROUTER_TASKS))
+    # Реестр моделей ИИ: загрузка из БД, при пустом — миграция из legacy-настроек
+    from llm import registry as _llm_registry
+    _reg_count = _llm_registry.load_registry(
+        await get_app_setting(_llm_registry.REGISTRY_SETTING_KEY, "")
+    )
+    if _reg_count == 0:
+        _llm_registry.migrate_from_legacy(get_llm_settings(), get_claude_settings())
+        await set_app_setting(_llm_registry.REGISTRY_SETTING_KEY, _llm_registry.serialize())
+        _reg_count = len(_llm_registry.get_entries())
+    logger.info("Реестр моделей ИИ загружен (%d записей)", _reg_count)
+    # Цепочки приоритетов моделей для corpus-задач
+    import json as _json
+    from llm.router import (
+        apply_chain as _apply_chain, CHAIN_TASKS as _CHAIN_TASKS,
+        get_all_chains as _get_all_chains,
+    )
+    for _task_id in _CHAIN_TASKS:
+        try:
+            _chain = _json.loads(await get_app_setting(f"ai_task_{_task_id}_chain", "[]"))
+        except Exception:
+            _chain = []
+        _apply_chain(_task_id, _chain if isinstance(_chain, list) else [])
+    logger.info("Цепочки моделей загружены: %s",
+                {t: len(c) for t, c in _get_all_chains().items()})
     # Загружаем маршрутизацию гейта предупреждений по уровням серьёзности
     _wl_defaults = _get_warning_level_routes()
     for _level in _WARNING_LEVELS:

@@ -189,6 +189,32 @@ def get_all_warning_level_routes() -> dict[str, dict[str, str]]:
     return {k: dict(v) for k, v in _warning_level_routing.items()}
 
 
+# ── Приоритетные цепочки моделей (fallback по размеру и ошибкам) ──────────────
+# Цепочка — упорядоченный список id записей реестра (llm.registry).
+# Непустая цепочка у задачи имеет приоритет над одиночным provider задачи.
+# Этап 1: только corpus-задачи (анализ сегментов).
+
+CHAIN_TASKS: tuple[str, ...] = ("seg_auto", "seg_manual")
+
+_task_chains: dict[str, list[str]] = {t: [] for t in CHAIN_TASKS}
+
+
+def get_chain(task_id: str) -> list[str]:
+    """Цепочка приоритетов задачи (пустая — работает одиночный provider)."""
+    return list(_task_chains.get(task_id, []))
+
+
+def apply_chain(task_id: str, entry_ids: list[str]) -> None:
+    if task_id not in CHAIN_TASKS:
+        raise ValueError(f"Задача {task_id} не поддерживает цепочки моделей")
+    _task_chains[task_id] = [str(e).strip() for e in entry_ids if str(e).strip()]
+    logger.debug("ai_router: цепочка %s → %s", task_id, _task_chains[task_id])
+
+
+def get_all_chains() -> dict[str, list[str]]:
+    return {k: list(v) for k, v in _task_chains.items()}
+
+
 # ── Runtime-состояние ────────────────────────────────────────────────────────
 
 _routing: dict[str, dict[str, str]] = {

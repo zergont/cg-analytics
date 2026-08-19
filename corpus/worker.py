@@ -115,7 +115,8 @@ async def _process_segment(
     force=True — разрешить анализ открытого сегмента (ручной запуск).
     """
     import corpus.db as corpus_db
-    from llm.router import get_provider, get_prompt
+    from llm.router import get_provider, get_prompt, get_chain
+    from llm.registry import get_entry
 
     try:
         from analytics.runner import ANALYTICS_VERSION
@@ -141,13 +142,19 @@ async def _process_segment(
         seg_row["router_sn"], seg_row["equip_type"], seg_row["panel_id"]
     )
 
-    provider = get_provider(task_id)
-    prompt   = get_prompt(task_id)
+    prompt = get_prompt(task_id)
 
-    if provider == "api":
+    # Цепочка приоритетов моделей (реестр) имеет приоритет над одиночным провайдером
+    chain_entries = [e for e in (get_entry(eid) for eid in get_chain(task_id)) if e]
+    if chain_entries:
+        provider = "chain"
+        result = await _analyse_segment_chain(seg_row, kb_path, prompt, chain_entries)
+    elif get_provider(task_id) == "api":
+        provider = "api"
         from corpus.agent import analyse_segment
         result = await analyse_segment(seg_row, kb_path, system_prompt=prompt)
     else:
+        provider = "llm"
         result = await _analyse_segment_llm(seg_row, prompt)
 
     if result["error"]:
@@ -214,6 +221,95 @@ async def _analyse_segment_llm(seg_row: dict, system_prompt: str) -> dict[str, A
             "loops_count": 0, "generation_time_sec": 0, "debug_json": {},
             "claude_model": None,
         }
+
+
+# ── Цепочка приоритетов моделей ───────────────────────────────────────────────
+
+# Оценка размера промпта: ~3 символа на токен для русского текста (консервативно)
+_EST_CHARS_PER_TOKEN = 3
+# Резерв контекста под ответ модели
+_RESPONSE_RESERVE_TOKENS = 4000
+
+
+async def _analyse_segment_chain(
+    seg_row: dict,
+    kb_path: str | None,
+    system_prompt: str,
+    entries: list[dict],
+) -> dict[str, Any]:
+    """Анализ по цепочке приоритетов: проактивный отбор по размеру + fallback по ошибкам.
+
+    Для каждой записи цепочки по порядку:
+      1. промпт не влезает в max_ctx_tokens → пропуск без запроса;
+      2. type="api"  → Claude-агент с инструментами;
+         type="llm"  → plain chat через запись реестра (стрим по настройке записи);
+      3. ошибка запроса (сеть после ретраев, 4xx сразу) → следующая запись.
+    След маршрутизации пишется в debug_json.routing.
+    """
+    import time
+    from llm.client import chat
+
+    report_md  = seg_row.get("report_md") or ""
+    est_tokens = (len(system_prompt) + len(report_md)) // _EST_CHARS_PER_TOKEN \
+                 + _RESPONSE_RESERVE_TOKENS
+    trace: list[dict] = []
+
+    for entry in entries:
+        if est_tokens > entry["max_ctx_tokens"]:
+            trace.append({"entry": entry["id"],
+                          "action": "skip_size",
+                          "detail": f"~{est_tokens} ток. > лимита {entry['max_ctx_tokens']}"})
+            logger.info("corpus/chain: #%s → «%s» пропущена по размеру (~%d > %d ток.)",
+                        seg_row.get("id"), entry["name"], est_tokens, entry["max_ctx_tokens"])
+            continue
+
+        t0 = time.monotonic()
+        try:
+            if entry["type"] == "api":
+                from corpus.agent import analyse_segment
+                result = await analyse_segment(seg_row, kb_path, system_prompt=system_prompt)
+                if result.get("error"):
+                    trace.append({"entry": entry["id"], "action": "error",
+                                  "detail": str(result["error"])[:300]})
+                    continue
+            else:
+                content = await chat(system_prompt, report_md,
+                                     entry=entry, stream=entry.get("stream", True))
+                result = {
+                    "verdict":            "LLM",
+                    "alarm_level":        None,
+                    "conclusion_md":      content,
+                    "error":              None,
+                    "tokens_used":        0,
+                    "tool_calls_count":   0,
+                    "loops_count":        0,
+                    "generation_time_sec": round(time.monotonic() - t0, 1),
+                    "debug_json":         {"provider": entry["provider"]},
+                    "claude_model":       f"{entry['name']} ({entry['model']})",
+                }
+            trace.append({"entry": entry["id"], "action": "ok"})
+            dbg = result.get("debug_json") or {}
+            dbg["routing"] = trace
+            dbg["est_prompt_tokens"] = est_tokens
+            result["debug_json"] = dbg
+            return result
+        except Exception as exc:
+            # сеть/429/5xx уже отретраены внутри chat(); сюда доходят
+            # исчерпанные ретраи и 4xx — в обоих случаях идём к следующей модели
+            trace.append({"entry": entry["id"], "action": "error", "detail": repr(exc)[:300]})
+            logger.warning("corpus/chain: #%s → «%s» ошибка, перехожу дальше: %r",
+                           seg_row.get("id"), entry["name"], exc)
+
+    detail = "; ".join(f"{t['entry']}: {t['action']}" for t in trace) or "цепочка пуста"
+    return {
+        "verdict": None, "alarm_level": None, "conclusion_md": "",
+        "error": f"Ни одна модель цепочки не обработала сегмент "
+                 f"(промпт ~{est_tokens} ток.): {detail}",
+        "tokens_used": 0, "tool_calls_count": 0, "loops_count": 0,
+        "generation_time_sec": 0,
+        "debug_json": {"routing": trace, "est_prompt_tokens": est_tokens},
+        "claude_model": None,
+    }
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────────

@@ -267,6 +267,288 @@
     </div>
 </div>
 
+<!-- ─── Реестр моделей ИИ (полная ширина) ────────────────────────────── -->
+<div class="row g-3 mt-0" id="llm-registry">
+    <div class="col-12">
+        <div class="card mb-3">
+            <div class="card-header fw-semibold">📚 Реестр моделей ИИ — доступные подключения</div>
+            <div class="card-body">
+                <div class="text-muted small mb-3">
+                    Паспорта подключений для приоритетных цепочек анализа сегментов.
+                    «Лимит контекста» — по нему роутер решает, влезает ли отчёт сегмента в модель.
+                    «Параллельно» — сколько запросов допускается одновременно (локальным серверам — 1).
+                </div>
+                {% if llm_registry %}
+                <table class="table table-sm align-middle mb-3">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Название</th>
+                            <th>Провайдер</th>
+                            <th>Модель</th>
+                            <th class="text-end">Лимит контекста</th>
+                            <th class="text-end">Параллельно</th>
+                            <th>Ключ API</th>
+                            <th style="width:220px"></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    {% for e in llm_registry %}
+                    <tr>
+                        <td><span class="fw-semibold small">{{ e.name }}</span><br>
+                            <span class="text-muted" style="font-size:0.72rem">{{ e.id }}</span></td>
+                        <td><small>{{ e.provider }}{% if e.type == 'api' %} <span class="badge bg-primary-subtle text-primary-emphasis" style="font-size:0.65rem">агент</span>{% endif %}</small></td>
+                        <td><small>{{ e.model }}{% if e.base_url %}<br><span class="text-muted" style="font-size:0.72rem">{{ e.base_url }}</span>{% endif %}</small></td>
+                        <td class="text-end"><small>{{ "{:,}".format(e.max_ctx_tokens).replace(",", " ") }}</small></td>
+                        <td class="text-end"><small>{{ e.max_concurrent }}</small></td>
+                        <td><small>{{ "••••••" if e.has_api_key else "—" }}</small></td>
+                        <td class="text-end">
+                            <button type="button" class="btn btn-sm btn-outline-secondary"
+                                    onclick="llmRegTest('{{ e.id }}', this)">Проверить</button>
+                            <button type="button" class="btn btn-sm btn-outline-primary"
+                                    onclick='llmRegEdit({{ e | tojson }})'>Изменить</button>
+                            <form method="post" action="/settings/llm-registry/delete" class="d-inline"
+                                  onsubmit="return confirm('Удалить подключение «{{ e.name }}»? Оно будет убрано из цепочек.')">
+                                <input type="hidden" name="entry_id" value="{{ e.id }}">
+                                <button type="submit" class="btn btn-sm btn-outline-danger">✕</button>
+                            </form>
+                            <div class="small mt-1" id="llm-reg-test-{{ e.id }}" style="font-size:0.72rem"></div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <div class="text-muted small mb-3">Реестр пуст — добавьте первое подключение.</div>
+                {% endif %}
+
+                <details id="llm-reg-form-details">
+                    <summary class="text-muted small" style="cursor:pointer">Добавить / изменить подключение</summary>
+                    <form method="post" action="/settings/llm-registry/save" class="mt-2" id="llm-reg-form">
+                        <input type="hidden" name="entry_id" id="reg_entry_id" value="">
+                        <div class="row g-2 mb-2">
+                            <div class="col-3">
+                                <label class="form-label small fw-semibold mb-1">Название</label>
+                                <input type="text" name="name" id="reg_name" class="form-control form-control-sm" required
+                                       placeholder="Qwen3-27B (LM Studio)">
+                            </div>
+                            <div class="col-2">
+                                <label class="form-label small fw-semibold mb-1">Провайдер</label>
+                                <select name="provider" id="reg_provider" class="form-select form-select-sm"
+                                        onchange="llmRegProviderHint()">
+                                    <option value="ollama">Ollama</option>
+                                    <option value="lmstudio">LM Studio</option>
+                                    <option value="deepseek">DeepSeek</option>
+                                    <option value="anthropic">Claude (Anthropic)</option>
+                                </select>
+                            </div>
+                            <div class="col-4">
+                                <label class="form-label small fw-semibold mb-1">URL сервера</label>
+                                <input type="text" name="base_url" id="reg_base_url" class="form-control form-control-sm"
+                                       placeholder="http://192.168.0.111:1234">
+                                <div class="form-text" id="reg_url_hint" style="font-size:0.72rem"></div>
+                            </div>
+                            <div class="col-3">
+                                <label class="form-label small fw-semibold mb-1">Модель</label>
+                                <input type="text" name="model" id="reg_model" class="form-control form-control-sm" required
+                                       placeholder="qwen/qwen3.8-27b">
+                            </div>
+                        </div>
+                        <div class="row g-2 mb-2">
+                            <div class="col-3">
+                                <label class="form-label small fw-semibold mb-1">Ключ API</label>
+                                <input type="password" name="api_key" id="reg_api_key" class="form-control form-control-sm"
+                                       autocomplete="new-password"
+                                       placeholder="пусто — не менять">
+                                <div class="form-text" style="font-size:0.72rem">Нужен для DeepSeek; локальным не требуется.</div>
+                            </div>
+                            <div class="col-2">
+                                <label class="form-label small fw-semibold mb-1">Лимит контекста</label>
+                                <input type="number" name="max_ctx_tokens" id="reg_max_ctx" class="form-control form-control-sm"
+                                       min="1024" max="2000000" required>
+                            </div>
+                            <div class="col-2">
+                                <label class="form-label small fw-semibold mb-1">num_ctx (Ollama)</label>
+                                <input type="number" name="num_ctx" id="reg_num_ctx" class="form-control form-control-sm"
+                                       min="1024" max="1000000" value="16384">
+                            </div>
+                            <div class="col-2">
+                                <label class="form-label small fw-semibold mb-1">Temperature</label>
+                                <input type="number" name="temperature" id="reg_temperature" class="form-control form-control-sm"
+                                       min="0" max="2" step="0.05" value="0.1">
+                            </div>
+                            <div class="col-1">
+                                <label class="form-label small fw-semibold mb-1">Паралл.</label>
+                                <input type="number" name="max_concurrent" id="reg_max_conc" class="form-control form-control-sm"
+                                       min="1" max="16" value="1">
+                            </div>
+                            <div class="col-2 d-flex align-items-end">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" name="stream" id="reg_stream" value="on" checked>
+                                    <label class="form-check-label small" for="reg_stream">Стриминг</label>
+                                </div>
+                            </div>
+                        </div>
+                        <input type="hidden" name="type" id="reg_type" value="llm">
+                        <button type="submit" class="btn btn-sm btn-primary">Сохранить подключение</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="llmRegReset()">Очистить форму</button>
+                        <span class="text-muted small ms-2">Claude идёт агентским пайплайном (модель — из карточки «ИИ-аналитика»).</span>
+                    </form>
+                </details>
+
+                <script>
+                const LLM_REG_CTX_DEFAULTS = {ollama: 16384, lmstudio: 40960, deepseek: 131072, anthropic: 200000};
+                function llmRegProviderHint() {
+                    const p = document.getElementById("reg_provider").value;
+                    document.getElementById("reg_url_hint").textContent = {
+                        ollama:    "Ollama: обычно http://localhost:11434",
+                        lmstudio:  "LM Studio: обычно http://192.168.0.111:1234",
+                        deepseek:  "DeepSeek: https://api.deepseek.com",
+                        anthropic: "Не используется — подключение через SDK",
+                    }[p] || "";
+                    const ctx = document.getElementById("reg_max_ctx");
+                    if (!ctx.value) ctx.value = LLM_REG_CTX_DEFAULTS[p];
+                    document.getElementById("reg_type").value = (p === "anthropic") ? "api" : "llm";
+                    if (p === "deepseek" && !document.getElementById("reg_base_url").value)
+                        document.getElementById("reg_base_url").value = "https://api.deepseek.com";
+                }
+                function llmRegEdit(e) {
+                    document.getElementById("llm-reg-form-details").open = true;
+                    document.getElementById("reg_entry_id").value    = e.id;
+                    document.getElementById("reg_name").value        = e.name;
+                    document.getElementById("reg_provider").value    = e.provider;
+                    document.getElementById("reg_base_url").value    = e.base_url;
+                    document.getElementById("reg_model").value       = e.model;
+                    document.getElementById("reg_api_key").value     = "";
+                    document.getElementById("reg_max_ctx").value     = e.max_ctx_tokens;
+                    document.getElementById("reg_num_ctx").value     = e.num_ctx;
+                    document.getElementById("reg_temperature").value = e.temperature;
+                    document.getElementById("reg_max_conc").value    = e.max_concurrent;
+                    document.getElementById("reg_stream").checked    = e.stream;
+                    document.getElementById("reg_type").value        = e.type;
+                    llmRegProviderHint();
+                    document.getElementById("llm-reg-form").scrollIntoView({behavior: "smooth", block: "center"});
+                }
+                function llmRegReset() {
+                    document.getElementById("llm-reg-form").reset();
+                    document.getElementById("reg_entry_id").value = "";
+                    llmRegProviderHint();
+                }
+                async function llmRegTest(id, btn) {
+                    const out = document.getElementById("llm-reg-test-" + id);
+                    out.textContent = "проверяю…"; out.className = "small mt-1 text-muted";
+                    btn.disabled = true;
+                    try {
+                        const r = await fetch("/settings/llm-registry/test/" + encodeURIComponent(id));
+                        const j = await r.json();
+                        out.textContent = (j.ok ? "✓ " : "✗ ") + j.detail;
+                        out.className = "small mt-1 " + (j.ok ? "text-success" : "text-danger");
+                    } catch (err) {
+                        out.textContent = "✗ " + err; out.className = "small mt-1 text-danger";
+                    } finally { btn.disabled = false; }
+                }
+                document.addEventListener("DOMContentLoaded", llmRegProviderHint);
+                </script>
+            </div>
+        </div>
+
+        <!-- Цепочки приоритетов моделей -->
+        <div class="card mb-3">
+            <div class="card-header fw-semibold">⛓️ Цепочки приоритетов — анализ сегментов</div>
+            <div class="card-body">
+                <div class="text-muted small mb-3">
+                    Порядок моделей для обработки сегмента. Роутер оценивает размер отчёта и берёт
+                    первую модель, в чей лимит контекста он влезает; при ошибке — переходит к следующей.
+                    Непустая цепочка имеет приоритет над выбором провайдера в «Маршрутизации AI» ниже.
+                    Пустая цепочка — работает как раньше (одиночный провайдер задачи).
+                </div>
+                <form method="post" action="/settings/ai-chains">
+                    {% for task_id in chain_tasks %}
+                    <div class="border rounded p-3 mb-3">
+                        <div class="fw-semibold mb-2" style="font-size:0.9rem">{{ ai_task_meta[task_id].label }}</div>
+                        <div class="d-flex gap-2 align-items-start flex-wrap">
+                            <ol class="list-group list-group-numbered mb-0" id="chain-list-{{ task_id }}" style="min-width:340px">
+                            </ol>
+                            <div>
+                                <select class="form-select form-select-sm" id="chain-add-{{ task_id }}" style="max-width:280px">
+                                    {% for e in llm_registry %}
+                                    <option value="{{ e.id }}">{{ e.name }} ({{ "{:,}".format(e.max_ctx_tokens).replace(",", " ") }} ток.)</option>
+                                    {% endfor %}
+                                </select>
+                                <button type="button" class="btn btn-sm btn-outline-primary mt-1"
+                                        onclick="chainAdd('{{ task_id }}')">+ Добавить в цепочку</button>
+                            </div>
+                        </div>
+                        <input type="hidden" name="chain_{{ task_id }}" id="chain-value-{{ task_id }}"
+                               value="{{ ai_chains[task_id] | join(',') }}">
+                    </div>
+                    {% endfor %}
+                    <button type="submit" class="btn btn-sm btn-primary">Сохранить цепочки</button>
+                    <span class="text-muted small ms-2">Вступает в силу немедленно, без перезапуска.</span>
+                </form>
+
+                <script>
+                const LLM_REG_NAMES = {
+                    {% for e in llm_registry %}"{{ e.id }}": "{{ e.name }}",{% endfor %}
+                };
+                function chainRender(taskId) {
+                    const val  = document.getElementById("chain-value-" + taskId).value;
+                    const list = document.getElementById("chain-list-" + taskId);
+                    const ids  = val ? val.split(",").filter(Boolean) : [];
+                    list.innerHTML = "";
+                    if (!ids.length) {
+                        list.innerHTML = '<li class="list-group-item text-muted small">цепочка пуста — используется одиночный провайдер задачи</li>';
+                        return;
+                    }
+                    ids.forEach((id, i) => {
+                        const li = document.createElement("li");
+                        li.className = "list-group-item d-flex justify-content-between align-items-center py-1";
+                        const name = LLM_REG_NAMES[id] || (id + " (удалено из реестра)");
+                        li.innerHTML = '<span class="small">' + name + '</span>' +
+                            '<span class="btn-group">' +
+                            '<button type="button" class="btn btn-sm btn-outline-secondary py-0" onclick="chainMove(\'' + taskId + '\',' + i + ',-1)">↑</button>' +
+                            '<button type="button" class="btn btn-sm btn-outline-secondary py-0" onclick="chainMove(\'' + taskId + '\',' + i + ',1)">↓</button>' +
+                            '<button type="button" class="btn btn-sm btn-outline-danger py-0" onclick="chainRemove(\'' + taskId + '\',' + i + ')">✕</button>' +
+                            '</span>';
+                        list.appendChild(li);
+                    });
+                }
+                function chainIds(taskId) {
+                    const v = document.getElementById("chain-value-" + taskId).value;
+                    return v ? v.split(",").filter(Boolean) : [];
+                }
+                function chainSet(taskId, ids) {
+                    document.getElementById("chain-value-" + taskId).value = ids.join(",");
+                    chainRender(taskId);
+                }
+                function chainAdd(taskId) {
+                    const sel = document.getElementById("chain-add-" + taskId);
+                    if (!sel.value) return;
+                    const ids = chainIds(taskId);
+                    if (ids.includes(sel.value)) return;
+                    ids.push(sel.value);
+                    chainSet(taskId, ids);
+                }
+                function chainMove(taskId, i, d) {
+                    const ids = chainIds(taskId);
+                    const j = i + d;
+                    if (j < 0 || j >= ids.length) return;
+                    [ids[i], ids[j]] = [ids[j], ids[i]];
+                    chainSet(taskId, ids);
+                }
+                function chainRemove(taskId, i) {
+                    const ids = chainIds(taskId);
+                    ids.splice(i, 1);
+                    chainSet(taskId, ids);
+                }
+                document.addEventListener("DOMContentLoaded", () => {
+                    {% for task_id in chain_tasks %}chainRender("{{ task_id }}");{% endfor %}
+                });
+                </script>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- ─── Маршрутизация AI-задач (полная ширина) ───────────────────────── -->
 <div class="row g-3 mt-0" id="ai-routing">
     <div class="col-12">
@@ -281,6 +563,8 @@
                         <span class="fw-semibold" style="min-width:260px">{{ meta.label }}</span>
                         {% if task_id == 'warning_claude' %}
                         <span class="text-muted small">Провайдер/модель — по уровню серьёзности, карточка ниже ↓</span>
+                        {% elif task_id in chain_tasks and ai_chains[task_id] %}
+                        <span class="text-warning small">⛓️ Работает цепочка приоритетов (карточка выше) — выбор провайдера здесь не действует</span>
                         {% else %}
                         <div class="d-flex gap-3">
                             <div class="form-check form-check-inline">

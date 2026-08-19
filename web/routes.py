@@ -824,8 +824,13 @@ async def settings_page(request: Request):
         get_all as _get_router, TASKS as _TASKS, TASK_HINTS as _HINTS,
         WARNING_LEVELS as _WL, WARNING_LEVEL_LABELS as _WL_LABELS,
         WARNING_LEVEL_SLUGS as _WL_SLUGS, get_all_warning_level_routes as _get_wl_routes,
+        CHAIN_TASKS as _CHAIN_TASKS, get_all_chains as _get_chains,
     )
+    from llm.registry import get_entries as _get_llm_entries
     _wl_routes = _get_wl_routes()
+    _llm_entries = _get_llm_entries()
+    for _e in _llm_entries:   # ключи API в шаблон не отдаём — только признак наличия
+        _e["has_api_key"] = bool(_e.pop("api_key", ""))
     return templates.TemplateResponse(request, "settings.html", {
         "settings": cfg,
         "registry": registry,
@@ -848,6 +853,9 @@ async def settings_page(request: Request):
             {"level": lvl, "slug": _WL_SLUGS[lvl], "label": _WL_LABELS[lvl], "route": _wl_routes[lvl]}
             for lvl in _WL
         ],
+        "llm_registry": _llm_entries,
+        "ai_chains":    _get_chains(),
+        "chain_tasks":  list(_CHAIN_TASKS),
     })
 
 
@@ -894,6 +902,82 @@ async def update_llm_settings(
     logger.info("LLM настройки сохранены: provider=%s model=%s num_ctx=%d stream=%s",
                 llm_provider, llm_model, llm_num_ctx, stream)
     return RedirectResponse(url="/settings", status_code=303)
+
+
+@router.post("/settings/llm-registry/save")
+async def llm_registry_save(request: Request):
+    """Добавить/обновить запись реестра моделей ИИ."""
+    from llm import registry as llm_registry
+    form = await request.form()
+    entry_id = str(form.get("entry_id", "")).strip()
+    api_key  = str(form.get("api_key", "")).strip()
+    # пустое поле ключа при редактировании = оставить прежний ключ
+    if not api_key and entry_id:
+        existing = llm_registry.get_entry(entry_id)
+        if existing:
+            api_key = existing["api_key"]
+    entry = llm_registry.upsert_entry({
+        "id":             entry_id,
+        "name":           form.get("name", ""),
+        "type":           form.get("type", "llm"),
+        "provider":       form.get("provider", "ollama"),
+        "base_url":       form.get("base_url", ""),
+        "model":          form.get("model", ""),
+        "api_key":        api_key,
+        "max_ctx_tokens": form.get("max_ctx_tokens", ""),
+        "temperature":    form.get("temperature", "0.1"),
+        "num_ctx":        form.get("num_ctx", ""),
+        "stream":         form.get("stream") == "on",
+        "max_concurrent": form.get("max_concurrent", ""),
+    })
+    await analytics.set_app_setting(llm_registry.REGISTRY_SETTING_KEY, llm_registry.serialize())
+    logger.info("Реестр моделей: сохранена запись «%s» (%s)", entry["name"], entry["id"])
+    return RedirectResponse(url="/settings#llm-registry", status_code=303)
+
+
+@router.post("/settings/llm-registry/delete")
+async def llm_registry_delete(entry_id: str = Form(...)):
+    """Удалить запись реестра (и вычистить её из цепочек задач)."""
+    import json as _json
+    from llm import registry as llm_registry
+    from llm.router import CHAIN_TASKS, get_chain, apply_chain
+    llm_registry.delete_entry(entry_id)
+    await analytics.set_app_setting(llm_registry.REGISTRY_SETTING_KEY, llm_registry.serialize())
+    for task_id in CHAIN_TASKS:
+        chain = get_chain(task_id)
+        if entry_id in chain:
+            chain = [e for e in chain if e != entry_id]
+            apply_chain(task_id, chain)
+            await analytics.set_app_setting(f"ai_task_{task_id}_chain", _json.dumps(chain))
+    logger.info("Реестр моделей: удалена запись %s", entry_id)
+    return RedirectResponse(url="/settings#llm-registry", status_code=303)
+
+
+@router.get("/settings/llm-registry/test/{entry_id}")
+async def llm_registry_test(entry_id: str):
+    """Проверка доступности подключения из реестра (fetch из UI)."""
+    from llm import registry as llm_registry
+    from llm.client import ping_entry
+    entry = llm_registry.get_entry(entry_id)
+    if not entry:
+        return JSONResponse({"ok": False, "detail": "запись не найдена"})
+    return JSONResponse(await ping_entry(entry))
+
+
+@router.post("/settings/ai-chains")
+async def update_ai_chains(request: Request):
+    """Сохранить цепочки приоритетов моделей для corpus-задач."""
+    import json as _json
+    from llm.router import CHAIN_TASKS, apply_chain
+    form = await request.form()
+    for task_id in CHAIN_TASKS:
+        raw = str(form.get(f"chain_{task_id}", "")).strip()
+        chain = [e for e in raw.split(",") if e.strip()] if raw else []
+        apply_chain(task_id, chain)
+        await analytics.set_app_setting(f"ai_task_{task_id}_chain", _json.dumps(chain))
+    logger.info("Цепочки моделей сохранены: %s",
+                {t: len(str(form.get(f'chain_{t}', '')).split(',')) for t in CHAIN_TASKS})
+    return RedirectResponse(url="/settings#ai-routing", status_code=303)
 
 
 @router.post("/settings/ai-routing")
