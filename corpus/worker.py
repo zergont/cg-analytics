@@ -194,6 +194,7 @@ async def _analyse_segment_llm(seg_row: dict, system_prompt: str) -> dict[str, A
     """Анализ сегмента через локальную LLM (без инструментов, простой вызов)."""
     import time
     from llm.client import _cfg, chat
+    from llm.router import format_ai_signature
 
     t0 = time.monotonic()
     report_md = seg_row.get("report_md") or ""
@@ -201,6 +202,8 @@ async def _analyse_segment_llm(seg_row: dict, system_prompt: str) -> dict[str, A
     try:
         # chat() сам ретраит сеть/429/5xx и знает текущего провайдера (Ollama/LM Studio)
         content = await chat(system_prompt, report_md)
+        if content:
+            content += format_ai_signature(_cfg["model"])
 
         return {
             "verdict":            "LLM",
@@ -273,8 +276,11 @@ async def _analyse_segment_chain(
                                   "detail": str(result["error"])[:300]})
                     continue
             else:
+                from llm.router import format_ai_signature
                 content = await chat(system_prompt, report_md,
                                      entry=entry, stream=entry.get("stream", True))
+                if content:
+                    content += format_ai_signature(entry["model"])
                 result = {
                     "verdict":            "LLM",
                     "alarm_level":        None,
