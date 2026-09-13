@@ -337,6 +337,7 @@
                                         onchange="llmRegProviderHint()">
                                     <option value="ollama">Ollama</option>
                                     <option value="lmstudio">LM Studio</option>
+                                    <option value="llamacpp">llama-server (llama.cpp)</option>
                                     <option value="deepseek">DeepSeek</option>
                                     <option value="anthropic">Claude (Anthropic)</option>
                                 </select>
@@ -349,8 +350,15 @@
                             </div>
                             <div class="col-3">
                                 <label class="form-label small fw-semibold mb-1">Модель</label>
-                                <input type="text" name="model" id="reg_model" class="form-control form-control-sm" required
-                                       placeholder="qwen/qwen3.8-27b">
+                                <div class="input-group input-group-sm">
+                                    <input type="text" name="model" id="reg_model" class="form-control form-control-sm" required
+                                           placeholder="qwen/qwen3.8-27b">
+                                    <button type="button" class="btn btn-outline-secondary" onclick="llmRegListModels()"
+                                            title="Запросить у сервера список моделей — клик по имени подставит его в поле">
+                                        Модели сервера
+                                    </button>
+                                </div>
+                                <div id="reg_models_out" class="mt-1" style="font-size:0.75rem"></div>
                             </div>
                         </div>
                         <div class="row g-2 mb-2">
@@ -396,12 +404,13 @@
                 </details>
 
                 <script>
-                const LLM_REG_CTX_DEFAULTS = {ollama: 16384, lmstudio: 40960, deepseek: 131072, anthropic: 200000};
+                const LLM_REG_CTX_DEFAULTS = {ollama: 16384, lmstudio: 40960, llamacpp: 32768, deepseek: 131072, anthropic: 200000};
                 function llmRegProviderHint() {
                     const p = document.getElementById("reg_provider").value;
                     document.getElementById("reg_url_hint").textContent = {
                         ollama:    "Ollama: обычно http://localhost:11434",
                         lmstudio:  "LM Studio: обычно http://192.168.0.111:1234",
+                        llamacpp:  "llama-server: обычно http://host:8080; имя модели — как в «Модели сервера» (алиас или файл GGUF)",
                         deepseek:  "DeepSeek: https://api.deepseek.com",
                         anthropic: "Не используется — подключение через SDK",
                     }[p] || "";
@@ -431,7 +440,29 @@
                 function llmRegReset() {
                     document.getElementById("llm-reg-form").reset();
                     document.getElementById("reg_entry_id").value = "";
+                    document.getElementById("reg_models_out").innerHTML = "";
                     llmRegProviderHint();
+                }
+                async function llmRegListModels() {
+                    const out = document.getElementById("reg_models_out");
+                    out.className = "mt-1 text-muted"; out.textContent = "запрашиваю…";
+                    const fd = new FormData();
+                    for (const id of ["reg_entry_id", "reg_provider", "reg_base_url", "reg_api_key"]) {
+                        const el = document.getElementById(id);
+                        fd.append(el.name, el.value);
+                    }
+                    try {
+                        const r = await fetch("/settings/llm-registry/models", {method: "POST", body: fd});
+                        const j = await r.json();
+                        if (!j.ok) { out.className = "mt-1 text-danger"; out.textContent = "✗ " + j.detail; return; }
+                        if (!j.models.length) { out.className = "mt-1 text-muted"; out.textContent = j.detail || "сервер не отдал ни одной модели"; return; }
+                        out.className = "mt-1";
+                        out.innerHTML = '<span class="text-muted">клик — подставить: </span>' + j.models.map(m =>
+                            '<a href="#" class="me-2" onclick="document.getElementById(\'reg_model\').value=this.textContent;return false;">' +
+                            m.replace(/</g, "&lt;") + '</a>').join("");
+                    } catch (err) {
+                        out.className = "mt-1 text-danger"; out.textContent = "✗ " + err;
+                    }
                 }
                 async function llmRegTest(id, btn) {
                     const out = document.getElementById("llm-reg-test-" + id);

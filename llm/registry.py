@@ -13,7 +13,8 @@
   id             — слаг-идентификатор (ссылка из приоритетных цепочек)
   name           — человекочитаемое имя для UI
   type           — "llm" (plain chat) | "api" (Claude-агент с инструментами)
-  provider       — ollama | lmstudio | deepseek | anthropic
+  provider       — ollama | lmstudio | llamacpp | deepseek | anthropic
+                   (llamacpp — llama-server из llama.cpp, OpenAI-совместимый API)
   base_url       — адрес сервера (для anthropic не используется)
   model          — имя модели
   api_key        — ключ API (deepseek; для локальных пусто)
@@ -37,13 +38,16 @@ logger = logging.getLogger(__name__)
 
 REGISTRY_SETTING_KEY = "llm_model_registry"
 
-ENTRY_PROVIDERS = ("ollama", "lmstudio", "deepseek", "anthropic")
+ENTRY_PROVIDERS = ("ollama", "lmstudio", "llamacpp", "deepseek", "anthropic")
 ENTRY_TYPES     = ("llm", "api")
+# Локальные серверы: по умолчанию строго последовательно (один запрос за раз)
+LOCAL_PROVIDERS = ("ollama", "lmstudio", "llamacpp")
 
 # Дефолтные паспорта контекста по провайдеру (для подсказок в UI)
 DEFAULT_MAX_CTX = {
     "ollama":    16384,
     "lmstudio":  40960,
+    "llamacpp":  32768,
     "deepseek":  131072,
     "anthropic": 200000,
 }
@@ -78,8 +82,7 @@ def normalize_entry(raw: dict) -> dict:
     except (TypeError, ValueError):
         max_conc = 0
     if max_conc < 1:
-        # локальные серверы по умолчанию строго последовательно
-        max_conc = 1 if provider in ("ollama", "lmstudio") else 4
+        max_conc = 1 if provider in LOCAL_PROVIDERS else 4
     try:
         temperature = float(raw.get("temperature", 0.1))
     except (TypeError, ValueError):

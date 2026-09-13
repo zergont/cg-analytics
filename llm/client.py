@@ -78,8 +78,9 @@ def get_llm_settings() -> dict:
 
 # ── Запрос/разбор по провайдерам ───────────────────────────────────────────────
 
-# Провайдеры с OpenAI-совместимым API (/v1/chat/completions)
-_OPENAI_COMPAT = ("lmstudio", "deepseek")
+# Провайдеры с OpenAI-совместимым API (/v1/chat/completions):
+# LM Studio, llama-server (llama.cpp), DeepSeek
+_OPENAI_COMPAT = ("lmstudio", "llamacpp", "deepseek")
 
 
 def _build_request(
@@ -245,6 +246,25 @@ async def chat(
     return "".join(parts).strip()
 
 
+async def list_server_models(provider: str, base_url: str, api_key: str = "") -> list[str]:
+    """Имена моделей, которые отдаёт сервер: Ollama — /api/tags, остальные — /v1/models.
+
+    Бросает исключение при недоступности; для anthropic список не запрашивается.
+    """
+    if provider == "anthropic":
+        return []
+    base_url = base_url.rstrip("/")
+    url = f"{base_url}/api/tags" if provider == "ollama" else f"{base_url}/v1/models"
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(url, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+    if provider == "ollama":
+        return [m.get("name", "") for m in data.get("models", []) if m.get("name")]
+    return [m.get("id", "") for m in data.get("data", []) if m.get("id")]
+
+
 async def ping_entry(entry: dict) -> dict:
     """Проверка доступности подключения из реестра (кнопка «Проверить» в UI).
 
@@ -261,24 +281,16 @@ async def ping_entry(entry: dict) -> dict:
         return {"ok": has_key,
                 "detail": "ключ API найден (config.yml)" if has_key
                           else "ключ не задан ни в config.yml, ни в ANTHROPIC_API_KEY"}
-    url = (f"{entry['base_url']}/api/tags" if provider == "ollama"
-           else f"{entry['base_url']}/v1/models")
-    headers = {"Authorization": f"Bearer {entry['api_key']}"} if entry.get("api_key") else {}
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-            models = ([m.get("name", "") for m in data.get("models", [])]
-                      if provider == "ollama"
-                      else [m.get("id", "") for m in data.get("data", [])])
-            if entry.get("model") and entry["model"] not in models:
-                return {"ok": True,
-                        "detail": f"сервер доступен, но модель «{entry['model']}» "
-                                  f"не найдена в списке ({len(models)} шт.)"}
-            return {"ok": True, "detail": f"доступен, моделей: {len(models)}"}
+        models = await list_server_models(provider, entry["base_url"], entry.get("api_key", ""))
     except Exception as exc:
         return {"ok": False, "detail": repr(exc)}
+    if entry.get("model") and entry["model"] not in models:
+        shown = ", ".join(models[:5]) + (" …" if len(models) > 5 else "")
+        return {"ok": True,
+                "detail": f"сервер доступен, но модель «{entry['model']}» не найдена. "
+                          f"Сервер отдаёт: {shown or '—'}"}
+    return {"ok": True, "detail": f"доступен, моделей: {len(models)}"}
 
 
 async def stream_analysis(md_packet: str) -> AsyncIterator[str]:

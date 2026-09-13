@@ -9,27 +9,25 @@
             <div class="card-body">
                 <form id="pg-form">
 
-                    <!-- Провайдер -->
+                    <!-- Подключение из реестра моделей -->
                     <div class="mb-3">
-                        <label class="form-label small fw-semibold">Провайдер</label>
-                        <div class="d-flex gap-3">
-                            <div class="form-check">
-                                <input class="form-check-input" type="radio" name="provider"
-                                       id="prov-llm" value="llm" checked onchange="updateModelHint()">
-                                <label class="form-check-label" for="prov-llm">🤖 LLM (Ollama)</label>
-                            </div>
-                            <div class="form-check">
-                                <input class="form-check-input" type="radio" name="provider"
-                                       id="prov-api" value="api" onchange="updateModelHint()">
-                                <label class="form-check-label" for="prov-api">✨ Claude API</label>
-                            </div>
-                        </div>
+                        <label class="form-label small fw-semibold">Подключение
+                            <span class="text-muted fw-normal">(реестр моделей в настройках)</span>
+                        </label>
+                        <select name="entry_id" id="pg-entry" class="form-select form-select-sm" onchange="updateModelHint()">
+                            {% for e in llm_registry %}
+                            <option value="{{ e.id }}" data-model="{{ e.model }}">
+                                {% if e.type == 'api' %}✨{% else %}🤖{% endif %} {{ e.name }} — {{ e.provider }}
+                            </option>
+                            {% endfor %}
+                            <option value="" data-model="{{ llm.model }}">🤖 Локальная LLM (глобальные настройки)</option>
+                        </select>
                     </div>
 
                     <!-- Модель -->
                     <div class="mb-3">
                         <label class="form-label small fw-semibold">Модель
-                            <span class="text-muted fw-normal" id="model-hint">(оставь пустым — из настроек)</span>
+                            <span class="text-muted fw-normal" id="model-hint">(оставь пустым — из подключения)</span>
                         </label>
                         <input type="text" name="model" id="pg-model"
                                class="form-control form-control-sm"
@@ -118,13 +116,12 @@
 </style>
 
 <script>
-const llmModel  = {{ llm.model | tojson }};
-const apiModel  = {{ claude.model | tojson }};
-
 function updateModelHint() {
-    const prov = document.querySelector('input[name=provider]:checked').value;
-    document.getElementById('pg-model').placeholder = prov === 'llm' ? llmModel : apiModel;
+    const sel = document.getElementById('pg-entry');
+    const opt = sel.options[sel.selectedIndex];
+    document.getElementById('pg-model').placeholder = opt ? (opt.dataset.model || '') : '';
 }
+document.addEventListener('DOMContentLoaded', updateModelHint);
 
 function clearAll() {
     document.getElementById('pg-response').textContent = 'Ответ появится здесь...';

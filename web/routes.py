@@ -964,6 +964,35 @@ async def llm_registry_test(entry_id: str):
     return JSONResponse(await ping_entry(entry))
 
 
+@router.post("/settings/llm-registry/models")
+async def llm_registry_models(request: Request):
+    """Список моделей сервера по значениям формы (ещё не сохранённой записи).
+
+    Пустой ключ при редактировании существующей записи — берём сохранённый.
+    """
+    from llm import registry as llm_registry
+    from llm.client import list_server_models
+    form = await request.form()
+    provider = str(form.get("provider", "")).strip()
+    base_url = str(form.get("base_url", "")).strip()
+    api_key  = str(form.get("api_key", "")).strip()
+    entry_id = str(form.get("entry_id", "")).strip()
+    if not api_key and entry_id:
+        existing = llm_registry.get_entry(entry_id)
+        if existing:
+            api_key = existing["api_key"]
+    if provider == "anthropic":
+        return JSONResponse({"ok": True, "models": [],
+                             "detail": "Claude: список моделей задаётся вручную"})
+    if not base_url:
+        return JSONResponse({"ok": False, "detail": "укажите URL сервера"})
+    try:
+        models = await list_server_models(provider, base_url, api_key)
+        return JSONResponse({"ok": True, "models": models})
+    except Exception as exc:
+        return JSONResponse({"ok": False, "detail": repr(exc)})
+
+
 @router.post("/settings/ai-chains")
 async def update_ai_chains(request: Request):
     """Сохранить цепочки приоритетов моделей для corpus-задач."""
@@ -1021,34 +1050,49 @@ async def ai_playground_page(request: Request):
     """Страница ручного запроса к AI (playground)."""
     from llm.client import get_llm_settings
     from corpus.settings import get_claude_settings
+    from llm.registry import get_entries as _get_llm_entries
+    entries = _get_llm_entries()
+    for e in entries:
+        e.pop("api_key", None)   # ключи в шаблон не отдаём
     return templates.TemplateResponse(request, "ai_playground.html", {
         "llm": get_llm_settings(),
         "claude": get_claude_settings(),
+        "llm_registry": entries,
     })
 
 
 @router.post("/ai-playground/run")
 async def ai_playground_run(request: Request):
-    """Выполнить запрос к AI и вернуть ответ (streaming SSE)."""
+    """Выполнить запрос к AI и вернуть ответ (streaming SSE).
+
+    entry_id — запись реестра моделей; пустой entry_id — legacy-режим
+    (provider llm/api из глобальных настроек).
+    """
     import json as _json
     from fastapi.responses import StreamingResponse
+    from llm.registry import get_entry as _get_llm_entry
 
     form = await request.form()
+    entry_id      = str(form.get("entry_id", "")).strip()
     provider      = str(form.get("provider", "llm"))
     model_override= str(form.get("model", "")).strip()
     system_prompt = str(form.get("system_prompt", "")).strip()
     user_message  = str(form.get("user_message", "")).strip()
     use_stream    = form.get("stream") == "on"
 
+    entry = _get_llm_entry(entry_id) if entry_id else None
+    if entry:
+        provider = "api" if entry["type"] == "api" else "llm"
+
     async def _generate():
         raw_chunks: list[str] = []
         try:
             if provider == "llm":
                 from llm.client import chat_stream
-                # chat_stream знает текущего провайдера (Ollama/LM Studio) и ретраит сам
+                # chat_stream ретраит сам; с entry — параметры и семафор записи реестра
                 async for token in chat_stream(
                     system_prompt, user_message,
-                    model=model_override or None, stream=use_stream,
+                    model=model_override or None, stream=use_stream, entry=entry,
                 ):
                     raw_chunks.append(token)
                     yield f"data: {_json.dumps({'token': token})}\n\n"
@@ -1058,7 +1102,7 @@ async def ai_playground_run(request: Request):
                 from corpus.settings import get_claude_settings
                 from config import settings as app_settings
                 claude_cfg = get_claude_settings()
-                model = model_override or claude_cfg["model"]
+                model = model_override or (entry["model"] if entry else "") or claude_cfg["model"]
                 _http = _httpx.AsyncClient(proxy=claude_cfg["proxy"]) if claude_cfg.get("proxy") else None
                 client = anthropic.AsyncAnthropic(
                     api_key=app_settings.anthropic_api_key,
