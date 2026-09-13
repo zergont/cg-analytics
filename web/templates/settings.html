@@ -518,9 +518,9 @@
                 </form>
 
                 <script>
-                const LLM_REG_NAMES = {
-                    {% for e in llm_registry %}"{{ e.id }}": "{{ e.name }}",{% endfor %}
-                };
+                {% set _reg_names = {} %}
+                {% for e in llm_registry %}{% set _ = _reg_names.update({e.id: e.name}) %}{% endfor %}
+                const LLM_REG_NAMES = {{ _reg_names | tojson }};
                 function chainRender(taskId) {
                     const val  = document.getElementById("chain-value-" + taskId).value;
                     const list = document.getElementById("chain-list-" + taskId);
@@ -550,14 +550,28 @@
                 function chainSet(taskId, ids) {
                     document.getElementById("chain-value-" + taskId).value = ids.join(",");
                     chainRender(taskId);
+                    chainSyncSelect(taskId);
                 }
                 function chainAdd(taskId) {
                     const sel = document.getElementById("chain-add-" + taskId);
-                    if (!sel.value) return;
                     const ids = chainIds(taskId);
-                    if (ids.includes(sel.value)) return;
+                    if (!sel.value || ids.includes(sel.value)) {
+                        alert("Все подключения из реестра уже в цепочке.");
+                        return;
+                    }
                     ids.push(sel.value);
                     chainSet(taskId, ids);
+                }
+                function chainSyncSelect(taskId) {
+                    // в выпадашке остаются только ещё не добавленные подключения
+                    const sel = document.getElementById("chain-add-" + taskId);
+                    const ids = chainIds(taskId);
+                    let firstFree = null;
+                    for (const opt of sel.options) {
+                        opt.hidden = ids.includes(opt.value);
+                        if (!opt.hidden && firstFree === null) firstFree = opt.value;
+                    }
+                    if (ids.includes(sel.value)) sel.value = firstFree ?? "";
                 }
                 function chainMove(taskId, i, d) {
                     const ids = chainIds(taskId);
@@ -572,7 +586,7 @@
                     chainSet(taskId, ids);
                 }
                 document.addEventListener("DOMContentLoaded", () => {
-                    {% for task_id in chain_tasks %}chainRender("{{ task_id }}");{% endfor %}
+                    {% for task_id in chain_tasks %}chainRender("{{ task_id }}"); chainSyncSelect("{{ task_id }}");{% endfor %}
                 });
                 </script>
             </div>
