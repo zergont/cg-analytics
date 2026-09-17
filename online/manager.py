@@ -614,6 +614,10 @@ async def _analyze_warning_claude(
         # Обогатить analytics_alarms счётчиками до передачи в промпт (свежие запросы)
         _seg_row = await online_db.get_open_segment(router_sn, equip_type, panel_id)
         _seg_id = _seg_row["id"] if _seg_row else None
+        # Момент срабатывания: им адресуются записи гейта и им же штампуются.
+        # Разбор длится десятки секунд, сегмент за это время может закрыться —
+        # адресация «в открытую строку» уводила запись в следующий сегмент.
+        _gate_ts = datetime.now(timezone.utc)
         _run_origin_ts = None
         if _seg_id:
             try:
@@ -710,10 +714,14 @@ async def _analyze_warning_claude(
                            router_sn, equip_type, panel_id)
 
         if applied:
-            await online_db.set_segment_gate_suppression(
+            if not await online_db.set_segment_gate_suppression(
                 router_sn, equip_type, panel_id,
                 suppressed_hash=compute_analytics_hash(struct.get("analytics_alarms", [])),
-            )
+                segment_id=_seg_id, ts=_gate_ts,
+            ):
+                logger.warning("WarningGate: вердикт «отменить» не записан — сегмент "
+                               "на %s не найден (%s/%s/%s)",
+                               _gate_ts.isoformat(), router_sn, equip_type, panel_id)
             # Эпизод живёт и меряется, но помечен: из severity исключён,
             # копим статистику ложных срабатываний для тюнинга порогов
             try:
@@ -724,19 +732,27 @@ async def _analyze_warning_claude(
                 logger.warning("WarningGate: не удалось пометить эпизоды gate_suppressed",
                                exc_info=True)
 
+        saved = None
         if analysis:
-            await online_db.update_open_segment_warning(
+            saved = await online_db.save_segment_warning(
                 router_sn, equip_type, panel_id,
                 analysis_md=analysis,
                 fault_hash=fault_hash,
                 alarm_text=extract_alarm_text(struct),
+                segment_id=_seg_id, ts=_gate_ts,
             )
+            if not saved:
+                logger.warning("WarningGate: разбор НЕ СОХРАНЁН — сегмент на %s не найден "
+                               "(%s/%s/%s, %d симв.)",
+                               _gate_ts.isoformat(), router_sn, equip_type, panel_id,
+                               len(analysis))
 
         # Обязательный журнал гейта — пишется при любом исходе
-        await online_db.append_segment_gate_event(
+        _logged = await online_db.append_segment_gate_event(
             router_sn, equip_type, panel_id,
+            segment_id=_seg_id, ts=_gate_ts,
             event={
-                "ts":                 datetime.now(timezone.utc).isoformat(),
+                "ts":                 _gate_ts.isoformat(),
                 "fault_hash":         fault_hash,
                 "severity_level":     struct.get("severity_level"),
                 "panel_severity":     struct.get("panel_severity"),
@@ -755,8 +771,11 @@ async def _analyze_warning_claude(
                 "tokens_out":       tokens_out,
             },
         )
-        logger.info("WarningGate: %s/%s/%s — decision=%s applied=%s (%d симв. анализа)",
-                    router_sn, equip_type, panel_id, decision, applied, len(analysis))
+        logger.info("WarningGate: %s/%s/%s — decision=%s applied=%s (%d симв. анализа, "
+                    "разбор=%s, журнал=%s)",
+                    router_sn, equip_type, panel_id, decision, applied, len(analysis or ""),
+                    "сохранён" if saved else ("нет" if analysis else "—"),
+                    "записан" if _logged else "ПОТЕРЯН")
 
     except Exception:
         # Fail-open: предупреждение остаётся видимым, подавление не ставится

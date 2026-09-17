@@ -117,6 +117,79 @@ def _make_seg_hint(db_row: dict):
     return SimpleNamespace(run_state=db_row.get("run_state"), run_state_label=label)
 
 
+def _parse_gate_state(open_row: dict | None) -> dict:
+    """Записи гейта из открытой строки, которую цикл закрытия сейчас удалит.
+
+    Гейт пишет разбор только в открытую строку; при закрытии окна она удаляется,
+    а insert_closed_segment до v4.9.65 этих колонок не содержал — за всю историю
+    ни один закрытый сегмент разбора не сохранил.
+    """
+    empty = {"analyses": [], "gate_log": [], "suppressed_hash": None}
+    if not open_row:
+        return empty
+
+    def _lst(raw):
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                logger.warning("Битый JSON записей гейта открытого сегмента")
+                return []
+        return raw if isinstance(raw, list) else []
+
+    return {
+        "analyses":        _lst(open_row.get("warning_analyses")),
+        "gate_log":        _lst(open_row.get("gate_log")),
+        "suppressed_hash": open_row.get("gate_suppressed_hash"),
+    }
+
+
+def _gate_entry_ts(entry: dict, key: str) -> datetime | None:
+    raw = entry.get(key)
+    if not raw:
+        return None
+    try:
+        return _tz_utc(datetime.fromisoformat(raw))
+    except Exception:
+        return None
+
+
+def _slice_gate_state(state: dict, t_from, t_to=None) -> dict:
+    """Записи гейта, попавшие в окно [t_from, t_to) — доля одного сегмента.
+
+    Нарезка по времени, а не «всё в первый сегмент»: когда работа и останов
+    закрываются одним циклом, разбор аварии иначе ложится на зелёный сегмент
+    работы вместо красного, который и откроет диспетчер. t_to=None — хвост,
+    то есть записи после конца последнего закрытого сегмента: они принадлежат
+    новой открытой строке.
+
+    gate_suppressed_hash сознательно не разносится по закрытым сегментам: он
+    гасит severity в календаре, и это видимое изменение, которое надо обсуждать
+    отдельно. В закрытые едут только разборы и журнал.
+    """
+    t_from = _tz_utc(t_from)
+    t_to = _tz_utc(t_to) if t_to is not None else None
+
+    def _inside(ts: datetime | None) -> bool:
+        if ts is None or ts < t_from:
+            return False
+        return t_to is None or ts < t_to
+
+    analyses = [e for e in state.get("analyses", [])
+                if isinstance(e, dict) and _inside(_gate_entry_ts(e, "t"))]
+    gate_log = [e for e in state.get("gate_log", [])
+                if isinstance(e, dict) and _inside(_gate_entry_ts(e, "ts"))]
+
+    out: dict = {}
+    if analyses:
+        out["warning_analyses"] = analyses
+        out["warning_analysis_md"] = analyses[-1].get("md")
+        out["warning_analyzed_hash"] = analyses[-1].get("fault_hash")
+    if gate_log:
+        out["gate_log"] = gate_log
+    return out
+
+
 def _coking_from_json(d) -> CokingRisk:
     """Десериализовать CokingRisk из dict или JSON-строки (asyncpg отдаёт JSONB как str)."""
     if not d:
@@ -1157,6 +1230,9 @@ class OnlinePollEngine:
             elif isinstance(_raw, dict):
                 _open_chars = _raw
 
+        # Записи гейта удаляемой строки — разложим по закрытым сегментам ниже
+        _gate_state = _parse_gate_state(_open_row)
+
         # Удалить старый открытый сегмент
         await online_db.delete_open_segment(
             self.router_sn, self.equip_type, self.panel_id
@@ -1172,7 +1248,7 @@ class OnlinePollEngine:
         # active_detections из _active_alerts: тревоги живут сквозь смену RUN_STATE.
         _seed_cv, _ = _extract_open_segment_data(segments[-1])
         _seed_dets = list(self._active_alerts.values())
-        await online_db.upsert_open_segment({
+        _seed_open_id = await online_db.upsert_open_segment({
             "router_sn":              self.router_sn,
             "equip_type":             self.equip_type,
             "panel_id":               self.panel_id,
@@ -1324,6 +1400,10 @@ class OnlinePollEngine:
                 "report_md":          report_md,
                 "report_summary_md":  summary_md,
                 "incident_json":      None if _seg_no_data else incidents.get(seg.t_start),
+                **_slice_gate_state(
+                    _gate_state,
+                    _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end,
+                ),
             })
             # ← await выше = event loop обслужил API. Сигналим прогресс сразу.
             if _seg_no_data:
@@ -1379,6 +1459,18 @@ class OnlinePollEngine:
                     incr_chars=_open_chars,
                     ref_chars=seg_dict,
                 )
+
+        # Хвост записей гейта — в пересеянную открытую строку: они сделаны позже
+        # конца последнего закрытого сегмента и принадлежат уже новому сегменту.
+        if _seed_open_id:
+            _tail = _slice_gate_state(_gate_state, last_committed_t_end)
+            if _gate_state.get("suppressed_hash"):
+                _tail["gate_suppressed_hash"] = _gate_state["suppressed_hash"]
+            try:
+                await online_db.append_segment_gate_state(_seed_open_id, _tail)
+            except Exception:
+                logger.warning("OnlineEngine[%s]: хвост записей гейта не восстановлен",
+                               self.key, exc_info=True)
 
         self._open_history_cache = None
         self._open_history_cache_ts = None
@@ -1520,6 +1612,7 @@ class OnlinePollEngine:
         # Новые закрытые сегменты: смены RUN_STATE и устранение неисправностей
         # (FAULT_CLEARED режет СТОП-период — границу ставит сегментатор)
         closed_segs = [s for s in segments if s.cause_close in ("RUN_STATE_CHANGE", "FAULT_CLEARED")]
+        _rs_gate_state: dict | None = None
         if closed_segs:
             # Сохранить характеристики открытого сегмента для верификации (до удаления)
             _rs_open_row = await online_db.get_open_segment(
@@ -1535,6 +1628,9 @@ class OnlinePollEngine:
                         logger.warning("OnlineEngine[%s]: битый characteristics_json открытого сегмента", self.key)
                 elif isinstance(_raw_rs, dict):
                     _rs_open_chars = _raw_rs
+
+            # Записи гейта удаляемой строки — разложим по закрытым сегментам ниже
+            _rs_gate_state = _parse_gate_state(_rs_open_row)
 
             await online_db.delete_open_segment(
                 self.router_sn, self.equip_type, self.panel_id
@@ -1618,6 +1714,10 @@ class OnlinePollEngine:
                     "report_md":          report_md_rs,
                     "report_summary_md":  summary_md_rs,
                     "incident_json":      _rs_incident,
+                    **_slice_gate_state(
+                        _rs_gate_state,
+                        _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end_rs,
+                    ),
                 })
                 # ← await выше = прогресс обновляется на каждой смене RUN_STATE
                 if _rs_no_data:
@@ -1759,6 +1859,17 @@ class OnlinePollEngine:
         )
 
         self._last_open_seg_id = _open_seg_id
+
+        # Хвост записей гейта удалённой строки — в новую открытую (см. _close_window)
+        if _rs_gate_state is not None and _open_seg_id:
+            _rs_tail = _slice_gate_state(_rs_gate_state, self.cursor_ts)
+            if _rs_gate_state.get("suppressed_hash"):
+                _rs_tail["gate_suppressed_hash"] = _rs_gate_state["suppressed_hash"]
+            try:
+                await online_db.append_segment_gate_state(_open_seg_id, _rs_tail)
+            except Exception:
+                logger.warning("OnlineEngine[%s]: хвост записей гейта не восстановлен",
+                               self.key, exc_info=True)
 
         # Записать события жизненного цикла тревог (segment_id теперь известен)
         if _alert_events:

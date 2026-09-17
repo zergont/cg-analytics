@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import asyncpg
@@ -291,8 +291,11 @@ async def insert_closed_segment(data: dict[str, Any]) -> int:
                 analytics_version,
                 characteristics_json, report_md, report_summary_md,
                 incident_json,
+                warning_analysis_md, warning_analyzed_hash, warning_analyses,
+                gate_log, gate_suppressed_hash,
                 updated_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13::jsonb,$14,$15,$16::jsonb,now())
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13::jsonb,$14,$15,$16::jsonb,
+                      $17,$18,$19::jsonb,$20::jsonb,$21,now())
             ON CONFLICT (router_sn, equip_type, panel_id, t_start)
                 WHERE t_end IS NOT NULL
             DO UPDATE SET
@@ -306,7 +309,12 @@ async def insert_closed_segment(data: dict[str, Any]) -> int:
                 characteristics_json = EXCLUDED.characteristics_json,
                 report_md           = EXCLUDED.report_md,
                 report_summary_md   = EXCLUDED.report_summary_md,
-                incident_json       = EXCLUDED.incident_json,
+                incident_json       = COALESCE(EXCLUDED.incident_json, auto_segments.incident_json),
+                warning_analysis_md   = COALESCE(EXCLUDED.warning_analysis_md,   auto_segments.warning_analysis_md),
+                warning_analyzed_hash = COALESCE(EXCLUDED.warning_analyzed_hash, auto_segments.warning_analyzed_hash),
+                warning_analyses      = COALESCE(EXCLUDED.warning_analyses,      auto_segments.warning_analyses),
+                gate_log              = COALESCE(EXCLUDED.gate_log,              auto_segments.gate_log),
+                gate_suppressed_hash  = COALESCE(EXCLUDED.gate_suppressed_hash,  auto_segments.gate_suppressed_hash),
                 updated_at          = now()
             RETURNING id
         """,
@@ -324,6 +332,13 @@ async def insert_closed_segment(data: dict[str, Any]) -> int:
             data.get("report_summary_md"),
             json.dumps(data.get("incident_json"), ensure_ascii=False)
                 if data.get("incident_json") is not None else None,
+            data.get("warning_analysis_md"),
+            data.get("warning_analyzed_hash"),
+            json.dumps(data.get("warning_analyses"), ensure_ascii=False)
+                if data.get("warning_analyses") else None,
+            json.dumps(data.get("gate_log"), ensure_ascii=False)
+                if data.get("gate_log") else None,
+            data.get("gate_suppressed_hash"),
         )
         seg_id = row["id"]
 
@@ -616,36 +631,74 @@ async def get_run_state_origin_ts(seg_id: int):
         await conn.close()
 
 
-async def update_open_segment_warning(
+async def _resolve_gate_target(
+    conn, router_sn: str, equip_type: str, panel_id: int,
+    segment_id: int | None, ts: datetime,
+) -> int | None:
+    """id сегмента, которому принадлежит запись гейта.
+
+    Сначала прямая ссылка — сегмент, который гейт читал, когда начинал разбор.
+    Если строки уже нет (цикл закрытия удаляет открытую и вставляет закрытую с
+    новым id), берём сегмент, чьё окно покрывает момент срабатывания: разбор
+    длится десятки секунд и должен остаться на своём сегменте, а не уехать на
+    следующий. None — сегмента нет вовсе (окно ещё не проанализировано).
+    """
+    if segment_id is not None:
+        row = await conn.fetchrow(
+            "SELECT id FROM auto_segments WHERE id=$1", segment_id
+        )
+        if row:
+            return int(row["id"])
+    row = await conn.fetchrow("""
+        SELECT id FROM auto_segments
+        WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
+          AND t_start <= $4 AND (t_end IS NULL OR t_end > $4)
+        ORDER BY t_start DESC
+        LIMIT 1
+    """, router_sn, equip_type, panel_id, ts)
+    return int(row["id"]) if row else None
+
+
+async def save_segment_warning(
     router_sn: str, equip_type: str, panel_id: int,
     analysis_md: str, fault_hash: str,
     alarm_text: str | None = None,
-) -> None:
-    """Сохранить Claude-анализ предупреждения в открытый сегмент.
+    segment_id: int | None = None,
+    ts: datetime | None = None,
+) -> bool:
+    """Сохранить разбор гейта в сегмент, которому он относится.
 
     warning_analysis_md/warning_analyzed_hash — последний разбор (совместимость);
     warning_analyses — append-only история: смена состава тревог (сброс, кнопка
     останова) не затирает разбор исходной аварии.
+
+    Возвращает False, если сегмент не найден — вызывающий обязан это залогировать:
+    молчаливая потеря разбора уже стоила нам всей истории до v4.9.65.
     """
     import json as _json
-    from datetime import datetime, timezone
+    ts = ts or datetime.now(timezone.utc)
     entry = _json.dumps({
-        "t":          datetime.now(timezone.utc).isoformat(),
+        "t":          ts.isoformat(),
         "fault_hash": fault_hash,
         "alarm_text": alarm_text,
         "md":         analysis_md,
     }, ensure_ascii=False)
     conn = await _connect()
     try:
+        seg_id = await _resolve_gate_target(
+            conn, router_sn, equip_type, panel_id, segment_id, ts
+        )
+        if seg_id is None:
+            return False
         await conn.execute("""
             UPDATE auto_segments
-            SET warning_analysis_md   = $4,
-                warning_analyzed_hash = $5,
-                warning_analyses      = COALESCE(warning_analyses, '[]'::jsonb) || $6::jsonb,
+            SET warning_analysis_md   = $2,
+                warning_analyzed_hash = $3,
+                warning_analyses      = COALESCE(warning_analyses, '[]'::jsonb) || $4::jsonb,
                 updated_at            = now()
-            WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
-              AND t_end IS NULL
-        """, router_sn, equip_type, panel_id, analysis_md, fault_hash, entry)
+            WHERE id = $1
+        """, seg_id, analysis_md, fault_hash, entry)
+        return True
     finally:
         await conn.close()
 
@@ -653,18 +706,26 @@ async def update_open_segment_warning(
 async def append_segment_gate_event(
     router_sn: str, equip_type: str, panel_id: int,
     event: dict,
-) -> None:
-    """Добавить запись в append-only журнал гейта открытого сегмента."""
+    segment_id: int | None = None,
+    ts: datetime | None = None,
+) -> bool:
+    """Добавить запись в append-only журнал гейта. False — сегмент не найден."""
     import json as _json
+    ts = ts or datetime.now(timezone.utc)
     conn = await _connect()
     try:
+        seg_id = await _resolve_gate_target(
+            conn, router_sn, equip_type, panel_id, segment_id, ts
+        )
+        if seg_id is None:
+            return False
         await conn.execute("""
             UPDATE auto_segments
-            SET gate_log   = COALESCE(gate_log, '[]'::jsonb) || $4::jsonb,
+            SET gate_log   = COALESCE(gate_log, '[]'::jsonb) || $2::jsonb,
                 updated_at = now()
-            WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
-              AND t_end IS NULL
-        """, router_sn, equip_type, panel_id, _json.dumps([event], ensure_ascii=False))
+            WHERE id = $1
+        """, seg_id, _json.dumps([event], ensure_ascii=False))
+        return True
     finally:
         await conn.close()
 
@@ -672,17 +733,59 @@ async def append_segment_gate_event(
 async def set_segment_gate_suppression(
     router_sn: str, equip_type: str, panel_id: int,
     suppressed_hash: str,
-) -> None:
-    """Зафиксировать вердикт «отменить»: подавить аналитику для данного состава детекций."""
+    segment_id: int | None = None,
+    ts: datetime | None = None,
+) -> bool:
+    """Зафиксировать вердикт «отменить»: подавить аналитику для данного состава
+    детекций. False — сегмент не найден."""
+    ts = ts or datetime.now(timezone.utc)
+    conn = await _connect()
+    try:
+        seg_id = await _resolve_gate_target(
+            conn, router_sn, equip_type, panel_id, segment_id, ts
+        )
+        if seg_id is None:
+            return False
+        await conn.execute("""
+            UPDATE auto_segments
+            SET gate_suppressed_hash = $2,
+                updated_at           = now()
+            WHERE id = $1
+        """, seg_id, suppressed_hash)
+        return True
+    finally:
+        await conn.close()
+
+
+async def append_segment_gate_state(segment_id: int, state: dict) -> None:
+    """Дописать в сегмент записи гейта, нарезанные из удаляемой открытой строки.
+
+    Хвост — записи, сделанные позже конца последнего закрытого сегмента: они
+    принадлежат новой открытой строке, которой на момент записи ещё не было.
+    Массивы дописываются, скаляры проставляются только если переданы.
+    """
+    import json as _json
+    analyses = state.get("warning_analyses") or []
+    gate_log = state.get("gate_log") or []
+    if not analyses and not gate_log and not state.get("gate_suppressed_hash"):
+        return
     conn = await _connect()
     try:
         await conn.execute("""
             UPDATE auto_segments
-            SET gate_suppressed_hash = $4,
-                updated_at           = now()
-            WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
-              AND t_end IS NULL
-        """, router_sn, equip_type, panel_id, suppressed_hash)
+            SET warning_analyses      = COALESCE(warning_analyses, '[]'::jsonb) || $2::jsonb,
+                gate_log              = COALESCE(gate_log, '[]'::jsonb) || $3::jsonb,
+                warning_analysis_md   = COALESCE($4, warning_analysis_md),
+                warning_analyzed_hash = COALESCE($5, warning_analyzed_hash),
+                gate_suppressed_hash  = COALESCE($6, gate_suppressed_hash),
+                updated_at            = now()
+            WHERE id = $1
+        """, segment_id,
+             _json.dumps(analyses, ensure_ascii=False),
+             _json.dumps(gate_log, ensure_ascii=False),
+             state.get("warning_analysis_md"),
+             state.get("warning_analyzed_hash"),
+             state.get("gate_suppressed_hash"))
     finally:
         await conn.close()
 
