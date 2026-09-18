@@ -54,7 +54,8 @@ async def _current_segments(conn, sn: str, et: str, pid: int,
                             tf: datetime, tt: datetime) -> list[dict]:
     rows = await conn.fetch(
         """
-        SELECT t_start, t_end, run_state, cause_open, cause_close
+        SELECT t_start, t_end, run_state, cause_close,
+               characteristics_json->>'cause_open' AS cause_open
         FROM auto_segments
         WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
           AND t_start < $5 AND (t_end IS NULL OR t_end > $4)
@@ -111,7 +112,7 @@ async def _run_machine(conn, obs: dict, tf: datetime, tt: datetime,
             print(f"    {_fmt(r['t_start'])} – {_fmt(r['t_end'])}  "
                   f"{_dur(r['t_start'], r['t_end'], tt):>9}  "
                   f"{_RS.get(r['run_state'], r['run_state'])}  "
-                  f"close={r['cause_close']}")
+                  f"open={r['cause_open'] or '—'} close={r['cause_close'] or '—'}")
         print("  --- станет ---")
         for p in new_stops:
             kind = "АВАРИЙНЫЙ СТОП" if p.get("stop_kind") == "EMERGENCY" else "Стоп"
