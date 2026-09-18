@@ -284,6 +284,82 @@ def _split_stop_on_shutdown(
     return out
 
 
+def _classify_stop_periods(
+    run_state_periods: list[dict],
+    fault_periods: list[dict],
+    cfg,
+    tt: datetime,
+) -> list[dict]:
+    """Разделить СТОП-периоды на два вида и поставить единственный рез.
+
+    Стоп считается аварийным, если в момент его начала активна маска аварийной
+    тяжести. Залипшей с прошлого раза такая маска быть не может: с активной
+    аварией машину не пустить, значит она и есть причина этого останова —
+    искать её в прошлом не нужно.
+
+    Рез ровно один: там, где снята последняя активная аварийная маска. Голова —
+    АВАРИЙНЫЙ СТОП, хвост — простой СТОП «готов к пуску». Не сняли до пуска —
+    реза нет, весь стоп аварийный. Авария, возникшая ПОСРЕДИ простого стопа
+    (кнопка на стоящей машине), вид не меняет и не режет: её видно цветом
+    живого сегмента и в хронологии. Так инцидент 17.07 решается без вырезания
+    красного куска.
+
+    Заменяет пару _split_stop_on_fault_cleared / _split_stop_on_shutdown: те
+    резали по любой смене «грязно/чисто» и по входу в аварию и давали до пяти
+    кусков на один стоп, включая вырожденные в секунды.
+    """
+    shutdown_iv: list[tuple[datetime, datetime]] = []
+    for fp in fault_periods:
+        if cfg.bitmap_severity(fp.get("severity") or "none") != "SHUTDOWN":
+            continue
+        fs = _tz(fp["fault_start"])
+        fe = _tz(fp["fault_end"]) if fp.get("fault_end") else _tz(tt)
+        if fe > fs:
+            shutdown_iv.append((fs, fe))
+    # Слияние обязательно: авария, поднявшаяся поверх ещё не снятой, должна
+    # продлевать покрытие, иначе рез уедет к снятию первой, а не последней.
+    shutdown_iv = _merge_intervals(shutdown_iv)
+
+    out: list[dict] = []
+    for period in run_state_periods:
+        if int(period["value"]) != 0:
+            out.append(period)
+            continue
+
+        p_start = _tz(period["state_start"])
+        p_end_raw = period.get("state_end")
+        p_end = _tz(p_end_raw) if p_end_raw else _tz(tt)
+
+        covering = next(((s, e) for s, e in shutdown_iv if s <= p_start < e), None)
+        if covering is None:
+            part = dict(period)
+            part["stop_kind"] = "SIMPLE"
+            out.append(part)
+            continue
+
+        t_clear = covering[1]
+        if t_clear >= p_end:
+            part = dict(period)
+            part["stop_kind"] = "EMERGENCY"
+            out.append(part)
+            continue
+
+        head = dict(period)
+        head["stop_kind"] = "EMERGENCY"
+        head["state_end"] = t_clear
+        head["cause_close"] = "SHUTDOWN_CLEARED"
+        out.append(head)
+
+        tail = dict(period)
+        tail["stop_kind"] = "SIMPLE"
+        tail["state_start"] = t_clear
+        tail["state_end"] = p_end_raw
+        tail["cause_open"] = "SHUTDOWN_CLEARED"
+        out.append(tail)
+
+    return out
+
+
 def _build_ts_index(by_addr: dict[int, list[dict]]) -> dict[int, list[datetime]]:
     """Tz-нормализованный индекс меток времени для bisect-срезов."""
     return {addr: [_tz(r["ts"]) for r in rows] for addr, rows in by_addr.items()}
@@ -1153,16 +1229,19 @@ def segment(
     # Рез СТОП-периодов по устранению неисправностей: «СТОП (авария)» →
     # FAULT_CLEARED → «СТОП (готов к пуску)». Живой движок и перечитка
     # получают одинаковые границы — правило детерминировано из history.
-    run_state_periods = _split_stop_on_fault_cleared(
-        run_state_periods, fault_periods, all_by_addr, cfg, tt,
-    )
-
-    # Рез СТОП-периодов по пересечению уровня в АВАРИЮ: SHUTDOWN-фронт на стоящей
-    # машине (E-Stop и т.п.) выделяется в отдельный красный сегмент, не хороня
-    # сегмент-причину. Границы детерминированы из history.
-    run_state_periods = _split_stop_on_shutdown(
-        run_state_periods, fault_periods, cfg, tt,
-    )
+    # Новая модель (v4.9.68): один рез вместо двух сплиттеров, у стопа два вида.
+    # Пока флаг выключен — поведение байт-в-байт прежнее.
+    if bool(cfg.seg("stop_kind", "enabled", default=False)):
+        run_state_periods = _classify_stop_periods(
+            run_state_periods, fault_periods, cfg, tt,
+        )
+    else:
+        run_state_periods = _split_stop_on_fault_cleared(
+            run_state_periods, fault_periods, all_by_addr, cfg, tt,
+        )
+        run_state_periods = _split_stop_on_shutdown(
+            run_state_periods, fault_periods, cfg, tt,
+        )
 
     segments: list[Segment] = []
     accumulators = RiskAccumulators()
@@ -1224,6 +1303,7 @@ def segment(
         cause_open = period.get("cause_open") or (
             "REPORT_START" if p_start < tf else "RUN_STATE_CHANGE"
         )
+        stop_kind: str | None = period.get("stop_kind")
         cause_close: str | None = period.get("cause_close") or (
             None if p_end_raw is None or _tz(p_end_raw) >= tt
             else "RUN_STATE_CHANGE"
@@ -1309,6 +1389,7 @@ def segment(
             subsegments=subsegments,
             sequence_checks=seq_checks,
             events=events,
+            stop_kind=stop_kind,
         )
         segments.append(seg)
 
