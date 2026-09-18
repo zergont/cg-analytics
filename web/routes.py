@@ -1317,6 +1317,7 @@ _COKING_COLORS = {"GREEN": "success", "YELLOW": "warning", "RED": "danger"}
 _CAUSE_CLOSE_RU = {
     "RUN_STATE_CHANGE": "Смена режима",
     "FAULT_CLEARED":    "Неисправности устранены",
+    "SHUTDOWN_CLEARED": "Авария снята",
     "DAILY_BOUNDARY":   "Суточный рез",
     "OPERATOR_STOP":    "Стоп оператором",
 }

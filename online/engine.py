@@ -1611,7 +1611,10 @@ class OnlinePollEngine:
 
         # Новые закрытые сегменты: смены RUN_STATE и устранение неисправностей
         # (FAULT_CLEARED режет СТОП-период — границу ставит сегментатор)
-        closed_segs = [s for s in segments if s.cause_close in ("RUN_STATE_CHANGE", "FAULT_CLEARED")]
+        closed_segs = [
+            s for s in segments
+            if s.cause_close in ("RUN_STATE_CHANGE", "FAULT_CLEARED", "SHUTDOWN_CLEARED")
+        ]
         _rs_gate_state: dict | None = None
         if closed_segs:
             # Сохранить характеристики открытого сегмента для верификации (до удаления)

@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS auto_segments (
                              'RUN_STATE_CHANGE',
                              'DAILY_BOUNDARY',
                              'OPERATOR_STOP',
-                             'FAULT_CLEARED'
+                             'FAULT_CLEARED',
+                             'SHUTDOWN_CLEARED'
                          ) OR cause_close IS NULL),
     -- Для суточного реза
     split_reason         TEXT,                  -- 'DAILY_BOUNDARY' если применимо
@@ -251,4 +252,20 @@ ALTER TABLE auto_segments
 ALTER TABLE auto_segments DROP CONSTRAINT IF EXISTS auto_segments_cause_close_check;
 ALTER TABLE auto_segments ADD CONSTRAINT auto_segments_cause_close_check
     CHECK (cause_close IN ('RUN_STATE_CHANGE', 'DAILY_BOUNDARY', 'OPERATOR_STOP', 'FAULT_CLEARED')
+           OR cause_close IS NULL);
+
+-- Миграция v4.9.66: SHUTDOWN_CLEARED — валидное значение cause_close.
+-- Новая модель сегментации стопа: СТОП имеет два вида, АВАРИЙНЫЙ и простой.
+-- Аварийный закрывается в момент, когда снята последняя активная маска
+-- аварийной тяжести («не осталось ошибок, мешающих пуску»), и дальше идёт
+-- простой СТОП. Писателя значения ещё нет — приёмник ставится заранее,
+-- чтобы к моменту его появления констрейнт уже был расширен на всех серверах.
+-- FAULT_CLEARED из списка НЕ удаляется: такие строки есть в проде, а
+-- ADD CONSTRAINT валидируется по данным и упал бы на них. Файл выполняется
+-- одним куском в неявной транзакции (db/analytics.py::init_db, без try/except),
+-- поэтому падение любого оператора откатывает весь файл и роняет старт сервиса.
+ALTER TABLE auto_segments DROP CONSTRAINT IF EXISTS auto_segments_cause_close_check;
+ALTER TABLE auto_segments ADD CONSTRAINT auto_segments_cause_close_check
+    CHECK (cause_close IN ('RUN_STATE_CHANGE', 'DAILY_BOUNDARY', 'OPERATOR_STOP',
+                           'FAULT_CLEARED', 'SHUTDOWN_CLEARED')
            OR cause_close IS NULL);
