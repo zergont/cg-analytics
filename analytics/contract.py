@@ -253,6 +253,10 @@ class Segment:
     subsegments: list[Subsegment]
     sequence_checks: list[dict[str, Any]]
     events: list[dict[str, Any]]
+    # Вид стоп-сегмента: 'EMERGENCY' — останов аварийный (в его начале активна
+    # маска аварийной тяжести), 'SIMPLE' — обычный. None у всех остальных
+    # режимов и у сегментов, нарезанных до появления модели (v4.9.67).
+    stop_kind: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -274,4 +278,5 @@ class Segment:
             "subsegments": [s.to_dict() for s in self.subsegments],
             "sequence_checks": self.sequence_checks,
             "events": self.events,
+            "stop_kind": self.stop_kind,
         }

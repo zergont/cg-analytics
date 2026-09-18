@@ -114,7 +114,12 @@ def _make_seg_hint(db_row: dict):
             logger.warning("Битый characteristics_json в сегменте %s", db_row.get("id"))
             chars = None
     label = (chars.get("run_state_label") if isinstance(chars, dict) else None)
-    return SimpleNamespace(run_state=db_row.get("run_state"), run_state_label=label)
+    # stop_kind обязателен: после рестарта хинт подставляется вместо настоящего
+    # Segment, и обращение к отсутствующему полю дало бы AttributeError в первом
+    # же цикле — то есть ровно тогда, когда движок только поднялся.
+    kind = (chars.get("stop_kind") if isinstance(chars, dict) else None)
+    return SimpleNamespace(run_state=db_row.get("run_state"),
+                           run_state_label=label, stop_kind=kind)
 
 
 def _parse_gate_state(open_row: dict | None) -> dict:

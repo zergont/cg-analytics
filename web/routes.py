@@ -1314,6 +1314,26 @@ async def sync_equipment():
 
 
 _COKING_COLORS = {"GREEN": "success", "YELLOW": "warning", "RED": "danger"}
+# Вид стоп-сегмента поверх словаря режимов (v4.9.67)
+_STOP_KIND_LABELS = {"EMERGENCY": "Аварийный стоп"}
+
+
+def _seg_label(run_state: int | None, stop_kind: str | None = None) -> str | None:
+    """Подпись сегмента для API: вид стопа поверх словаря режимов.
+
+    Сохранённый characteristics_json.run_state_label сознательно НЕ читаем.
+    Он приходит из каталога регистров исходной БД (register_catalog.states_json)
+    и расходится с нашим словарём: там, где у нас «Работа», в каталоге
+    «Номин. частота/напряжение», а «Разгрузка» названа «Охлаждение/задержка
+    останова». Переключение на сохранённую метку молча переименовало бы все
+    сегменты и развело подписи в отчётах и в календаре.
+    """
+    if run_state is None:
+        return None
+    return (_STOP_KIND_LABELS.get(stop_kind or "")
+            or _RUN_STATE_LABELS.get(run_state, str(run_state)))
+
+
 _CAUSE_CLOSE_RU = {
     "RUN_STATE_CHANGE": "Смена режима",
     "FAULT_CLEARED":    "Неисправности устранены",
@@ -2192,6 +2212,9 @@ async def api_machines():
 
         # Текущее состояние из открытого сегмента
         run_state      = seg.get("run_state")    if seg else None
+        _m_chars       = _parse_json(seg.get("characteristics_json"),
+                                     ctx="characteristics_json в /machines") if seg else None
+        _stop_kind     = _m_chars.get("stop_kind") if isinstance(_m_chars, dict) else None
         coking_risk    = None
         status_text    = None
         severity_level = None
@@ -2235,7 +2258,8 @@ async def api_machines():
             # тот отдаёт run_state. См. online/manager.py start_machine/stop_machine.
             "monitoring_status": obs["status"],        # running / stopped
             "run_state":     run_state,
-            "run_state_label": _RUN_STATE_LABELS.get(run_state, str(run_state)) if run_state is not None else None,
+            "stop_kind":     _stop_kind,
+            "run_state_label": _seg_label(run_state, _stop_kind),
             # Уровень однозначно кодирует источник: предупреждение — только аналитика,
             # внимание/авария — только панель
             "severity_level":    severity_level,       # норма / предупреждение / внимание / авария
@@ -2358,6 +2382,7 @@ async def api_machine_segments(
         run_state = seg.get("run_state")
         _chars    = _parse_json(seg.get("characteristics_json"), ctx="characteristics_json в /segments")
         dq        = _chars.get("data_quality") if isinstance(_chars, dict) else None
+        _stop_kind = _chars.get("stop_kind")   if isinstance(_chars, dict) else None
         dur       = None
         if seg.get("t_start") and seg.get("t_end"):
             dur = (seg["t_end"] - seg["t_start"]).total_seconds()
@@ -2375,7 +2400,8 @@ async def api_machine_segments(
             "op_day":        op_day,                      # YYYY-MM-DD операционных суток
             "is_open":       is_open,
             "run_state":     run_state,
-            "run_state_label": _RUN_STATE_LABELS.get(run_state, str(run_state)) if run_state is not None else None,
+            "stop_kind":     _stop_kind,
+            "run_state_label": _seg_label(run_state, _stop_kind),
             "duration_sec":  dur,
             "cause_close":   seg.get("cause_close"),
             "severity":      sev,                         # SHUTDOWN/WARNING/CAUTION/None (было INFO до v4.8.9)
@@ -2414,6 +2440,7 @@ async def api_segment_detail(seg_id: int):
     run_state = seg.get("run_state")
     _chars    = _parse_json(seg.get("characteristics_json"), ctx="characteristics_json в /segment")
     dq        = _chars.get("data_quality") if isinstance(_chars, dict) else None
+    _stop_kind = _chars.get("stop_kind")   if isinstance(_chars, dict) else None
     sev       = _seg_severity(seg.get("characteristics_json"), seg.get("active_detections_json"),
                               gate_suppressed_hash=seg.get("gate_suppressed_hash"))
     gate_ok   = _seg_gate_checked(
@@ -2452,7 +2479,8 @@ async def api_segment_detail(seg_id: int):
         "t_end":         seg["t_end"].isoformat()   if seg.get("t_end")   else None,
         "is_open":       is_open,
         "run_state":     run_state,
-        "run_state_label": _RUN_STATE_LABELS.get(run_state, str(run_state)) if run_state is not None else None,
+        "stop_kind":     _stop_kind,
+        "run_state_label": _seg_label(run_state, _stop_kind),
         "duration_sec":  dur,
         "cause_close":   seg.get("cause_close"),
         "severity":      sev,

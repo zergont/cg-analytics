@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 
 # ── Константы ─────────────────────────────────────────────────────────────────
 
+# Вид стоп-сегмента поверх словаря режимов (v4.9.67)
+_STOP_KIND_LABELS: dict[str, str] = {"EMERGENCY": "Аварийный стоп"}
+
 _RUN_STATE_LABELS: dict[int, str] = {
     0: "Стоп",
     1: "Задержка пуска",
@@ -172,7 +175,11 @@ def build_structural_status(
           time_in_mode_sec, panel_alarms[], analytics_alarms[], key_params[]
     """
     run_state: int = seg_row.get("run_state") or 0
-    mode_label = _RUN_STATE_LABELS.get(run_state, f"RUN_STATE={run_state}")
+    # Разбор поднят сюда из блока времени в режиме: вид стопа нужен для подписи
+    chars        = _parse_json(seg_row.get("characteristics_json")) or {}
+    _stop_kind   = chars.get("stop_kind")
+    mode_label = (_STOP_KIND_LABELS.get(_stop_kind or "")
+                  or _RUN_STATE_LABELS.get(run_state, f"RUN_STATE={run_state}"))
 
     current_vals = _parse_json(seg_row.get("current_values_json")) or {}
     active_dets  = _parse_json(seg_row.get("active_detections_json")) or []
@@ -193,7 +200,6 @@ def build_structural_status(
     # Берём из _total_run_state_sec в characteristics_json — аналитика уже посчитала
     # накопленное время через всю цепочку суточных резов (inherited_run_state_sec + duration).
     # Fallback: wallclock от t_start (для первого тика, когда chars ещё нет).
-    chars        = _parse_json(seg_row.get("characteristics_json")) or {}
     total_rs_sec = chars.get("_total_run_state_sec") or {}
     # JSON ключи — строки; сравниваем и str и int
     time_in_mode_sec = float(
