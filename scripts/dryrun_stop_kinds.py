@@ -29,6 +29,7 @@ import asyncpg  # noqa: E402
 
 from analytics import binding, source as asrc  # noqa: E402
 from analytics.segmenter import _classify_stop_periods  # noqa: E402
+from online.engine import _find_daily_boundaries  # noqa: E402
 from config import settings  # noqa: E402
 from db import analytics as db_analytics  # noqa: E402
 from online import db as online_db  # noqa: E402
@@ -48,6 +49,37 @@ def _dur(a: datetime, b: datetime | None, tt: datetime) -> str:
     if secs < 3600:
         return f"{secs // 60}м {secs % 60}с"
     return f"{secs // 3600}ч {(secs % 3600) // 60}м"
+
+
+def _apply_daily_cuts(periods: list[dict], tf: datetime, tt: datetime) -> list[dict]:
+    """Дорезать периоды суточными границами — их ставит движок, не сегментатор.
+
+    Без этого длинный стоп выглядит одним куском там, где в БД он разложен
+    посуточно, и сравнение «сейчас против станет» врёт в пользу новой модели.
+    """
+    from config import get_tz
+    tz = get_tz()
+    bounds = _find_daily_boundaries(tf, tt, 9, tz)
+    if not bounds:
+        return periods
+    out: list[dict] = []
+    for p in periods:
+        p_start = p["state_start"]
+        p_end = p.get("state_end") or tt
+        inner = [b for b in bounds if p_start < b < p_end]
+        if not inner:
+            out.append(p)
+            continue
+        cuts = [p_start] + inner + [p_end]
+        for i in range(len(cuts) - 1):
+            part = dict(p)
+            part["state_start"] = cuts[i]
+            is_last = i == len(cuts) - 2
+            part["state_end"] = p.get("state_end") if is_last else cuts[i + 1]
+            if not is_last:
+                part["cause_close"] = "DAILY_BOUNDARY"
+            out.append(part)
+    return out
 
 
 async def _current_segments(conn, sn: str, et: str, pid: int,
@@ -90,6 +122,7 @@ async def _run_machine(conn, obs: dict, tf: datetime, tt: datetime,
         (p for p in enum_periods if p["addr"] == 40011),
         key=lambda p: p["state_start"])
     new = _classify_stop_periods(rs_periods, fault_periods, cfg, tt)
+    new = _apply_daily_cuts(new, tf, tt)
     new_stops = [p for p in new if int(p["value"]) == 0]
     emergency = [p for p in new_stops if p.get("stop_kind") == "EMERGENCY"]
 
@@ -103,8 +136,10 @@ async def _run_machine(conn, obs: dict, tf: datetime, tt: datetime,
 
     short = [r for r in cur_stops
              if r["t_end"] and (r["t_end"] - r["t_start"]).total_seconds() < 60]
-    if short:
-        print(f"  вырожденных сейчас (<60с): {len(short)} — исчезнут")
+    new_short = [p for p in new_stops if p.get("state_end")
+                 and (p["state_end"] - p["state_start"]).total_seconds() < 60]
+    if short or new_short:
+        print(f"  коротких (<60с): сейчас {len(short)} → станет {len(new_short)}")
 
     if verbose:
         print("  --- сейчас ---")
