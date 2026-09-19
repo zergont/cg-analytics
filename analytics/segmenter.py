@@ -284,6 +284,30 @@ def _split_stop_on_shutdown(
     return out
 
 
+def shutdown_intervals(
+    fault_periods: list[dict], cfg, tt: datetime,
+) -> list[tuple[datetime, datetime]]:
+    """Слитые интервалы, в которых висела хоть одна маска аварийной тяжести.
+
+    Слияние обязательно: авария, поднявшаяся поверх ещё не снятой, должна
+    продлевать покрытие, иначе рез уедет к снятию первой, а не последней.
+    Незакрытая маска считается активной до tt.
+
+    Общая для сегментатора (вид стоп-периода и место реза) и «Следователя»
+    (какая из прошлых стоянок была нормальной) — шкала тяжести должна быть
+    одна, иначе якорь и нарезка разойдутся.
+    """
+    out: list[tuple[datetime, datetime]] = []
+    for fp in fault_periods:
+        if cfg.bitmap_severity(fp.get("severity") or "none") != "SHUTDOWN":
+            continue
+        fs = _tz(fp["fault_start"])
+        fe = _tz(fp["fault_end"]) if fp.get("fault_end") else _tz(tt)
+        if fe > fs:
+            out.append((fs, fe))
+    return _merge_intervals(out)
+
+
 def _classify_stop_periods(
     run_state_periods: list[dict],
     fault_periods: list[dict],
@@ -308,17 +332,7 @@ def _classify_stop_periods(
     резали по любой смене «грязно/чисто» и по входу в аварию и давали до пяти
     кусков на один стоп, включая вырожденные в секунды.
     """
-    shutdown_iv: list[tuple[datetime, datetime]] = []
-    for fp in fault_periods:
-        if cfg.bitmap_severity(fp.get("severity") or "none") != "SHUTDOWN":
-            continue
-        fs = _tz(fp["fault_start"])
-        fe = _tz(fp["fault_end"]) if fp.get("fault_end") else _tz(tt)
-        if fe > fs:
-            shutdown_iv.append((fs, fe))
-    # Слияние обязательно: авария, поднявшаяся поверх ещё не снятой, должна
-    # продлевать покрытие, иначе рез уедет к снятию первой, а не последней.
-    shutdown_iv = _merge_intervals(shutdown_iv)
+    shutdown_iv = shutdown_intervals(fault_periods, cfg, tt)
 
     out: list[dict] = []
     for period in run_state_periods:

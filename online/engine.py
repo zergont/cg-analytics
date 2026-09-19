@@ -577,9 +577,16 @@ async def _run_segment(
                 continue
             _st = _tz_utc(datetime.fromisoformat(seg.t_start))
             _te = _tz_utc(datetime.fromisoformat(seg.t_end))
+            _ctx = None
+            if getattr(seg, "stop_kind", None) == "EMERGENCY":
+                _ctx = await _load_incident_context(
+                    router_sn, equip_type, panel_id, _st, ts_to, cfg
+                )
+            _ep, _fp = _ctx if _ctx else (enum_periods, fault_periods)
             inc = _clf.build_stop_incident(
-                enum_periods, fault_periods, _st, _te, cfg,
+                _ep, _fp, _st, _te, cfg,
                 stop_kind=getattr(seg, "stop_kind", None),
+                stabilization_sec=_stab_sec(cfg),
             )
             if inc is not None:
                 incidents[seg.t_start] = inc
@@ -590,6 +597,78 @@ async def _run_segment(
     except Exception:
         logger.warning("_run_segment: не удалось построить ленту стоп-сегмента", exc_info=True)
     return segments, incidents, gaps, chronologies
+
+
+# Запас при догрузке данных для акта: якорный стоп-период надо захватить
+# вместе с предшествующим ему расхолаживанием, иначе повторный расчёт якоря
+# внутри build_stop_incident не увидит входа через 4/5 (SQL берёт периоды
+# строго с state_end > ts_from) и уедет в фолбэк.
+_ACT_LOAD_MARGIN_SEC = 60
+
+
+def _stab_sec(cfg) -> int:
+    """Лаг стабилизации машины после останова, сек (KB, дефолт 60).
+
+    Сопутствующие неисправности — горячий останов, рост температуры при
+    вставшей прокачке — приходят уже после самого падения и относятся к той
+    же аварии. Лаг ничего не решает, он только не даёт обрезать запись, если
+    маска ушла через полминуты.
+    """
+    try:
+        return int(cfg.seg("stop_kind", "stabilization_sec", default=60) or 60)
+    except Exception:
+        return 60
+
+
+async def _load_incident_context(
+    router_sn: str, equip_type: str, panel_id: int,
+    stop_ts: datetime, ts_to: datetime, cfg,
+) -> tuple[list[dict], list[dict]] | None:
+    """enum/fault, доведённые назад до последнего нормального останова.
+
+    Штатное окно движка начинается ровно в момент останова (cursor_ts = t_end
+    предыдущего сегмента), поэтому преамбула акта физически пуста: SQL берёт
+    периоды с `state_end > ts_from` строго, и предыдущий режим — тот самый,
+    что отвечает на вопрос «падение из работы или через охлаждение» — в
+    выборку не попадает. Из-за этого же у характер-гейта rs_before=None и за
+    30 дней строился один акт на восемь аварий.
+
+    Здесь окно расширяется назад: сначала дешёвый поиск якоря по одному
+    регистру RUN_STATE и по маскам, затем полная загрузка от якоря. Три
+    запроса, и только когда в цикле закрывается аварийный стоп.
+
+    None — если догрузить не удалось; вызывающий работает на обычных данных.
+    """
+    from analytics import classifier as _clf
+
+    stop_ts = _tz_utc(stop_ts)
+    horizon = stop_ts - timedelta(seconds=_clf.BASELINE_SEARCH_SEC)
+    try:
+        rs_periods, fault_periods = await asyncio.gather(
+            _src.get_enum_periods(
+                router_sn, equip_type, panel_id, horizon, ts_to,
+                addrs=[_clf._ADDR_RUN_STATE],
+            ),
+            _src.get_fault_periods(
+                router_sn, equip_type, panel_id, horizon, ts_to,
+                fault_addrs=cfg.whitelist_fault,
+            ),
+        )
+        anchor_ts, _reason = _clf.find_baseline_anchor(
+            rs_periods, fault_periods, stop_ts, cfg
+        )
+        enum_periods = await _src.get_enum_periods(
+            router_sn, equip_type, panel_id,
+            anchor_ts - timedelta(seconds=_ACT_LOAD_MARGIN_SEC), ts_to,
+            addrs=_src.enum_read_addrs(cfg),
+        )
+        return enum_periods, fault_periods
+    except Exception:
+        logger.warning(
+            "Не удалось догрузить данные для акта %s/%s/%s от %s",
+            router_sn, equip_type, panel_id, stop_ts, exc_info=True,
+        )
+        return None
 
 
 async def _collect_and_enrich_detections(
@@ -1834,10 +1913,20 @@ class OnlinePollEngine:
                             build_segment_chronology as _chrono,
                         )
                         _rs_st = _tz_utc(datetime.fromisoformat(seg.t_start))
+                        _rs_ctx = None
+                        if getattr(seg, "stop_kind", None) == "EMERGENCY":
+                            _rs_ctx = await _load_incident_context(
+                                self.router_sn, self.equip_type, self.panel_id,
+                                _rs_st, ts_to_utc, self.cfg,
+                            )
+                        _rs_ep, _rs_fp = (
+                            _rs_ctx if _rs_ctx else (enum_periods, fault_periods)
+                        )
                         _rs_incident = _clf.build_stop_incident(
-                            enum_periods, fault_periods,
+                            _rs_ep, _rs_fp,
                             _rs_st, seg_t_end_rs, self.cfg,
                             stop_kind=getattr(seg, "stop_kind", None),
+                            stabilization_sec=_stab_sec(self.cfg),
                         )
                         # Лента только там, где акта нет: у аварийного стопа
                         # своя внутри акта, дублировать её незачем

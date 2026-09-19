@@ -200,9 +200,13 @@ async def _run_machine(conn, obs: dict, tf: datetime, tt: datetime,
         else:
             print(f"      ВНИМАНИЕ: рез не по снятию маски (close={cc or '-'})")
 
+        try:
+            _stab = int(cfg.seg("stop_kind", "stabilization_sec", default=60) or 60)
+        except Exception:
+            _stab = 60
         inc = build_stop_incident(
             enum_periods, fault_periods, t_from, t_to, cfg,
-            stop_kind="EMERGENCY",
+            stop_kind="EMERGENCY", stabilization_sec=_stab,
         )
         if inc is None:
             stat["no_act"] += 1
@@ -211,6 +215,24 @@ async def _run_machine(conn, obs: dict, tf: datetime, tt: datetime,
             continue
         stat["acts"] += 1
 
+        win = inc.get("window") or {}
+        _base = {"normal_stop": "последний нормальный останов",
+                 "prev_emergency": "конец предыдущей аварии",
+                 "fallback": "ФОЛБЭК — нормального останова в горизонте нет"}
+        print(f"      окно: {_fmt(win.get('from'))} - {_fmt(win.get('to'))}  "
+              f"({_base.get(win.get('baseline'), win.get('baseline'))})")
+        st = inc.get("standing") or []
+        if st:
+            print(f"      висело на момент останова ({len(st)}):")
+            for e in st[:6]:
+                _age = int(e.get("age_sec") or 0)
+                _ago = (f"{_age // 86400} сут" if _age >= 86400
+                        else f"{_age // 3600} ч" if _age >= 3600
+                        else f"{_age // 60} мин")
+                print(f"        - {e.get('name')} [{e.get('severity')}] "
+                      f"с {_fmt(e.get('since'))} ({_ago})")
+            if len(st) > 6:
+                print(f"        ... ещё {len(st) - 6}")
         ch = inc.get("character") or {}
         votes = (ch.get("immediate_votes") or []) + (ch.get("controlled_votes") or [])
         print(f"      характер: "
