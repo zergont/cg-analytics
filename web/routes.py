@@ -2406,6 +2406,7 @@ async def api_machine_segments(
             "cause_close":   seg.get("cause_close"),
             "severity":      sev,                         # SHUTDOWN/WARNING/CAUTION/None (было INFO до v4.8.9)
             "gate_checked":  gate_ok,                     # срабатывание аналитики отменено гейтом
+            "has_incident":  bool(seg.get("has_incident")),  # есть акт аварийного останова
             "data_quality":  dq,                          # 0.0–1.0, null у старых сегментов
             "no_data":       (not is_open) and dq == 0.0, # весь сегмент без связи → «нет связи» в UI
             "coking_risk":   None,                        # в calendar-запросе не грузим JSONB полностью
@@ -2495,6 +2496,10 @@ async def api_segment_detail(seg_id: int):
         "report_summary_md": seg.get("report_summary_md"),
         # ИИ-анализ
         "analysis":      analysis,
+        # Акт аварийного останова («Следователь»): вердикт характера и лента
+        # событий [останов − 5 мин, конец сегмента]. Только у стоп-сегментов
+        # вида EMERGENCY; у остальных null (v4.9.70)
+        "incident_json": _parse_json(seg.get("incident_json"), None, ctx="incident_json"),
         # Онлайн-анализ предупреждения (гейт Claude) — есть и у открытого сегмента
         "warning_analysis_md": seg.get("warning_analysis_md"),
         # История разборов гейта [{t, fault_hash, alarm_text, md}] — смена

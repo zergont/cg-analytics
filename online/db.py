@@ -513,7 +513,9 @@ async def get_segments_for_calendar(
                        split_reason, continued_from, continues_to,
                        coking_risk_json, analytics_version,
                        active_detections_json, characteristics_json,
-                       gate_suppressed_hash
+                       gate_suppressed_hash,
+                       -- сам акт тяжёлый, в календарь тянем только признак
+                       (incident_json IS NOT NULL) AS has_incident
                 FROM auto_segments
                 WHERE {where}
                 ORDER BY t_start DESC
