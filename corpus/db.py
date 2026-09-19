@@ -187,7 +187,15 @@ async def get_segment_row(seg_id: int) -> dict | None:
             """
             SELECT id, router_sn, equip_type, panel_id,
                    run_state, characteristics_json, report_md,
-                   incident_json,
+                   incident_json, chronology_json,
+                   -- Разборы гейта, сделанные ПО ХОДУ сегмента: в них то,
+                   -- чего нет больше нигде — что предшествовало, каким был
+                   -- тренд, что висело в тот момент. Без них ИИ писал
+                   -- итоговое заключение, не видя собственных разборов.
+                   warning_analyses, warning_analysis_md,
+                   -- Читается препроцессором (_gate_suppressed), а в выборке
+                   -- его не было: вердикт гейта «отменить» не влиял на вывод
+                   gate_suppressed_hash,
                    t_start, t_end
             FROM auto_segments
             WHERE id = $1

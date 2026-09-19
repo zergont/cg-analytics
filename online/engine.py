@@ -639,6 +639,29 @@ def _act_detail_events(cfg) -> int:
         return ACT_DETAIL_EVENTS
 
 
+def _carry_incident(open_row: dict | None, seg_start: datetime) -> dict | None:
+    """Готовый акт с закрываемой открытой строки, если он про этот же стоп.
+
+    Акт строится один раз — по истечении лага стабилизации, ещё на живом
+    сегменте. При закрытии его надо перенести, а не собрать заново: документ
+    вышел бы тот же, но «один раз» должно значить буквально один раз.
+    Сверяем t_start, чтобы не унести акт на соседний сегмент батча.
+    """
+    if not open_row or open_row.get("incident_json") is None:
+        return None
+    row_start = open_row.get("t_start")
+    if row_start is None or _tz_utc(row_start) != _tz_utc(seg_start):
+        return None
+    raw = open_row["incident_json"]
+    if isinstance(raw, str):
+        try:
+            import json as _j
+            raw = _j.loads(raw)
+        except Exception:
+            return None
+    return raw if isinstance(raw, dict) else None
+
+
 def _is_stop_head(enum_periods: list[dict], t_start: datetime) -> bool:
     """Начинается ли сегмент на реальном фронте входа в стоп.
 
@@ -1951,9 +1974,15 @@ class OnlinePollEngine:
                             build_segment_chronology as _chrono,
                         )
                         _rs_st = _tz_utc(datetime.fromisoformat(seg.t_start))
+                        # Акт собран один раз и не пересобирается: если он уже
+                        # лежит на закрываемой открытой строке — переносим как
+                        # есть. Пересборка дала бы тот же документ, но «один
+                        # раз» должно значить буквально один раз.
+                        _rs_incident = _carry_incident(_rs_open_row, _rs_st)
                         # Акт — только у головы стопа: продолжение после
                         # суточного реза ссылается на неё через continued_from
-                        if (getattr(seg, "stop_kind", None) == "EMERGENCY"
+                        if (_rs_incident is None
+                                and getattr(seg, "stop_kind", None) == "EMERGENCY"
                                 and _is_stop_head(enum_periods, _rs_st)):
                             _rs_ctx = await _load_incident_context(
                                 self.router_sn, self.equip_type, self.panel_id,
@@ -2122,9 +2151,12 @@ class OnlinePollEngine:
             self.key, _time.perf_counter() - _t0,
         )
 
-        # Акт и лента для ОТКРЫТОГО стоп-сегмента: разбор аварии нужен
-        # диспетчеру сразу, а не после сброса. Переписываются каждый цикл,
-        # пока сегмент жив; при закрытии собираются начисто.
+        # Артефакты ОТКРЫТОГО стоп-сегмента.
+        #   Лента растёт каждый цикл — события видны сразу, живьём.
+        #   Акт собирается ОДИН раз, по истечении лага стабилизации: раньше
+        #   собирать нечего (сопутствующие ещё не пришли), и полуготовый
+        #   документ хуже его отсутствия. Уже собранный не трогаем — в БД
+        #   он под COALESCE, так что None его не сотрёт.
         _open_incident = None
         _open_chronology = None
         if open_seg.run_state == 0:
@@ -2134,7 +2166,11 @@ class OnlinePollEngine:
                     build_segment_chronology as _chrono,
                 )
                 _op_st = _tz_utc(datetime.fromisoformat(open_seg.t_start))
+                _lag_done = ts_to_utc >= _op_st + timedelta(
+                    seconds=_stab_sec(self.cfg)
+                )
                 if (getattr(open_seg, "stop_kind", None) == "EMERGENCY"
+                        and _lag_done
                         and _is_stop_head(enum_periods, _op_st)):
                     _op_ctx = await _load_incident_context(
                         self.router_sn, self.equip_type, self.panel_id,

@@ -266,6 +266,71 @@ def _fmt_detections_hierarchy(chars_json: Any) -> str:
     return "\n".join(lines)
 
 
+def _format_gate_analyses(segment_row: dict) -> str:
+    """Секция «Разборы в моменты событий» — что ИИ уже говорил по ходу сегмента.
+
+    Разборы делает гейт в момент срабатывания: у него есть контекст, которого
+    в итоговом заключении нет по построению — предыдущий сегмент, тренд
+    параметров, состав висевших тревог на ту секунду. До v4.9.83 они в промпт
+    не попадали, и модель писала вывод, не видя собственных наблюдений.
+    """
+    items = segment_row.get("warning_analyses")
+    if isinstance(items, str):
+        try:
+            items = json.loads(items)
+        except (ValueError, TypeError):
+            items = None
+    if not items:
+        md = segment_row.get("warning_analysis_md")
+        if not md:
+            return ""
+        items = [{"md": md}]
+    if not isinstance(items, list):
+        return ""
+
+    out: list[str] = ["## Разборы в моменты событий", "",
+                      "Сделаны по ходу сегмента, в момент срабатывания. "
+                      "Учти их и не противоречь без основания.", ""]
+    for it in items:
+        if not isinstance(it, dict) or not it.get("md"):
+            continue
+        ts = (it.get("t") or "")[:19].replace("T", " ")
+        head = " — ".join(x for x in (ts, it.get("alarm_text")) if x)
+        out.append(f"### {head}" if head else "###")
+        out.append(str(it["md"]).strip())
+        out.append("")
+    return "\n".join(out) + "\n" if len(out) > 4 else ""
+
+
+def _format_chronology(chronology_json: Any) -> str:
+    """Секция «Хронология стоянки» — что панель записала за период.
+
+    Для стоп-сегмента это «кто что нажимал и сбрасывал»: в режиме 0 панель
+    копит сообщения, не меняя режим, и без ленты период выглядит однородным.
+    """
+    if not chronology_json:
+        return ""
+    if isinstance(chronology_json, str):
+        try:
+            chronology_json = json.loads(chronology_json)
+        except (ValueError, TypeError):
+            return ""
+    events = (chronology_json or {}).get("chronology") or []
+    if not events:
+        return ""
+    out = ["## Хронология стоянки", "", "```"]
+    for e in events:
+        ts = (e.get("ts") or "")[11:19]
+        kind = "СОБЫТИЕ  " if e.get("kind") == "fault" else "состояние"
+        bit = e.get("bit")
+        a = f"{e.get('addr')}/{bit}" if bit is not None else str(e.get("addr"))
+        val = f" = {e.get('label')}" if (e.get("kind") == "state" and e.get("label")) else ""
+        sev = f"  [{e.get('severity')}]" if e.get("severity") else ""
+        out.append(f"{ts}  {kind} {a:9} {e.get('name') or ''}{val}{sev}")
+    out += ["```", ""]
+    return "\n".join(out) + "\n"
+
+
 def _format_incident(incident_json: Any) -> str:
     """Секция «Реконструкция аварийного останова» для промпта Claude (лента целиком).
 
@@ -339,7 +404,9 @@ def build_claude_input(segment_row: dict) -> str:
         f"---\n\n"
     )
     incident_md = _format_incident(segment_row.get("incident_json"))
-    return header + incident_md + report_md
+    gate_md = _format_gate_analyses(segment_row)
+    chrono_md = _format_chronology(segment_row.get("chronology_json"))
+    return header + incident_md + gate_md + chrono_md + report_md
 
 
 def extract_verdict_alarm(segment_row: dict) -> tuple[str, str]:

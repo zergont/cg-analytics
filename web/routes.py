@@ -2453,6 +2453,10 @@ async def api_segment_detail(seg_id: int):
         # событий [останов − 5 мин, конец сегмента]. Только у стоп-сегментов
         # вида EMERGENCY; у остальных null (v4.9.70)
         "incident_json": _parse_json(seg.get("incident_json"), None, ctx="incident_json"),
+        # Цепочка суточного реза: у продолжения аварийного стопа своего акта
+        # нет — он лежит в голове, на которую указывает continued_from
+        "continued_from": seg.get("continued_from"),
+        "continues_to":   seg.get("continues_to"),
         # Лента событий панели за окно стоп-сегмента: «кто что нажимал и
         # сбрасывал, пока машина стояла». Только там, где акта нет —
         # у аварийного стопа своя лента внутри incident_json (v4.9.76)

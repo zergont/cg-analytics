@@ -224,12 +224,14 @@ async def upsert_open_segment(data: dict[str, Any]) -> int:
                     characteristics_json   = COALESCE($11::jsonb, characteristics_json),
                     report_md              = COALESCE($12, report_md),
                     report_summary_md      = COALESCE($13, report_summary_md),
-                    -- Акт и лента живут на открытой строке и переписываются
-                    -- каждый цикл: разбор аварии нужен диспетчеру сразу, а не
-                    -- задним числом. Пишем как есть, без COALESCE: они
-                    -- детерминированно выводятся из истории, и залипший
-                    -- старый акт тут хуже пустого (v4.9.82)
-                    incident_json          = $14::jsonb,
+                    -- Акт собирается ОДИН раз — по истечении лага
+                    -- стабилизации либо при закрытии, что раньше, — и дальше
+                    -- не меняется: это документ, а не живая лента. COALESCE
+                    -- поэтому по делу: цикл, в котором акта ещё нет, не должен
+                    -- стирать уже собранный. Новый открытый сегмент приходит
+                    -- через INSERT, так что чужой акт не залипнет (v4.9.83).
+                    incident_json          = COALESCE($14::jsonb, incident_json),
+                    -- Лента, наоборот, растёт вместе с сегментом — пишем как есть
                     chronology_json        = $15::jsonb,
                     updated_at             = now()
                 WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
