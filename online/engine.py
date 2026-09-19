@@ -324,6 +324,21 @@ def _alert_key(d: dict) -> str:
     return d.get("scenario", "?")
 
 
+def _live_alert_keys(seg) -> set[str]:
+    """Ключи тревог, активных на конец сегмента (по последнему подсегменту).
+
+    Такая тревога переживёт рез: сразу после закрытия окна `_process_episodes`
+    заведёт по ней живой эпизод. Сеять по ней ещё и «эфемерный» закрытый —
+    значит удвоить одну непрерывную тревогу.
+    """
+    try:
+        _, dets = _extract_open_segment_data(seg)
+    except Exception:
+        logger.warning("Не удалось снять активные тревоги сегмента", exc_info=True)
+        return set()
+    return {_alert_key(d) for d in dets if d.get("scenario")}
+
+
 def _diff_alerts(
     prev_map: dict[str, dict],
     curr_list: list[dict],
@@ -557,7 +572,10 @@ async def _collect_and_enrich_detections(
 
     1. Собирает уникальные (scenario, severity, run_state, front_count) из всех подсегментов.
     2. Для сценариев без живого эпизода (короткий сегмент закрылся внутри одного
-       цикла, например START_FAILURE) — создаёт сразу закрытый эпизод.
+       цикла, например START_FAILURE) — создаёт сразу закрытый эпизод. Живой —
+       это и то, что уже в памяти движка, и то, что активно на конец сегмента
+       (память отстаёт на цикл: тревога, поднявшая RUN_STATE, в неё ещё не
+       попала, и без второй половины условия одна авария давала два эпизода).
     3. Счётчики фронтов И длительности по alarm_episodes (текущий эпизод уже в БД,
        поэтому без +1).
     4. Возвращает список event-dict для insert_detection_events (переходный период).
@@ -1284,6 +1302,10 @@ class OnlinePollEngine:
         # t_end последнего успешно сохранённого сегмента (для отката cursor_ts при пропуске границы)
         last_committed_t_end: datetime = _tz_utc(t_from)
 
+        # Тревоги, активные на конец окна: живой эпизод по ним заведётся на
+        # следующем цикле, поэтому «эфемерными» их считать нельзя
+        _live_keys = _live_alert_keys(segments[-1])
+
         for i, seg in enumerate(segments):
             is_last = (i == len(segments) - 1)
 
@@ -1355,7 +1377,7 @@ class OnlinePollEngine:
             _det_events = [] if _seg_no_data else await _collect_and_enrich_detections(
                 seg, self.router_sn, self.equip_type, self.panel_id,
                 seg_t_end, self.cfg, run_origin_ts=_run_origin,
-                open_keys=set(self._episodes),
+                open_keys=set(self._episodes) | _live_keys,
             )
 
             seg_dict = seg.to_dict()
@@ -1650,6 +1672,9 @@ class OnlinePollEngine:
             carry_continued_from = self.continued_from_id
             # Унаследованное RS время: ci==0 продолжает цепочку, ci>0 — новый RS
             _rs_inherited_before = dict(self.inherited_run_state_sec)
+            # Тревоги, активные в остающемся открытом сегменте: по ним ниже в
+            # этом же цикле заведётся живой эпизод (память движка отстаёт)
+            _live_keys = _live_alert_keys(segments[-1])
             for ci, seg in enumerate(closed_segs):
                 coking_risk = _extract_coking_risk_from_segments([seg])
                 seg_t_end_rs = _tz_utc(datetime.fromisoformat(seg.t_end))
@@ -1668,7 +1693,7 @@ class OnlinePollEngine:
                 _rs_det_events = [] if _rs_no_data else await _collect_and_enrich_detections(
                     seg, self.router_sn, self.equip_type, self.panel_id,
                     seg_t_end_rs, self.cfg, run_origin_ts=_rs_run_origin,
-                    open_keys=set(self._episodes),
+                    open_keys=set(self._episodes) | _live_keys,
                 )
 
                 if _rs_no_data:

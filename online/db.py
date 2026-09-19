@@ -633,17 +633,22 @@ async def get_run_state_origin_ts(seg_id: int):
         await conn.close()
 
 
-async def _resolve_gate_target(
+async def _resolve_segment_target(
     conn, router_sn: str, equip_type: str, panel_id: int,
     segment_id: int | None, ts: datetime,
 ) -> int | None:
-    """id сегмента, которому принадлежит запись гейта.
+    """id сегмента, которому принадлежит запись, сделанная в момент ts.
 
-    Сначала прямая ссылка — сегмент, который гейт читал, когда начинал разбор.
+    Сначала прямая ссылка — сегмент, который писавший читал, когда начинал.
     Если строки уже нет (цикл закрытия удаляет открытую и вставляет закрытую с
-    новым id), берём сегмент, чьё окно покрывает момент срабатывания: разбор
-    длится десятки секунд и должен остаться на своём сегменте, а не уехать на
-    следующий. None — сегмента нет вовсе (окно ещё не проанализировано).
+    новым id), берём сегмент, чьё окно покрывает момент события: запись должна
+    остаться на своём сегменте, а не уехать на следующий. None — сегмента нет
+    вовсе (окно ещё не проанализировано).
+
+    Нужен и гейту (разбор длится десятки секунд), и эпизодам тревог: в цикле
+    закрытия движок держит в памяти id уже удалённой открытой строки, и INSERT
+    эпизода с ним падал по внешнему ключу. Падал именно там, где важнее всего —
+    смена RUN_STATE и появление аварийных масок происходят в одном цикле.
     """
     if segment_id is not None:
         row = await conn.fetchrow(
@@ -687,7 +692,7 @@ async def save_segment_warning(
     }, ensure_ascii=False)
     conn = await _connect()
     try:
-        seg_id = await _resolve_gate_target(
+        seg_id = await _resolve_segment_target(
             conn, router_sn, equip_type, panel_id, segment_id, ts
         )
         if seg_id is None:
@@ -716,7 +721,7 @@ async def append_segment_gate_event(
     ts = ts or datetime.now(timezone.utc)
     conn = await _connect()
     try:
-        seg_id = await _resolve_gate_target(
+        seg_id = await _resolve_segment_target(
             conn, router_sn, equip_type, panel_id, segment_id, ts
         )
         if seg_id is None:
@@ -743,7 +748,7 @@ async def set_segment_gate_suppression(
     ts = ts or datetime.now(timezone.utc)
     conn = await _connect()
     try:
-        seg_id = await _resolve_gate_target(
+        seg_id = await _resolve_segment_target(
             conn, router_sn, equip_type, panel_id, segment_id, ts
         )
         if seg_id is None:
@@ -887,6 +892,10 @@ async def open_episode(
     """Открыть эпизод тревоги (t_close IS NULL = висит). Возвращает id."""
     conn = await _connect()
     try:
+        # segment_id из памяти движка может указывать на уже удалённую строку
+        segment_id = await _resolve_segment_target(
+            conn, router_sn, equip_type, panel_id, segment_id, t_open
+        )
         row = await conn.fetchrow("""
             INSERT INTO alarm_episodes
                 (router_sn, equip_type, panel_id, scenario, source, severity,
