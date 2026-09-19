@@ -587,7 +587,7 @@ async def _run_segment(
                 _ep, _fp, _st, _te, cfg,
                 stop_kind=getattr(seg, "stop_kind", None),
                 stabilization_sec=_stab_sec(cfg),
-                max_events=_max_act_events(cfg),
+                detail_events=_act_detail_events(cfg),
             )
             if inc is not None:
                 incidents[seg.t_start] = inc
@@ -621,14 +621,18 @@ def _stab_sec(cfg) -> int:
         return 60
 
 
-def _max_act_events(cfg) -> int:
-    """Потолок ленты акта, событий (KB, дефолт 300). 0 — не обрезать."""
-    from analytics.classifier import MAX_ACT_EVENTS
+def _act_detail_events(cfg) -> int:
+    """Сколько событий перед остановом показать поштучно (KB, дефолт 100).
+
+    Всё окно целиком идёт в свод по видам, так что история не теряется; это
+    только глубина детальной части.
+    """
+    from analytics.classifier import ACT_DETAIL_EVENTS
     try:
-        v = cfg.seg("stop_kind", "max_act_events", default=MAX_ACT_EVENTS)
-        return int(MAX_ACT_EVENTS if v is None else v)
+        v = cfg.seg("stop_kind", "act_detail_events", default=ACT_DETAIL_EVENTS)
+        return int(ACT_DETAIL_EVENTS if v is None else v)
     except Exception:
-        return MAX_ACT_EVENTS
+        return ACT_DETAIL_EVENTS
 
 
 async def _load_incident_context(
@@ -1938,7 +1942,7 @@ class OnlinePollEngine:
                             _rs_st, seg_t_end_rs, self.cfg,
                             stop_kind=getattr(seg, "stop_kind", None),
                             stabilization_sec=_stab_sec(self.cfg),
-                            max_events=_max_act_events(self.cfg),
+                            detail_events=_act_detail_events(self.cfg),
                         )
                         # Лента только там, где акта нет: у аварийного стопа
                         # своя внутри акта, дублировать её незачем

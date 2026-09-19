@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from analytics.classifier import (  # noqa: E402
     build_stop_incident,
-    cap_act_events,
+    summarize_events,
     classify_stop_character,
     find_baseline_anchor,
     prev_stop_end,
@@ -182,21 +182,41 @@ if old_e:
     check(abs(old_e["age_sec"] - (STOP_A - T(10, 0)).total_seconds()) < 1,
           "9в: возраст маски посчитан неверно")
 
-# 10. Порог ленты: жертвуем ранними сменами состояний, фронты держим
+# 10. Свод по видам вмещает всю историю, детали — окрестность останова
 many = (
-    [{"ts": T(11, 0, i).isoformat(), "kind": "state", "label": f"s{i}"}
-     for i in range(50)]
-    + [{"ts": T(12, 0).isoformat(), "kind": "fault", "label": "важный фронт"}]
-    + [{"ts": T(13, 30).isoformat(), "kind": "state", "label": "после останова"}]
+    [{"ts": T(11, 0, i).isoformat(), "kind": "state", "addr": 40011,
+      "name": "Режим"} for i in range(50)]
+    + [{"ts": T(12, 0).isoformat(), "kind": "fault", "addr": 40404, "bit": 3,
+        "severity": "shutdown", "name": "важный фронт"},
+       {"ts": T(12, 30).isoformat(), "kind": "fault", "addr": 40404, "bit": 3,
+        "severity": "shutdown", "name": "важный фронт"}]
+    + [{"ts": T(13, 30).isoformat(), "kind": "state", "addr": 40599,
+        "name": "после останова"}]
 )
-kept, trunc = cap_act_events(many, T(13, 0), max_events=10)
-check(len(kept) == 10, f"10a: ожидали 10 событий, получили {len(kept)}")
-check(trunc and trunc["dropped"] == 42, f"10б: неверно посчитана обрезка: {trunc}")
-labels = [e["label"] for e in kept]
-check("важный фронт" in labels, "10в: фронт неисправности принесён в жертву раньше смен")
-check("после останова" in labels, "10г: событие после останова обрезано")
-check(cap_act_events(many, T(13, 0), max_events=0)[1] is None,
-      "10д: нулевой порог должен отключать обрезку")
+summary, detail = summarize_events(many, T(13, 0), detail_limit=5)
+by_name = {g["name"]: g for g in summary}
+check(len(summary) == 3, f"10a: ожидали три вида, получили {len(summary)}")
+check(by_name["Режим"]["count"] == 50,
+      f"10б: смены режима недосчитаны: {by_name['Режим']['count']}")
+check(by_name["важный фронт"]["count"] == 2,
+      "10в: повторный фронт не сгруппирован")
+check(by_name["важный фронт"]["first"] == T(12, 0).isoformat()
+      and by_name["важный фронт"]["last"] == T(12, 30).isoformat(),
+      "10г: границы группы посчитаны неверно")
+check(summary[0]["kind"] == "fault", "10д: фронты должны идти в своде первыми")
+check(len(detail) == 6, f"10е: ожидали 5 до + 1 после, получили {len(detail)}")
+check(detail[-1]["name"] == "после останова",
+      "10ж: событие после останова должно остаться в деталях")
+check(sum(g["count"] for g in summary) == len(many),
+      "10з: свод должен покрывать все события без потерь")
+_, only_sum = summarize_events(many, T(13, 0), detail_limit=0)
+check(len(only_sum) == 1, "10и: при нулевом пороге остаётся только то, что после")
+
+# 11. Акт несёт и свод, и общее число событий окна
+if inc_b:
+    check(inc_b.get("summary"), "11a: свод не попал в акт")
+    check(inc_b.get("events_total", 0) >= len(inc_b["chronology"]),
+          "11б: events_total меньше показанного")
 
 if _errors:
     print("ПРОВАЛЕНО:")

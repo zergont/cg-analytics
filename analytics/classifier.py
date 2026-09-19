@@ -202,9 +202,10 @@ BASELINE_SEARCH_SEC = 30 * 24 * 3600
 # не короче суток (берём более раннюю границу из двух).
 BASELINE_FALLBACK_PERIODS = 3
 BASELINE_FALLBACK_MIN_SEC = 24 * 3600
-# Потолок ленты акта. Упирается в контекстное окно запроса к ИИ, а не в
-# здравый смысл: сколько событий модель осилит, столько и кладём.
-MAX_ACT_EVENTS = 300
+# Сколько событий перед остановом показать поштучно. Всё окно целиком идёт в
+# свод по видам (одна строка со счётчиком на вид), поэтому история не теряется
+# ни при какой длительности — детали нужны лишь там, где важна каждая секунда.
+ACT_DETAIL_EVENTS = 100
 
 
 def find_baseline_anchor(
@@ -272,43 +273,66 @@ def find_baseline_anchor(
     return min(by_periods, by_time), "fallback"
 
 
-def cap_act_events(
-    events: list[dict[str, Any]], stop_ts: datetime, max_events: int,
-) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-    """Обрезать ленту до порога. Возвращает (лента, сведения об обрезке).
+def summarize_events(
+    events: list[dict[str, Any]], stop_ts: datetime, detail_limit: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Разложить ленту на свод по видам и детальный хвост. (свод, детали).
 
-    Режем не по времени — по числу событий: длительность цикла диагностична
-    сама по себе, а вот контекстное окно запроса к ИИ конечно. Порядок
-    жертв: сперва самые ранние смены состояний, фронты неисправностей держим
-    до последнего — они существо дела. Всё, что после останова, не трогаем.
-    Обрезка не молчит: сколько и до какого момента, едет в акт.
+    Резать историю по числу событий незачем: повторяющееся событие — это одна
+    строка со счётчиком, а число ВИДОВ ограничено каталогом регистров и битов,
+    а не длительностью цикла. Поэтому в свод попадает всё окно целиком,
+    сколько бы оно ни длилось: «Высокая температура ОЖ — 4 раза, с 10:02 по
+    13:31». Длительность при этом остаётся видна и сама по себе диагностична.
+
+    Детально показывается то, где важна каждая секунда: всё после останова
+    (включая лаг стабилизации) плюс последние detail_limit событий перед ним.
+    Ничего не теряется — то, что не попало в детали, посчитано в своде.
+
+    detail_limit = 0 — деталей нет, только свод.
     """
-    if not max_events or len(events) <= max_events:
-        return events, None
-
     def _ts(e):
         raw = e.get("ts")
         return datetime.fromisoformat(raw) if isinstance(raw, str) else raw
 
     stop_ts = _tz(stop_ts)
+    groups: dict[tuple, dict[str, Any]] = {}
+    for e in events:
+        if e.get("kind") == "fault":
+            key = ("fault", e.get("addr"), e.get("bit"))
+        else:
+            key = ("state", e.get("addr"), None)
+        ts = _ts(e)
+        g = groups.get(key)
+        if g is None:
+            groups[key] = {
+                "kind": e.get("kind"),
+                "name": e.get("name"),
+                "addr": e.get("addr"),
+                "bit": e.get("bit"),
+                "severity": e.get("severity"),
+                "count": 1,
+                "first": ts.isoformat() if ts else None,
+                "last": ts.isoformat() if ts else None,
+            }
+            continue
+        g["count"] += 1
+        if ts:
+            g["last"] = ts.isoformat()
+            if not g["first"]:
+                g["first"] = ts.isoformat()
+        # Тяжесть группы — по худшему из виденных фронтов
+        if e.get("severity") and not g.get("severity"):
+            g["severity"] = e.get("severity")
+
+    summary = sorted(
+        groups.values(),
+        key=lambda g: (g["kind"] != "fault", -g["count"], g["name"] or ""),
+    )
+
     after = [e for e in events if _ts(e) is None or _ts(e) >= stop_ts]
-    before = [e for e in events if e not in after]
-    budget = max(0, max_events - len(after))
-    faults = [e for e in before if e.get("kind") == "fault"]
-    states = [e for e in before if e.get("kind") != "fault"]
-    if len(faults) >= budget:
-        kept_before = faults[-budget:] if budget else []
-    else:
-        kept_before = faults + states[-(budget - len(faults)):] if budget else []
-    kept_before.sort(key=lambda e: (_ts(e) or stop_ts))
-    kept = kept_before + after
-    dropped = len(events) - len(kept)
-    edge = _ts(kept_before[0]) if kept_before else stop_ts
-    return kept, {
-        "dropped": dropped,
-        "kept_from": edge.isoformat() if edge else None,
-        "reason": "предел ленты акта",
-    }
+    before = [e for e in events if _ts(e) is not None and _ts(e) < stop_ts]
+    detail = (before[-detail_limit:] if detail_limit else []) + after
+    return summary, detail
 
 
 def standing_faults(
@@ -320,7 +344,7 @@ def standing_faults(
     события: маска, поднявшаяся задолго до окна и всё ещё висящая, не попадёт
     в неё никогда — даже если она и есть причина. В проде такие живут неделями
     (40408/11 на ДГУ №1 висела двенадцать суток), и в акте им место одной
-    строкой «висит с такого-то», а не пятью сутками событий.
+    строкой «висит с такого-то», а не сутками событий.
     """
     stop_ts = _tz(stop_ts)
     out: list[dict[str, Any]] = []
@@ -355,7 +379,7 @@ def build_stop_incident(
     preamble_sec: int = 300,   # не используется: начало окна даёт якорь
     stop_kind: str | None = None,
     stabilization_sec: int = 60,
-    max_events: int = MAX_ACT_EVENTS,
+    detail_events: int = ACT_DETAIL_EVENTS,
 ) -> dict[str, Any] | None:
     """incident_json для аварийного стоп-сегмента; иначе None.
 
@@ -406,9 +430,8 @@ def build_stop_incident(
     chrono = build_chronology(
         enum_periods, fault_periods, cfg, window_from=win_from, window_to=win_to
     )
-    events, truncated = cap_act_events(
-        serialize_chronology(chrono), stop_ts, max_events
-    )
+    _all = serialize_chronology(chrono)
+    summary, events = summarize_events(_all, stop_ts, detail_events)
     return {
         "kind": "stop_incident",
         "stop_ts": stop_ts.isoformat(),
@@ -421,8 +444,10 @@ def build_stop_incident(
             "to": win_to.isoformat() if win_to else None,
             "baseline": baseline_reason,
         },
+        # Свод по видам покрывает ВСЁ окно, детали — окрестность останова
+        "summary": summary,
+        "events_total": len(_all),
         "chronology": events,
-        "truncated": truncated,
         "investigator_version": _INVESTIGATOR_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }

@@ -247,10 +247,20 @@ async def _run_machine(conn, obs: dict, tf: datetime, tt: datetime,
             stat["problems"].append(f"{label} {_fmt(t_from)}: лента акта пуста")
             print("      ДЕФЕКТ: лента акта пуста")
             continue
-        _tr = inc.get("truncated")
-        _tail = (f"  (обрезано {_tr['dropped']}, оставлено с {_fmt(_tr['kept_from'])})"
-                 if _tr else "")
-        print(f"      событий в ленте: {len(events)}{_tail}")
+        _sum = inc.get("summary") or []
+        print(f"      событий в окне: {inc.get('events_total', len(events))}, "
+              f"видов {len(_sum)}, поштучно показано {len(events)}")
+        if _sum:
+            print("      свод по видам:")
+            for g in _sum[:10]:
+                _mark = "*" if g.get("kind") == "fault" else ">"
+                _sev = f" [{g.get('severity')}]" if g.get("severity") else ""
+                _span = (f", с {_fmt(g.get('first'))} по {_fmt(g.get('last'))}"
+                         if g.get("count", 1) > 1 else f", {_fmt(g.get('first'))}")
+                print(f"        {_mark} {g.get('name')}{_sev} — "
+                      f"{g.get('count')} раз{_span}")
+            if len(_sum) > 10:
+                print(f"        ... ещё {len(_sum) - 10} видов")
         for line in _render_events(events, fault_ref, verbose, around=t_from):
             print(line)
 
