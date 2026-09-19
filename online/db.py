@@ -888,8 +888,16 @@ async def open_episode(
     scenario: str, source: str, severity: str | None,
     t_open: datetime, open_values: dict | None, segment_id: int | None = None,
     addr: int | None = None, bit: int | None = None,
+    active_sec: float = 0.0, blind_sec: float = 0.0,
 ) -> int:
-    """Открыть эпизод тревоги (t_close IS NULL = висит). Возвращает id."""
+    """Открыть эпизод тревоги (t_close IS NULL = висит). Возвращает id.
+
+    active_sec — время, уже прожитое тревогой к моменту записи: от фронта
+    неисправности до конца текущего окна. Без него эпизод стартовал с нуля и
+    цикл открытия не начислялся вовсе, поэтому тревога, прожившая один
+    снимок, записывалась нулевой длительности.
+    blind_sec — сколько из этого времени не было связи.
+    """
     conn = await _connect()
     try:
         # segment_id из памяти движка может указывать на уже удалённую строку
@@ -899,12 +907,14 @@ async def open_episode(
         row = await conn.fetchrow("""
             INSERT INTO alarm_episodes
                 (router_sn, equip_type, panel_id, scenario, source, severity,
-                 t_open, open_values_json, segment_id_open, addr, bit)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                 t_open, open_values_json, segment_id_open, addr, bit,
+                 active_sec, blind_sec)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             RETURNING id
         """, router_sn, equip_type, panel_id, scenario, source, severity,
              t_open, json.dumps(open_values or {}, ensure_ascii=False, default=str),
-             segment_id, addr, bit)
+             segment_id, addr, bit,
+             max(0.0, float(active_sec)), max(0.0, float(blind_sec)))
         return int(row["id"])
     finally:
         await conn.close()
@@ -916,6 +926,7 @@ async def insert_closed_episode(
     t_open: datetime, t_close: datetime, active_sec: float,
     open_values: dict | None = None,
     addr: int | None = None, bit: int | None = None,
+    blind_sec: float = 0.0,
 ) -> int:
     """Сразу закрытый эпизод — для детекций короткого сегмента, не живших
     в снимке открытого окна (например START_FAILURE за один цикл)."""
@@ -924,13 +935,15 @@ async def insert_closed_episode(
         row = await conn.fetchrow("""
             INSERT INTO alarm_episodes
                 (router_sn, equip_type, panel_id, scenario, source, severity,
-                 t_open, t_close, close_reason, active_sec, open_values_json, addr, bit)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'condition_cleared', $9, $10, $11, $12)
+                 t_open, t_close, close_reason, active_sec, open_values_json,
+                 addr, bit, blind_sec)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'condition_cleared', $9, $10,
+                    $11, $12, $13)
             RETURNING id
         """, router_sn, equip_type, panel_id, scenario, source, severity,
              t_open, t_close, active_sec,
              json.dumps(open_values or {}, ensure_ascii=False, default=str),
-             addr, bit)
+             addr, bit, max(0.0, float(blind_sec)))
         return int(row["id"])
     finally:
         await conn.close()
@@ -938,17 +951,45 @@ async def insert_closed_episode(
 
 async def update_episode(
     episode_id: int, *, active_sec_add: float = 0.0, severity: str | None = None,
+    blind_sec_add: float = 0.0,
 ) -> None:
-    """Приращение живого времени и/или эскалация severity открытого эпизода."""
+    """Приращение воздействия (и его слепой доли) и/или эскалация severity."""
     conn = await _connect()
     try:
         await conn.execute("""
             UPDATE alarm_episodes
             SET active_sec = active_sec + $2,
+                blind_sec  = blind_sec + $4,
                 severity   = COALESCE($3, severity),
                 updated_at = now()
             WHERE id = $1
-        """, episode_id, active_sec_add, severity)
+        """, episode_id, active_sec_add, severity, blind_sec_add)
+    finally:
+        await conn.close()
+
+
+async def retarget_episode_segments(
+    router_sn: str, equip_type: str, panel_id: int,
+    segment_id: int, t_from: datetime, t_to: datetime,
+) -> int:
+    """Привязать эпизоды, начавшиеся в окне сегмента, к его ЗАКРЫТОЙ строке.
+
+    segment_id_open ссылается на открытый сегмент, а цикл закрытия его
+    удаляет — внешний ключ объявлен ON DELETE SET NULL, поэтому ссылка
+    гарантированно обнулялась на первом же резе, и колонка была пустой у
+    всех эпизодов. Закрытая строка не удаляется, так что после перецеливания
+    связь «в каком сегменте возникла тревога» живёт. Возвращает число строк.
+    """
+    conn = await _connect()
+    try:
+        res = await conn.execute("""
+            UPDATE alarm_episodes
+            SET segment_id_open = $4, updated_at = now()
+            WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+              AND t_open >= $5 AND t_open < $6
+              AND segment_id_open IS DISTINCT FROM $4
+        """, router_sn, equip_type, panel_id, segment_id, t_from, t_to)
+        return int(res.split()[-1]) if res else 0
     finally:
         await conn.close()
 
@@ -1057,9 +1098,11 @@ async def count_episodes_batch(
 ) -> dict[str, dict[str, float]]:
     """Счётчики эпизодов одним запросом: фронты И суммарная длительность.
 
-    Возвращает {scenario: {count_window, dur_window, count_since, dur_since}}.
-    Считаются эпизоды с t_open в окне (включая ещё открытые); длительность —
-    сумма active_sec (время «под связью»). since_ts=None → счётчики «с пуска» = 0.
+    Возвращает {scenario: {count_window, dur_window, blind_window,
+    count_since, dur_since}}. Считаются эпизоды с t_open в окне (включая ещё
+    открытые); длительность — сумма active_sec (астрономическое воздействие),
+    blind_window — сколько из неё прошло без связи. since_ts=None → счётчики
+    «с пуска» = 0.
     """
     if not scenarios:
         return {}
@@ -1071,6 +1114,8 @@ async def count_episodes_batch(
                        WHERE t_open > now() - ($5 || ' days')::interval) AS count_window,
                    COALESCE(SUM(active_sec) FILTER (
                        WHERE t_open > now() - ($5 || ' days')::interval), 0) AS dur_window,
+                   COALESCE(SUM(blind_sec) FILTER (
+                       WHERE t_open > now() - ($5 || ' days')::interval), 0) AS blind_window,
                    COUNT(*) FILTER (
                        WHERE $6::timestamptz IS NOT NULL AND t_open >= $6) AS count_since,
                    COALESCE(SUM(active_sec) FILTER (
@@ -1088,6 +1133,7 @@ async def count_episodes_batch(
             result[episode_key(r["scenario"], r["addr"], r["bit"])] = {
                 "count_window": int(r["count_window"]),
                 "dur_window":   float(r["dur_window"]),
+                "blind_window": float(r["blind_window"]),
                 "count_since":  int(r["count_since"]),
                 "dur_since":    float(r["dur_since"]),
             }

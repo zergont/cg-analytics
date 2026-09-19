@@ -324,6 +324,27 @@ def _alert_key(d: dict) -> str:
     return d.get("scenario", "?")
 
 
+def _accrual_split(
+    prev_base: datetime | None, now_ts: datetime, gaps: list[dict],
+) -> tuple[float, float, float]:
+    """Разложить интервал цикла на (воздействие, слепая доля, время под данными).
+
+    span — астрономическое время от прошлой базы до конца окна: залипшая
+    неисправность висит на панели, пока её не сбросят, и обрыв связи её не
+    отменяет, поэтому воздействие идёт и в дыре.
+    gap  — сколько из span мы были слепы. Не вычитается, а копится рядом:
+    сброс мог произойти внутри слепого куска.
+    live — span минус gap, только для дебаунса закрытия: объявлять тревогу
+    снятой, пока мы её не видим, нельзя.
+    """
+    from analytics.accumulators import _gap_overlap_sec
+    if prev_base is None or now_ts <= prev_base:
+        return 0.0, 0.0, 0.0
+    span = (now_ts - prev_base).total_seconds()
+    gap = min(span, max(0.0, _gap_overlap_sec(gaps, prev_base, now_ts)))
+    return span, gap, max(0.0, span - gap)
+
+
 def _live_alert_keys(seg) -> set[str]:
     """Ключи тревог, активных на конец сегмента (по последнему подсегменту).
 
@@ -505,11 +526,14 @@ async def _run_segment(
     ts_to: datetime,
     cfg,
     initial_coking_risk: CokingRisk,
-) -> tuple[list, dict[str, dict]]:
+) -> tuple[list, dict[str, dict], list[dict]]:
     """Загрузить данные и запустить segment() в отдельном потоке.
 
     segment() — CPU-bound синхронная функция. asyncio.to_thread() выносит её
     в ThreadPoolExecutor, освобождая event loop для обработки веб-запросов.
+
+    Третьим возвращает дыры связи окна (уже с синтетическим хвостовым гэпом):
+    они нужны вызывающему, чтобы посчитать слепую долю воздействия тревог.
     """
     import functools
     from analytics.segmenter import segment as _segment
@@ -555,7 +579,7 @@ async def _run_segment(
                 incidents[seg.t_start] = inc
     except Exception:
         logger.warning("_run_segment: не удалось построить incident_json", exc_info=True)
-    return segments, incidents
+    return segments, incidents, gaps
 
 
 async def _collect_and_enrich_detections(
@@ -567,6 +591,8 @@ async def _collect_and_enrich_detections(
     cfg,
     run_origin_ts: datetime,
     open_keys: set[str] | None = None,
+    seeded_out: set[str] | None = None,
+    gaps: list[dict] | None = None,
 ) -> list[dict]:
     """Для закрытого сегмента: обогатить детекции счётчиками + вернуть events.
 
@@ -576,6 +602,9 @@ async def _collect_and_enrich_detections(
        это и то, что уже в памяти движка, и то, что активно на конец сегмента
        (память отстаёт на цикл: тревога, поднявшая RUN_STATE, в неё ещё не
        попала, и без второй половины условия одна авария давала два эпизода).
+       seeded_out — сюда складываются засеянные ключи; вызывающий копит их по
+       всем сегментам окна и добавляет к open_keys, иначе одна тревога,
+       пересекающая несколько закрываемых сегментов, сеется по разу на каждый.
     3. Счётчики фронтов И длительности по alarm_episodes (текущий эпизод уже в БД,
        поэтому без +1).
     4. Возвращает список event-dict для insert_detection_events (переходный период).
@@ -615,6 +644,12 @@ async def _collect_and_enrich_detections(
             if k in open_keys:
                 continue
             t_open = info["t_open"] or _tz_utc(seg_t_end)
+            # Воздействие — астрономическое, слепая доля считается рядом
+            _span = max(0.0, (_tz_utc(seg_t_end) - t_open).total_seconds())
+            _blind = 0.0
+            if gaps and _span > 0:
+                from analytics.accumulators import _gap_overlap_sec as _gos
+                _blind = min(_span, _gos(gaps, t_open, _tz_utc(seg_t_end)))
             try:
                 await online_db.insert_closed_episode(
                     router_sn, equip_type, panel_id,
@@ -623,10 +658,13 @@ async def _collect_and_enrich_detections(
                     severity=info["severity"],
                     t_open=t_open,
                     t_close=_tz_utc(seg_t_end),
-                    active_sec=max(0.0, (_tz_utc(seg_t_end) - t_open).total_seconds()),
+                    active_sec=_span,
                     open_values=info["values"],
                     addr=info["addr"], bit=info["bit"],
+                    blind_sec=_blind,
                 )
+                if seeded_out is not None:
+                    seeded_out.add(k)
             except Exception:
                 logger.warning("Не удалось создать эпизод для %s", k, exc_info=True)
 
@@ -647,6 +685,7 @@ async def _collect_and_enrich_detections(
             if c:
                 d.values["history_count_30d"]        = c["count_window"]
                 d.values["history_duration_30d_sec"] = round(c["dur_window"])
+                d.values["history_blind_30d_sec"]    = round(c.get("blind_window", 0))
                 d.values["startup_count"]            = c["count_since"]
                 d.values["startup_duration_sec"]     = round(c["dur_since"])
 
@@ -703,6 +742,7 @@ async def _enrich_open_seg_detections(
             if c:
                 d.values["history_count_30d"]        = c["count_window"]
                 d.values["history_duration_30d_sec"] = round(c["dur_window"])
+                d.values["history_blind_30d_sec"]    = round(c.get("blind_window", 0))
                 d.values["startup_count"]            = c["count_since"]
                 d.values["startup_duration_sec"]     = round(c["dur_since"])
 
@@ -833,6 +873,17 @@ class OnlinePollEngine:
                 self.key, self.cursor_ts,
             )
 
+        await self._restore_live_state()
+
+    async def _restore_live_state(self) -> None:
+        """Поднять из БД то, что переживает рестарт: живые тревоги и эпизоды.
+
+        Зовётся из initialize() И из ветки ПУСКа после OPERATOR_STOP в
+        менеджере — та настраивает движок вручную, минуя initialize(), и без
+        этого вызова память эпизодов оставалась пустой при непустой БД:
+        живые эпизоды висели открытыми навсегда, а на те же тревоги
+        заводились новые.
+        """
         # Восстановить живые тревоги из журнала (незакрытые на момент рестарта)
         try:
             active = await online_db.get_active_alerts(
@@ -856,12 +907,31 @@ class OnlinePollEngine:
             eps = await online_db.get_open_episodes(
                 self.router_sn, self.equip_type, self.panel_id
             )
-            self._episodes = {
-                online_db.episode_key(e["scenario"], e.get("addr"), e.get("bit")): {
+            # eps отсортированы по t_open. Если в БД два открытых эпизода с
+            # одним ключом — это след дублей: словарь молча оставил бы младший,
+            # а старший висел бы открытым вечно. Закрываем старший явно.
+            self._episodes = {}
+            for e in eps:
+                k = online_db.episode_key(e["scenario"], e.get("addr"), e.get("bit"))
+                prev = self._episodes.get(k)
+                if prev is not None:
+                    try:
+                        await online_db.close_episode(
+                            prev["id"], _tz_utc(e["t_open"]), "superseded_duplicate"
+                        )
+                        logger.warning(
+                            "OnlineEngine[%s]: дубль эпизода %s — закрыт старший #%s",
+                            self.key, k, prev["id"],
+                        )
+                    except Exception:
+                        logger.warning(
+                            "OnlineEngine[%s]: не удалось закрыть дубль эпизода %s",
+                            self.key, k, exc_info=True,
+                        )
+                self._episodes[k] = {
                     "id": e["id"], "severity": e.get("severity"),
-                    "miss": 0, "first_miss_ts": None}
-                for e in eps
-            }
+                    "miss": 0, "first_miss_ts": None,
+                }
             if self._episodes:
                 logger.info(
                     "OnlineEngine[%s]: восстановлены открытые эпизоды: %s",
@@ -883,27 +953,23 @@ class OnlinePollEngine:
 
         Открытие — сразу; закрытие — после N циклов подряд «чисто»
         (ALARM_EPISODES.close_debounce_cycles в detectors.yaml, default 3 —
-        защита счётчиков от мерцания условия у порога). active_sec тикает
-        только по времени, покрытому данными, минус дыры связи: в дыре
-        эпизод висит, таймер стоит, дебаунс не идёт.
-        """
-        from analytics.accumulators import _gap_overlap_sec
+        защита счётчиков от мерцания условия у порога).
 
+        active_sec — астрономическое воздействие, оно идёт и в дыре: залипшая
+        неисправность висит на панели, пока её не сбросят. Слепая доля не
+        вычитается, а копится отдельно в blind_sec. Дебаунс при этом в дыре
+        замирает — объявлять тревогу снятой, пока мы её не видим, нельзя.
+        """
         debounce = int(self.cfg.det("ALARM_EPISODES", "close_debounce_cycles", default=3) or 3)
         now_ts = _tz_utc(t_to)
         curr_map = {_alert_key(d): d for d in curr_dets if d.get("scenario")}
 
-        # Приращение живого времени: [прошлая база .. min(t_to, последние данные)] минус дыры
-        delta_sec = 0.0
-        accrue_to = min(now_ts, _tz_utc(self.last_data_ts)) if self.last_data_ts else None
-        if accrue_to is not None:
-            if self._episode_accrual_ts is not None and accrue_to > self._episode_accrual_ts:
-                delta_sec = max(
-                    0.0,
-                    (accrue_to - self._episode_accrual_ts).total_seconds()
-                    - _gap_overlap_sec(gaps, self._episode_accrual_ts, accrue_to),
-                )
-            self._episode_accrual_ts = accrue_to
+        # База — конец окна, а не последние данные (как было): иначе при
+        # обрыве она замирала бы и воздействие переставало идти.
+        span_sec, gap_sec, live_sec = _accrual_split(
+            self._episode_accrual_ts, now_ts, gaps
+        )
+        self._episode_accrual_ts = now_ts
 
         # Открытие новых / обновление живущих
         for key, d in curr_map.items():
@@ -918,6 +984,11 @@ class OnlinePollEngine:
                         t_open = _tz_utc(datetime.fromisoformat(d["t_detected"]))
                     except Exception:
                         pass
+                # Время от фронта неисправности до конца этого окна. Дальше
+                # тикают поцикловые приращения от той же базы, так что
+                # интервалы стыкуются и не накладываются. Без этого эпизод,
+                # проживший ровно один снимок, записывался нулевым.
+                head_sec, head_blind, _ = _accrual_split(t_open, now_ts, gaps)
                 try:
                     ep_id = await online_db.open_episode(
                         self.router_sn, self.equip_type, self.panel_id,
@@ -928,6 +999,7 @@ class OnlinePollEngine:
                         open_values=_vals,
                         segment_id=self._last_open_seg_id,
                         addr=_vals.get("addr"), bit=_vals.get("bit"),
+                        active_sec=head_sec, blind_sec=head_blind,
                     )
                 except Exception:
                     logger.warning("OnlineEngine[%s]: не удалось открыть эпизод %s",
@@ -948,7 +1020,7 @@ class OnlinePollEngine:
                     await self._attach_trip_context(ep["id"], now_ts)
                 try:
                     await online_db.update_episode(
-                        ep["id"], active_sec_add=delta_sec,
+                        ep["id"], active_sec_add=span_sec, blind_sec_add=gap_sec,
                         severity=new_sev if new_sev != ep.get("severity") else None,
                     )
                     ep["severity"] = new_sev
@@ -957,7 +1029,7 @@ class OnlinePollEngine:
                                    self.key, key, exc_info=True)
 
         # Дебаунс закрытия — только когда данные реально шли (в дыре всё замирает)
-        if delta_sec <= 0:
+        if live_sec <= 0:
             return
         for key in list(self._episodes.keys()):
             if key in curr_map:
@@ -1077,6 +1149,7 @@ class OnlinePollEngine:
                     "severity":        e.get("severity"),
                     "since":           _tz_utc(e["t_open"]).isoformat(),
                     "active_sec":      round(e.get("active_sec") or 0),
+                    "blind_sec":       round(e.get("blind_sec") or 0),
                     "gate_suppressed": bool(e.get("gate_suppressed")),
                 }
                 for e in eps if e["scenario"] != "CONTROLLER_FAULT"
@@ -1232,7 +1305,7 @@ class OnlinePollEngine:
         from analytics.runner import ANALYTICS_VERSION
 
         try:
-            segments, incidents = await _run_segment(
+            segments, incidents, gaps = await _run_segment(
                 self.router_sn, self.equip_type, self.panel_id, self.engine_sn,
                 t_from, t_to, self.cfg,
                 self.inherited_coking_risk,
@@ -1305,6 +1378,9 @@ class OnlinePollEngine:
         # Тревоги, активные на конец окна: живой эпизод по ним заведётся на
         # следующем цикле, поэтому «эфемерными» их считать нельзя
         _live_keys = _live_alert_keys(segments[-1])
+        # Уже засеянные в этом окне — одна тревога на несколько сегментов
+        # должна дать один эпизод, а не по одному на сегмент
+        _seeded: set[str] = set()
 
         for i, seg in enumerate(segments):
             is_last = (i == len(segments) - 1)
@@ -1377,7 +1453,8 @@ class OnlinePollEngine:
             _det_events = [] if _seg_no_data else await _collect_and_enrich_detections(
                 seg, self.router_sn, self.equip_type, self.panel_id,
                 seg_t_end, self.cfg, run_origin_ts=_run_origin,
-                open_keys=set(self._episodes) | _live_keys,
+                open_keys=set(self._episodes) | _live_keys | _seeded,
+                seeded_out=_seeded, gaps=gaps,
             )
 
             seg_dict = seg.to_dict()
@@ -1443,6 +1520,18 @@ class OnlinePollEngine:
                 )
             else:
                 _enqueue_segment(db_id)
+
+            # Связь эпизод→сегмент: ссылка на открытую строку обнуляется
+            # при её удалении, поэтому перецеливаем на закрытую (v4.9.75)
+            try:
+                if db_id:
+                    await online_db.retarget_episode_segments(
+                        self.router_sn, self.equip_type, self.panel_id,
+                        db_id, _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end,
+                    )
+            except Exception:
+                logger.warning("OnlineEngine[%s]: не удалось привязать эпизоды к сегменту %s",
+                               self.key, db_id, exc_info=True)
 
             # Записать события детекций (segment_id теперь известен)
             if _det_events:
@@ -1675,6 +1764,8 @@ class OnlinePollEngine:
             # Тревоги, активные в остающемся открытом сегменте: по ним ниже в
             # этом же цикле заведётся живой эпизод (память движка отстаёт)
             _live_keys = _live_alert_keys(segments[-1])
+            # Уже засеянные в этом окне — см. тот же накопитель в _close_window
+            _seeded: set[str] = set()
             for ci, seg in enumerate(closed_segs):
                 coking_risk = _extract_coking_risk_from_segments([seg])
                 seg_t_end_rs = _tz_utc(datetime.fromisoformat(seg.t_end))
@@ -1693,7 +1784,8 @@ class OnlinePollEngine:
                 _rs_det_events = [] if _rs_no_data else await _collect_and_enrich_detections(
                     seg, self.router_sn, self.equip_type, self.panel_id,
                     seg_t_end_rs, self.cfg, run_origin_ts=_rs_run_origin,
-                    open_keys=set(self._episodes) | _live_keys,
+                    open_keys=set(self._episodes) | _live_keys | _seeded,
+                    seeded_out=_seeded, gaps=gaps,
                 )
 
                 if _rs_no_data:
@@ -1764,6 +1856,19 @@ class OnlinePollEngine:
                     )
                 else:
                     _enqueue_segment(_rs_db_id)
+
+                # Связь эпизод→сегмент: ссылка на открытую строку обнуляется
+                # при её удалении, поэтому перецеливаем на закрытую (v4.9.75)
+                try:
+                    if _rs_db_id:
+                        await online_db.retarget_episode_segments(
+                            self.router_sn, self.equip_type, self.panel_id,
+                            _rs_db_id,
+                            _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end_rs,
+                        )
+                except Exception:
+                    logger.warning("OnlineEngine[%s]: не удалось привязать эпизоды к сегменту %s",
+                                   self.key, _rs_db_id, exc_info=True)
 
                 # Записать события детекций (segment_id теперь известен)
                 if _rs_det_events:

@@ -165,6 +165,10 @@ class OnlineManager:
             engine.inherited_coking_risk = prev_coking
             engine.forward_fill_memory = None
             engine.continued_from_id = None
+            # initialize() пропущен, но живые тревоги и эпизоды поднять надо:
+            # без этого память движка пуста при непустой БД — открытые эпизоды
+            # висят вечно, а на те же тревоги заводятся новые
+            await engine._restore_live_state()
             logger.info(
                 "OnlineManager[%s]: ПУСК после СТОП — перечитка с %s, coking=%s",
                 key, op_stop_t_start, prev_coking.risk_level,
@@ -643,6 +647,7 @@ async def _analyze_warning_claude(
                     # Текущий эпизод уже в alarm_episodes — без +1
                     alarm["history_count_30d"]        = c["count_window"]
                     alarm["history_duration_30d_sec"] = round(c["dur_window"])
+                    alarm["history_blind_30d_sec"]    = round(c.get("blind_window", 0))
                     if _run_origin_ts is not None:
                         alarm["startup_count"]        = c["count_since"]
                         alarm["startup_duration_sec"] = round(c["dur_since"])

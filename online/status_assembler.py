@@ -79,6 +79,20 @@ def _parse_json(val: Any) -> Any:
     return val
 
 
+def _blind_note(blind_sec: Any) -> str:
+    """Оговорка про слепое время: « (из них X без связи)» либо пусто.
+
+    Воздействие считается астрономически и в дыре связи идёт — залипшая
+    неисправность висит, пока её не сбросят. Но сброс мог произойти внутри
+    слепого куска, и читающий должен понимать, что число — верхняя оценка.
+    """
+    try:
+        v = float(blind_sec or 0)
+    except (TypeError, ValueError):
+        return ""
+    return f" (из них {_fmt_duration(v)} без связи)" if v >= 1 else ""
+
+
 def _fmt_duration(sec: float) -> str:
     s = int(sec)
     h, rem = divmod(s, 3600)
@@ -425,7 +439,8 @@ def build_warning_prompt(
             supp = " — отменена гейтом" if e.get("gate_suppressed") else ""
             lines.append(
                 f"  [{e.get('severity')}] {e.get('scenario')}: {span}, "
-                f"воздействие {_fmt_duration(e.get('active_sec') or 0)}{supp}"
+                f"воздействие {_fmt_duration(e.get('active_sec') or 0)}"
+                f"{_blind_note(e.get('blind_sec'))}{supp}"
             )
 
     if trip_context:
@@ -457,7 +472,8 @@ def build_warning_prompt(
             supp = " — отменена гейтом" if al.get("gate_suppressed") else ""
             lines.append(
                 f"  Висела тревога: {al.get('scenario')} [{al.get('severity')}]"
-                f" {_fmt_duration(al.get('active_sec') or 0)}{supp}"
+                f" {_fmt_duration(al.get('active_sec') or 0)}"
+                f"{_blind_note(al.get('blind_sec'))}{supp}"
             )
         day = trip_context.get("last_24h")
         if day:
@@ -513,7 +529,11 @@ def build_warning_prompt(
                 line += f" — за 30 дней: {count_30d}"
                 dur_30d = a.get("history_duration_30d_sec")
                 if dur_30d:
-                    line += f" ({int(dur_30d) // 60} мин суммарно)"
+                    line += f" ({int(dur_30d) // 60} мин суммарно"
+                    blind_30d = a.get("history_blind_30d_sec")
+                    if blind_30d:
+                        line += f", {int(blind_30d) // 60} мин без связи"
+                    line += ")"
             if count_startup is not None:
                 line += f", с пуска: {count_startup}"
                 dur_startup = a.get("startup_duration_sec")

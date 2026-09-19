@@ -281,10 +281,12 @@ def build_summary_md(
             g = groups.setdefault(_group_key(e), {
                 "name": _group_name(e), "source": e.get("source"),
                 "sev_rank": 0, "severity": e.get("severity"),
-                "count": 0, "active_sec": 0.0, "suppressed": 0, "open": 0,
+                "count": 0, "active_sec": 0.0, "blind_sec": 0.0,
+                "suppressed": 0, "open": 0,
             })
             g["count"] += 1
             g["active_sec"] += e.get("active_sec") or 0
+            g["blind_sec"] += e.get("blind_sec") or 0
             rank = _SEV_RANK_MD.get(e.get("severity") or "", 0)
             if rank > g["sev_rank"]:
                 g["sev_rank"], g["severity"] = rank, e.get("severity")
@@ -301,6 +303,10 @@ def build_summary_md(
             src_ru = _SRC_RU.get(g["source"], g["source"] or "")
             line = (f"- {emoji} **{g['name']}** [{src_ru}]: {g['count']} {_eps_ru(g['count'])}, "
                     f"воздействие {_fmt_duration(g['active_sec'])}")
+            # Слепая доля — обязательная оговорка: внутри неё мог быть сброс
+            if g["blind_sec"] >= 1:
+                line += (f" (из них {_fmt_duration(g['blind_sec'])} без связи — "
+                         f"снятие могло произойти раньше)")
             if g["suppressed"]:
                 line += (" — *снято ИИ*" if g["suppressed"] == g["count"]
                          else f" — *снято ИИ: {g['suppressed']} из {g['count']}*")
@@ -776,7 +782,11 @@ def _append_subsegment(
             count_30d = (d.get("values") or {}).get("history_count_30d")
             if count_30d is not None:
                 dur_30d = (d.get("values") or {}).get("history_duration_30d_sec")
+                blind_30d = (d.get("values") or {}).get("history_blind_30d_sec")
                 suffix = f" (суммарно {_fmt_duration(dur_30d)})" if dur_30d else ""
+                if dur_30d and blind_30d:
+                    suffix = (f" (суммарно {_fmt_duration(dur_30d)}, из них "
+                              f"{_fmt_duration(blind_30d)} без связи)")
                 a(f"  - Срабатываний этого типа за 30 дней: **{count_30d}**{suffix}")
             startup_count = (d.get("values") or {}).get("startup_count")
             if startup_count is not None:

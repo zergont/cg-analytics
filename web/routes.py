@@ -2240,6 +2240,9 @@ async def api_machines():
                     "name":            (_parse_json(e.get("open_values_json")) or {}).get("fault_name"),
                     "since":           e["t_open"].isoformat() if e.get("t_open") else None,
                     "duration_sec":    round(e.get("active_sec") or 0),
+                    # Сколько из воздействия прошло без связи: внутри этого
+                    # куска тревога могла быть снята раньше (v4.9.75)
+                    "blind_sec":       round(e.get("blind_sec") or 0),
                     "gate_suppressed": bool(e.get("gate_suppressed")),
                     # Контекст аварии (только SHUTDOWN): предыдущий сегмент,
                     # тренд ключевых параметров, висевшие тревоги, сводка 24ч

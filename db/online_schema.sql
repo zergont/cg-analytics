@@ -189,8 +189,8 @@ ALTER TABLE online_observations
 
 -- Миграция v4.9.16: эпизоды тревог — одна строка = один непрерывный эпизод
 -- (панель или аналитика). Открыт: t_close IS NULL. Эпизоды уровня машины,
--- суточный рез их НЕ закрывает. active_sec тикает только по времени с данными
--- (в дырах связи эпизод висит, таймер стоит).
+-- суточный рез их НЕ закрывает. active_sec — астрономическое воздействие,
+-- его слепая доля — в blind_sec (дебаунс закрытия в дыре при этом замирает).
 CREATE TABLE IF NOT EXISTS alarm_episodes (
     id               BIGSERIAL   PRIMARY KEY,
     router_sn        TEXT        NOT NULL,
@@ -204,8 +204,11 @@ CREATE TABLE IF NOT EXISTS alarm_episodes (
     t_open           TIMESTAMPTZ NOT NULL,
     t_close          TIMESTAMPTZ,
     close_reason     TEXT,
-    -- Длительность «под связью», сек: в дырах не тикает
+    -- Воздействие, сек: астрономическое время от фронта до снятия. Идёт и в
+    -- дыре связи — залипшая неисправность висит, пока её не сбросят
     active_sec       DOUBLE PRECISION NOT NULL DEFAULT 0,
+    -- Сколько из воздействия прошло без связи: сброс мог случиться внутри
+    blind_sec        DOUBLE PRECISION NOT NULL DEFAULT 0,
     -- Вердикт гейта Claude «отменить»: эпизод живёт и меряется, но из severity исключён
     gate_suppressed  BOOLEAN     NOT NULL DEFAULT FALSE,
     -- Снапшот detection.values на момент открытия
@@ -269,3 +272,15 @@ ALTER TABLE auto_segments ADD CONSTRAINT auto_segments_cause_close_check
     CHECK (cause_close IN ('RUN_STATE_CHANGE', 'DAILY_BOUNDARY', 'OPERATOR_STOP',
                            'FAULT_CLEARED', 'SHUTDOWN_CLEARED')
            OR cause_close IS NULL);
+
+-- Миграция v4.9.75: blind_sec — сколько из воздействия прошло без связи.
+-- Смысл active_sec изменён: раньше из него вычитались дыры, и он значил
+-- «сколько мы тревогу видели», а наружу выходил словом «воздействие».
+-- Но неисправность залипшая: она висит на панели, пока оператор не сбросит,
+-- и обрыв связи её не отменяет. Теперь active_sec — астрономическое время
+-- воздействия, а слепая доля не вычитается, а копится здесь и показывается
+-- рядом: сброс мог произойти внутри слепого куска, и оператор должен это
+-- видеть. Старые строки получают 0 — там слепое время уже вычтено из
+-- active_sec и восстановить его нечем; такие эпизоды занижены по воздействию.
+ALTER TABLE alarm_episodes
+    ADD COLUMN IF NOT EXISTS blind_sec DOUBLE PRECISION NOT NULL DEFAULT 0;
