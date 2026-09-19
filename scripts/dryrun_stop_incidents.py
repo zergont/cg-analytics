@@ -247,7 +247,10 @@ async def _run_machine(conn, obs: dict, tf: datetime, tt: datetime,
             stat["problems"].append(f"{label} {_fmt(t_from)}: лента акта пуста")
             print("      ДЕФЕКТ: лента акта пуста")
             continue
-        print(f"      событий в ленте: {len(events)}")
+        _tr = inc.get("truncated")
+        _tail = (f"  (обрезано {_tr['dropped']}, оставлено с {_fmt(_tr['kept_from'])})"
+                 if _tr else "")
+        print(f"      событий в ленте: {len(events)}{_tail}")
         for line in _render_events(events, fault_ref, verbose, around=t_from):
             print(line)
 

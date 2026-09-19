@@ -65,39 +65,26 @@ def _value_at(periods: list[dict[str, Any]], ts: datetime) -> Any:
     return hit
 
 
-def prev_emergency_stop_end(
-    enum_periods: list[dict[str, Any]],
-    fault_periods: list[dict[str, Any]] | None = None,
-    stop_ts: datetime | None = None,
-    cfg: Any = None,
+def prev_stop_end(
+    enum_periods: list[dict[str, Any]], stop_ts: datetime
 ) -> datetime | None:
-    """Конец предыдущей АВАРИЙНОЙ стоянки перед stop_ts; иначе None.
+    """Конец предыдущей стоянки перед stop_ts; None — предыдущей не было.
 
-    Пол для окна взгляда назад. Без него серия попыток пуска пересказывает
-    сама себя: на ДЭС №3 16.09 машина трижды за восемь минут упала по
-    перегреву ОЖ, и преамбула второго и третьего актов затягивала события
-    первого — 85 событий в ленте вместо полутора десятков, а характер-гейт
-    видел в окне чужое охлаждение и менял вердикт.
+    Пол окна ВЕРДИКТА, и только его. Вердикт отвечает на вопрос «как упала
+    именно эта попытка — из работы или через расхолаживание», поэтому смотреть
+    дальше конца прошлой стоянки ему нечего: чужое расхолаживание в окне
+    превращает немедленное падение в контролируемое. На серии 16.09 без этого
+    пола падение 13:31:08 читалось как «через охлаждение».
 
-    Именно аварийная, а не любая: у предыдущей ПРОСТОЙ стоянки своего акта
-    нет, и её события (сброс, поворот ключа, предупреждения перед пуском) —
-    законный контекст текущего падения, вырезать их нельзя.
+    Окно ЛЕНТЫ акта этим полом не ограничено — у него другой вопрос и свой
+    якорь, см. find_baseline_anchor.
     """
-    if stop_ts is None:
-        return None
-    from .segmenter import shutdown_intervals
-
     stop_ts = _tz(stop_ts)
-    iv = (shutdown_intervals(fault_periods or [], cfg, stop_ts)
-          if cfg is not None else [])
-    if not iv:
-        return None
     ends = [
         _tz(p["state_end"])
         for p in _periods_for(enum_periods, _ADDR_RUN_STATE)
         if p.get("value") == _RS_STOP and p.get("state_end")
         and _tz(p["state_end"]) <= stop_ts
-        and any(a <= _tz(p["state_start"]) < b for a, b in iv)
     ]
     return max(ends) if ends else None
 
@@ -125,9 +112,9 @@ def classify_stop_character(
     """
     stop_ts = _tz(stop_ts)
     win_from = stop_ts - timedelta(seconds=lookback_sec)
-    # Не заглядывать в предыдущую аварию: иначе в серии попыток пуска гейт
-    # видит чужое охлаждение и объявляет останов контролируемым
-    _floor = prev_emergency_stop_end(enum_periods, fault_periods, stop_ts, cfg)
+    # Не заглядывать в предыдущую стоянку: иначе в серии попыток пуска гейт
+    # видит чужое расхолаживание и объявляет останов контролируемым
+    _floor = prev_stop_end(enum_periods, stop_ts)
     if _floor is not None and _floor > win_from:
         win_from = _floor
     rs = _periods_for(enum_periods, _ADDR_RUN_STATE)
@@ -206,11 +193,18 @@ def classify_stop_character(
 # Докуда искать нормальный останов. Не семантическая граница, а предохранитель:
 # машина, которая давно не останавливалась штатно, не должна тянуть в акт всю
 # свою историю. Не нашли за это время — идём в фолбэк.
-BASELINE_SEARCH_SEC = 7 * 24 * 3600
-# Фолбэк, когда нормального останова в горизонте нет: три последних периода
-# RUN_STATE, но окно не короче суток (берём более раннюю границу из двух).
+# Докуда искать эталон. Не смысловая граница, а предохранитель от запроса в
+# начало времён: длительность сама по себе ничего не портит — наоборот, месяц
+# работы без штатного останова это диагноз, а не шум. Размер акта ограничивает
+# не время, а порог по числу событий.
+BASELINE_SEARCH_SEC = 30 * 24 * 3600
+# Фолбэк, когда эталона в горизонте нет: три последних стоп-периода, но окно
+# не короче суток (берём более раннюю границу из двух).
 BASELINE_FALLBACK_PERIODS = 3
 BASELINE_FALLBACK_MIN_SEC = 24 * 3600
+# Потолок ленты акта. Упирается в контекстное окно запроса к ИИ, а не в
+# здравый смысл: сколько событий модель осилит, столько и кладём.
+MAX_ACT_EVENTS = 300
 
 
 def find_baseline_anchor(
@@ -224,50 +218,97 @@ def find_baseline_anchor(
 ) -> tuple[datetime, str]:
     """Начало последнего НОРМАЛЬНОГО останова перед stop_ts. (момент, причина).
 
-    Цикл оборудования — работа → расхолаживание → стоп, и так по кругу. Если
-    прошлый стоп прошёл штатно, значит на тот момент с машиной было всё в
-    порядке; всё, что случилось после, — возможные предвестники этой аварии.
-    Поэтому окно акта отсчитывается отсюда, а не от числа минут: оно выходит
-    ограничено количеством переходов в цикле (полтора-два десятка), а не
-    длительностью смены, и читаемо хоть при часовой работе, хоть при суточной.
+    Цикл оборудования — работа, стоп, и так по кругу. Если прошлый стоп прошёл
+    штатно, значит на тот момент с машиной было всё в порядке; всё, что
+    случилось после, — возможные предвестники этой аварии. Поэтому окно акта
+    отсчитывается отсюда, а не от числа минут: предупреждение способно
+    опередить аварию на часы, а длительность сама по себе не мешает — она
+    диагностична.
 
-    Нормальный останов — стоп, который НЕ аварийный И в который вошли через
-    разгрузку или охлаждение (RUN_STATE 4/5). Одного «не аварийный» мало:
-    обрыв цепочки 3→0 напрямую эталоном быть не может.
+    Нормальный останов — стоп-сегмент, который НЕ аварийный И открылся НЕ
+    снятием аварии. Второе условие существенно: после аварии машину не пустят,
+    пока не сбросят ошибки, и как только сбросили, аварийный стоп становится
+    простым. Но этот простой стоп — состояние восстановления, хвост той же
+    аварии (`cause_open = SHUTDOWN_CLEARED`), а не самостоятельный останов.
+    Считать его эталоном значит обрезать серию попыток на первом же звене,
+    тогда как следующая авария должна вбирать все предыдущие.
 
-    Причина — 'normal_stop' либо 'fallback'. Фолбэк (нормального останова в
-    горизонте нет) — три последних периода RUN_STATE, но не короче суток.
-    То, что эталона не нашлось, само по себе диагноз, поэтому причина едет в
-    акт, а не молчит.
+    Расхолаживания в условии НЕТ: останов без него бывает штатным, а
+    аварийность определяется маской в момент падения, и только ею.
+
+    Причина — 'normal_stop' либо 'fallback'. Фолбэк (эталона в горизонте нет)
+    — три последних стоп-периода, но не короче суток. Отсутствие эталона само
+    по себе диагноз, поэтому причина едет в акт, а не молчит.
     """
-    from .segmenter import shutdown_intervals
+    from .segmenter import _classify_stop_periods
 
     stop_ts = _tz(stop_ts)
     rs = _periods_for(enum_periods, _ADDR_RUN_STATE)
-    iv = shutdown_intervals(fault_periods or [], cfg, stop_ts) if cfg is not None else []
+    try:
+        parts = _classify_stop_periods(rs, fault_periods or [], cfg, stop_ts)
+    except Exception:
+        parts = rs
 
     best: datetime | None = None
-    prev_value: Any = None
-    for p in rs:
-        s_start = _tz(p["state_start"])
-        if s_start >= stop_ts:
+    stop_starts: list[datetime] = []
+    for p in parts:
+        if int(p.get("value", -1)) != _RS_STOP:
+            continue
+        p_start = _tz(p["state_start"])
+        if p_start >= stop_ts:
             break
-        if p.get("value") == _RS_STOP:
-            entered_via_cooldown = prev_value in _RS_COOLDOWN
-            was_emergency = any(a <= s_start < b for a, b in iv)
-            if entered_via_cooldown and not was_emergency:
-                best = s_start
-        prev_value = p.get("value")
+        stop_starts.append(p_start)
+        if (p.get("stop_kind") != "EMERGENCY"
+                and p.get("cause_open") != "SHUTDOWN_CLEARED"):
+            best = p_start
     if best is not None:
         return best, "normal_stop"
 
-    starts = [_tz(p["state_start"]) for p in rs if _tz(p["state_start"]) < stop_ts]
     by_periods = (
-        starts[-fallback_periods] if len(starts) >= fallback_periods
-        else (starts[0] if starts else stop_ts)
+        stop_starts[-fallback_periods] if len(stop_starts) >= fallback_periods
+        else (stop_starts[0] if stop_starts else stop_ts)
     )
     by_time = stop_ts - timedelta(seconds=fallback_min_sec)
     return min(by_periods, by_time), "fallback"
+
+
+def cap_act_events(
+    events: list[dict[str, Any]], stop_ts: datetime, max_events: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Обрезать ленту до порога. Возвращает (лента, сведения об обрезке).
+
+    Режем не по времени — по числу событий: длительность цикла диагностична
+    сама по себе, а вот контекстное окно запроса к ИИ конечно. Порядок
+    жертв: сперва самые ранние смены состояний, фронты неисправностей держим
+    до последнего — они существо дела. Всё, что после останова, не трогаем.
+    Обрезка не молчит: сколько и до какого момента, едет в акт.
+    """
+    if not max_events or len(events) <= max_events:
+        return events, None
+
+    def _ts(e):
+        raw = e.get("ts")
+        return datetime.fromisoformat(raw) if isinstance(raw, str) else raw
+
+    stop_ts = _tz(stop_ts)
+    after = [e for e in events if _ts(e) is None or _ts(e) >= stop_ts]
+    before = [e for e in events if e not in after]
+    budget = max(0, max_events - len(after))
+    faults = [e for e in before if e.get("kind") == "fault"]
+    states = [e for e in before if e.get("kind") != "fault"]
+    if len(faults) >= budget:
+        kept_before = faults[-budget:] if budget else []
+    else:
+        kept_before = faults + states[-(budget - len(faults)):] if budget else []
+    kept_before.sort(key=lambda e: (_ts(e) or stop_ts))
+    kept = kept_before + after
+    dropped = len(events) - len(kept)
+    edge = _ts(kept_before[0]) if kept_before else stop_ts
+    return kept, {
+        "dropped": dropped,
+        "kept_from": edge.isoformat() if edge else None,
+        "reason": "предел ленты акта",
+    }
 
 
 def standing_faults(
@@ -314,6 +355,7 @@ def build_stop_incident(
     preamble_sec: int = 300,   # не используется: начало окна даёт якорь
     stop_kind: str | None = None,
     stabilization_sec: int = 60,
+    max_events: int = MAX_ACT_EVENTS,
 ) -> dict[str, Any] | None:
     """incident_json для аварийного стоп-сегмента; иначе None.
 
@@ -349,11 +391,10 @@ def build_stop_incident(
     win_from, baseline_reason = find_baseline_anchor(
         enum_periods, fault_periods, stop_ts, cfg
     )
-    # Но не глубже предыдущей аварии — её акт уже есть, пересказывать незачем
-    _floor = prev_emergency_stop_end(enum_periods, fault_periods, stop_ts, cfg)
-    if _floor is not None and _floor > win_from:
-        win_from = _floor
-        baseline_reason = "prev_emergency"
+    # Пола по предыдущей аварии тут НЕТ сознательно: если между падениями
+    # не было штатного останова, значит это серия попыток, и следующий акт
+    # должен вбирать предыдущие — они одна история и так уйдут в разбор ИИ.
+    # Был штатный останов — якорь сам встанет на нём.
     # Конец — не позднее лага стабилизации: сопутствующие неисправности
     # (горячий останов, рост температуры) приходят уже после самого останова
     # и относятся к этой же аварии. Дальше конца сегмента не идём.
@@ -364,6 +405,9 @@ def build_stop_incident(
 
     chrono = build_chronology(
         enum_periods, fault_periods, cfg, window_from=win_from, window_to=win_to
+    )
+    events, truncated = cap_act_events(
+        serialize_chronology(chrono), stop_ts, max_events
     )
     return {
         "kind": "stop_incident",
@@ -377,7 +421,8 @@ def build_stop_incident(
             "to": win_to.isoformat() if win_to else None,
             "baseline": baseline_reason,
         },
-        "chronology": serialize_chronology(chrono),
+        "chronology": events,
+        "truncated": truncated,
         "investigator_version": _INVESTIGATOR_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
