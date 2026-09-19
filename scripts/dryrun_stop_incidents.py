@@ -89,6 +89,38 @@ def _event_line(e: dict, fault_ref) -> str:
     return f"      {ts}  > {what}: {val}"
 
 
+def _render_events(events: list[dict], fault_ref, verbose: bool,
+                   around: datetime | None = None, limit: int = 12) -> list[str]:
+    """Строки ленты. При усечении показываем ОКРЕСТНОСТЬ момента останова.
+
+    Наивные первые N бесполезны: у длинной ленты это вся преамбула, а сам
+    останов и маска, сделавшая сегмент аварийным, оказываются за обрезом.
+    """
+    if verbose or len(events) <= limit:
+        return [_event_line(e, fault_ref) for e in events]
+    if around is None:
+        return ([_event_line(e, fault_ref) for e in events[:limit]]
+                + [f"      ... ещё {len(events) - limit} (полностью — ключ -v)"])
+
+    def _ts(e):
+        raw = e.get("ts")
+        return datetime.fromisoformat(raw) if isinstance(raw, str) else raw
+
+    before = [e for e in events if _ts(e) and _ts(e) < around]
+    after = [e for e in events if not _ts(e) or _ts(e) >= around]
+    head = before[-3:] if len(before) > 3 else before
+    tail = after[: max(0, limit - len(head))]
+    out: list[str] = []
+    if len(before) > len(head):
+        out.append(f"      ... {len(before) - len(head)} до останова "
+                   f"(полностью — ключ -v)")
+    out += [_event_line(e, fault_ref) for e in head + tail]
+    rest = len(after) - len(tail)
+    if rest > 0:
+        out.append(f"      ... ещё {rest} после (полностью — ключ -v)")
+    return out
+
+
 async def _current_rows(conn, sn: str, et: str, pid: int,
                         tf: datetime, tt: datetime) -> list[dict]:
     rows = await conn.fetch(
@@ -194,11 +226,8 @@ async def _run_machine(conn, obs: dict, tf: datetime, tt: datetime,
             print("      ДЕФЕКТ: лента акта пуста")
             continue
         print(f"      событий в ленте: {len(events)}")
-        shown = events if verbose else events[:12]
-        for e in shown:
-            print(_event_line(e, fault_ref))
-        if len(shown) < len(events):
-            print(f"      ... ещё {len(events) - len(shown)} (полностью — ключ -v)")
+        for line in _render_events(events, fault_ref, verbose, around=t_from):
+            print(line)
 
     # Хронология стоянки: показываем самые насыщенные простые стопы
     simple = [p for p in stops
@@ -215,10 +244,8 @@ async def _run_machine(conn, obs: dict, tf: datetime, tt: datetime,
         events = ch["chronology"]
         print(f"  --- СТОЯНКА {_fmt(p['state_start'])} - {_fmt(p['state_end'])}  "
               f"({_dur(p['state_start'], p['state_end'], tt)}), событий {len(events)}")
-        for e in (events if verbose else events[:10]):
-            print(_event_line(e, fault_ref))
-        if not verbose and len(events) > 10:
-            print(f"      ... ещё {len(events) - 10}")
+        for line in _render_events(events, fault_ref, verbose, limit=10):
+            print(line)
 
     return stat
 

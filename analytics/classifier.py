@@ -65,6 +65,32 @@ def _value_at(periods: list[dict[str, Any]], ts: datetime) -> Any:
     return hit
 
 
+def prev_stop_end(
+    enum_periods: list[dict[str, Any]], stop_ts: datetime
+) -> datetime | None:
+    """Конец предыдущей стоянки перед stop_ts; None — предыдущей не было.
+
+    Пол для окна взгляда назад. Без него серия попыток пуска пересказывает
+    сама себя: на ДЭС №3 16.09 машина трижды за восемь минут упала по
+    перегреву ОЖ, и пятиминутная преамбула второго и третьего актов
+    затягивала события первого — 85 событий в ленте вместо полутора десятков,
+    а характер-гейт видел в окне чужое охлаждение и менял вердикт.
+
+    Пол ставится по концу предыдущего стоп-периода, то есть окно покрывает
+    ровно текущую попытку работы и не залезает в прошлую аварию. В обычном
+    случае (машина отработала часы и упала) пол лежит далеко позади и ничего
+    не ограничивает.
+    """
+    stop_ts = _tz(stop_ts)
+    ends = [
+        _tz(p["state_end"])
+        for p in _periods_for(enum_periods, _ADDR_RUN_STATE)
+        if p.get("value") == _RS_STOP and p.get("state_end")
+        and _tz(p["state_end"]) <= stop_ts
+    ]
+    return max(ends) if ends else None
+
+
 def find_work_to_stop(enum_periods: list[dict[str, Any]]) -> list[datetime]:
     """Моменты перехода RUN_STATE из не-стопа в стоп (0). Кандидаты на разбор."""
     rs = _periods_for(enum_periods, _ADDR_RUN_STATE)
@@ -87,6 +113,11 @@ def classify_stop_character(
     """
     stop_ts = _tz(stop_ts)
     win_from = stop_ts - timedelta(seconds=lookback_sec)
+    # Не заглядывать в предыдущую стоянку: иначе в серии попыток пуска гейт
+    # видит чужое охлаждение и объявляет останов контролируемым
+    _floor = prev_stop_end(enum_periods, stop_ts)
+    if _floor is not None and _floor > win_from:
+        win_from = _floor
     rs = _periods_for(enum_periods, _ADDR_RUN_STATE)
     rc = _periods_for(enum_periods, _ADDR_RUN_COMMAND)
     ft = _periods_for(enum_periods, _ADDR_FAULT_TYPE)
@@ -198,6 +229,10 @@ def build_stop_incident(
 
     stop_ts = _tz(stop_ts)
     win_from = stop_ts - timedelta(seconds=preamble_sec)
+    # Преамбула не залезает в предыдущую стоянку — см. prev_stop_end
+    _floor = prev_stop_end(enum_periods, stop_ts)
+    if _floor is not None and _floor > win_from:
+        win_from = _floor
     win_to = _tz(t_end) if t_end is not None else None
     chrono = build_chronology(
         enum_periods, fault_periods, cfg, window_from=win_from, window_to=win_to
