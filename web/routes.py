@@ -21,22 +21,15 @@ from pydantic import BaseModel
 
 from analytics.serializer import RUN_STATE_RU as _RUN_STATE_LABELS
 from db import analytics, source
+from web.segment_view import (  # noqa: F401  — реэкспорт: используются ниже по файлу
+    _parse_json,
+    _seg_active_dets,
+    _seg_collect_dets,
+    _seg_gate_checked,
+    _seg_severity,
+)
 
 logger = logging.getLogger(__name__)
-
-
-def _parse_json(val, default=None, ctx: str = ""):
-    """JSONB из asyncpg может прийти строкой — распарсить, при ошибке вернуть default."""
-    import json as _json
-    if val is None:
-        return default
-    if isinstance(val, str):
-        try:
-            return _json.loads(val)
-        except Exception:
-            logger.warning("Битый JSON%s", f" ({ctx})" if ctx else "")
-            return default
-    return val
 
 
 def _active_dets(seg_row: dict) -> tuple[list[dict], bool]:
@@ -1563,7 +1556,12 @@ async def online_calendar(
         checks = characteristics_json.get("sequence_checks") or []
         if not any(isinstance(c, dict) for c in checks):
             return None
-        dets = _seg_collect_dets(characteristics_json)
+        _stop_kind = characteristics_json.get("stop_kind")
+        if _stop_kind == "EMERGENCY":
+            return "авария"
+        # Стоп красится по активному на конец окна, прочие режимы — по максимуму
+        dets = (_seg_active_dets(characteristics_json) if _stop_kind == "SIMPLE"
+                else _seg_collect_dets(characteristics_json))
         level = compute_severity_level(dets)
         # Проваленная sequence-проверка без детекции — тоже сигнал аналитики
         if level == "норма" and any(
@@ -2123,59 +2121,6 @@ async def api_online_status():
 # Для использования с внешним фронтендом рекомендуется настроить CORS
 # через fastapi.middleware.cors.CORSMiddleware в main.py.
 
-def _seg_collect_dets(chars_json: Any, active_dets_json: Any = None) -> list[dict]:
-    """Все детекции сегмента: закрытый — из characteristics_json, открытый — из active_detections_json."""
-    dets: list[dict] = []
-    ch = _parse_json(chars_json, {}, ctx="characteristics_json") or {}
-    if isinstance(ch, dict):
-        for sub in ch.get("subsegments", []):
-            dets.extend(sub.get("detections", []))
-    if not dets and active_dets_json:
-        dets = _parse_json(active_dets_json, [], ctx="active_detections_json") or []
-    return [d for d in dets if isinstance(d, dict)]
-
-
-def _seg_gate_checked(dets: list[dict], gate_suppressed_hash: str | None) -> bool:
-    """Действует ли для сегмента вердикт гейта «отменить» (срабатывание проверено ИИ)."""
-    from online.status_assembler import compute_analytics_hash
-    return bool(
-        gate_suppressed_hash and dets
-        and compute_analytics_hash(dets) == gate_suppressed_hash
-    )
-
-
-def _seg_severity(
-    chars_json: Any, active_dets_json: Any = None,
-    gate_suppressed_hash: str | None = None,
-) -> str | None:
-    """Severity сегмента для API — значение поля `severity` в ответе.
-
-    Шкала (v4.8.9+):
-      "SHUTDOWN" — панель: аварийный останов
-      "WARNING"  — панель: тревога (derate / панельный warning)
-      "CAUTION"  — детекция аналитического движка  (до v4.8.9 называлось "INFO")
-      None       — детекций нет
-
-    Аналитика, отменённая гейтом Claude (gate_suppressed_hash совпал с хешем
-    текущего состава детекций), не учитывается → severity может стать None
-    даже при наличии детекций в characteristics_json.
-    """
-    dets = _seg_collect_dets(chars_json, active_dets_json)
-    if _seg_gate_checked(dets, gate_suppressed_hash):
-        dets = [d for d in dets if d.get("scenario") == "CONTROLLER_FAULT"]
-    if not dets:
-        return None
-
-    panel_rank = {"SHUTDOWN": 4, "WARNING": 3}
-    panel = [d.get("severity", "") for d in dets if d.get("scenario") == "CONTROLLER_FAULT"]
-    best_panel = max(panel, key=lambda s: panel_rank.get(s, 0), default="")
-    if panel_rank.get(best_panel, 0) >= 3:
-        return best_panel
-    if any(d.get("scenario") != "CONTROLLER_FAULT" for d in dets):
-        return "CAUTION"
-    return None
-
-
 @router.get("/api/machines", response_class=JSONResponse)
 async def api_machines():
     """Список наблюдаемых машин с текущим состоянием.
@@ -2243,7 +2188,10 @@ async def api_machines():
                 dets, gate_checked = _active_dets(seg)
                 if gate_checked:
                     dets = [d for d in dets if d.get("scenario") == "CONTROLLER_FAULT"]
-                severity_level = compute_severity_level(dets)
+                # Аварийный стоп держит красный до своей границы: маску могли
+                # уже снять, а рез приходит только следующим циклом опроса
+                severity_level = ("авария" if _stop_kind == "EMERGENCY"
+                                  else compute_severity_level(dets))
             except Exception:
                 logger.warning("api_machines: не удалось вычислить severity", exc_info=True)
 
@@ -2373,16 +2321,17 @@ async def api_machine_segments(
         seg_id    = seg.get("id")
         is_open   = seg.get("t_end") is None
         ai_status = ai_map.get(seg_id, {})
-        sev       = _seg_severity(seg.get("characteristics_json"), seg.get("active_detections_json"),
-                                  gate_suppressed_hash=seg.get("gate_suppressed_hash"))
-        gate_ok   = _seg_gate_checked(
-            _seg_collect_dets(seg.get("characteristics_json"), seg.get("active_detections_json")),
-            seg.get("gate_suppressed_hash"),
-        )
         run_state = seg.get("run_state")
         _chars    = _parse_json(seg.get("characteristics_json"), ctx="characteristics_json в /segments")
         dq        = _chars.get("data_quality") if isinstance(_chars, dict) else None
         _stop_kind = _chars.get("stop_kind")   if isinstance(_chars, dict) else None
+        sev       = _seg_severity(seg.get("characteristics_json"), seg.get("active_detections_json"),
+                                  gate_suppressed_hash=seg.get("gate_suppressed_hash"),
+                                  stop_kind=_stop_kind)
+        gate_ok   = _seg_gate_checked(
+            _seg_collect_dets(seg.get("characteristics_json"), seg.get("active_detections_json")),
+            seg.get("gate_suppressed_hash"),
+        )
         dur       = None
         if seg.get("t_start") and seg.get("t_end"):
             dur = (seg["t_end"] - seg["t_start"]).total_seconds()
@@ -2443,7 +2392,8 @@ async def api_segment_detail(seg_id: int):
     dq        = _chars.get("data_quality") if isinstance(_chars, dict) else None
     _stop_kind = _chars.get("stop_kind")   if isinstance(_chars, dict) else None
     sev       = _seg_severity(seg.get("characteristics_json"), seg.get("active_detections_json"),
-                              gate_suppressed_hash=seg.get("gate_suppressed_hash"))
+                              gate_suppressed_hash=seg.get("gate_suppressed_hash"),
+                              stop_kind=_stop_kind)
     gate_ok   = _seg_gate_checked(
         _seg_collect_dets(seg.get("characteristics_json"), seg.get("active_detections_json")),
         seg.get("gate_suppressed_hash"),
