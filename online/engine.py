@@ -522,8 +522,8 @@ async def _run_segment(
             initial_coking_risk=copy.deepcopy(initial_coking_risk),
         )
     )
-    # Аварийные остановы: incident_json для стоп-сегментов, являющихся падением
-    # работа→не-штат (характер-гейт). Ключ — seg.t_start (как в цикле персиста).
+    # Аварийные остановы: incident_json для стоп-сегментов вида EMERGENCY (когда
+    # новая модель включена) либо по характер-гейту (когда нет). Ключ — seg.t_start.
     incidents: dict[str, dict] = {}
     try:
         from analytics import classifier as _clf
@@ -532,7 +532,10 @@ async def _run_segment(
                 continue
             _st = _tz_utc(datetime.fromisoformat(seg.t_start))
             _te = _tz_utc(datetime.fromisoformat(seg.t_end)) if seg.t_end else None
-            inc = _clf.build_stop_incident(enum_periods, fault_periods, _st, _te, cfg)
+            inc = _clf.build_stop_incident(
+                enum_periods, fault_periods, _st, _te, cfg,
+                stop_kind=getattr(seg, "stop_kind", None),
+            )
             if inc is not None:
                 incidents[seg.t_start] = inc
     except Exception:
@@ -1702,6 +1705,7 @@ class OnlinePollEngine:
                             enum_periods, fault_periods,
                             _tz_utc(datetime.fromisoformat(seg.t_start)),
                             seg_t_end_rs, self.cfg,
+                            stop_kind=getattr(seg, "stop_kind", None),
                         )
                     except Exception:
                         logger.warning("OnlineEngine[%s]: incident_json не построен (RS-change)",

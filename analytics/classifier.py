@@ -170,16 +170,28 @@ def build_stop_incident(
     t_end: datetime | None = None,
     cfg: Any = None,
     preamble_sec: int = 300,
+    stop_kind: str | None = None,
 ) -> dict[str, Any] | None:
-    """incident_json для падения работа→не-штат; иначе None.
+    """incident_json для аварийного стоп-сегмента; иначе None.
 
-    Вызывается при закрытии стоп-сегмента (stop_ts = его начало). Если характер
-    не immediate или это не падение из работы — None (обычная схема, без тяжёлого
-    артефакта). Иначе: вердикт характера + лента [stop-preamble, t_end] (onset).
-    Возвращает JSON-совместимый dict (datetime → ISO) для хранения в JSONB.
+    Вызывается при закрытии стоп-сегмента (stop_ts = его начало). Когда строим —
+    вердикт характера + лента [stop-preamble, t_end]. Возвращает JSON-совместимый
+    dict (datetime → ISO) для хранения в JSONB.
+
+    stop_kind — вид стоп-сегмента новой модели ('EMERGENCY' / 'SIMPLE' / None).
+    Когда он передан, решает именно он: признак аварии — активная маска панели в
+    момент останова, а не вердикт характер-гейта. Гейт упирается в оконный дефект
+    (период RUN_STATE=3 выпадает из окна пересчёта, rs_before=None →
+    is_fall_from_work=False), из-за чего за 30 дней построился один акт на восемь
+    аварий. Вердикт при этом считается как и раньше и едет в артефакт описанием
+    характера останова.
+    None — старая модель (флаг stop_kind выключен): решает is_incident, как раньше.
     """
     verdict = classify_stop_character(enum_periods, stop_ts, cfg)
-    if not verdict["is_incident"]:
+    if stop_kind is not None:
+        if stop_kind != "EMERGENCY":
+            return None
+    elif not verdict["is_incident"]:
         return None
 
     from .reconstructor import build_chronology, serialize_chronology
@@ -193,6 +205,7 @@ def build_stop_incident(
     return {
         "kind": "stop_incident",
         "stop_ts": stop_ts.isoformat(),
+        "stop_kind": stop_kind,
         "character": verdict,
         "chronology": serialize_chronology(chrono),
         "investigator_version": _INVESTIGATOR_VERSION,
