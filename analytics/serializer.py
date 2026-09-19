@@ -223,8 +223,11 @@ def build_summary_md(
         a("Замечаний к работе нет.")
 
     # Сегмент закрыт по устранению неисправностей → время до устранения (MTTR):
-    # от первого фронта панельного кода до момента чистоты (границы сегмента)
-    if segments and getattr(segments[-1], "cause_close", None) == "FAULT_CLEARED":
+    # от первого фронта панельного кода до момента чистоты (границы сегмента).
+    # SHUTDOWN_CLEARED — тот же рез в новой модели СТОПа: там граница ставится
+    # по снятию аварийной маски, а не по полной чистоте (v4.9.74)
+    _cc = getattr(segments[-1], "cause_close", None) if segments else None
+    if _cc in ("FAULT_CLEARED", "SHUTDOWN_CLEARED"):
         panel_eps = [
             e for e in episodes
             if e.get("source") == "panel"
@@ -243,7 +246,9 @@ def build_summary_md(
                 mttr = (t_end - t_first).total_seconds()
                 if mttr > 0:
                     a("")
-                    a(f"⏱ **Неисправности устранены** — время до устранения: "
+                    _what = ("Авария снята" if _cc == "SHUTDOWN_CLEARED"
+                             else "Неисправности устранены")
+                    a(f"⏱ **{_what}** — время до устранения: "
                       f"**{_fmt_duration(mttr)}** (от первого кода до сброса)")
             except (ValueError, TypeError):
                 pass

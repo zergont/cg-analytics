@@ -269,7 +269,8 @@ def _build_conclusion(
     # Сегмент закрыт по устранению неисправностей → строка MTTR
     # (от первого фронта панельного кода до момента чистоты)
     mttr_row = ""
-    if segment_row.get("cause_close") == "FAULT_CLEARED" and segment_row.get("t_end"):
+    _cc = segment_row.get("cause_close")
+    if _cc in ("FAULT_CLEARED", "SHUTDOWN_CLEARED") and segment_row.get("t_end"):
         from corpus.preprocessor import _fmt_dur
         starts = [
             d.get("values", {}).get("fault_start")
@@ -288,7 +289,9 @@ def _build_conclusion(
                     t_end = t_end.replace(tzinfo=timezone.utc)
                 mttr = (t_end - t_first).total_seconds()
                 if mttr > 0:
-                    mttr_row = f"| Устранение | ⏱ за {_fmt_dur(mttr)} (от первого кода до сброса) |\n"
+                    _what = ("Авария снята" if _cc == "SHUTDOWN_CLEARED"
+                             else "Устранение")
+                    mttr_row = f"| {_what} | ⏱ за {_fmt_dur(mttr)} (от первого кода до сброса) |\n"
             except (ValueError, TypeError):
                 pass
 
