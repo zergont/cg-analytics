@@ -562,41 +562,45 @@ async def _run_segment(
             initial_coking_risk=copy.deepcopy(initial_coking_risk),
         )
     )
-    # Аварийные остановы: incident_json для стоп-сегментов вида EMERGENCY (когда
-    # новая модель включена) либо по характер-гейту (когда нет). Ключ — seg.t_start.
-    # Там, где акта нет, стоп-сегмент получает голую хронологию: в режиме 0
-    # панель копит сообщения, не меняя режим, и без ленты стоянка выглядит
-    # однородной. У аварийного стопа своя лента внутри акта — не дублируем.
+    # Стоп-сегменты получают ДВА артефакта, и они не исключают друг друга:
+    #   акт — что произошло, окно вокруг аварии, замирает на лаге;
+    #   лента — что было дальше, всё окно сегмента: видно, как неисправности
+    #           снимаются одна за другой, пока аварийный стоп не станет обычным.
+    # Ключ — seg.t_start.
     incidents: dict[str, dict] = {}
     chronologies: dict[str, dict] = {}
-    try:
-        from analytics import classifier as _clf
-        from analytics.reconstructor import build_segment_chronology as _chrono
-        for seg in segments:
-            if seg.run_state != 0 or not seg.t_end:
-                continue
+    from analytics import classifier as _clf
+    from analytics.reconstructor import build_segment_chronology as _chrono
+    for seg in segments:
+        if seg.run_state != 0 or not seg.t_end:
+            continue
+        # Исключение внутри цикла, а не снаружи: одно падение не должно
+        # лишать артефактов все следующие сегменты окна
+        try:
             _st = _tz_utc(datetime.fromisoformat(seg.t_start))
             _te = _tz_utc(datetime.fromisoformat(seg.t_end))
-            _ctx = None
-            if getattr(seg, "stop_kind", None) == "EMERGENCY":
+            if (getattr(seg, "stop_kind", None) == "EMERGENCY"
+                    and _is_stop_head(enum_periods, _st)):
                 _ctx = await _load_incident_context(
                     router_sn, equip_type, panel_id, _st, ts_to, cfg
                 )
-            _ep, _fp = _ctx if _ctx else (enum_periods, fault_periods)
-            inc = _clf.build_stop_incident(
-                _ep, _fp, _st, _te, cfg,
-                stop_kind=getattr(seg, "stop_kind", None),
-                stabilization_sec=_stab_sec(cfg),
-                detail_events=_act_detail_events(cfg),
-            )
-            if inc is not None:
-                incidents[seg.t_start] = inc
-                continue
+                _ep, _fp = _ctx if _ctx else (enum_periods, fault_periods)
+                inc = _clf.build_stop_incident(
+                    _ep, _fp, _st, _te, cfg,
+                    stop_kind="EMERGENCY",
+                    stabilization_sec=_stab_sec(cfg),
+                    detail_events=_act_detail_events(cfg),
+                )
+                if inc is not None:
+                    incidents[seg.t_start] = inc
             ch = _chrono(enum_periods, fault_periods, _st, _te, cfg)
             if ch is not None:
                 chronologies[seg.t_start] = ch
-    except Exception:
-        logger.warning("_run_segment: не удалось построить ленту стоп-сегмента", exc_info=True)
+        except Exception:
+            logger.warning(
+                "_run_segment: артефакты стоп-сегмента %s не построены",
+                seg.t_start, exc_info=True,
+            )
     return segments, incidents, gaps, chronologies
 
 
@@ -633,6 +637,25 @@ def _act_detail_events(cfg) -> int:
         return int(ACT_DETAIL_EVENTS if v is None else v)
     except Exception:
         return ACT_DETAIL_EVENTS
+
+
+def _is_stop_head(enum_periods: list[dict], t_start: datetime) -> bool:
+    """Начинается ли сегмент на реальном фронте входа в стоп.
+
+    Продолжение после суточного реза — это тот же стоп-период панели, просто
+    показанный со второго дня: у него сохраняется вид EMERGENCY, и без этой
+    проверки он заводил СВОЙ акт со stop_ts в момент реза и пустой лентой.
+    Акт строится только у головы; продолжение ссылается на неё через уже
+    существующий continued_from и несёт свою хронологию.
+    """
+    from analytics.classifier import _ADDR_RUN_STATE
+    t_start = _tz_utc(t_start)
+    for p in enum_periods or []:
+        if p.get("addr") != _ADDR_RUN_STATE or p.get("value") != 0:
+            continue
+        if _tz_utc(p["state_start"]) == t_start:
+            return True
+    return False
 
 
 async def _load_incident_context(
@@ -1928,29 +1951,31 @@ class OnlinePollEngine:
                             build_segment_chronology as _chrono,
                         )
                         _rs_st = _tz_utc(datetime.fromisoformat(seg.t_start))
-                        _rs_ctx = None
-                        if getattr(seg, "stop_kind", None) == "EMERGENCY":
+                        # Акт — только у головы стопа: продолжение после
+                        # суточного реза ссылается на неё через continued_from
+                        if (getattr(seg, "stop_kind", None) == "EMERGENCY"
+                                and _is_stop_head(enum_periods, _rs_st)):
                             _rs_ctx = await _load_incident_context(
                                 self.router_sn, self.equip_type, self.panel_id,
                                 _rs_st, ts_to_utc, self.cfg,
                             )
-                        _rs_ep, _rs_fp = (
-                            _rs_ctx if _rs_ctx else (enum_periods, fault_periods)
-                        )
-                        _rs_incident = _clf.build_stop_incident(
-                            _rs_ep, _rs_fp,
-                            _rs_st, seg_t_end_rs, self.cfg,
-                            stop_kind=getattr(seg, "stop_kind", None),
-                            stabilization_sec=_stab_sec(self.cfg),
-                            detail_events=_act_detail_events(self.cfg),
-                        )
-                        # Лента только там, где акта нет: у аварийного стопа
-                        # своя внутри акта, дублировать её незачем
-                        if _rs_incident is None:
-                            _rs_chronology = _chrono(
-                                enum_periods, fault_periods,
-                                _rs_st, seg_t_end_rs, self.cfg,
+                            _rs_ep, _rs_fp = (
+                                _rs_ctx if _rs_ctx else (enum_periods, fault_periods)
                             )
+                            _rs_incident = _clf.build_stop_incident(
+                                _rs_ep, _rs_fp,
+                                _rs_st, seg_t_end_rs, self.cfg,
+                                stop_kind="EMERGENCY",
+                                stabilization_sec=_stab_sec(self.cfg),
+                                detail_events=_act_detail_events(self.cfg),
+                            )
+                        # Лента есть у любого стоп-сегмента, в том числе
+                        # аварийного: акт говорит что произошло, лента — что
+                        # было дальше, пока авария не снята
+                        _rs_chronology = _chrono(
+                            enum_periods, fault_periods,
+                            _rs_st, seg_t_end_rs, self.cfg,
+                        )
                     except Exception:
                         logger.warning("OnlineEngine[%s]: лента стоп-сегмента не построена (RS-change)",
                                        self.key, exc_info=True)
@@ -2097,6 +2122,42 @@ class OnlinePollEngine:
             self.key, _time.perf_counter() - _t0,
         )
 
+        # Акт и лента для ОТКРЫТОГО стоп-сегмента: разбор аварии нужен
+        # диспетчеру сразу, а не после сброса. Переписываются каждый цикл,
+        # пока сегмент жив; при закрытии собираются начисто.
+        _open_incident = None
+        _open_chronology = None
+        if open_seg.run_state == 0:
+            try:
+                from analytics import classifier as _clf
+                from analytics.reconstructor import (
+                    build_segment_chronology as _chrono,
+                )
+                _op_st = _tz_utc(datetime.fromisoformat(open_seg.t_start))
+                if (getattr(open_seg, "stop_kind", None) == "EMERGENCY"
+                        and _is_stop_head(enum_periods, _op_st)):
+                    _op_ctx = await _load_incident_context(
+                        self.router_sn, self.equip_type, self.panel_id,
+                        _op_st, ts_to_utc, self.cfg,
+                    )
+                    _op_ep, _op_fp = (
+                        _op_ctx if _op_ctx else (enum_periods, fault_periods)
+                    )
+                    _open_incident = _clf.build_stop_incident(
+                        _op_ep, _op_fp, _op_st, None, self.cfg,
+                        stop_kind="EMERGENCY",
+                        stabilization_sec=_stab_sec(self.cfg),
+                        detail_events=_act_detail_events(self.cfg),
+                    )
+                _open_chronology = _chrono(
+                    enum_periods, fault_periods, _op_st, ts_to_utc, self.cfg
+                )
+            except Exception:
+                logger.warning(
+                    "OnlineEngine[%s]: артефакты открытого стоп-сегмента не построены",
+                    self.key, exc_info=True,
+                )
+
         _t0 = _time.perf_counter()
         _open_seg_id = await online_db.upsert_open_segment({
             "router_sn":              self.router_sn,
@@ -2121,6 +2182,8 @@ class OnlinePollEngine:
             "report_md":              open_report_md,
             "report_summary_md":      open_summary_md,
             "continued_from":         open_continued_from,
+            "incident_json":          _open_incident,
+            "chronology_json":        _open_chronology,
         })
         logger.debug(
             "TIMING[%s]: upsert за %.3fs | ИТОГО цикл %.2fs",

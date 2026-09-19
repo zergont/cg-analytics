@@ -1318,9 +1318,12 @@ def segment(
             "REPORT_START" if p_start < tf else "RUN_STATE_CHANGE"
         )
         stop_kind: str | None = period.get("stop_kind")
-        cause_close: str | None = period.get("cause_close") or (
-            None if p_end_raw is None or _tz(p_end_raw) >= tt
-            else "RUN_STATE_CHANGE"
+        # Причина реза действует, только если сам рез попал в окно. Иначе при
+        # доборе после простоя сервиса довграничная половина получала бы
+        # «Авария снята» на суточной границе, хотя маску сняли часами позже.
+        _cut_inside = p_end_raw is not None and _tz(p_end_raw) < tt
+        cause_close: str | None = (
+            (period.get("cause_close") or "RUN_STATE_CHANGE") if _cut_inside else None
         )
 
         # L2-подсегменты

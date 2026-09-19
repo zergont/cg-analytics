@@ -224,6 +224,13 @@ async def upsert_open_segment(data: dict[str, Any]) -> int:
                     characteristics_json   = COALESCE($11::jsonb, characteristics_json),
                     report_md              = COALESCE($12, report_md),
                     report_summary_md      = COALESCE($13, report_summary_md),
+                    -- Акт и лента живут на открытой строке и переписываются
+                    -- каждый цикл: разбор аварии нужен диспетчеру сразу, а не
+                    -- задним числом. Пишем как есть, без COALESCE: они
+                    -- детерминированно выводятся из истории, и залипший
+                    -- старый акт тут хуже пустого (v4.9.82)
+                    incident_json          = $14::jsonb,
+                    chronology_json        = $15::jsonb,
                     updated_at             = now()
                 WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
                   AND t_end IS NULL
@@ -241,6 +248,10 @@ async def upsert_open_segment(data: dict[str, Any]) -> int:
                     if data.get("characteristics_json") is not None else None,
                 data.get("report_md"),
                 data.get("report_summary_md"),
+                json.dumps(data.get("incident_json"), ensure_ascii=False)
+                    if data.get("incident_json") is not None else None,
+                json.dumps(data.get("chronology_json"), ensure_ascii=False)
+                    if data.get("chronology_json") is not None else None,
             )
 
             if row:
@@ -255,8 +266,9 @@ async def upsert_open_segment(data: dict[str, Any]) -> int:
                     analytics_version,
                     current_values_json, active_detections_json,
                     continued_from, characteristics_json, report_md,
-                    report_summary_md, updated_at
-                ) VALUES ($1,$2,$3,$4,NULL,$5,$6::jsonb,$7,$8::jsonb,$9::jsonb,$10,$11::jsonb,$12,$13,now())
+                    report_summary_md, incident_json, chronology_json, updated_at
+                ) VALUES ($1,$2,$3,$4,NULL,$5,$6::jsonb,$7,$8::jsonb,$9::jsonb,$10,$11::jsonb,$12,$13,
+                          $14::jsonb,$15::jsonb,now())
                 RETURNING id
             """,
                 data["router_sn"], data["equip_type"], data["panel_id"],
@@ -271,6 +283,10 @@ async def upsert_open_segment(data: dict[str, Any]) -> int:
                     if data.get("characteristics_json") is not None else None,
                 data.get("report_md"),
                 data.get("report_summary_md"),
+                json.dumps(data.get("incident_json"), ensure_ascii=False)
+                    if data.get("incident_json") is not None else None,
+                json.dumps(data.get("chronology_json"), ensure_ascii=False)
+                    if data.get("chronology_json") is not None else None,
             )
         return row["id"]
     finally:
@@ -309,8 +325,13 @@ async def insert_closed_segment(data: dict[str, Any]) -> int:
                 characteristics_json = EXCLUDED.characteristics_json,
                 report_md           = EXCLUDED.report_md,
                 report_summary_md   = EXCLUDED.report_summary_md,
-                incident_json       = COALESCE(EXCLUDED.incident_json, auto_segments.incident_json),
-                chronology_json     = COALESCE(EXCLUDED.chronology_json, auto_segments.chronology_json),
+                -- Без COALESCE: оба поля детерминированно выводятся из
+                -- истории, и при повторном анализе должны ПЕРЕЗАПИСЫВАТЬСЯ.
+                -- Иначе старый акт залипает после правки кода или смены
+                -- тяжести в KB и перекрывает свежую ленту (v4.9.82).
+                -- COALESCE ниже по делу защищает только то, что пишет гейт.
+                incident_json       = EXCLUDED.incident_json,
+                chronology_json     = EXCLUDED.chronology_json,
                 warning_analysis_md   = COALESCE(EXCLUDED.warning_analysis_md,   auto_segments.warning_analysis_md),
                 warning_analyzed_hash = COALESCE(EXCLUDED.warning_analyzed_hash, auto_segments.warning_analyzed_hash),
                 warning_analyses      = COALESCE(EXCLUDED.warning_analyses,      auto_segments.warning_analyses),
