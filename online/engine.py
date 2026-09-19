@@ -950,6 +950,9 @@ class OnlinePollEngine:
         self._episode_accrual_ts: datetime | None = None
         # id открытого сегмента с прошлого цикла — справочная ссылка новых эпизодов
         self._last_open_seg_id: int | None = None
+        # Подпись ленты открытого сегмента (t_start, число событий) — чтобы не
+        # переписывать её в БД, пока в ней ничего не менялось
+        self._open_chrono_sig: tuple | None = None
 
     @property
     def key(self) -> str:
@@ -1656,8 +1659,13 @@ class OnlinePollEngine:
                 "characteristics_json": seg_dict,
                 "report_md":          report_md,
                 "report_summary_md":  summary_md,
-                "incident_json":      None if _seg_no_data else incidents.get(seg.t_start),
-                "chronology_json":    None if _seg_no_data else chronologies.get(seg.t_start),
+                # Пустой сегмент (нет связи) акта не лишается: акт и лента
+                # собираются из enum-периодов и фронтов масок, аналоговых
+                # данных не трогают. Заглушка «нет связи» существует потому,
+                # что врать нельзя про аналоги; здесь врать нечем. И самое
+                # ценное как раз тут — с какой маской машина ушла в обрыв.
+                "incident_json":      incidents.get(seg.t_start),
+                "chronology_json":    chronologies.get(seg.t_start),
                 **_slice_gate_state(
                     _gate_state,
                     _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end,
@@ -1967,7 +1975,8 @@ class OnlinePollEngine:
                 _rs_seg_dict = seg.to_dict()
                 _rs_incident = None
                 _rs_chronology = None
-                if seg.run_state == 0 and not _rs_no_data:
+                # Пустой сегмент не исключение — см. суточный путь
+                if seg.run_state == 0:
                     try:
                         from analytics import classifier as _clf
                         from analytics.reconstructor import (
@@ -2188,6 +2197,17 @@ class OnlinePollEngine:
                 _open_chronology = _chrono(
                     enum_periods, fault_periods, _op_st, ts_to_utc, self.cfg
                 )
+                # Передаём ленту, только если в ней что-то изменилось: иначе
+                # строка переписывается каждые тридцать секунд впустую. Ключ
+                # включает начало сегмента — у нового сегмента подпись своя.
+                _sig = (
+                    open_seg.t_start,
+                    len((_open_chronology or {}).get("chronology") or []),
+                )
+                if _open_chronology is not None and _sig == self._open_chrono_sig:
+                    _open_chronology = None
+                elif _open_chronology is not None:
+                    self._open_chrono_sig = _sig
             except Exception:
                 logger.warning(
                     "OnlineEngine[%s]: артефакты открытого стоп-сегмента не построены",

@@ -231,8 +231,11 @@ async def upsert_open_segment(data: dict[str, Any]) -> int:
                     -- стирать уже собранный. Новый открытый сегмент приходит
                     -- через INSERT, так что чужой акт не залипнет (v4.9.83).
                     incident_json          = COALESCE($14::jsonb, incident_json),
-                    -- Лента, наоборот, растёт вместе с сегментом — пишем как есть
-                    chronology_json        = $15::jsonb,
+                    -- Лента растёт вместе с сегментом, но переписывать её
+                    -- каждый цикл незачем: движок передаёт поле, только когда
+                    -- в ней что-то появилось. На сотне машин это разница между
+                    -- сотней бессмысленных перезаписей JSONB в минуту и нулём
+                    chronology_json        = COALESCE($15::jsonb, chronology_json),
                     updated_at             = now()
                 WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
                   AND t_end IS NULL
