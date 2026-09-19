@@ -108,6 +108,41 @@ def build_chronology(
     return events
 
 
+_SEGMENT_CHRONOLOGY_VERSION = "1.0"
+
+
+def build_segment_chronology(
+    enum_periods: list[dict[str, Any]],
+    fault_periods: list[dict[str, Any]],
+    t_from: datetime,
+    t_to: datetime,
+    cfg: Any = None,
+) -> dict[str, Any] | None:
+    """Лента событий панели за окно сегмента; None — если ничего не случилось.
+
+    Для стоп-сегмента это ответ на вопрос «кто что нажимал и сбрасывал, пока
+    машина стояла»: в режиме 0 панель копит сообщения, не меняя режим, и без
+    ленты стоянка выглядит однородной.
+
+    Окно строгое, без преамбулы: событие принадлежит сегменту, во время
+    которого произошло. Поэтому маска, висевшая ещё до начала стоянки, в
+    ленту не попадёт — она видна в тяжести сегмента и в его детекциях, а
+    здесь нас интересует именно то, что происходило внутри.
+    """
+    chrono = build_chronology(
+        enum_periods, fault_periods, cfg, window_from=t_from, window_to=t_to
+    )
+    if not chrono:
+        return None
+    return {
+        "kind": "segment_chronology",
+        "t_from": _tz(t_from).isoformat() if t_from else None,
+        "t_to": _tz(t_to).isoformat() if t_to else None,
+        "chronology": serialize_chronology(chrono),
+        "version": _SEGMENT_CHRONOLOGY_VERSION,
+    }
+
+
 def serialize_chronology(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Лента → JSON-совместимый вид (datetime → ISO) для хранения в incident_json."""
     out = []

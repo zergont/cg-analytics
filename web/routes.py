@@ -2453,6 +2453,10 @@ async def api_segment_detail(seg_id: int):
         # событий [останов − 5 мин, конец сегмента]. Только у стоп-сегментов
         # вида EMERGENCY; у остальных null (v4.9.70)
         "incident_json": _parse_json(seg.get("incident_json"), None, ctx="incident_json"),
+        # Лента событий панели за окно стоп-сегмента: «кто что нажимал и
+        # сбрасывал, пока машина стояла». Только там, где акта нет —
+        # у аварийного стопа своя лента внутри incident_json (v4.9.76)
+        "chronology_json": _parse_json(seg.get("chronology_json"), None, ctx="chronology_json"),
         # Онлайн-анализ предупреждения (гейт Claude) — есть и у открытого сегмента
         "warning_analysis_md": seg.get("warning_analysis_md"),
         # История разборов гейта [{t, fault_hash, alarm_text, md}] — смена

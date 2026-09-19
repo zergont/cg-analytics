@@ -284,3 +284,11 @@ ALTER TABLE auto_segments ADD CONSTRAINT auto_segments_cause_close_check
 -- active_sec и восстановить его нечем; такие эпизоды занижены по воздействию.
 ALTER TABLE alarm_episodes
     ADD COLUMN IF NOT EXISTS blind_sec DOUBLE PRECISION NOT NULL DEFAULT 0;
+
+-- Миграция v4.9.76: chronology_json — лента событий панели за окно сегмента.
+-- Для стоп-сегмента это «кто что нажимал и сбрасывал, пока машина стояла»:
+-- в режиме 0 панель копит сообщения, не меняя режим, и без ленты стоянка
+-- выглядит однородной. Строится только там, где нет акта: у аварийного стопа
+-- своя лента внутри incident_json, дублировать её незачем.
+ALTER TABLE auto_segments
+    ADD COLUMN IF NOT EXISTS chronology_json JSONB;

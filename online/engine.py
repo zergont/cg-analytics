@@ -526,7 +526,7 @@ async def _run_segment(
     ts_to: datetime,
     cfg,
     initial_coking_risk: CokingRisk,
-) -> tuple[list, dict[str, dict], list[dict]]:
+) -> tuple[list, dict[str, dict], list[dict], dict[str, dict]]:
     """Загрузить данные и запустить segment() в отдельном потоке.
 
     segment() — CPU-bound синхронная функция. asyncio.to_thread() выносит её
@@ -534,6 +534,7 @@ async def _run_segment(
 
     Третьим возвращает дыры связи окна (уже с синтетическим хвостовым гэпом):
     они нужны вызывающему, чтобы посчитать слепую долю воздействия тревог.
+    Четвёртым — хронологии стоянок (ключ тот же, seg.t_start).
     """
     import functools
     from analytics.segmenter import segment as _segment
@@ -563,23 +564,32 @@ async def _run_segment(
     )
     # Аварийные остановы: incident_json для стоп-сегментов вида EMERGENCY (когда
     # новая модель включена) либо по характер-гейту (когда нет). Ключ — seg.t_start.
+    # Там, где акта нет, стоп-сегмент получает голую хронологию: в режиме 0
+    # панель копит сообщения, не меняя режим, и без ленты стоянка выглядит
+    # однородной. У аварийного стопа своя лента внутри акта — не дублируем.
     incidents: dict[str, dict] = {}
+    chronologies: dict[str, dict] = {}
     try:
         from analytics import classifier as _clf
+        from analytics.reconstructor import build_segment_chronology as _chrono
         for seg in segments:
-            if seg.run_state != 0:
+            if seg.run_state != 0 or not seg.t_end:
                 continue
             _st = _tz_utc(datetime.fromisoformat(seg.t_start))
-            _te = _tz_utc(datetime.fromisoformat(seg.t_end)) if seg.t_end else None
+            _te = _tz_utc(datetime.fromisoformat(seg.t_end))
             inc = _clf.build_stop_incident(
                 enum_periods, fault_periods, _st, _te, cfg,
                 stop_kind=getattr(seg, "stop_kind", None),
             )
             if inc is not None:
                 incidents[seg.t_start] = inc
+                continue
+            ch = _chrono(enum_periods, fault_periods, _st, _te, cfg)
+            if ch is not None:
+                chronologies[seg.t_start] = ch
     except Exception:
-        logger.warning("_run_segment: не удалось построить incident_json", exc_info=True)
-    return segments, incidents, gaps
+        logger.warning("_run_segment: не удалось построить ленту стоп-сегмента", exc_info=True)
+    return segments, incidents, gaps, chronologies
 
 
 async def _collect_and_enrich_detections(
@@ -1305,7 +1315,7 @@ class OnlinePollEngine:
         from analytics.runner import ANALYTICS_VERSION
 
         try:
-            segments, incidents, gaps = await _run_segment(
+            segments, incidents, gaps, chronologies = await _run_segment(
                 self.router_sn, self.equip_type, self.panel_id, self.engine_sn,
                 t_from, t_to, self.cfg,
                 self.inherited_coking_risk,
@@ -1507,6 +1517,7 @@ class OnlinePollEngine:
                 "report_md":          report_md,
                 "report_summary_md":  summary_md,
                 "incident_json":      None if _seg_no_data else incidents.get(seg.t_start),
+                "chronology_json":    None if _seg_no_data else chronologies.get(seg.t_start),
                 **_slice_gate_state(
                     _gate_state,
                     _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end,
@@ -1815,17 +1826,28 @@ class OnlinePollEngine:
 
                 _rs_seg_dict = seg.to_dict()
                 _rs_incident = None
+                _rs_chronology = None
                 if seg.run_state == 0 and not _rs_no_data:
                     try:
                         from analytics import classifier as _clf
+                        from analytics.reconstructor import (
+                            build_segment_chronology as _chrono,
+                        )
+                        _rs_st = _tz_utc(datetime.fromisoformat(seg.t_start))
                         _rs_incident = _clf.build_stop_incident(
                             enum_periods, fault_periods,
-                            _tz_utc(datetime.fromisoformat(seg.t_start)),
-                            seg_t_end_rs, self.cfg,
+                            _rs_st, seg_t_end_rs, self.cfg,
                             stop_kind=getattr(seg, "stop_kind", None),
                         )
+                        # Лента только там, где акта нет: у аварийного стопа
+                        # своя внутри акта, дублировать её незачем
+                        if _rs_incident is None:
+                            _rs_chronology = _chrono(
+                                enum_periods, fault_periods,
+                                _rs_st, seg_t_end_rs, self.cfg,
+                            )
                     except Exception:
-                        logger.warning("OnlineEngine[%s]: incident_json не построен (RS-change)",
+                        logger.warning("OnlineEngine[%s]: лента стоп-сегмента не построена (RS-change)",
                                        self.key, exc_info=True)
                 _rs_db_id = await online_db.insert_closed_segment({
                     "router_sn":          self.router_sn,
@@ -1843,6 +1865,7 @@ class OnlinePollEngine:
                     "report_md":          report_md_rs,
                     "report_summary_md":  summary_md_rs,
                     "incident_json":      _rs_incident,
+                    "chronology_json":    _rs_chronology,
                     **_slice_gate_state(
                         _rs_gate_state,
                         _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end_rs,

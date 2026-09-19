@@ -290,12 +290,12 @@ async def insert_closed_segment(data: dict[str, Any]) -> int:
                 coking_risk_json, forward_fill_json,
                 analytics_version,
                 characteristics_json, report_md, report_summary_md,
-                incident_json,
+                incident_json, chronology_json,
                 warning_analysis_md, warning_analyzed_hash, warning_analyses,
                 gate_log, gate_suppressed_hash,
                 updated_at
             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13::jsonb,$14,$15,$16::jsonb,
-                      $17,$18,$19::jsonb,$20::jsonb,$21,now())
+                      $22::jsonb,$17,$18,$19::jsonb,$20::jsonb,$21,now())
             ON CONFLICT (router_sn, equip_type, panel_id, t_start)
                 WHERE t_end IS NOT NULL
             DO UPDATE SET
@@ -310,6 +310,7 @@ async def insert_closed_segment(data: dict[str, Any]) -> int:
                 report_md           = EXCLUDED.report_md,
                 report_summary_md   = EXCLUDED.report_summary_md,
                 incident_json       = COALESCE(EXCLUDED.incident_json, auto_segments.incident_json),
+                chronology_json     = COALESCE(EXCLUDED.chronology_json, auto_segments.chronology_json),
                 warning_analysis_md   = COALESCE(EXCLUDED.warning_analysis_md,   auto_segments.warning_analysis_md),
                 warning_analyzed_hash = COALESCE(EXCLUDED.warning_analyzed_hash, auto_segments.warning_analyzed_hash),
                 warning_analyses      = COALESCE(EXCLUDED.warning_analyses,      auto_segments.warning_analyses),
@@ -339,6 +340,8 @@ async def insert_closed_segment(data: dict[str, Any]) -> int:
             json.dumps(data.get("gate_log"), ensure_ascii=False)
                 if data.get("gate_log") else None,
             data.get("gate_suppressed_hash"),
+            json.dumps(data.get("chronology_json"), ensure_ascii=False)
+                if data.get("chronology_json") is not None else None,
         )
         seg_id = row["id"]
 
