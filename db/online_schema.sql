@@ -252,10 +252,14 @@ ALTER TABLE auto_segments
 -- уже давно (analytics/segmenter.py), а констрейнт его не разрешал: вставка
 -- падала CheckViolationError, цикл движка ломался на каждой машине с таким
 -- суб-сегментом.
-ALTER TABLE auto_segments DROP CONSTRAINT IF EXISTS auto_segments_cause_close_check;
-ALTER TABLE auto_segments ADD CONSTRAINT auto_segments_cause_close_check
-    CHECK (cause_close IN ('RUN_STATE_CHANGE', 'DAILY_BOUNDARY', 'OPERATOR_STOP', 'FAULT_CLEARED')
-           OR cause_close IS NULL);
+-- ОТМЕНЕНА миграцией v4.9.66 ниже, операторы снесены намеренно (v4.9.87).
+-- Файл проигрывается целиком при каждом старте, сверху вниз. Пока значения
+-- SHUTDOWN_CLEARED в таблице не было, этот узкий CHECK проходил валидацию и
+-- следом перезаписывался широким. Как только первая строка с SHUTDOWN_CLEARED
+-- появилась (20.09, авария на ДГУ №2), ADD CONSTRAINT здесь стал падать — а
+-- вместе с ним откатывался весь файл, и сервис не поднимался вовсе.
+-- Урок: миграция, СУЖАЮЩАЯ допустимые значения, не может оставаться в файле
+-- после расширяющей. Из двух ALTER остаётся только последний.
 
 -- Миграция v4.9.66: SHUTDOWN_CLEARED — валидное значение cause_close.
 -- Новая модель сегментации стопа: СТОП имеет два вида, АВАРИЙНЫЙ и простой.
