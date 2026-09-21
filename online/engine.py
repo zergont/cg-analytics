@@ -966,6 +966,10 @@ class OnlinePollEngine:
         # Подпись ленты открытого сегмента (t_start, число событий) — чтобы не
         # переписывать её в БД, пока в ней ничего не менялось
         self._open_chrono_sig: tuple | None = None
+        # Начало стопа, по которому акт уже собран. Акт строится ОДИН раз, и
+        # он же заказывает разбор у Клауда — без этой отметки и то, и другое
+        # повторялось бы каждым циклом
+        self._act_done_for: datetime | None = None
 
     @property
     def key(self) -> str:
@@ -1041,6 +1045,31 @@ class OnlinePollEngine:
 
         await self._restore_live_state()
 
+    def _order_incident_analysis(
+        self, incident: dict, stop_ts: datetime, segment_id: int | None = None,
+    ) -> None:
+        """Заказать разбор аварии у Клауда. Повод — готовый акт.
+
+        Гейт предупреждений для аварии не годился: он ждёт 60 секунд
+        стабилизации состава, а у трети аварий маску снимали раньше, состав
+        становился «норма» и отсчёт выбрасывался — разбора не было вовсе.
+        Акт же строится у каждой аварии по построению и несёт материал
+        богаче снимка состояния.
+
+        Фоновая задача: разбор — мнение поверх фактов, цикл движка его не ждёт.
+        """
+        try:
+            from online.incident_gate import analyze_incident
+            asyncio.create_task(analyze_incident(
+                self.router_sn, self.equip_type, self.panel_id,
+                incident, stop_ts, segment_id,
+            ))
+            logger.info("OnlineEngine[%s]: заказан разбор аварии на %s",
+                        self.key, stop_ts.isoformat())
+        except Exception:
+            logger.warning("OnlineEngine[%s]: разбор аварии не заказан",
+                           self.key, exc_info=True)
+
     async def _restore_live_state(self) -> None:
         """Поднять из БД то, что переживает рестарт: живые тревоги и эпизоды.
 
@@ -1067,6 +1096,20 @@ class OnlinePollEngine:
                 self.key,
             )
             self._active_alerts = {}
+
+        # Акт открытого сегмента: если он уже собран, повторно не строим и
+        # разбор не перезаказываем
+        try:
+            _row = await online_db.get_open_segment(
+                self.router_sn, self.equip_type, self.panel_id
+            )
+            if _row and _row.get("incident_json") is not None and _row.get("t_start"):
+                self._act_done_for = _tz_utc(_row["t_start"])
+                logger.info("OnlineEngine[%s]: акт открытого сегмента уже собран (%s)",
+                            self.key, self._act_done_for)
+        except Exception:
+            logger.warning("OnlineEngine[%s]: не удалось проверить акт открытого сегмента",
+                           self.key, exc_info=True)
 
         # Восстановить открытые эпизоды тревог (переживают рестарт)
         try:
@@ -2020,6 +2063,11 @@ class OnlinePollEngine:
                                 stabilization_sec=_stab_sec(self.cfg),
                                 detail_events=_act_detail_events(self.cfg),
                             )
+                            # Авария короче лага: акта на открытой строке не
+                            # было, значит разбор заказывается отсюда
+                            if _rs_incident is not None:
+                                self._act_done_for = _rs_st
+                                self._order_incident_analysis(_rs_incident, _rs_st)
                         # Лента есть у любого стоп-сегмента, в том числе
                         # аварийного: акт говорит что произошло, лента — что
                         # было дальше, пока авария не снята
@@ -2193,6 +2241,7 @@ class OnlinePollEngine:
                 )
                 if (getattr(open_seg, "stop_kind", None) == "EMERGENCY"
                         and _lag_done
+                        and self._act_done_for != _op_st
                         and _is_stop_head(enum_periods, _op_st)):
                     _op_ctx = await _load_incident_context(
                         self.router_sn, self.equip_type, self.panel_id,
@@ -2207,6 +2256,9 @@ class OnlinePollEngine:
                         stabilization_sec=_stab_sec(self.cfg),
                         detail_events=_act_detail_events(self.cfg),
                     )
+                    if _open_incident is not None:
+                        self._act_done_for = _op_st
+                        self._order_incident_analysis(_open_incident, _op_st)
                 _open_chronology = _chrono(
                     enum_periods, fault_periods, _op_st, ts_to_utc, self.cfg
                 )

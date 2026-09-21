@@ -427,6 +427,18 @@ class OnlineManager:
                     self._warning_tracker.pop(key, None)
                     continue
 
+                # Аварию разбирает не этот гейт, а акт: он строится у каждой
+                # аварии на границе min(останов + лаг, закрытие) и заказывает
+                # разбор сам (online/incident_gate.py). Здешняя минута
+                # стабилизации для аварии не работала — у трети из них маску
+                # снимали раньше, состав становился «норма», и отсчёт просто
+                # выбрасывался вместе с разбором.
+                # Отменить что-либо гейт тут всё равно не может: can_cancel
+                # требует panel_severity == «норма».
+                if struct.get("panel_severity") == "авария":
+                    self._warning_tracker.pop(key, None)
+                    continue
+
                 fault_hash = compute_fault_hash(struct)
                 already_analyzed = seg.get("warning_analyzed_hash") == fault_hash
 
