@@ -1736,6 +1736,16 @@ class OnlinePollEngine:
             else:
                 _enqueue_segment(db_id)
 
+            # Акт, собранный суточным резом: на открытой строке его не было
+            # (авария началась в пределах лага до границы), значит и разбор
+            # заказывается отсюда — иначе он бы не заказался вовсе
+            _daily_inc = incidents.get(seg.t_start)
+            if _daily_inc is not None:
+                _daily_st = _tz_utc(datetime.fromisoformat(seg.t_start))
+                if self._act_done_for != _daily_st:
+                    self._act_done_for = _daily_st
+                    self._order_incident_analysis(_daily_inc, _daily_st, db_id)
+
             # Связь эпизод→сегмент: ссылка на открытую строку обнуляется
             # при её удалении, поэтому перецеливаем на закрытую (v4.9.75)
             try:
@@ -2068,6 +2078,8 @@ class OnlinePollEngine:
                             if _rs_incident is not None:
                                 self._act_done_for = _rs_st
                                 self._order_incident_analysis(_rs_incident, _rs_st)
+                                # segment_id ещё не известен — строка
+                                # вставляется ниже; разбор найдёт сегмент по ts
                         # Лента есть у любого стоп-сегмента, в том числе
                         # аварийного: акт говорит что произошло, лента — что
                         # было дальше, пока авария не снята
