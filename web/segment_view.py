@@ -69,8 +69,26 @@ def _seg_active_dets(chars_json: Any, active_dets_json: Any = None) -> list[dict
 
 
 def _seg_gate_checked(dets: list[dict], gate_suppressed_hash: str | None) -> bool:
-    """Действует ли для сегмента вердикт гейта «отменить» (срабатывание проверено ИИ)."""
+    """Действует ли вердикт гейта «отменить» (срабатывание проверено ИИ).
+
+    Вердикт касается ТОЛЬКО аналитики: вынести его гейт может лишь при чистой
+    панели (`can_cancel` требует panel_severity == «норма»). Но хеш считается
+    по составу аналитических детекций, и если ПОСЛЕ вердикта поднялась маска
+    панели, состав не изменился — вердикт продолжал действовать, и сегмент
+    получал пометку «проверено ИИ, угрозы нет» при живой аварии.
+
+    Наблюдалось 21.09: сегмент 35508, активная маска SHUTDOWN, а плашка в
+    календаре жёлтая с щитом. Поэтому при активном сигнале панели тяжести
+    WARNING или выше вердикт считается недействительным.
+    """
     from online.status_assembler import compute_analytics_hash
+    panel_loud = any(
+        d.get("scenario") == "CONTROLLER_FAULT"
+        and d.get("severity") in ("SHUTDOWN", "WARNING")
+        for d in dets
+    )
+    if panel_loud:
+        return False
     return bool(
         gate_suppressed_hash and dets
         and compute_analytics_hash(dets) == gate_suppressed_hash

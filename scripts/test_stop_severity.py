@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from web.segment_view import _seg_severity  # noqa: E402
+from web.segment_view import _seg_gate_checked, _seg_severity  # noqa: E402
 from online.status_assembler import compute_analytics_hash  # noqa: E402
 
 _errors: list[str] = []
@@ -79,6 +79,19 @@ check(_seg_severity(chars([analytic()]), gate_suppressed_hash=_h),
 check(_seg_severity(chars([fault("SHUTDOWN", 3, CLEARED)], [fault("WARNING", 5)]),
                     stop_kind=None),
       "SHUTDOWN", "7: поведение без вида изменилось")
+
+# 8. Вердикт гейта не перебивает живой сигнал панели
+_an = {"scenario": "RPM_UNDERSPEED", "severity": "CAUTION", "fault_codes": []}
+_h8 = compute_analytics_hash([_an])
+check(_seg_gate_checked([_an], _h8), True,
+      "8a: вердикт по чистой панели должен действовать")
+check(_seg_gate_checked([_an, fault("SHUTDOWN", 5)], _h8), False,
+      "8б: вердикт действует при живой аварии — «проверено ИИ» поверх красного")
+check(_seg_gate_checked([_an, fault("WARNING", 5)], _h8), False,
+      "8в: вердикт действует при живом предупреждении панели")
+check(_seg_severity(chars([_an, fault("SHUTDOWN", 5)]),
+                    gate_suppressed_hash=_h8, stop_kind="SIMPLE"),
+      "SHUTDOWN", "8г: авария потеряла цвет из-за вердикта гейта")
 
 if _errors:
     print("ПРОВАЛЕНО:")
