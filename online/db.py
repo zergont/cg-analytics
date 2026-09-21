@@ -949,6 +949,41 @@ async def open_episode(
         await conn.close()
 
 
+async def existing_episode_onsets(
+    router_sn: str, equip_type: str, panel_id: int,
+    onsets: list[datetime],
+) -> set[tuple[str, datetime]]:
+    """Какие из переданных онсетов уже имеют эпизод. {(ключ, t_open)}.
+
+    Запасной писатель (`insert_closed_episode`) сеет эпизод для тревоги, у
+    которой его «нет». До v4.9.86 это проверялось по памяти движка — то есть
+    отвечало на вопрос «жива ли тревога СЕЙЧАС», а не «был ли у неё эпизод».
+    Тревога, прожившая своё и закрытая дебаунсом внутри сегмента, к моменту
+    закрытия не подходила ни под одно условие и засевалась второй раз.
+    Наблюдалось на проде: 14732 (живой) и 14734 (посев) с одним t_open.
+
+    Спрашиваем базу, а не память: совпадение онсета до секунды означает ту же
+    тревогу — у обоих писателей t_open берётся из одного t_detected. Один
+    индексный запрос на сегмент вместо цепочки частных условий.
+    """
+    if not onsets:
+        return set()
+    conn = await _connect()
+    try:
+        rows = await conn.fetch("""
+            SELECT scenario, addr, bit, t_open
+            FROM alarm_episodes
+            WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+              AND t_open = ANY($4::timestamptz[])
+        """, router_sn, equip_type, panel_id, onsets)
+        return {
+            (episode_key(r["scenario"], r["addr"], r["bit"]), r["t_open"])
+            for r in rows
+        }
+    finally:
+        await conn.close()
+
+
 async def insert_closed_episode(
     router_sn: str, equip_type: str, panel_id: int, *,
     scenario: str, source: str, severity: str | None,

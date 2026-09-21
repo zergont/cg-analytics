@@ -788,10 +788,23 @@ async def _collect_and_enrich_detections(
     if not seen:
         return []
 
-    # Эпизоды для эфемерных тревог — не живших в снимке открытого окна
+    # Эпизоды для эфемерных тревог — тех, у которых эпизода НЕТ ВООБЩЕ.
+    # Память движка отвечает только на вопрос «жива ли тревога сейчас», а
+    # тревога, прожившая своё и закрытая дебаунсом внутри сегмента, под него
+    # не подходит и засевалась второй раз. Поэтому спрашиваем базу.
     if open_keys is not None:
+        try:
+            _already = await online_db.existing_episode_onsets(
+                router_sn, equip_type, panel_id,
+                [i["t_open"] for i in seen.values() if i.get("t_open")],
+            )
+        except Exception:
+            logger.warning("Не удалось проверить существующие эпизоды", exc_info=True)
+            _already = set()
         for k, info in seen.items():
             if k in open_keys:
+                continue
+            if (k, info.get("t_open")) in _already:
                 continue
             t_open = info["t_open"] or _tz_utc(seg_t_end)
             # Воздействие — астрономическое, слепая доля считается рядом
