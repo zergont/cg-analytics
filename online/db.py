@@ -1063,7 +1063,15 @@ async def close_episode(episode_id: int, t_close: datetime, reason: str) -> None
     try:
         await conn.execute("""
             UPDATE alarm_episodes
-            SET t_close = $2, close_reason = $3, updated_at = now()
+            SET t_close = $2, close_reason = $3,
+                -- Хвост начисления: поцикловые приращения останавливаются на
+                -- последнем цикле присутствия, а t_close берётся из первого
+                -- промаха — между ними пропадал ровно один период опроса.
+                -- Воздействие астрономическое, значит оно и есть t_close-t_open.
+                active_sec = GREATEST(
+                    active_sec, EXTRACT(EPOCH FROM ($2 - t_open))
+                ),
+                updated_at = now()
             WHERE id = $1 AND t_close IS NULL
         """, episode_id, t_close, reason)
     finally:

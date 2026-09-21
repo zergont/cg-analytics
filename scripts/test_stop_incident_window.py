@@ -177,6 +177,9 @@ st = standing_faults(FAULTS, STOP_A)
 names = {e["name"] for e in st}
 check("Уровень ОЖ ниже нормы" in names, f"9a: давно висящая маска не в срезе: {names}")
 check("Давно снятое" not in names, "9б: снятая маска попала в срез")
+# Маска, поднявшаяся В момент останова, — это его причина, а не «висело»
+check("Температура ОЖ" not in names,
+      f"9б2: маска самой аварии попала в срез «висело»: {names}")
 old_e = next((e for e in st if e["name"] == "Уровень ОЖ ниже нормы"), None)
 if old_e:
     check(abs(old_e["age_sec"] - (STOP_A - T(10, 0)).total_seconds()) < 1,

@@ -386,7 +386,13 @@ def extract_alarm_text(s: dict) -> str | None:
     analytics_alarms = s.get("analytics_alarms", [])
 
     if panel_sev != "норма" and panel_alarms:
-        return panel_alarms[0].get("description") or panel_alarms[0].get("scenario")
+        # Самая тяжёлая, а не первая по порядку. Порядок — это порядок
+        # обхода детекций, и 20.09 разбор аварийного останова вышел
+        # озаглавлен предупреждением по температуре ОЖ: выглядело так,
+        # будто саму аварию никто не разбирал.
+        _rank = {"SHUTDOWN": 3, "WARNING": 2, "CAUTION": 1}
+        top = max(panel_alarms, key=lambda a: _rank.get(a.get("severity"), 0))
+        return top.get("description") or top.get("scenario")
     if analytics_sev == "предупреждение" and analytics_alarms:
         return analytics_alarms[0].get("description") or analytics_alarms[0].get("scenario")
     return None

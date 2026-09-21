@@ -228,10 +228,17 @@ def build_summary_md(
     # по снятию аварийной маски, а не по полной чистоте (v4.9.74)
     _cc = getattr(segments[-1], "cause_close", None) if segments else None
     if _cc in ("FAULT_CLEARED", "SHUTDOWN_CLEARED"):
+        # Якорь зависит от того, ЧТО именно устранили. На резе по снятию
+        # аварийной маски строка называется «Авария снята» — значит и мерить
+        # надо от аварии, а не от предупреждения, случившегося раньше.
+        # Наблюдалось 20.09: строка показывала 16м19с от предупреждения по
+        # температуре ОЖ, тогда как авария (кнопка) длилась 15м39с.
+        _anchor_sev = (("SHUTDOWN",) if _cc == "SHUTDOWN_CLEARED"
+                       else ("SHUTDOWN", "WARNING"))
         panel_eps = [
             e for e in episodes
             if e.get("source") == "panel"
-            and e.get("severity") in ("SHUTDOWN", "WARNING")
+            and e.get("severity") in _anchor_sev
             and e.get("t_open")
         ]
         t_first = min((e["t_open"] for e in panel_eps), default=None)

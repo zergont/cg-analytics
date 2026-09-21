@@ -351,7 +351,10 @@ def standing_faults(
     for fp in fault_periods or []:
         fs = _tz(fp["fault_start"])
         fe = _tz(fp["fault_end"]) if fp.get("fault_end") else None
-        if fs > stop_ts or (fe is not None and fe <= stop_ts):
+        # Строго раньше: маска, поднявшаяся В момент останова, — это его
+        # причина, она и так первой строкой в ленте. «Висело» значит «было
+        # до того», и запись «висит 0 с» только зашумляет срез.
+        if fs >= stop_ts or (fe is not None and fe <= stop_ts):
             continue
         out.append({
             "name": fp.get("fault_name_ru") or fp.get("fault_name")
