@@ -386,16 +386,28 @@ def extract_alarm_text(s: dict) -> str | None:
     analytics_alarms = s.get("analytics_alarms", [])
 
     if panel_sev != "норма" and panel_alarms:
-        # Самая тяжёлая, а не первая по порядку. Порядок — это порядок
-        # обхода детекций, и 20.09 разбор аварийного останова вышел
-        # озаглавлен предупреждением по температуре ОЖ: выглядело так,
-        # будто саму аварию никто не разбирал.
-        _rank = {"SHUTDOWN": 3, "WARNING": 2, "CAUTION": 1}
-        top = max(panel_alarms, key=lambda a: _rank.get(a.get("severity"), 0))
-        return top.get("description") or top.get("scenario")
+        return _compose_alarm_text(panel_alarms)
     if analytics_sev == "предупреждение" and analytics_alarms:
-        return analytics_alarms[0].get("description") or analytics_alarms[0].get("scenario")
+        return _compose_alarm_text(analytics_alarms)
     return None
+
+
+def _compose_alarm_text(alarms: list[dict]) -> str | None:
+    """Подпись СОСТАВА тревог: самая тяжёлая плюс счёт остальных.
+
+    Гейт разбирает не одну тревогу, а весь состав разом — в промпт уходят
+    все активные. Подписывать разбор одним именем значит врать: 20.09 разбор
+    аварийного останова вышел озаглавлен предупреждением по температуре ОЖ
+    (оно просто стояло первым в списке), и выглядело так, будто саму аварию
+    никто не разбирал.
+    """
+    if not alarms:
+        return None
+    rank = {"SHUTDOWN": 3, "WARNING": 2, "CAUTION": 1}
+    top = max(alarms, key=lambda a: rank.get(a.get("severity"), 0))
+    name = top.get("description") or top.get("scenario")
+    rest = len(alarms) - 1
+    return f"{name} + ещё {rest}" if rest > 0 else name
 
 
 def build_warning_prompt(
