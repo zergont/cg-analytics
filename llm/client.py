@@ -15,6 +15,7 @@
 import asyncio
 import json
 import logging
+import re
 from collections.abc import AsyncIterator
 
 import httpx
@@ -83,35 +84,80 @@ def get_llm_settings() -> dict:
 _OPENAI_COMPAT = ("lmstudio", "llamacpp", "deepseek")
 
 
+# Режим рассуждения (llm.registry.REASONING_LEVELS): "default" — ничего не передаём.
+_THINK_TAG_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+
+
+def strip_think(text: str) -> str:
+    """Убрать блок рассуждений <think>…</think>, если сервер вклеил его в текст ответа."""
+    if "<think>" not in text:
+        return text
+    cleaned = _THINK_TAG_RE.sub("", text)
+    # незакрытый <think> (оборванный ответ) — отрезаем всё после него
+    return cleaned.split("<think>", 1)[0].strip() if "<think>" in cleaned else cleaned.strip()
+
+
+def _apply_reasoning(payload: dict, provider: str, level: str, system: str) -> str:
+    """Перевести уровень рассуждения на язык провайдера; вернуть системный промпт.
+
+    OpenAI-совместимые (LM Studio, llama-server): reasoning_effort + enable_thinking;
+    Ollama: think (false | уровень); DeepSeek: thinking.type.
+    «off» дополнительно подмешивает /no_think — мягкий выключатель Qwen3,
+    работает даже если сервер не знает chat_template_kwargs.
+    """
+    if not level or level == "default":
+        return system
+    off = level == "off"
+    if provider == "deepseek":
+        payload["thinking"] = {"type": "disabled" if off else "enabled"}
+    elif provider in _OPENAI_COMPAT:
+        # LM Studio (проверено на qwen3.8): выключает только reasoning_effort="none",
+        # enable_thinking игнорирует; enable_thinking оставлен для llama-server/Qwen3
+        payload["reasoning_effort"] = "none" if off else level
+        payload["chat_template_kwargs"] = {"enable_thinking": not off}
+    else:  # ollama
+        payload["think"] = False if off else level
+    if off and provider != "deepseek":
+        system = (system + "\n/no_think") if system else "/no_think"
+    return system
+
+
 def _build_request(
     system: str, user: str, model: str | None, stream: bool, cfg: dict,
+    reasoning: str | None = None,
 ) -> tuple[str, dict, dict]:
-    """URL, payload и заголовки под провайдера из cfg (глобальный _cfg или запись реестра)."""
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user",   "content": user},
-    ]
+    """URL, payload и заголовки под провайдера из cfg (глобальный _cfg или запись реестра).
+
+    reasoning — переопределение режима рассуждения (иначе cfg["reasoning"]).
+    """
     mdl = (model or cfg["model"]).strip()
+    provider = cfg.get("provider", "ollama")
     headers: dict = {}
     if cfg.get("api_key"):
         headers["Authorization"] = f"Bearer {cfg['api_key']}"
-    if cfg.get("provider") in _OPENAI_COMPAT:
+    if provider in _OPENAI_COMPAT:
         # OpenAI-совместимый API: LM Studio (контекст задаётся при загрузке модели) и DeepSeek
-        return f"{cfg['base_url']}/v1/chat/completions", {
+        url, payload = f"{cfg['base_url']}/v1/chat/completions", {
             "model":       mdl,
-            "messages":    messages,
             "stream":      stream,
             "temperature": cfg["temperature"],
-        }, headers
-    return f"{cfg['base_url']}/api/chat", {
-        "model":    mdl,
-        "messages": messages,
-        "stream":   stream,
-        "options": {
-            "temperature": cfg["temperature"],
-            "num_ctx":     cfg["num_ctx"],
-        },
-    }, headers
+        }
+    else:
+        url, payload = f"{cfg['base_url']}/api/chat", {
+            "model":    mdl,
+            "stream":   stream,
+            "options": {
+                "temperature": cfg["temperature"],
+                "num_ctx":     cfg["num_ctx"],
+            },
+        }
+    level = reasoning if reasoning is not None else cfg.get("reasoning", "default")
+    system = _apply_reasoning(payload, provider, level, system)
+    payload["messages"] = [
+        {"role": "system", "content": system},
+        {"role": "user",   "content": user},
+    ]
+    return url, payload, headers
 
 
 async def _iter_ollama_stream(response) -> AsyncIterator[str]:
@@ -168,6 +214,7 @@ async def chat_stream(
     model: str | None = None,
     stream: bool | None = None,
     entry: dict | None = None,
+    reasoning: str | None = None,
 ) -> AsyncIterator[str]:
     """Ответ LLM токен за токеном (или одним блоком при stream=False).
 
@@ -181,7 +228,7 @@ async def chat_stream(
     """
     cfg = entry if entry is not None else _cfg
     use_stream = cfg.get("stream", True) if stream is None else stream
-    url, payload, headers = _build_request(system, user, model, use_stream, cfg)
+    url, payload, headers = _build_request(system, user, model, use_stream, cfg, reasoning)
 
     logger.info("LLM запрос: provider=%s model=%s prompt_len=%d stream=%s",
                 cfg.get("provider"), payload["model"], len(user), use_stream)
@@ -233,6 +280,7 @@ async def chat_stream(
 async def chat(
     system: str, user: str, *, model: str | None = None,
     entry: dict | None = None, stream: bool | None = None,
+    reasoning: str | None = None,
 ) -> str:
     """Ответ LLM одной строкой (с ретраями).
 
@@ -242,8 +290,9 @@ async def chat(
     """
     use_stream = stream if stream is not None else False
     parts = [t async for t in chat_stream(system, user, model=model,
-                                          stream=use_stream, entry=entry)]
-    return "".join(parts).strip()
+                                          stream=use_stream, entry=entry,
+                                          reasoning=reasoning)]
+    return strip_think("".join(parts)).strip()
 
 
 async def list_server_models(provider: str, base_url: str, api_key: str = "") -> list[str]:

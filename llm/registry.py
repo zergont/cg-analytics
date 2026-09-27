@@ -21,6 +21,8 @@
   max_ctx_tokens — паспортный лимит контекста: по нему проактивный роутинг
                    решает, влезает ли сегмент в модель
   temperature, num_ctx, stream — параметры генерации (per-модель)
+  reasoning      — режим рассуждения: default (не передаём) | off | low |
+                   medium | high | xhigh; клиент переводит на язык провайдера
   max_concurrent — лимит одновременных запросов к подключению
                    (локальные — 1, чтобы не выгрызать слоты GPU)
 
@@ -40,6 +42,7 @@ REGISTRY_SETTING_KEY = "llm_model_registry"
 
 ENTRY_PROVIDERS = ("ollama", "lmstudio", "llamacpp", "deepseek", "anthropic")
 ENTRY_TYPES     = ("llm", "api")
+REASONING_LEVELS = ("default", "off", "low", "medium", "high", "xhigh")
 # Локальные серверы: по умолчанию строго последовательно (один запрос за раз)
 LOCAL_PROVIDERS = ("ollama", "lmstudio", "llamacpp")
 
@@ -103,6 +106,9 @@ def normalize_entry(raw: dict) -> dict:
         "temperature":    temperature,
         "num_ctx":        num_ctx,
         "stream":         bool(raw.get("stream", True)),
+        "reasoning":      (str(raw.get("reasoning", "default")).strip()
+                           if str(raw.get("reasoning", "default")).strip() in REASONING_LEVELS
+                           else "default"),
         "max_concurrent": max_conc,
     }
 

@@ -34,6 +34,22 @@
                                placeholder="{{ llm.model }}">
                     </div>
 
+                    <!-- Рассуждение -->
+                    <div class="mb-3">
+                        <label class="form-label small fw-semibold">Рассуждение
+                            <span class="text-muted fw-normal">(пусто — как в паспорте подключения)</span>
+                        </label>
+                        <select name="reasoning" id="pg-reasoning" class="form-select form-select-sm">
+                            <option value="">— как в паспорте —</option>
+                            <option value="default">по умолчанию модели (не передавать)</option>
+                            <option value="off">выкл</option>
+                            <option value="low">low</option>
+                            <option value="medium">medium</option>
+                            <option value="high">high</option>
+                            <option value="xhigh">xhigh</option>
+                        </select>
+                    </div>
+
                     <!-- Стриминг -->
                     <div class="mb-3">
                         <div class="form-check">

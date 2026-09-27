@@ -921,6 +921,7 @@ async def llm_registry_save(request: Request):
         "temperature":    form.get("temperature", "0.1"),
         "num_ctx":        form.get("num_ctx", ""),
         "stream":         form.get("stream") == "on",
+        "reasoning":      form.get("reasoning", "default"),
         "max_concurrent": form.get("max_concurrent", ""),
     })
     await analytics.set_app_setting(llm_registry.REGISTRY_SETTING_KEY, llm_registry.serialize())
@@ -1072,6 +1073,7 @@ async def ai_playground_run(request: Request):
     system_prompt = str(form.get("system_prompt", "")).strip()
     user_message  = str(form.get("user_message", "")).strip()
     use_stream    = form.get("stream") == "on"
+    reasoning     = str(form.get("reasoning", "")).strip() or None   # None — как в паспорте
 
     entry = _get_llm_entry(entry_id) if entry_id else None
     if entry:
@@ -1086,6 +1088,7 @@ async def ai_playground_run(request: Request):
                 async for token in chat_stream(
                     system_prompt, user_message,
                     model=model_override or None, stream=use_stream, entry=entry,
+                    reasoning=reasoning,
                 ):
                     raw_chunks.append(token)
                     yield f"data: {_json.dumps({'token': token})}\n\n"
