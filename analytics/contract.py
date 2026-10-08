@@ -80,6 +80,16 @@ class DerivedMetrics:
     neg_seq_i2_pct_max: Optional[float] = None      # I₂% макс в подсегменте
     neg_seq_i2_pct_med: Optional[float] = None      # I₂% медиана
     neg_seq_i2_duration_sec: Optional[float] = None  # время I₂% > порога приближения
+    # ── Перекос фазных токов и ток нейтрали (v4.9.97) ────────────────────────
+    # Обе — в % номинального тока генератора, по реальным замерам (без ff).
+    # *_run_sec — самый длинный НЕПРЕРЫВНЫЙ участок выше порога детектора:
+    # одиночные всплески в норме бывают, длительных — нет.
+    phase_spread_pct_max: Optional[float] = None     # (I_max − I_min) / I_ном, %
+    phase_spread_pct_med: Optional[float] = None
+    phase_spread_run_sec: Optional[float] = None
+    neutral_current_pct_max: Optional[float] = None  # |Σ I_k| / I_ном, % (углы по P, Q)
+    neutral_current_pct_med: Optional[float] = None
+    neutral_current_run_sec: Optional[float] = None
     # ── Справочные метрики несимметрии (НЕ основа детектора) ────────────────
     current_imbalance_pct_max: Optional[float] = None   # грубый перекос токов (справочно)
     current_imbalance_pct_med: Optional[float] = None

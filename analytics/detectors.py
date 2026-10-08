@@ -56,6 +56,14 @@ def run_all_detectors(
     if cfg.det("NEGATIVE_SEQUENCE", "enabled", default=True) and run_state in _ns_valid:
         detections.extend(_detect_negative_sequence(derived, seg_start, cfg))
 
+    # Перекос фазных токов и ток нейтрали (v4.9.97): то, чего I₂ не видит —
+    # провал одной фазы с током через нейтраль. Пороги из норм, см. KB.
+    for _scn, _fn in (("PHASE_CURRENT_SPREAD", _detect_phase_current_spread),
+                      ("NEUTRAL_CURRENT", _detect_neutral_current)):
+        _valid = set(cfg.det(_scn, "valid_run_states", default=[3]) or [3])
+        if cfg.det(_scn, "enabled", default=True) and run_state in _valid:
+            detections.extend(_fn(derived, seg_start, cfg))
+
     if cfg.det("COOLING_FAILURE", "enabled", default=True):
         detections.extend(_detect_cooling_failure(characteristics, derived, run_state, seg_start, seg_end, cfg))
 
@@ -194,7 +202,9 @@ def _detect_negative_sequence(
     Заводская защита PCC3300 (Neg Seq Overcurrent) реагирует на I₂%, а НЕ на
     грубый перекос |I_k - I_avg|/I_avg (расхождение ~в 6-8 раз).
 
-    Предупреждаем с зазором 10% (до заводского порога 12%).
+    Порог — из паспорта генератора, а не от заводской уставки панели: Stamford
+    (генераторы на Cummins) допускает длительно ≤8% номинала и советует защиту
+    на 8%; уставка PCC3300 12% выше этого предела. Предупреждаем раньше (KB).
     Gate: RUN_STATE=3 (проверяется в run_all_detectors).
     """
     i2_pct = derived.neg_seq_i2_pct_max
@@ -203,9 +213,10 @@ def _detect_negative_sequence(
     if i2_pct is None:
         return []
 
-    prox_thr = float(cfg.det("NEGATIVE_SEQUENCE", "i2_proximity_warning_pct", default=10.0))
+    prox_thr = float(cfg.det("NEGATIVE_SEQUENCE", "i2_proximity_warning_pct", default=6.0))
     dur_thr = float(cfg.det("NEGATIVE_SEQUENCE", "duration_warning_sec", default=60.0))
     factory_thr = float(cfg.det("NEGATIVE_SEQUENCE", "factory_threshold_pct", default=12.0))
+    norm_ref = cfg.det("NEGATIVE_SEQUENCE", "norm_ref", default="")
 
     if i2_pct < prox_thr:
         return []
@@ -219,7 +230,8 @@ def _detect_negative_sequence(
         source="METRIC_RULE",
         trigger=(
             f"I₂={i2_pct:.1f}% > {prox_thr:.0f}% "
-            f"(заводской порог PCC3300: {factory_thr:.0f}%) "
+            f"(заводской порог PCC3300: {factory_thr:.0f}%"
+            + (f"; {norm_ref}" if norm_ref else "") + ") "
             f"за {dur:.0f}с > {dur_thr:.0f}с"
         ),
         related_roles=[
@@ -235,6 +247,97 @@ def _detect_negative_sequence(
             "duration_sec": dur,
             "proximity_threshold_pct": prox_thr,
             "factory_threshold_pct": factory_thr,
+            "norm_ref": norm_ref or None,
+        },
+    )]
+
+
+# ── PHASE_CURRENT_SPREAD / NEUTRAL_CURRENT ───────────────────────────────────
+
+def _detect_phase_current_spread(
+    derived: DerivedMetrics,
+    seg_start: datetime,
+    cfg: AnalyticsConfig,
+) -> list[Detection]:
+    """Перекос фазных токов: I_max − I_min в % номинального тока генератора.
+
+    Норма — ПТЭД 1993 п. 4.1.8: длительная работа ДЭС допустима при разности
+    токов фаз не более 20% номинального. В отличие от I₂ видит провал одной
+    фазы: ток уходит в нейтраль, обратная последовательность почти не растёт.
+    Срабатывание — непрерывное превышение не короче выдержки (KB).
+    """
+    return _metric_run_detection(
+        derived.phase_spread_pct_max, derived.phase_spread_pct_med,
+        derived.phase_spread_run_sec, seg_start, cfg,
+        scenario="PHASE_CURRENT_SPREAD", thr_key="spread_warning_pct", thr_default=20.0,
+        what="Перекос фазных токов I_max − I_min",
+        related=["CURRENT_L1", "CURRENT_L2", "CURRENT_L3"],
+        description_key="PHASE_CURRENT_SPREAD.above_norm",
+    )
+
+
+def _detect_neutral_current(
+    derived: DerivedMetrics,
+    seg_start: datetime,
+    cfg: AnalyticsConfig,
+) -> list[Detection]:
+    """Ток нейтрали в % номинального тока генератора.
+
+    Норма — ГОСТ 11677-85 п. 3.9.6 (нейтраль НН трансформатора Y/Yн: 25%
+    номинального тока длительно) и Stamford AGN 017 (нагрузка фаза–нейтраль
+    не более 25% номинала генератора). Панель PCC3300 ток нейтрали не
+    контролирует — защиты 50N/51N у неё нет, это видит только аналитика.
+    """
+    return _metric_run_detection(
+        derived.neutral_current_pct_max, derived.neutral_current_pct_med,
+        derived.neutral_current_run_sec, seg_start, cfg,
+        scenario="NEUTRAL_CURRENT", thr_key="neutral_warning_pct", thr_default=25.0,
+        what="Ток нейтрали",
+        related=["CURRENT_L1", "CURRENT_L2", "CURRENT_L3",
+                 "ACTIVE_POWER_L1", "ACTIVE_POWER_L2", "ACTIVE_POWER_L3",
+                 "REACTIVE_POWER_L1", "REACTIVE_POWER_L2", "REACTIVE_POWER_L3"],
+        description_key="NEUTRAL_CURRENT.above_norm",
+    )
+
+
+def _metric_run_detection(
+    pct_max: float | None, pct_med: float | None, run_sec: float | None,
+    seg_start: datetime, cfg: AnalyticsConfig, *,
+    scenario: str, thr_key: str, thr_default: float, what: str,
+    related: list[str], description_key: str,
+) -> list[Detection]:
+    """Общий вид: метрика в % I_ном, порог и выдержка из KB, ссылка на норму.
+
+    run_sec — уже посчитанный в метриках самый длинный непрерывный участок
+    выше порога из KB, так что здесь он только сравнивается с выдержкой.
+    """
+    if pct_max is None or run_sec is None:
+        return []
+    thr = float(cfg.det(scenario, thr_key, default=thr_default))
+    dur_thr = float(cfg.det(scenario, "duration_warning_sec", default=60.0))
+    if pct_max < thr or run_sec < dur_thr:
+        return []
+    norm_ref = cfg.det(scenario, "norm_ref", default="")
+    return [Detection(
+        scenario=scenario,
+        severity=cfg.det(scenario, "severity_default", default="CAUTION"),
+        t_detected=_iso(seg_start),
+        source="METRIC_RULE",
+        trigger=(
+            f"{what}: до {pct_max:.0f}% номинального тока ≥ {thr:.0f}%"
+            + (f" ({norm_ref})" if norm_ref else "")
+            + f", непрерывно {run_sec:.0f}с ≥ {dur_thr:.0f}с"
+        ),
+        related_roles=related,
+        fault_codes=[],
+        description_key=description_key,
+        values={
+            "pct_max": pct_max,
+            "pct_med": pct_med,
+            "run_sec": run_sec,
+            "threshold_pct": thr,
+            "duration_threshold_sec": dur_thr,
+            "norm_ref": norm_ref or None,
         },
     )]
 

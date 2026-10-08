@@ -176,6 +176,18 @@ def _group_worst(scenario: str, values_list: list[dict]) -> str | None:
         vals, limits = _nums("value"), _nums("shutdown_limit")
         if vals and limits:
             return f"макс. {max(vals):.0f} при пороге {limits[0]:.0f}"
+    elif scenario in ("PHASE_CURRENT_SPREAD", "NEUTRAL_CURRENT"):
+        vals, thr = _nums("pct_max"), _nums("threshold_pct")
+        if vals:
+            refs = [v.get("norm_ref") for v in values_list if v.get("norm_ref")]
+            base = f"до {max(vals):.0f}% I_ном"
+            if thr:
+                base += f" при норме ≤{thr[0]:.0f}%"
+            return base + (f" ({refs[0]})" if refs else "")
+    elif scenario == "NEGATIVE_SEQUENCE":
+        vals, thr = _nums("i2_pct_max"), _nums("proximity_threshold_pct")
+        if vals:
+            return f"I₂ до {max(vals):.1f}% I_ном" + (f" при пороге {thr[0]:.0f}%" if thr else "")
     elif scenario == "RPM_UNDERSPEED":
         mins = _nums("rpm_min")
         if mins:

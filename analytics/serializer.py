@@ -34,7 +34,9 @@ _SEVERITY_EMOJI = {
 # Канонический словарь — corpus/preprocessor импортирует отсюда.
 SCENARIO_RU: dict[str, str] = {
     "LOAD_STEP":          "Резкий наброс/сброс нагрузки",
-    "NEGATIVE_SEQUENCE":  "Несимметрия фаз",
+    "NEGATIVE_SEQUENCE":  "Ток обратной последовательности",
+    "PHASE_CURRENT_SPREAD": "Перекос фазных токов",
+    "NEUTRAL_CURRENT":    "Ток нейтрали",
     "COOLING_FAILURE":    "Отклонения температуры охлаждающей жидкости",
     "OIL_DILUTION":       "Пониженное давление масла",
     "COKING_RISK":        "Длительная работа на малой нагрузке (риск нагара)",

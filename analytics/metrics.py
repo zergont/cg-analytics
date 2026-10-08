@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import cmath
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .contract import Characteristic, DerivedMetrics
@@ -331,7 +331,7 @@ def compute_derived_metrics(
             neg_seq_i2_pct_med = _median(pcts)
 
             # Суммарное время I₂% > порога приближения к заводской защите
-            i2_prox = float(cfg.det("NEGATIVE_SEQUENCE", "i2_proximity_warning_pct", default=10.0))
+            i2_prox = float(cfg.det("NEGATIVE_SEQUENCE", "i2_proximity_warning_pct", default=6.0))
             dur = 0.0
             for j in range(len(i2_pct_series) - 1):
                 ts_j, pct_j = i2_pct_series[j]
@@ -339,6 +339,71 @@ def compute_derived_metrics(
                 if pct_j > i2_prox:
                     dur += (ts_next - ts_j).total_seconds()
             neg_seq_i2_duration_sec = dur if dur > 0 else None
+
+    # ── Перекос фазных токов и ток нейтрали (v4.9.97) ────────────────────────
+    # Заводские защиты PCC3300 такую картину не видят: защиты по току нейтрали
+    # нет, а I₂ в % номинала при провале одной фазы остаётся единицами
+    # процентов. 29.09.2026 (Сининда, перед сгоранием повышающего
+    # трансформатора): L3 упала до ~10% от L1/L2, ток нейтрали ~1440 А, I₂ —
+    # 2–4% номинала. Нормируем на номинальный ток, как и I₂: на малой нагрузке
+    # перекос в 20% номинала просто не набирается, шум отсекается сам.
+    #
+    # Ряд строится по ПАКЕТАМ связи с удержанием последнего значения каждого
+    # регистра (_held_samples), а не по совпадению реальных строк: роутер шлёт
+    # регистр только при изменении, и пофазная Q молчит до 200 с — точное
+    # совпадение девяти регистров рвало бы непрерывность, а мёртвая фаза с
+    # постоянным нулём не попадала бы в ряд вовсе.
+    phase_spread_pct_max: float | None = None
+    phase_spread_pct_med: float | None = None
+    phase_spread_run_sec: float | None = None
+    neutral_current_pct_max: float | None = None
+    neutral_current_pct_med: float | None = None
+    neutral_current_run_sec: float | None = None
+    _i_addrs = [_addr(f"CURRENT_L{k}") for k in (1, 2, 3)]
+    _p_addrs = [_addr(f"ACTIVE_POWER_L{k}") for k in (1, 2, 3)]
+    _q_addrs = [_addr(f"REACTIVE_POWER_L{k}") for k in (1, 2, 3)]
+    if i_nominal_a > 0 and all(_i_addrs):
+        max_gap = heartbeat * max_mult
+        spread_thr = float(cfg.det("PHASE_CURRENT_SPREAD", "spread_warning_pct", default=20.0))
+        neutral_thr = float(cfg.det("NEUTRAL_CURRENT", "neutral_warning_pct", default=25.0))
+        _hb = cfg.seg("data_quality", "heartbeat_addr", default=None)
+        hb_addr = int(_hb) if _hb is not None else None
+
+        with_pq = all(_p_addrs) and all(_q_addrs)
+        addrs = _i_addrs + ((_p_addrs + _q_addrs) if with_pq else [])
+        samples = _held_samples(
+            {a: _rows_in(a) for a in addrs},
+            [ts for ts, _ in _rows_in(hb_addr)] if hb_addr else [],
+            gaps, max_gap, heartbeat / 2,
+        )
+        spread: list[tuple[datetime, float]] = []
+        neutral: list[tuple[datetime, float]] = []
+        for ts, held in samples:
+            cur = [held.get(a) for a in _i_addrs]
+            if any(v is None for v in cur):
+                continue
+            spread.append((ts, (max(cur) - min(cur)) / i_nominal_a * 100))
+            if with_pq:
+                p_ = [held.get(a) for a in _p_addrs]
+                q_ = [held.get(a) for a in _q_addrs]
+                if any(v is None for v in p_ + q_):
+                    continue
+                i_n = _compute_neutral_current(cur, p_, q_)
+                if i_n is not None:
+                    neutral.append((ts, i_n / i_nominal_a * 100))
+        # Максимум — устойчивый (держится хотя бы два пакета подряд): на скачке
+        # нагрузки одна фаза приходит новым значением раньше двух других, и
+        # один пакет даёт фантомный перекос (у ДЭС №3 — 61% на одном замере).
+        # Детектору это не мешает — ему нужна выдержка, — но в отчёте такой
+        # максимум сбивал бы с толку.
+        if spread:
+            phase_spread_pct_max = _sustained_max(spread, max_gap)
+            phase_spread_pct_med = _median([v for _, v in spread])
+            phase_spread_run_sec = _longest_run_at_or_above(spread, spread_thr, max_gap)
+        if neutral:
+            neutral_current_pct_max = _sustained_max(neutral, max_gap)
+            neutral_current_pct_med = _median([v for _, v in neutral])
+            neutral_current_run_sec = _longest_run_at_or_above(neutral, neutral_thr, max_gap)
 
     # S-consistency: |√(P²+Q²) - S_тег|
     p_total = _rows_in(_addr("ACTIVE_POWER_TOTAL") or 0) if _addr("ACTIVE_POWER_TOTAL") else []
@@ -459,6 +524,12 @@ def compute_derived_metrics(
         neg_seq_i2_pct_max=_r(neg_seq_i2_pct_max),
         neg_seq_i2_pct_med=_r(neg_seq_i2_pct_med),
         neg_seq_i2_duration_sec=_r(neg_seq_i2_duration_sec),
+        phase_spread_pct_max=_r(phase_spread_pct_max),
+        phase_spread_pct_med=_r(phase_spread_pct_med),
+        phase_spread_run_sec=_r(phase_spread_run_sec),
+        neutral_current_pct_max=_r(neutral_current_pct_max),
+        neutral_current_pct_med=_r(neutral_current_pct_med),
+        neutral_current_run_sec=_r(neutral_current_run_sec),
         current_imbalance_pct_max=_r(current_imbalance_pct_max),
         current_imbalance_pct_med=_r(current_imbalance_pct_med),
         power_imbalance_pct_max=_r(power_imbalance_pct_max),
@@ -565,6 +636,132 @@ def _time_below(
         if v < threshold:
             total += (_tz(next_ts) - _tz(ts)).total_seconds()
     return total if total > 0 else None
+
+
+def _held_samples(
+    rows_by_addr: dict[int, list[tuple[datetime, float]]],
+    packet_ts: list[datetime],
+    gaps: list[dict[str, Any]],
+    max_gap_sec: float,
+    tol_sec: float,
+) -> list[tuple[datetime, dict[int, float]]]:
+    """Значения регистров на каждый пакет связи, с удержанием последнего.
+
+    Роутер шлёт регистр только при изменении: молчание значит «не
+    изменилось», пока связь жива. Поэтому значение держится, пока идут
+    пакеты, и сбрасывается только при потере связи — пауза между пакетами
+    длиннее max_gap_sec или дыра из data_gaps между ними. Начальное значение
+    на старте подсегмента дают строки forward-fill первого пакета.
+
+    Якоря — пакеты (пинг-регистр); если его нет — моменты любых строк этих
+    регистров. Строки в пределах tol_sec после пакета относятся к нему.
+    """
+    anchors = sorted(packet_ts) or sorted({ts for rows in rows_by_addr.values() for ts, _ in rows})
+    if not anchors:
+        return []
+    # Окно «строка относится к пакету» не шире половины интервала между
+    # пакетами: иначе в один момент подмешиваются значения СЛЕДУЮЩЕГО пакета.
+    # С ±15 с при пакетах раз в 9–10 с у ДЭС №3 получался фантомный перекос
+    # 61% на скачке нагрузки (одна фаза — новое значение, две — старые).
+    steps = sorted((b - a).total_seconds() for a, b in zip(anchors, anchors[1:]))
+    if steps:
+        tol_sec = min(tol_sec, steps[len(steps) // 2] / 2)
+    ordered = {a: sorted(rows, key=lambda r: r[0]) for a, rows in rows_by_addr.items()}
+    pos = {a: 0 for a in ordered}
+    held: dict[int, float] = {}
+    out: list[tuple[datetime, dict[int, float]]] = []
+    prev: datetime | None = None
+    for ts in anchors:
+        broken = prev is not None and (
+            (ts - prev).total_seconds() > max_gap_sec or _gap_between(prev, ts, gaps)
+        )
+        if broken:
+            held = {}
+        for a, rows in ordered.items():
+            k = pos[a]
+            while k < len(rows) and rows[k][0] <= ts + timedelta(seconds=tol_sec):
+                # После обрыва связи старое значение не принимаем: только то,
+                # что пришло вместе с этим пакетом
+                if not broken or rows[k][0] >= ts - timedelta(seconds=tol_sec):
+                    held[a] = rows[k][1]
+                k += 1
+            pos[a] = k
+        out.append((ts, dict(held)))
+        prev = ts
+    return out
+
+
+def _sustained_max(
+    series: list[tuple[datetime, float]], max_gap_sec: float,
+) -> float | None:
+    """Максимум, державшийся хотя бы два соседних замера (без дыры связи).
+
+    Одиночный замер — максимум его самого, только если ряд из одной точки.
+    """
+    if not series:
+        return None
+    if len(series) == 1:
+        return series[0][1]
+    best: float | None = None
+    for (ts, v), (ts_next, v_next) in zip(series, series[1:]):
+        if (ts_next - ts).total_seconds() <= max_gap_sec:
+            m = min(v, v_next)
+            best = m if best is None else max(best, m)
+    return best
+
+
+def _gap_between(t0: datetime, t1: datetime, gaps: list[dict[str, Any]]) -> bool:
+    """Есть ли дыра связи из data_gaps, пересекающая (t0, t1)."""
+    for g in gaps or []:
+        gs = _tz(g["gap_start"])
+        ge = _tz(g["gap_end"]) if g.get("gap_end") else None
+        if gs < t1 and (ge is None or ge > t0):
+            return True
+    return False
+
+
+def _compute_neutral_current(
+    currents: list[float], p: list[float], q: list[float],
+) -> float | None:
+    """Ток нейтрали |I_L1 + I_L2 + I_L3| по модулям токов и пофазным P, Q.
+
+    Угол тока фазы относительно её напряжения — atan2(Q, P); напряжения
+    считаются симметричными (0°, −120°, +120°), как и в расчёте I₂.
+
+    В отличие от I₂, нулевой ток фазы здесь законен: это и есть провал фазы,
+    который ищем, — вектор просто нулевой. Пропускаем замер, только если ток
+    есть, а угол взять не из чего (P и Q обе ≈ 0).
+    """
+    total = 0j
+    for k, theta in enumerate((0.0, -2 * math.pi / 3, 2 * math.pi / 3)):
+        i_mag = currents[k]
+        if i_mag < 1e-3:
+            continue
+        if abs(p[k]) < 1e-4 and abs(q[k]) < 1e-4:
+            return None
+        total += i_mag * cmath.exp(1j * (theta - math.atan2(q[k], p[k])))
+    return abs(total)
+
+
+def _longest_run_at_or_above(
+    series: list[tuple[datetime, float]], threshold: float, max_gap_sec: float,
+) -> float | None:
+    """Самый длинный непрерывный участок, где значение ≥ порога, сек.
+
+    Непрерывность рвётся на замере ниже порога и на дыре в данных длиннее
+    max_gap_sec: дыра — не подтверждение, что превышение длилось. Именно
+    непрерывный участок, а не сумма: одиночные всплески в норме бывают
+    (у ДЭС №3 за месяц — до 23% перекоса), длительных — нет.
+    """
+    best = cur = 0.0
+    for (ts, v), (ts_next, _) in zip(series, series[1:]):
+        dt = (ts_next - ts).total_seconds()
+        if v >= threshold and dt <= max_gap_sec:
+            cur += dt
+            best = max(best, cur)
+        else:
+            cur = 0.0
+    return best if best > 0 else None
 
 
 def _compute_neg_seq_i2(
