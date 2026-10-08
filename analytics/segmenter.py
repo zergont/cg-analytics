@@ -284,27 +284,73 @@ def _split_stop_on_shutdown(
     return out
 
 
+def fault_type_shutdown(cfg) -> tuple[int | None, frozenset[int]]:
+    """Регистр типа последней неисправности и его значения аварийной тяжести.
+
+    Кодировка своя у каждого контроллера, поэтому объявляет её он сам — в
+    карте регистров, ключом `shutdown_states` у роли LAST_FAULT_TYPE. Нет
+    объявления — источник выключен, аварию определяют только маски.
+    """
+    try:
+        addr = cfg.role_to_addr("LAST_FAULT_TYPE")
+        states = (cfg.register_map.get(addr) or {}).get("shutdown_states") if addr else None
+        if not addr or not states:
+            return None, frozenset()
+        return addr, frozenset(int(v) for v in states)
+    except (AttributeError, TypeError, ValueError):
+        return None, frozenset()
+
+
 def shutdown_intervals(
     fault_periods: list[dict], cfg, tt: datetime,
+    enum_periods: list[dict] | None = None,
 ) -> list[tuple[datetime, datetime]]:
-    """Слитые интервалы, в которых висела хоть одна маска аварийной тяжести.
+    """Слитые интервалы, в которых панель держала аварию.
+
+    Два источника, оба — реакция самой панели:
+      - маски аварийной тяжести;
+      - тип последней неисправности (PCC3300: 40013 = Shutdown / Shutdown
+        with Cooldown).
+    Второй нужен потому, что не у каждого кода есть бит в масках. 1452 «Отказ
+    включения автомата» роняет машину в Shutdown, но бита не имеет: за 45 суток
+    так прошли мимо шесть аварий ДГУ №1 из семнадцати. Тип читается в одном
+    кадре опроса с RUN_STATE — в момент останова он уже на месте, — и уходит
+    ровно на сбросе: на всех семнадцати совпал со снятием масок с точностью до
+    кадра и ни разу не пережил пуск.
 
     Слияние обязательно: авария, поднявшаяся поверх ещё не снятой, должна
     продлевать покрытие, иначе рез уедет к снятию первой, а не последней.
-    Незакрытая маска считается активной до tt.
+    Источники сливаются так же — рез идёт по тому, что снялось позже.
+    Незакрытый интервал считается активным до tt.
 
     Общая для сегментатора (вид стоп-периода и место реза) и «Следователя»
     (какая из прошлых стоянок была нормальной) — шкала тяжести должна быть
     одна, иначе якорь и нарезка разойдутся.
     """
+    tt = _tz(tt)
     out: list[tuple[datetime, datetime]] = []
     for fp in fault_periods:
         if cfg.bitmap_severity(fp.get("severity") or "none") != "SHUTDOWN":
             continue
         fs = _tz(fp["fault_start"])
-        fe = _tz(fp["fault_end"]) if fp.get("fault_end") else _tz(tt)
+        fe = _tz(fp["fault_end"]) if fp.get("fault_end") else tt
         if fe > fs:
             out.append((fs, fe))
+
+    ft_addr, ft_states = fault_type_shutdown(cfg)
+    if ft_addr is not None:
+        for p in enum_periods or []:
+            if p.get("addr") != ft_addr:
+                continue
+            try:
+                if int(p.get("value")) not in ft_states:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            s = _tz(p["state_start"])
+            e = _tz(p["state_end"]) if p.get("state_end") else tt
+            if e > s:
+                out.append((s, e))
     return _merge_intervals(out)
 
 
@@ -313,26 +359,31 @@ def _classify_stop_periods(
     fault_periods: list[dict],
     cfg,
     tt: datetime,
+    enum_periods: list[dict] | None = None,
 ) -> list[dict]:
     """Разделить СТОП-периоды на два вида и поставить единственный рез.
 
-    Стоп считается аварийным, если в момент его начала активна маска аварийной
-    тяжести. Залипшей с прошлого раза такая маска быть не может: с активной
-    аварией машину не пустить, значит она и есть причина этого останова —
+    Стоп считается аварийным, если в момент его начала панель держит аварию:
+    активна маска аварийной тяжести или тип последней неисправности — Shutdown
+    (см. shutdown_intervals). Залипшей с прошлого раза такая авария быть не
+    может: с ней машину не пустить, значит она и есть причина этого останова —
     искать её в прошлом не нужно.
 
-    Рез ровно один: там, где снята последняя активная аварийная маска. Голова —
+    Рез ровно один: там, где панель сняла аварию последней. Голова —
     АВАРИЙНЫЙ СТОП, хвост — простой СТОП «готов к пуску». Не сняли до пуска —
     реза нет, весь стоп аварийный. Авария, возникшая ПОСРЕДИ простого стопа
     (кнопка на стоящей машине), вид не меняет и не режет: её видно цветом
     живого сегмента и в хронологии. Так инцидент 17.07 решается без вырезания
     красного куска.
 
+    enum_periods — все enum-периоды окна (нужен тип последней неисправности);
+    без них решают одни маски.
+
     Заменяет пару _split_stop_on_fault_cleared / _split_stop_on_shutdown: те
     резали по любой смене «грязно/чисто» и по входу в аварию и давали до пяти
     кусков на один стоп, включая вырожденные в секунды.
     """
-    shutdown_iv = shutdown_intervals(fault_periods, cfg, tt)
+    shutdown_iv = shutdown_intervals(fault_periods, cfg, tt, enum_periods)
 
     out: list[dict] = []
     for period in run_state_periods:
@@ -1247,7 +1298,7 @@ def segment(
     # Пока флаг выключен — поведение байт-в-байт прежнее.
     if bool(cfg.seg("stop_kind", "enabled", default=False)):
         run_state_periods = _classify_stop_periods(
-            run_state_periods, fault_periods, cfg, tt,
+            run_state_periods, fault_periods, cfg, tt, enum_periods,
         )
     else:
         run_state_periods = _split_stop_on_fault_cleared(

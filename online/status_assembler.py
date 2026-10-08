@@ -319,6 +319,9 @@ def build_structural_status(
         "panel_alarms":       panel_alarms,
         "analytics_alarms":   analytics_alarms,
         "key_params":         key_params,
+        # Вид стопа нарезки: аварийность здесь не только по маскам, но и по
+        # типу последней неисправности (40013), которого нет в детекциях
+        "stop_kind":          _stop_kind,
     }
 
 

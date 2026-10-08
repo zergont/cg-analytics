@@ -253,8 +253,9 @@ class Segment:
     subsegments: list[Subsegment]
     sequence_checks: list[dict[str, Any]]
     events: list[dict[str, Any]]
-    # Вид стоп-сегмента: 'EMERGENCY' — останов аварийный (в его начале активна
-    # маска аварийной тяжести), 'SIMPLE' — обычный. None у всех остальных
+    # Вид стоп-сегмента: 'EMERGENCY' — останов аварийный (в его начале панель
+    # держит аварию: маска аварийной тяжести или тип последней неисправности
+    # Shutdown, v4.9.94), 'SIMPLE' — обычный. None у всех остальных
     # режимов и у сегментов, нарезанных до появления модели (v4.9.67).
     stop_kind: Optional[str] = None
 

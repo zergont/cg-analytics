@@ -694,21 +694,27 @@ async def _load_incident_context(
     выборку не попадает. Из-за этого же у характер-гейта rs_before=None и за
     30 дней строился один акт на восемь аварий.
 
-    Здесь окно расширяется назад: сначала дешёвый поиск якоря по одному
-    регистру RUN_STATE и по маскам, затем полная загрузка от якоря. Три
-    запроса, и только когда в цикле закрывается аварийный стоп.
+    Здесь окно расширяется назад: сначала дешёвый поиск якоря по RUN_STATE,
+    типу последней неисправности и маскам, затем полная загрузка от якоря.
+    Три запроса, и только когда в цикле закрывается аварийный стоп. Тип
+    неисправности в поиске обязателен: без него прошлая авария без бита в
+    масках (1452) сойдёт за нормальный останов, и акт обрежет серию на ней.
 
     None — если догрузить не удалось; вызывающий работает на обычных данных.
     """
     from analytics import classifier as _clf
+    from analytics import source as _src
+    from analytics.segmenter import fault_type_shutdown
 
     stop_ts = _tz_utc(stop_ts)
     horizon = stop_ts - timedelta(seconds=_clf.BASELINE_SEARCH_SEC)
+    _ft_addr, _ = fault_type_shutdown(cfg)
+    _anchor_addrs = [_clf._ADDR_RUN_STATE] + ([_ft_addr] if _ft_addr else [])
     try:
         rs_periods, fault_periods = await asyncio.gather(
             _src.get_enum_periods(
                 router_sn, equip_type, panel_id, horizon, ts_to,
-                addrs=[_clf._ADDR_RUN_STATE],
+                addrs=_anchor_addrs,
             ),
             _src.get_fault_periods(
                 router_sn, equip_type, panel_id, horizon, ts_to,
@@ -718,11 +724,20 @@ async def _load_incident_context(
         anchor_ts, _reason = _clf.find_baseline_anchor(
             rs_periods, fault_periods, stop_ts, cfg
         )
+        load_from = anchor_ts - timedelta(seconds=_ACT_LOAD_MARGIN_SEC)
         enum_periods = await _src.get_enum_periods(
-            router_sn, equip_type, panel_id,
-            anchor_ts - timedelta(seconds=_ACT_LOAD_MARGIN_SEC), ts_to,
+            router_sn, equip_type, panel_id, load_from, ts_to,
             addrs=_src.enum_read_addrs(cfg),
         )
+        # Якорь может оказаться раньше горизонта: SQL отдаёт стоп-период,
+        # начавшийся до горизонта и закончившийся после, с настоящим началом.
+        # Тогда маски перечитываются от того же места, что и enum, — иначе
+        # окно акта заявляет покрытие, которого у масок нет.
+        if load_from < horizon:
+            fault_periods = await _src.get_fault_periods(
+                router_sn, equip_type, panel_id, load_from, ts_to,
+                fault_addrs=cfg.whitelist_fault,
+            )
         return enum_periods, fault_periods
     except Exception:
         logger.warning(

@@ -235,7 +235,10 @@ def find_baseline_anchor(
     тогда как следующая авария должна вбирать все предыдущие.
 
     Расхолаживания в условии НЕТ: останов без него бывает штатным, а
-    аварийность определяется маской в момент падения, и только ею.
+    аварийность определяется реакцией панели в момент падения, и только ею:
+    маской или типом последней неисправности (см. segmenter.shutdown_intervals).
+    Поэтому enum_periods должны нести и этот регистр, а не один RUN_STATE —
+    иначе авария без бита в масках сойдёт за нормальный останов.
 
     Причина — 'normal_stop' либо 'fallback'. Фолбэк (эталона в горизонте нет)
     — три последних стоп-периода, но не короче суток. Отсутствие эталона само
@@ -246,7 +249,9 @@ def find_baseline_anchor(
     stop_ts = _tz(stop_ts)
     rs = _periods_for(enum_periods, _ADDR_RUN_STATE)
     try:
-        parts = _classify_stop_periods(rs, fault_periods or [], cfg, stop_ts)
+        parts = _classify_stop_periods(
+            rs, fault_periods or [], cfg, stop_ts, enum_periods,
+        )
     except Exception:
         parts = rs
 

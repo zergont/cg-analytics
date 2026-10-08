@@ -172,7 +172,7 @@ async def _run_machine(conn, obs: dict, tf: datetime, tt: datetime,
         (p for p in enum_periods if p["addr"] == 40011),
         key=lambda p: p["state_start"])
 
-    parts = _classify_stop_periods(rs_periods, fault_periods, cfg, tt)
+    parts = _classify_stop_periods(rs_periods, fault_periods, cfg, tt, enum_periods)
     stops = [p for p in parts if int(p["value"]) == 0]
     emergencies = [p for p in stops if p.get("stop_kind") == "EMERGENCY"]
 

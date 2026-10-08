@@ -221,6 +221,47 @@ if inc_b:
     check(inc_b.get("events_total", 0) >= len(inc_b["chronology"]),
           "11б: events_total меньше показанного")
 
+
+# 12. Прошлая авария БЕЗ бита в масках (1452: ДГУ №1, вечер 17.09) не
+#     становится эталоном — ни сама, ни её хвост после сброса. Аварийность
+#     якорь узнаёт по 40013, а не только по маскам.
+class _CfgFT(_Cfg):
+    register_map = {40011: {"role": "RUN_STATE"},
+                    40013: {"role": "LAST_FAULT_TYPE", "shutdown_states": [3, 4]}}
+
+    def role_to_addr(self, role: str) -> int | None:
+        return next((a for a, m in self.register_map.items() if m.get("role") == role), None)
+
+
+def ftp(value: int, start: datetime, end: datetime | None) -> dict:
+    return {"addr": 40013, "value": value, "state_start": start,
+            "state_end": end, "label": f"FT={value}"}
+
+
+E1 = T(13, 26, 11)          # первая 1452: маски нет, 40013=4
+RESET_E1 = T(13, 28, 52)    # сброс — 40013 уходит в 0
+ENUM_1452 = [
+    rs(3, T(12, 0), NORMAL_STOP),
+    rs(0, NORMAL_STOP, T(13, 10)),
+    rs(3, T(13, 10), E1),
+    rs(0, E1, RESTART),
+    rs(3, RESTART, STOP_B),
+    rs(0, STOP_B, END_B),
+    ftp(0, T(12, 0), E1),
+    ftp(4, E1, RESET_E1),
+    ftp(0, RESET_E1, STOP_B),
+    ftp(4, STOP_B, None),
+]
+got, why = find_baseline_anchor(ENUM_1452, [], STOP_B, _CfgFT())
+check(got == NORMAL_STOP and why == "normal_stop",
+      f"12a: прошлая авария без бита в масках принята за эталон — якорь "
+      f"{got}/{why}, ожидали {NORMAL_STOP}")
+# Контроль: без объявления типа та же история даёт ложный эталон —
+# значит, тест действительно проверяет второй признак
+got, _ = find_baseline_anchor(ENUM_1452, [], STOP_B, CFG)
+check(got != NORMAL_STOP,
+      "12б: без объявления 40013 якорь всё равно нашёлся — тест ничего не проверяет")
+
 if _errors:
     print("ПРОВАЛЕНО:")
     for e in _errors:
