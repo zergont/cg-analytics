@@ -51,6 +51,12 @@ def _extract_detections(chars_json: Any) -> list[dict]:
     return detections
 
 
+def _stop_kind(chars_json: Any) -> str | None:
+    """Вид стоп-сегмента нарезки: 'EMERGENCY' / 'SIMPLE' / None."""
+    parsed = _parse_json(chars_json)
+    return parsed.get("stop_kind") if isinstance(parsed, dict) else None
+
+
 def _gate_suppressed(segment_row: dict, detections: list[dict]) -> bool:
     """Снял ли гейт (ИИ) аналитические предупреждения сегмента.
 
@@ -68,8 +74,17 @@ def _gate_suppressed(segment_row: dict, detections: list[dict]) -> bool:
     return has_analytics and compute_analytics_hash(detections) == suppressed
 
 
-def _extract_verdict(detections: list[dict], gate_suppressed: bool = False) -> tuple[str, str]:
+def _extract_verdict(
+    detections: list[dict],
+    gate_suppressed: bool = False,
+    stop_kind: str | None = None,
+) -> tuple[str, str]:
     """Вычислить вердикт и уровень тревоги из списка детекций.
+
+    Аварийный стоп — авария, даже если в детекциях её нет: 1452 «Отказ
+    включения автомата» роняет панель в Shutdown без бита в масках, и
+    видно это только по типу последней неисправности (40013), который
+    решает вид стопа, но в детекцию не идёт.
 
     Шкала серьёзности (4 уровня, ALARM исключён — в панелях его нет):
         НОРМА    🟢 — детекций нет / только INFO / аналитика снята ИИ
@@ -84,7 +99,7 @@ def _extract_verdict(detections: list[dict], gate_suppressed: bool = False) -> t
     """
     sevs = {d.get("severity") for d in detections if isinstance(d, dict) and d.get("severity")}
 
-    if "SHUTDOWN" in sevs:
+    if "SHUTDOWN" in sevs or stop_kind == "EMERGENCY":
         return "авария", "SHUTDOWN"
     if "WARNING" in sevs or "ALARM" in sevs:   # ALARM — легаси старых сегментов
         return "требует внимания", "WARNING"
@@ -385,7 +400,8 @@ def build_claude_input(segment_row: dict) -> str:
 
     detections = _extract_detections(chars_json)
     verdict, alarm_level = _extract_verdict(
-        detections, _gate_suppressed(segment_row, detections)
+        detections, _gate_suppressed(segment_row, detections),
+        _stop_kind(chars_json),
     )
     run_state_label = (
         RUN_STATE_RU.get(run_state, str(run_state))
@@ -413,4 +429,5 @@ def extract_verdict_alarm(segment_row: dict) -> tuple[str, str]:
     """Публичный метод: (verdict, alarm_level) для записи в БД."""
     chars_json = segment_row.get("characteristics_json")
     detections = _extract_detections(chars_json)
-    return _extract_verdict(detections, _gate_suppressed(segment_row, detections))
+    return _extract_verdict(detections, _gate_suppressed(segment_row, detections),
+                            _stop_kind(chars_json))

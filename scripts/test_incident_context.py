@@ -150,14 +150,15 @@ def main() -> int:
     check(len(fault_calls) == 2 and fault_calls[1] == want,
           f"6в: маски не перечитаны от якоря: {fault_calls}")
 
-    # 7. Статус движка несёт вид стопа — по нему гейт предупреждений
-    #    пропускает аварию, которую видно только по 40013 (детекций нет)
+    # 7. Статус движка несёт вид стопа и считает аварию, которую видно
+    #    только по 40013 (детекций нет), аварией — по обоим гейт
+    #    предупреждений её пропускает (v4.9.95)
     from online.status_assembler import build_structural_status
     st = build_structural_status({"run_state": 0,
                                   "characteristics_json": {"stop_kind": "EMERGENCY"},
                                   "active_detections_json": []})
-    check(st.get("stop_kind") == "EMERGENCY" and st.get("panel_severity") == "норма",
-          f"7: в статусе нет вида стопа: {st.get('stop_kind')!r}")
+    check(st.get("stop_kind") == "EMERGENCY" and st.get("panel_severity") == "авария",
+          f"7: статус аварии без детекций: {st.get('stop_kind')!r}/{st.get('panel_severity')!r}")
 
     if _errors:
         print(f"FAIL — {len(_errors)} расхождений:")

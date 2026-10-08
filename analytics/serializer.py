@@ -206,9 +206,14 @@ def build_summary_md(
         c for s in segments for c in (getattr(s, "sequence_checks", None) or [])
         if isinstance(c, dict) and not c.get("passed", True)
     ]
+    # Аварийный стоп — авария панели, даже если эпизода SHUTDOWN нет: 1452
+    # «Отказ включения автомата» роняет панель в Shutdown без бита в масках,
+    # и видно это только по типу последней неисправности (40013), который
+    # решает вид стопа, но в детекцию не идёт.
+    emergency = [s for s in segments if getattr(s, "stop_kind", None) == "EMERGENCY"]
 
     # ── Вердикт (догма v4.9.32: SHUTDOWN🔴 / WARNING🟠 / CAUTION🟡 / НОРМА🟢) ──
-    if panel_shutdown:
+    if panel_shutdown or emergency:
         a("## 🔴 АВАРИЯ — аварийный останов панели")
     elif panel_warning:
         a("## 🟠 ВНИМАНИЕ — предупреждение панели управления")
@@ -242,6 +247,18 @@ def build_summary_md(
             and e.get("t_open")
         ]
         t_first = min((e["t_open"] for e in panel_eps), default=None)
+        # Эпизода нет (авария без бита в масках) — якорь в начале аварийного
+        # стопа: 40013 входит в Shutdown в одном кадре с остановом. Только у
+        # головы, открытой самим остановом; продолжение после суточного реза
+        # (REPORT_START) начала аварии не знает, и врать временем не стоит.
+        if t_first is None and _cc == "SHUTDOWN_CLEARED":
+            _heads = [s.t_start for s in emergency
+                      if getattr(s, "cause_open", None) == "RUN_STATE_CHANGE"]
+            if _heads:
+                try:
+                    t_first = datetime.fromisoformat(min(_heads))
+                except (ValueError, TypeError):
+                    t_first = None
         t_end_iso = getattr(segments[-1], "t_end", None)
         if t_first is not None and t_end_iso:
             try:

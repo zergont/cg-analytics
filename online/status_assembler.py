@@ -244,6 +244,13 @@ def build_structural_status(
     panel_sev     = compute_panel_severity(active_dets)
     analytics_sev = compute_analytics_severity(dets_for_level)
     sev_level     = compute_severity_level(dets_for_level)
+    # Аварийный стоп — авария панели, даже когда в детекциях её нет: 1452
+    # «Отказ включения автомата» роняет панель в Shutdown без бита в масках,
+    # и видно это только по типу последней неисправности (40013), который
+    # решает вид стопа, но в детекцию не идёт. Предупреждение панели без
+    # останова (Warning в 40013) сюда не попадает — стоп тогда простой.
+    if _stop_kind == "EMERGENCY":
+        panel_sev = sev_level = "авария"
 
     # ── Активные тревоги с расшифровкой из справочника ──
     panel_alarms:     list[dict] = []
@@ -322,7 +329,36 @@ def build_structural_status(
         # Вид стопа нарезки: аварийность здесь не только по маскам, но и по
         # типу последней неисправности (40013), которого нет в детекциях
         "stop_kind":          _stop_kind,
+        "emergency_text":     (_emergency_text(panel_alarms, values, fault_ref)
+                               if _stop_kind == "EMERGENCY" else None),
     }
+
+
+def _emergency_text(panel_alarms: list[dict], values: dict, fault_ref=None) -> str:
+    """Подпись аварийного стопа: аварийная маска, иначе код панели из 40012.
+
+    У 1452 бита в масках нет, и из панельных тревог висит разве что CAUTION
+    «CommonAlarm при несброшенном коде» — подписать аварию им значило бы
+    назвать Shutdown предупреждением. Имя кода — из справочника: это
+    официальное название Cummins, а не сгенерированное описание.
+    """
+    shut = next((a for a in panel_alarms if a.get("severity") == "SHUTDOWN"), None)
+    if shut:
+        return shut.get("description") or shut.get("scenario") or "аварийный останов"
+    try:
+        code = int((values.get("LAST_FAULT_CODE") or {}).get("value") or 0)
+    except (TypeError, ValueError):
+        code = 0
+    if code <= 0:
+        return "аварийный останов"
+    name = None
+    if fault_ref:
+        try:
+            desc = (fault_ref.lookup(code) or {}).get("description") or {}
+            name = desc.get("ru") or desc.get("en")
+        except (TypeError, ValueError, AttributeError):
+            name = None
+    return f"аварийный останов, код {code}" + (f" — {name}" if name else "")
 
 
 def compute_fault_hash(s: dict) -> str:
@@ -359,7 +395,9 @@ def format_status_text(s: dict) -> str:
 
     parts = []
 
-    if panel_sev == "авария" and panel_alarms:
+    if s.get("emergency_text"):
+        parts.append(f"🔴 панель: {s['emergency_text']}")
+    elif panel_sev == "авария" and panel_alarms:
         desc = panel_alarms[0].get("description") or panel_alarms[0]["scenario"]
         parts.append(f"🔴 панель: {desc}")
     elif panel_sev == "внимание" and panel_alarms:
@@ -388,6 +426,11 @@ def extract_alarm_text(s: dict) -> str | None:
     panel_alarms     = s.get("panel_alarms", [])
     analytics_alarms = s.get("analytics_alarms", [])
 
+    # Аварийный стоп без аварийной маски (1452): в панельных тревогах самое
+    # тяжёлое — CAUTION, подписывать им аварию нельзя
+    if s.get("emergency_text") and not any(
+            a.get("severity") == "SHUTDOWN" for a in panel_alarms):
+        return s["emergency_text"]
     if panel_sev != "норма" and panel_alarms:
         return _compose_alarm_text(panel_alarms)
     if analytics_sev == "предупреждение" and analytics_alarms:
