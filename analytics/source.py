@@ -9,11 +9,14 @@
 
 """Чтение данных из основной БД телеметрии для аналитического блока.
 
-Читает ТОЛЬКО whitelist-регистры (ТЗ, раздел 2.3):
+Сегментация и детекторы читают ТОЛЬКО whitelist-регистры (ТЗ, раздел 2.3):
 - аналоговые → history_rich (addr IN whitelist_analog)
 - enum-периоды → enum_history (addr IN [40011, 40010])
 - fault-периоды → fault_history (addr IN 40400-40428)
 - пропуски связи → data_gaps
+
+Ленты событий (разбор аварии, лента стоянки) — ВСЁ, что прислала панель:
+get_timeline_periods, без фильтра KB (v4.9.96).
 """
 from __future__ import annotations
 
@@ -139,7 +142,7 @@ async def get_enum_periods(
     """Периоды enum-состояний из enum_history, пересекающиеся с [ts_from, ts_to).
 
     По умолчанию — только 40011 (RUN_STATE) и 40010 (SWITCH_POS).
-    Колонки: addr, state_start, state_end, value, label.
+    Колонки: addr, state_start, state_end, value, name_ru, label.
     state_end IS NULL → период активен прямо сейчас.
     """
     if addrs is None:
@@ -153,6 +156,7 @@ async def get_enum_periods(
                 e.state_start,
                 e.state_end,
                 e.value,
+                r.name_ru,
                 COALESCE(
                     r.states_json->'labels_ru'->>e.value::text,
                     r.states_json->'labels'   ->>e.value::text,
@@ -287,6 +291,74 @@ async def get_fault_periods(
     return [dict(r) for r in rows]
 
 
+# ── Ленты событий: всё, что прислала панель ────────────────────────────────────
+# Конфиг аналитики (KB) нужен нарезке и детекторам — порогам и ролям. Ленте он
+# не нужен: в шумных событиях часто кроются действия персонала, а регистр,
+# который забыли объявить в KB, из неё просто пропадал (монолитный слой
+# equipment/ так и остался без команд панели). Источник списка адресов —
+# каталог регистров самой БД телеметрии.
+_CATALOG_TTL_SEC = 3600
+_catalog_cache: dict[str, tuple[float, list[int]]] = {}
+
+
+async def get_catalog_addrs(equip_type: str) -> list[int]:
+    """Все адреса каталога регистров для типа оборудования (кэш на час).
+
+    Каталог общий у всех машин типа и меняется только с прошивкой декодера,
+    так что один запрос в час на тип. В enum_history/fault_history по этим
+    адресам лежит только то, что есть: аналоговые просто не дадут строк.
+    """
+    import time
+    hit = _catalog_cache.get(equip_type)
+    if hit and time.monotonic() - hit[0] < _CATALOG_TTL_SEC:
+        return hit[1]
+    async with _get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT addr FROM register_catalog WHERE equip_type = $1", equip_type,
+        )
+    addrs = sorted({int(r["addr"]) for r in rows})
+    _catalog_cache[equip_type] = (time.monotonic(), addrs)
+    return addrs
+
+
+async def get_timeline_periods(
+    router_sn: str,
+    equip_type: str,
+    panel_id: int,
+    ts_from: datetime,
+    ts_to: datetime,
+    cfg: Any = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Все enum- и fault-периоды машины за окно — для лент событий.
+
+    Тот же запрос, что у нарезки, только список адресов — каталог БД плюс
+    списки KB. (enum_periods, fault_periods). Имена и тяжесть битов — из
+    каталога.
+
+    Объединение с KB делает результат гарантированным надмножеством того,
+    что читает нарезка, — поэтому её вход можно отфильтровать отсюда, не
+    читая окно второй раз. Каталог недоступен — остаются списки KB: хуже
+    неполной ленты только её отсутствие.
+    """
+    try:
+        addrs = await get_catalog_addrs(equip_type)
+    except Exception:
+        logger.warning("Каталог регистров %s не прочитан — лента по KB",
+                       equip_type, exc_info=True)
+        addrs = []
+    kb_enum = set(enum_read_addrs(cfg)) if cfg is not None else set()
+    kb_fault = set(cfg.whitelist_fault) if cfg is not None else set()
+    enum_addrs = sorted(set(addrs) | kb_enum) or None
+    fault_addrs = frozenset(set(addrs) | kb_fault) or None
+    enum_periods, fault_periods = await asyncio.gather(
+        get_enum_periods(router_sn, equip_type, panel_id, ts_from, ts_to,
+                         addrs=enum_addrs),
+        get_fault_periods(router_sn, equip_type, panel_id, ts_from, ts_to,
+                          fault_addrs=fault_addrs),
+    )
+    return enum_periods, fault_periods
+
+
 async def get_data_gaps(
     router_sn: str,
     equip_type: str,
@@ -324,3 +396,19 @@ async def get_data_gaps(
         )
     except Exception:
         return []
+
+
+def kb_slice(
+    enum_periods: list[dict[str, Any]],
+    fault_periods: list[dict[str, Any]],
+    cfg: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Вход нарезки из полной ленты: только то, что объявлено в KB.
+
+    Порядок сохраняется (enum — по адресу и началу, fault — по началу), так
+    что результат совпадает с тем, что дали бы отдельные чтения по KB.
+    """
+    kb_e = set(enum_read_addrs(cfg))
+    kb_f = cfg.whitelist_fault
+    return ([p for p in enum_periods if p.get("addr") in kb_e],
+            [f for f in fault_periods if f.get("addr") in kb_f])

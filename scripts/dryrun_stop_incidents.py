@@ -173,6 +173,9 @@ async def _run_machine(conn, obs: dict, tf: datetime, tt: datetime,
         key=lambda p: p["state_start"])
 
     parts = _classify_stop_periods(rs_periods, fault_periods, cfg, tt, enum_periods)
+    # Акт и лента — по всему, что прислала панель (как в движке, v4.9.96);
+    # классификация выше — по KB
+    tl_enum, tl_faults = await asrc.get_timeline_periods(sn, et, pid, tf, tt, cfg)
     stops = [p for p in parts if int(p["value"]) == 0]
     emergencies = [p for p in stops if p.get("stop_kind") == "EMERGENCY"]
 
@@ -205,8 +208,9 @@ async def _run_machine(conn, obs: dict, tf: datetime, tt: datetime,
         except Exception:
             _stab = 60
         inc = build_stop_incident(
-            enum_periods, fault_periods, t_from, t_to, cfg,
+            tl_enum, fault_periods, t_from, t_to, cfg,
             stop_kind="EMERGENCY", stabilization_sec=_stab,
+            timeline_faults=tl_faults,
         )
         if inc is None:
             stat["no_act"] += 1
@@ -270,7 +274,7 @@ async def _run_machine(conn, obs: dict, tf: datetime, tt: datetime,
     logs = []
     for p in simple:
         ch = build_segment_chronology(
-            enum_periods, fault_periods, p["state_start"], p["state_end"], cfg)
+            tl_enum, tl_faults, p["state_start"], p["state_end"], cfg)
         if ch and ch.get("chronology"):
             logs.append((p, ch))
     stat["simple_with_log"] = len(logs)

@@ -503,6 +503,30 @@ async def get_segment_after(
         await conn.close()
 
 
+async def get_segments_between(
+    router_sn: str, equip_type: str, panel_id: int,
+    t_from: datetime, t_to: datetime,
+) -> list[dict[str, Any]]:
+    """Закрытые сегменты, пересекающие [t_from, t_to): режим, границы, характеристики.
+
+    Для разбора аварии: расчётные параметры цикла от последнего нормального
+    останова уже посчитаны при закрытии сегментов — аналог повторно не читаем.
+    """
+    conn = await _connect()
+    try:
+        rows = await conn.fetch("""
+            SELECT id, run_state, t_start, t_end, characteristics_json
+            FROM auto_segments
+            WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
+              AND t_end IS NOT NULL
+              AND t_end > $4 AND t_start < $5
+            ORDER BY t_start ASC
+        """, router_sn, equip_type, panel_id, t_from, t_to)
+        return [dict(r) for r in rows]
+    finally:
+        await conn.close()
+
+
 async def get_segment_by_id(seg_id: int) -> dict[str, Any] | None:
     conn = await _connect()
     try:

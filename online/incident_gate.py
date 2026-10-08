@@ -56,8 +56,148 @@ def _age(sec: float) -> str:
     return f"{sec} с"
 
 
+# Не параметры, а коды: последняя неисправность и её тип идут в ленту
+_NOT_PARAMS = {"LAST_FAULT_CODE", "LAST_FAULT_TYPE"}
+
+
+def _chars_of(seg: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Расчётные характеристики сегмента по ролям, сведённые по подсегментам.
+
+    Мин и макс — по всему сегменту, «на конце» — последнее значение
+    последнего подсегмента, где роль есть.
+    """
+    import json as _json
+    raw = seg.get("characteristics_json")
+    if isinstance(raw, str):
+        try:
+            raw = _json.loads(raw)
+        except Exception:
+            return {}
+    out: dict[str, dict[str, Any]] = {}
+    for sub in (raw or {}).get("subsegments") or []:
+        for role, ch in ((sub or {}).get("characteristics") or {}).items():
+            if not isinstance(ch, dict) or role in _NOT_PARAMS:
+                continue
+            acc = out.setdefault(role, {"min": None, "max": None, "end": None,
+                                        "unit": ch.get("unit") or ""})
+            for k, pick in (("min", min), ("max", max)):
+                v = ch.get(k)
+                if v is not None:
+                    acc[k] = v if acc[k] is None else pick(acc[k], v)
+            if ch.get("value_end") is not None:
+                acc["end"] = ch["value_end"]
+    return out
+
+
+def _fmt_num(v: Any) -> str:
+    if v is None:
+        return "—"
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    return f"{f:.0f}" if abs(f) >= 100 else f"{f:.2f}".rstrip("0").rstrip(".")
+
+
+def _format_cycle_params(
+    segments: list[dict[str, Any]], stop_ts: Any,
+) -> list[str]:
+    """Цикл от последнего нормального останова: ход режимов и параметры.
+
+    Параметры не читаются заново — это расчётные характеристики, которые
+    аналитика посчитала при закрытии каждого сегмента. Весь цикл — сводкой
+    мин/макс, подробно — сегмент, из которого машина упала, и последний
+    рабочий: тот же приём, что у ленты событий.
+
+    Сводка — ПО РЕЖИМАМ. Общая на весь цикл врала бы: минимум давления масла
+    приходил бы со стоянки, а максимум температуры ОЖ — с прогрева после
+    прошлой аварии, когда насос уже встал.
+    """
+    from analytics.serializer import RUN_STATE_RU
+
+    def _dt(x: Any) -> datetime | None:
+        if isinstance(x, str):
+            try:
+                x = datetime.fromisoformat(x)
+            except ValueError:
+                return None
+        if not isinstance(x, datetime):
+            return None
+        return x if x.tzinfo else x.replace(tzinfo=timezone.utc)
+
+    def _hms(x: Any) -> str:
+        d = _dt(x)
+        return d.strftime("%Y-%m-%d %H:%M:%S") if d else "—"
+
+    stop = _dt(stop_ts)
+    if stop is None:
+        return []
+    before = [sg for sg in segments
+              if (_dt(sg.get("t_start")) or stop) < stop]
+    if not before:
+        return []
+    def _mode(sg: dict[str, Any]) -> str:
+        rs = sg.get("run_state")
+        name = RUN_STATE_RU.get(rs, f"RUN_STATE={rs}")
+        raw = sg.get("characteristics_json")
+        if rs == 0 and isinstance(raw, str):
+            try:
+                import json as _json
+                raw = _json.loads(raw)
+            except Exception:
+                raw = None
+        if rs == 0 and isinstance(raw, dict) and raw.get("stop_kind") == "EMERGENCY":
+            name += " (аварийный)"
+        return name
+
+    out: list[str] = ["", "Ход цикла (сегменты аналитики, UTC):"]
+    for sg in before:
+        out.append(f"  - {_mode(sg)}: "
+                   f"{_hms(sg.get('t_start'))} — {_hms(sg.get('t_end'))}")
+
+    by_mode: dict[str, dict[str, dict[str, Any]]] = {}
+    for sg in before:
+        cyc = by_mode.setdefault(_mode(sg), {})
+        for role, ch in _chars_of(sg).items():
+            acc = cyc.setdefault(role, {"min": None, "max": None, "unit": ch["unit"]})
+            for k, pick in (("min", min), ("max", max)):
+                if ch[k] is not None:
+                    acc[k] = ch[k] if acc[k] is None else pick(acc[k], ch[k])
+    for mode, cyc in by_mode.items():
+        if not cyc:
+            continue
+        out += ["", f"Параметры за цикл — {mode} (расчётные, мин / макс):"]
+        for role in sorted(cyc):
+            c = cyc[role]
+            out.append(f"  {role}: {_fmt_num(c['min'])} / {_fmt_num(c['max'])} {c['unit']}".rstrip())
+
+    def _detail(sg: dict[str, Any], title: str) -> None:
+        chars = _chars_of(sg)
+        if not chars:
+            return
+        out.extend(["", f"{title} — {_mode(sg)}, "
+                        f"{_hms(sg.get('t_start'))} — {_hms(sg.get('t_end'))} "
+                        f"(мин / макс / на конце):"])
+        for role in sorted(chars):
+            c = chars[role]
+            out.append(f"  {role}: {_fmt_num(c['min'])} / {_fmt_num(c['max'])} / "
+                       f"{_fmt_num(c['end'])} {c['unit']}".rstrip())
+
+    # Откуда упала: последний не-стоповый сегмент. У 1452 это пуск или
+    # прогрев — до работы машина не дошла; у штатной нагрузки — работа или
+    # разгрузка. Последний рабочий — отдельно, если упала не из работы.
+    fell = next((sg for sg in reversed(before) if sg.get("run_state") != 0), None)
+    work = next((sg for sg in reversed(before) if sg.get("run_state") == 3), None)
+    if fell is not None:
+        _detail(fell, "Сегмент, из которого машина остановилась")
+    if work is not None and work is not fell:
+        _detail(work, "Последний рабочий сегмент цикла")
+    return out
+
+
 def build_incident_prompt(
     incident: dict[str, Any], seg_row: dict[str, Any] | None = None,
+    cycle_segments: list[dict[str, Any]] | None = None,
 ) -> str:
     """Промпт разбора аварии из акта.
 
@@ -87,7 +227,7 @@ def build_incident_prompt(
     if standing:
         out += ["", "Висело на момент останова (маска — с какого времени):"]
         for f in standing:
-            sev = _SEVERITY_RU.get(f.get("severity") or "", f.get("severity") or "?")
+            sev = _SEVERITY_RU.get(f.get("severity") or "", f.get("severity") or "событие")
             out.append(f"  - {f.get('name')} [{sev}] — с {f.get('since')} "
                        f"({_age(f.get('age_sec') or 0)})")
 
@@ -95,13 +235,20 @@ def build_incident_prompt(
     if summary:
         out += ["", f"Что происходило за период (событий всего "
                     f"{incident.get('events_total', '?')}):"]
-        for g in summary[:20]:
-            mark = "авария/фронт" if g.get("kind") == "fault" else "состояние"
+        # Все виды, без обрезки: в шумных событиях часто кроются действия
+        # персонала, а число видов ограничено каталогом регистров, не временем
+        for g in summary:
+            # Метка — по тяжести бита из каталога: в битовых регистрах есть и
+            # аварии, и предупреждения, и события без тяжести
+            if g.get("kind") != "fault":
+                mark = "состояние"
+            elif g.get("severity"):
+                mark = "фронт: " + _SEVERITY_RU.get(g["severity"], g["severity"])
+            else:
+                mark = "событие"
             span = (f"{_ts(g.get('first'))}—{_ts(g.get('last'))}"
                     if (g.get("count") or 1) > 1 else _ts(g.get("first")))
             out.append(f"  - {g.get('name')} [{mark}] × {g.get('count')} ({span})")
-        if len(summary) > 20:
-            out.append(f"  … ещё {len(summary) - 20} видов")
 
     chrono = incident.get("chronology") or []
     if chrono:
@@ -116,6 +263,8 @@ def build_incident_prompt(
             out.append(f"{_ts(e.get('ts'))}  {kind} {addr:9} "
                        f"{e.get('name') or ''}{val}{sev}")
         out.append("```")
+
+    out += _format_cycle_params(cycle_segments or [], incident.get("stop_ts"))
 
     if seg_row and seg_row.get("report_md"):
         out += ["", "Отчёт аналитики по сегменту:", "",
@@ -194,7 +343,19 @@ async def analyze_incident(
     except Exception:
         logger.warning("IncidentGate: строка сегмента не прочитана", exc_info=True)
 
-    prompt = build_incident_prompt(incident, seg_row)
+    cycle_segments: list[dict[str, Any]] = []
+    try:
+        win_from = (incident.get("window") or {}).get("from")
+        if win_from:
+            cycle_segments = await online_db.get_segments_between(
+                router_sn, equip_type, panel_id,
+                datetime.fromisoformat(win_from), stop_ts,
+            )
+    except Exception:
+        logger.warning("IncidentGate: сегменты цикла не прочитаны — разбор "
+                       "без расчётных параметров", exc_info=True)
+
+    prompt = build_incident_prompt(incident, seg_row, cycle_segments)
 
     try:
         if provider == "llm":

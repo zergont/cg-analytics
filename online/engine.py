@@ -571,6 +571,10 @@ async def _run_segment(
     chronologies: dict[str, dict] = {}
     from analytics import classifier as _clf
     from analytics.reconstructor import build_segment_chronology as _chrono
+    tl_enum, tl_faults = await _timeline_for(
+        segments, router_sn, equip_type, panel_id, ts_from, ts_to, cfg,
+        enum_periods, fault_periods,
+    )
     for seg in segments:
         if seg.run_state != 0 or not seg.t_end:
             continue
@@ -584,16 +588,19 @@ async def _run_segment(
                 _ctx = await _load_incident_context(
                     router_sn, equip_type, panel_id, _st, ts_to, cfg
                 )
-                _ep, _fp = _ctx if _ctx else (enum_periods, fault_periods)
+                _ep, _fp, _tlf = (
+                    _ctx if _ctx else (tl_enum, fault_periods, tl_faults)
+                )
                 inc = _clf.build_stop_incident(
                     _ep, _fp, _st, _te, cfg,
                     stop_kind="EMERGENCY",
                     stabilization_sec=_stab_sec(cfg),
                     detail_events=_act_detail_events(cfg),
+                    timeline_faults=_tlf,
                 )
                 if inc is not None:
                     incidents[seg.t_start] = inc
-            ch = _chrono(enum_periods, fault_periods, _st, _te, cfg)
+            ch = _chrono(tl_enum, tl_faults, _st, _te, cfg)
             if ch is not None:
                 chronologies[seg.t_start] = ch
         except Exception:
@@ -602,6 +609,32 @@ async def _run_segment(
                 seg.t_start, exc_info=True,
             )
     return segments, incidents, gaps, chronologies
+
+
+async def _timeline_for(
+    segments: list, router_sn: str, equip_type: str, panel_id: int,
+    ts_from: datetime, ts_to: datetime, cfg,
+    enum_periods: list[dict], fault_periods: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """Данные для лент стоянок окна: всё, что прислала панель.
+
+    Нарезка и детекторы работают по KB, ленты — по каталогу БД телеметрии
+    (v4.9.96). Догружаем, только если в окне есть стоянка: у работающей
+    машины лент нет, а пул соединений к исходной БД общий на весь парк.
+    Не вышло — ленты строятся по данным нарезки, как раньше.
+    """
+    if not any(getattr(s, "run_state", None) == 0 for s in segments):
+        return enum_periods, fault_periods
+    from analytics import source as _src
+    try:
+        return await _src.get_timeline_periods(
+            router_sn, equip_type, panel_id,
+            _tz_utc(ts_from), _tz_utc(ts_to), cfg,
+        )
+    except Exception:
+        logger.warning("Лента %s/%s/%s: полные данные не загружены — по KB",
+                       router_sn, equip_type, panel_id, exc_info=True)
+        return enum_periods, fault_periods
 
 
 # Запас при догрузке данных для акта: якорный стоп-период надо захватить
@@ -684,8 +717,13 @@ def _is_stop_head(enum_periods: list[dict], t_start: datetime) -> bool:
 async def _load_incident_context(
     router_sn: str, equip_type: str, panel_id: int,
     stop_ts: datetime, ts_to: datetime, cfg,
-) -> tuple[list[dict], list[dict]] | None:
+) -> tuple[list[dict], list[dict], list[dict]] | None:
     """enum/fault, доведённые назад до последнего нормального останова.
+
+    (enum, маски для классификации, все fault-события для ленты). enum —
+    все регистры панели: классификация выбирает свои по адресу. Маски для
+    классификации — из KB, чтобы шкала аварийности совпадала с нарезкой;
+    лента и срез «висело» — по всем битовым регистрам, включая события.
 
     Штатное окно движка начинается ровно в момент останова (cursor_ts = t_end
     предыдущего сегмента), поэтому преамбула акта физически пуста: SQL берёт
@@ -695,8 +733,9 @@ async def _load_incident_context(
     30 дней строился один акт на восемь аварий.
 
     Здесь окно расширяется назад: сначала дешёвый поиск якоря по RUN_STATE,
-    типу последней неисправности и маскам, затем полная загрузка от якоря.
-    Три запроса, и только когда в цикле закрывается аварийный стоп. Тип
+    типу последней неисправности и маскам, затем полная загрузка от якоря —
+    всего, что прислала панель (каталог БД, не KB). Четыре запроса, и только
+    когда в цикле закрывается аварийный стоп. Тип
     неисправности в поиске обязателен: без него прошлая авария без бита в
     масках (1452) сойдёт за нормальный останов, и акт обрежет серию на ней.
 
@@ -725,20 +764,36 @@ async def _load_incident_context(
             rs_periods, fault_periods, stop_ts, cfg
         )
         load_from = anchor_ts - timedelta(seconds=_ACT_LOAD_MARGIN_SEC)
-        enum_periods = await _src.get_enum_periods(
-            router_sn, equip_type, panel_id, load_from, ts_to,
-            addrs=_src.enum_read_addrs(cfg),
-        )
+        try:
+            enum_periods, timeline_faults = await _src.get_timeline_periods(
+                router_sn, equip_type, panel_id, load_from, ts_to, cfg,
+            )
+        except Exception:
+            # Полный набор за весь цикл не прочитался (тяжёлый запрос). Цикл
+            # от якоря важнее полноты: откат на списки KB, акт строится один
+            # раз, и терять ради лишних регистров его преамбулу нельзя.
+            logger.warning(
+                "Акт %s/%s/%s: полная лента от якоря не прочитана — по KB",
+                router_sn, equip_type, panel_id, exc_info=True,
+            )
+            enum_periods, timeline_faults = await asyncio.gather(
+                _src.get_enum_periods(
+                    router_sn, equip_type, panel_id, load_from, ts_to,
+                    addrs=_src.enum_read_addrs(cfg),
+                ),
+                _src.get_fault_periods(
+                    router_sn, equip_type, panel_id, load_from, ts_to,
+                    fault_addrs=cfg.whitelist_fault,
+                ),
+            )
         # Якорь может оказаться раньше горизонта: SQL отдаёт стоп-период,
         # начавшийся до горизонта и закончившийся после, с настоящим началом.
-        # Тогда маски перечитываются от того же места, что и enum, — иначе
-        # окно акта заявляет покрытие, которого у масок нет.
+        # Тогда маски берутся от того же места, что и лента, — иначе окно
+        # акта заявляет покрытие, которого у масок нет.
         if load_from < horizon:
-            fault_periods = await _src.get_fault_periods(
-                router_sn, equip_type, panel_id, load_from, ts_to,
-                fault_addrs=cfg.whitelist_fault,
-            )
-        return enum_periods, fault_periods
+            _wl = cfg.whitelist_fault
+            fault_periods = [f for f in timeline_faults if f.get("addr") in _wl]
+        return enum_periods, fault_periods, timeline_faults
     except Exception:
         logger.warning(
             "Не удалось догрузить данные для акта %s/%s/%s от %s",
@@ -981,6 +1036,9 @@ class OnlinePollEngine:
         # Подпись ленты открытого сегмента (t_start, число событий) — чтобы не
         # переписывать её в БД, пока в ней ничего не менялось
         self._open_chrono_sig: tuple | None = None
+        # Режим открытого сегмента на прошлом цикле: стоит — значит, ленте
+        # нужны все регистры, и окно читается один раз полным набором
+        self._last_open_run_state: int | None = None
         # Начало стопа, по которому акт уже собран. Акт строится ОДИН раз, и
         # он же заказывает разбор у Клауда — без этой отметки и то, и другое
         # повторялось бы каждым циклом
@@ -1904,21 +1962,40 @@ class OnlinePollEngine:
                     logger.warning("OnlineEngine[%s]: не удалось сохранить last_data_ts", self.key, exc_info=True)
 
             _t0 = _time.perf_counter()
-            enum_periods, fault_periods, gaps = await asyncio.gather(
-                _src.get_enum_periods(
-                    self.router_sn, self.equip_type, self.panel_id,
-                    ts_from_utc, ts_to_utc, addrs=_src.enum_read_addrs(self.cfg),
-                ),
-                _src.get_fault_periods(
-                    self.router_sn, self.equip_type, self.panel_id,
-                    ts_from_utc, ts_to_utc,
-                    fault_addrs=self.cfg.whitelist_fault,
-                ),
-                _src.get_data_gaps(
-                    self.router_sn, self.equip_type, self.panel_id,
-                    ts_from_utc, ts_to_utc,
-                ),
-            )
+            # Машина стояла на прошлом цикле — лента понадобится почти
+            # наверняка: читаем окно один раз полным набором и режем из него
+            # вход нарезки, а не читаем то же окно дважды (пул к исходной
+            # БД — три соединения на весь парк, а резерв стоит неделями)
+            tl_pre: tuple[list, list] | None = None
+            if self._last_open_run_state == 0:
+                (tl_e, tl_f), gaps = await asyncio.gather(
+                    _src.get_timeline_periods(
+                        self.router_sn, self.equip_type, self.panel_id,
+                        ts_from_utc, ts_to_utc, self.cfg,
+                    ),
+                    _src.get_data_gaps(
+                        self.router_sn, self.equip_type, self.panel_id,
+                        ts_from_utc, ts_to_utc,
+                    ),
+                )
+                tl_pre = (tl_e, tl_f)
+                enum_periods, fault_periods = _src.kb_slice(tl_e, tl_f, self.cfg)
+            else:
+                enum_periods, fault_periods, gaps = await asyncio.gather(
+                    _src.get_enum_periods(
+                        self.router_sn, self.equip_type, self.panel_id,
+                        ts_from_utc, ts_to_utc, addrs=_src.enum_read_addrs(self.cfg),
+                    ),
+                    _src.get_fault_periods(
+                        self.router_sn, self.equip_type, self.panel_id,
+                        ts_from_utc, ts_to_utc,
+                        fault_addrs=self.cfg.whitelist_fault,
+                    ),
+                    _src.get_data_gaps(
+                        self.router_sn, self.equip_type, self.panel_id,
+                        ts_from_utc, ts_to_utc,
+                    ),
+                )
             logger.debug(
                 "TIMING[%s]: gather(enum=%d, fault=%d, gaps=%d) за %.2fs",
                 self.key, len(enum_periods), len(fault_periods), len(gaps),
@@ -1951,6 +2028,17 @@ class OnlinePollEngine:
                     ts_to=ts_to_utc,
                     initial_coking_risk=copy.deepcopy(self.inherited_coking_risk),
                 )
+            )
+            if tl_pre is not None:
+                tl_enum, tl_faults = tl_pre
+            else:
+                # Первый цикл стоянки: полный набор ещё не читался
+                tl_enum, tl_faults = await _timeline_for(
+                    segments, self.router_sn, self.equip_type, self.panel_id,
+                    ts_from_utc, ts_to_utc, self.cfg, enum_periods, fault_periods,
+                )
+            self._last_open_run_state = (
+                segments[-1].run_state if segments else self._last_open_run_state
             )
         except Exception:
             logger.exception("OnlineEngine[%s]: ошибка анализа открытого окна", self.key)
@@ -2078,8 +2166,9 @@ class OnlinePollEngine:
                                 self.router_sn, self.equip_type, self.panel_id,
                                 _rs_st, ts_to_utc, self.cfg,
                             )
-                            _rs_ep, _rs_fp = (
-                                _rs_ctx if _rs_ctx else (enum_periods, fault_periods)
+                            _rs_ep, _rs_fp, _rs_tlf = (
+                                _rs_ctx if _rs_ctx
+                                else (tl_enum, fault_periods, tl_faults)
                             )
                             _rs_incident = _clf.build_stop_incident(
                                 _rs_ep, _rs_fp,
@@ -2087,6 +2176,7 @@ class OnlinePollEngine:
                                 stop_kind="EMERGENCY",
                                 stabilization_sec=_stab_sec(self.cfg),
                                 detail_events=_act_detail_events(self.cfg),
+                                timeline_faults=_rs_tlf,
                             )
                             # Авария короче лага: акта на открытой строке не
                             # было, значит разбор заказывается отсюда
@@ -2099,7 +2189,7 @@ class OnlinePollEngine:
                         # аварийного: акт говорит что произошло, лента — что
                         # было дальше, пока авария не снята
                         _rs_chronology = _chrono(
-                            enum_periods, fault_periods,
+                            tl_enum, tl_faults,
                             _rs_st, seg_t_end_rs, self.cfg,
                         )
                     except Exception:
@@ -2274,20 +2364,22 @@ class OnlinePollEngine:
                         self.router_sn, self.equip_type, self.panel_id,
                         _op_st, ts_to_utc, self.cfg,
                     )
-                    _op_ep, _op_fp = (
-                        _op_ctx if _op_ctx else (enum_periods, fault_periods)
+                    _op_ep, _op_fp, _op_tlf = (
+                        _op_ctx if _op_ctx
+                        else (tl_enum, fault_periods, tl_faults)
                     )
                     _open_incident = _clf.build_stop_incident(
                         _op_ep, _op_fp, _op_st, None, self.cfg,
                         stop_kind="EMERGENCY",
                         stabilization_sec=_stab_sec(self.cfg),
                         detail_events=_act_detail_events(self.cfg),
+                        timeline_faults=_op_tlf,
                     )
                     if _open_incident is not None:
                         self._act_done_for = _op_st
                         self._order_incident_analysis(_open_incident, _op_st)
                 _open_chronology = _chrono(
-                    enum_periods, fault_periods, _op_st, ts_to_utc, self.cfg
+                    tl_enum, tl_faults, _op_st, ts_to_utc, self.cfg
                 )
                 # Передаём ленту, только если в ней что-то изменилось: иначе
                 # строка переписывается каждые тридцать секунд впустую. Ключ

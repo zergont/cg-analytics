@@ -388,6 +388,7 @@ def build_stop_incident(
     stop_kind: str | None = None,
     stabilization_sec: int = 60,
     detail_events: int = ACT_DETAIL_EVENTS,
+    timeline_faults: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """incident_json для аварийного стоп-сегмента; иначе None.
 
@@ -403,6 +404,13 @@ def build_stop_incident(
     аварий. Вердикт при этом считается как и раньше и едет в артефакт описанием
     характера останова.
     None — старая модель (флаг stop_kind выключен): решает is_incident, как раньше.
+
+    timeline_faults — fault-периоды для ленты, свода и среза «висело»: все
+    битовые регистры панели, включая информационные события (в шумных часто
+    кроются действия персонала). Классификация — вердикт и якорь — идёт по
+    fault_periods: там маски из KB, и шкала аварийности должна совпадать с
+    нарезкой. None — лента по тем же fault_periods. enum_periods могут быть
+    полными: классификация выбирает свои регистры по адресу.
     """
     verdict = classify_stop_character(
         enum_periods, stop_ts, cfg, fault_periods=fault_periods
@@ -435,8 +443,9 @@ def build_stop_incident(
         lag_to = stop_ts + timedelta(seconds=stabilization_sec)
         win_to = lag_to if win_to is None else min(win_to, lag_to)
 
+    tl_faults = fault_periods if timeline_faults is None else timeline_faults
     chrono = build_chronology(
-        enum_periods, fault_periods, cfg, window_from=win_from, window_to=win_to
+        enum_periods, tl_faults, cfg, window_from=win_from, window_to=win_to
     )
     _all = serialize_chronology(chrono)
     summary, events = summarize_events(_all, stop_ts, detail_events)
@@ -446,7 +455,7 @@ def build_stop_incident(
         "stop_kind": stop_kind,
         "character": verdict,
         # Что висело на момент падения — маска могла подняться задолго до окна
-        "standing": standing_faults(fault_periods, stop_ts),
+        "standing": standing_faults(tl_faults, stop_ts),
         "window": {
             "from": win_from.isoformat(),
             "to": win_to.isoformat() if win_to else None,

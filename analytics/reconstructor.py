@@ -37,6 +37,8 @@ def _state_event(p: dict[str, Any], reg: dict[int, dict]) -> dict[str, Any]:
     """enum-период → событие ленты (смена состояния регистра)."""
     addr = p["addr"]
     meta = reg.get(addr, {})
+    # Имя — из KB, если регистр там описан; иначе из каталога БД телеметрии:
+    # лента несёт всё, что прислала панель, а не только объявленное в KB
     return {
         "ts":       _tz(p["state_start"]),
         "end":      _tz(p.get("state_end")),
@@ -44,7 +46,8 @@ def _state_event(p: dict[str, Any], reg: dict[int, dict]) -> dict[str, Any]:
         "addr":     addr,
         "bit":      None,
         "role":     meta.get("role"),
-        "name":     meta.get("description") or meta.get("role") or f"reg_{addr}",
+        "name":     (meta.get("description") or p.get("name_ru")
+                     or meta.get("role") or f"reg_{addr}"),
         "value":    p.get("value"),
         "label":    p.get("label"),
         "severity": None,
