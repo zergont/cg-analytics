@@ -198,6 +198,8 @@
                         document.getElementById("llm_ctx_hint").textContent =
                             p === "lmstudio" ? "(игнорируется — задаётся при загрузке модели в LM Studio)"
                           : p === "gorynych" ? "(игнорируется — окно выбирает шлюз)" : "";
+                        const th = document.getElementById("llm_temp_hint");
+                        if (th) th.textContent = p === "gorynych" ? "(игнорируется — выбирает шлюз)" : "";
                     }
                     document.addEventListener("DOMContentLoaded", llmProviderHint);
                     </script>
@@ -208,7 +210,8 @@
                                    value="{{ llm.model }}" required placeholder="qwen2.5:14b">
                         </div>
                         <div class="col-4">
-                            <label class="form-label small fw-semibold mb-1">Temperature</label>
+                            <label class="form-label small fw-semibold mb-1">Temperature
+                                <span class="text-muted fw-normal" id="llm_temp_hint" style="font-size:0.75rem"></span></label>
                             <input type="number" name="llm_temperature" class="form-control form-control-sm"
                                    value="{{ llm.temperature }}" min="0" max="2" step="0.05" required>
                         </div>
@@ -434,7 +437,8 @@
                         anthropic: "Не используется — подключение через SDK",
                         gorynych:  "Шлюз: http://192.168.0.79:4000/src/analytics (без /v1). Модели: fast, flashnext, gemma; "
                                    + "smart + xhigh — совет на 15–30 мин, не для цепочек. Модель, рассуждение и приоритет "
-                                   + "по виду разбора задаёт «Градация разбора»; параллельно — не больше 3",
+                                   + "по виду разбора задаёт «Градация разбора»; параллельно — не больше 3; "
+                                   + "температуру выбирает шлюз — поле Temp. не действует",
                     }[p] || "";
                     const ctx = document.getElementById("reg_max_ctx");
                     if (!ctx.value) ctx.value = LLM_REG_CTX_DEFAULTS[p];

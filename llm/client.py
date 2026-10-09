@@ -267,9 +267,9 @@ def _build_request(
         payload["notes"] = False
         payload["fallback"] = True
         payload["priority"] = priority if priority in GORYNYCH_PRIORITIES else "normal"
-        # Температура уходит всегда: на уровнях с рассуждениями шлюз заменяет её
-        # сам (у Qwen при 0.1–0.3 рассуждение ходит по кругу), без рассуждений —
-        # берёт нашу. Какой уровень у «по умолчанию», знает только шлюз
+        # Температуру выбирает шлюз — на любом уровне рассуждений (у Qwen при
+        # 0.1–0.3 рассуждение ходит по кругу). Поле настроек для шлюза не действует
+        payload.pop("temperature", None)
     payload["messages"] = [
         {"role": "system", "content": system},
         {"role": "user",   "content": user},

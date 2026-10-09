@@ -103,8 +103,7 @@ check(b["stream"] is True, "1г: к шлюзу всегда поток, даже
 check(b.get("notes") is False and b.get("fallback") is True, "1д: notes=false и fallback=true")
 check("chat_template_kwargs" not in b and "/no_think" not in b["messages"][0]["content"],
       "1е: шлюзу — только reasoning_effort, без chat_template_kwargs и /no_think")
-check(b.get("temperature") == 0.1,
-      "1ж: температура уходит всегда — на уровнях с рассуждениями шлюз заменит её сам")
+check("temperature" not in b, "1ж: температуру шлюзу не шлём — выбирает он")
 check(meta.get("gorynych", {}).get("backend") == "flashnext" and meta.get("usage", {}).get("total_tokens") == 1020,
       f"1з: метаданные ответа не собраны: {meta}")
 check(client.gateway_label(meta, "fast") == "flashnext (xhigh)", "1и: подпись по реально ответившей голове")
@@ -114,15 +113,15 @@ run(client.chat("SYS", "отчёт", entry=GW, depth="seg_norma"))
 b = srv.requests[0]["body"]
 check(b["model"] == "fast" and "reasoning_effort" not in b and b["priority"] == "batch",
       f"1к: «по умолчанию» — рассуждение не передаём, решает шлюз: {b}")
-check("temperature" in b, "1к: при «по умолчанию» (у fast — без рассуждений) температура наша")
+check("temperature" not in b, "1к: и при «по умолчанию» температуру выбирает шлюз")
 
 router.apply_depth("humanize", "", "off", "background")
 srv = Server(sse(chunk("ok"))).install()
 run(client.chat("SYS", "текст", entry=GW, depth="humanize", model="/home/x/Qwen.gguf"))
 b = srv.requests[0]["body"]
 check(b["model"] == "flashnext", f"1л: пустая модель в градации — модель подключения, не вызывающего: {b['model']}")
-check(b["reasoning_effort"] == "none" and "temperature" in b and b["priority"] == "background",
-      f"1м: выкл → none, температура при выключенных рассуждениях уходит: {b}")
+check(b["reasoning_effort"] == "none" and "temperature" not in b and b["priority"] == "background",
+      f"1м: выкл → none, температуру и без рассуждений выбирает шлюз: {b}")
 router.load_depth("")   # вернуть профили по умолчанию
 
 # ── 2. Прямой сервер: градация не действует, поведение прежнее ───────────────
@@ -133,6 +132,7 @@ check(txt == "ответ", f"2a: ответ LM Studio {txt!r}")
 check(b["model"] == "qwen/qwen3.8-27b" and b["stream"] is False, "2б: модель и режим записи LM Studio")
 check("priority" not in b and "notes" not in b and "fallback" not in b,
       "2в: поля шлюза не должны уходить другим провайдерам")
+check(b.get("temperature") == 0.1, "2в: прямому серверу температура уходит, как раньше")
 check(b.get("reasoning_effort") == "none" and b.get("chat_template_kwargs") == {"enable_thinking": False}
       and b["messages"][0]["content"].endswith("/no_think"), "2г: выключатель рассуждений LM Studio прежний")
 
