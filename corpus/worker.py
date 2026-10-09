@@ -143,19 +143,21 @@ async def _process_segment(
     )
 
     prompt = get_prompt(task_id)
+    depth = _segment_depth(seg_row, task_id)
 
     # Цепочка приоритетов моделей (реестр) имеет приоритет над одиночным провайдером
     chain_entries = [e for e in (get_entry(eid) for eid in get_chain(task_id)) if e]
     if chain_entries:
         provider = "chain"
-        result = await _analyse_segment_chain(seg_row, kb_path, prompt, chain_entries)
+        result = await _analyse_segment_chain(seg_row, kb_path, prompt, chain_entries,
+                                              depth=depth)
     elif get_provider(task_id) == "api":
         provider = "api"
         from corpus.agent import analyse_segment
         result = await analyse_segment(seg_row, kb_path, system_prompt=prompt)
     else:
         provider = "llm"
-        result = await _analyse_segment_llm(seg_row, prompt)
+        result = await _analyse_segment_llm(seg_row, prompt, depth=depth)
 
     if result["error"]:
         logger.error("corpus ERROR #%d | %s", seg_id, result["error"])
@@ -190,7 +192,63 @@ async def _process_segment(
     )
 
 
-async def _analyse_segment_llm(seg_row: dict, system_prompt: str) -> dict[str, Any]:
+def _segment_depth(seg_row: dict, task_id: str) -> str:
+    """Вид разбора для градации: ручной запуск — «manual», иначе по уровню тревоги.
+
+    Уровень — тот же детерминированный вердикт, что уходит модели в шапке
+    («Уровень тревоги»): сегмент без происшествий простой, авария — нет.
+    """
+    from llm.router import depth_for_segment
+    if task_id == "seg_manual":
+        return "manual"
+    try:
+        from corpus.preprocessor import extract_verdict_alarm
+        _, level = extract_verdict_alarm(seg_row)
+    except Exception:
+        level = None
+    return depth_for_segment(level)
+
+
+def _llm_result_fields(meta: dict, fallback_model: str) -> dict[str, Any]:
+    """Подпись, отладка и токены по реально ответившей модели.
+
+    У шлюза ответить могла не та голова, что заказана (подмена при долгом
+    ожидании или когда промпт не влез) — подписываем её, а task_id и причину
+    подмены кладём в debug_json, чтобы найти запрос в журнале шлюза.
+    """
+    from llm.client import gateway_label
+    g = meta.get("gorynych") or {}
+    usage = meta.get("usage") or {}
+    label = gateway_label(meta, fallback_model)
+    out: dict[str, Any] = {
+        "label":       label,
+        "tokens_used": int(usage.get("total_tokens") or 0),
+        "debug":       {},
+        "claude_model": None,
+    }
+    if g:
+        out["debug"]["gorynych"] = g
+        out["claude_model"] = f"Горыныч: {label}"
+    if usage:
+        out["debug"]["usage"] = usage
+    return out
+
+
+def _error_detail(exc: Exception) -> dict[str, Any]:
+    """Запись следа цепочки об ошибке: у ошибки шлюза — код и task_id отдельно."""
+    from llm.client import LLMError
+    rec: dict[str, Any] = {"detail": repr(exc)[:300]}
+    if isinstance(exc, LLMError):
+        rec.update({"http_status": exc.status, "code": exc.code, "task_id": exc.task_id})
+    return rec
+
+
+class EmptyLLMResponse(Exception):
+    """Модель вернула пустой текст — это ошибка, а не готовое заключение."""
+
+
+async def _analyse_segment_llm(seg_row: dict, system_prompt: str,
+                               depth: str | None = None) -> dict[str, Any]:
     """Анализ сегмента через локальную LLM (без инструментов, простой вызов)."""
     import time
     from llm.client import _cfg, chat
@@ -198,24 +256,28 @@ async def _analyse_segment_llm(seg_row: dict, system_prompt: str) -> dict[str, A
 
     t0 = time.monotonic()
     report_md = seg_row.get("report_md") or ""
+    meta: dict = {}
 
     try:
-        # chat() сам ретраит сеть/429/5xx и знает текущего провайдера (Ollama/LM Studio)
-        content = await chat(system_prompt, report_md)
-        if content:
-            content += format_ai_signature(_cfg["model"])
+        # chat() сам ретраит сеть/429/5xx и знает текущего провайдера
+        content = await chat(system_prompt, report_md, depth=depth, meta=meta)
+        if not content:
+            raise EmptyLLMResponse("модель вернула пустой ответ")
+        f = _llm_result_fields(meta, _cfg["model"])
+        content += format_ai_signature(f["label"])
 
         return {
             "verdict":            "LLM",
             "alarm_level":        None,
             "conclusion_md":      content,
             "error":              None,
-            "tokens_used":        0,
+            "tokens_used":        f["tokens_used"],
             "tool_calls_count":   0,
             "loops_count":        0,
             "generation_time_sec": round(time.monotonic() - t0, 1),
-            "debug_json":         {"provider": "llm", "model": _cfg["model"]},
-            "claude_model":       _cfg["model"],
+            "debug_json":         {"provider": "llm", "model": _cfg["model"],
+                                   "depth": depth, **f["debug"]},
+            "claude_model":       f["claude_model"] or _cfg["model"],
         }
     except Exception as exc:
         return {
@@ -239,6 +301,7 @@ async def _analyse_segment_chain(
     kb_path: str | None,
     system_prompt: str,
     entries: list[dict],
+    depth: str | None = None,
 ) -> dict[str, Any]:
     """Анализ по цепочке приоритетов: проактивный отбор по размеру + fallback по ошибкам.
 
@@ -246,7 +309,10 @@ async def _analyse_segment_chain(
       1. промпт не влезает в max_ctx_tokens → пропуск без запроса;
       2. type="api"  → Claude-агент с инструментами;
          type="llm"  → plain chat через запись реестра (стрим по настройке записи);
-      3. ошибка запроса (сеть после ретраев, 4xx сразу) → следующая запись.
+      3. ошибка запроса (сеть после ретраев, 4xx сразу) → следующая запись;
+         пустой ответ — тоже ошибка: сохранять пустое заключение как готовое
+         нельзя, повторно его уже никто не возьмёт.
+    depth — вид разбора: у записей шлюза задаёт модель, рассуждение и приоритет.
     След маршрутизации пишется в debug_json.routing.
     """
     import time
@@ -277,21 +343,26 @@ async def _analyse_segment_chain(
                     continue
             else:
                 from llm.router import format_ai_signature
+                meta: dict = {}
                 content = await chat(system_prompt, report_md,
-                                     entry=entry, stream=entry.get("stream", True))
-                if content:
-                    content += format_ai_signature(entry["model"])
+                                     entry=entry, stream=entry.get("stream", True),
+                                     depth=depth, meta=meta)
+                if not content:
+                    raise EmptyLLMResponse("модель вернула пустой ответ")
+                f = _llm_result_fields(meta, entry["model"])
+                content += format_ai_signature(f["label"])
                 result = {
                     "verdict":            "LLM",
                     "alarm_level":        None,
                     "conclusion_md":      content,
                     "error":              None,
-                    "tokens_used":        0,
+                    "tokens_used":        f["tokens_used"],
                     "tool_calls_count":   0,
                     "loops_count":        0,
                     "generation_time_sec": round(time.monotonic() - t0, 1),
-                    "debug_json":         {"provider": entry["provider"]},
-                    "claude_model":       f"{entry['name']} ({entry['model']})",
+                    "debug_json":         {"provider": entry["provider"], "entry": entry["id"],
+                                           "depth": depth, **f["debug"]},
+                    "claude_model":       f["claude_model"] or f"{entry['name']} ({entry['model']})",
                 }
             trace.append({"entry": entry["id"], "action": "ok"})
             dbg = result.get("debug_json") or {}
@@ -302,7 +373,7 @@ async def _analyse_segment_chain(
         except Exception as exc:
             # сеть/429/5xx уже отретраены внутри chat(); сюда доходят
             # исчерпанные ретраи и 4xx — в обоих случаях идём к следующей модели
-            trace.append({"entry": entry["id"], "action": "error", "detail": repr(exc)[:300]})
+            trace.append({"entry": entry["id"], "action": "error", **_error_detail(exc)})
             logger.warning("corpus/chain: #%s → «%s» ошибка, перехожу дальше: %r",
                            seg_row.get("id"), entry["name"], exc)
 

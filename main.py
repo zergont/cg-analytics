@@ -120,6 +120,9 @@ async def lifespan(app: FastAPI):
         _apply_chain(_task_id, _chain if isinstance(_chain, list) else [])
     logger.info("Цепочки моделей загружены: %s",
                 {t: len(c) for t, c in _get_all_chains().items()})
+    # Градация разбора (шлюз «Горыныч»): модель/рассуждение/приоритет по виду разбора
+    from llm.router import load_depth as _load_depth, DEPTH_SETTING_KEY as _DEPTH_KEY
+    _load_depth(await get_app_setting(_DEPTH_KEY, ""))
     # Загружаем маршрутизацию гейта предупреждений по уровням серьёзности
     _wl_defaults = _get_warning_level_routes()
     for _level in _WARNING_LEVELS:

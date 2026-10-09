@@ -37,20 +37,22 @@ async def humanize(conclusion_md: str, task_id: str = "human_auto") -> str:
             result = await _humanize_api(system_prompt, user_msg)
             model = get_claude_settings()["model"]
         else:
-            from llm.client import get_llm_settings
-            result = await _humanize_llm(system_prompt, user_msg)
-            model = get_llm_settings()["model"]
+            from llm.client import gateway_label, get_llm_settings
+            meta: dict = {}
+            result = await _humanize_llm(system_prompt, user_msg, meta)
+            model = gateway_label(meta, get_llm_settings()["model"])
         return result + format_ai_signature(model) if result else result
     except Exception as exc:
         logger.warning("corpus/humanizer: ошибка (некритично): %s", repr(exc))
         return ""
 
 
-async def _humanize_llm(system_prompt: str, user_msg: str) -> str:
+async def _humanize_llm(system_prompt: str, user_msg: str, meta: dict | None = None) -> str:
     from llm.client import chat
 
-    # chat() сам ретраит сеть/429/5xx и знает текущего провайдера (Ollama/LM Studio)
-    result = await chat(system_prompt, user_msg)
+    # chat() сам ретраит сеть/429/5xx и знает текущего провайдера; у шлюза
+    # «Горыныч» модель и приоритет — по градации («пересказ для оператора»)
+    result = await chat(system_prompt, user_msg, depth="humanize", meta=meta)
     logger.debug("corpus/humanizer LLM: %d символов", len(result))
     return result
 

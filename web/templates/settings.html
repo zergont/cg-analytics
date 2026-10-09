@@ -169,6 +169,7 @@
                                     onchange="llmProviderHint()">
                                 <option value="ollama"   {% if llm.provider == "ollama" %}selected{% endif %}>Ollama</option>
                                 <option value="lmstudio" {% if llm.provider == "lmstudio" %}selected{% endif %}>LM Studio</option>
+                                <option value="gorynych" {% if llm.provider == "gorynych" %}selected{% endif %}>Горыныч (шлюз)</option>
                             </select>
                         </div>
                         <div class="col-8">
@@ -189,11 +190,14 @@
                     <script>
                     function llmProviderHint() {
                         const p = document.getElementById("llm_provider").value;
-                        document.getElementById("llm_url_hint").textContent =
-                            p === "lmstudio" ? "LM Studio: обычно http://localhost:1234"
-                                             : "Ollama: обычно http://localhost:11434";
+                        document.getElementById("llm_url_hint").textContent = {
+                            lmstudio: "LM Studio: обычно http://localhost:1234",
+                            gorynych: "Горыныч: http://192.168.0.79:4000/src/analytics (без /v1). Модель — fast; "
+                                      + "модель, рассуждение и приоритет по виду разбора — в карточке «Градация разбора»",
+                        }[p] || "Ollama: обычно http://localhost:11434";
                         document.getElementById("llm_ctx_hint").textContent =
-                            p === "lmstudio" ? "(игнорируется — задаётся при загрузке модели в LM Studio)" : "";
+                            p === "lmstudio" ? "(игнорируется — задаётся при загрузке модели в LM Studio)"
+                          : p === "gorynych" ? "(игнорируется — окно выбирает шлюз)" : "";
                     }
                     document.addEventListener("DOMContentLoaded", llmProviderHint);
                     </script>
@@ -342,12 +346,13 @@
                                     <option value="llamacpp">llama-server (llama.cpp)</option>
                                     <option value="deepseek">DeepSeek</option>
                                     <option value="anthropic">Claude (Anthropic)</option>
+                                    <option value="gorynych">Горыныч (шлюз)</option>
                                 </select>
                             </div>
                             <div class="col-4">
                                 <label class="form-label small fw-semibold mb-1">URL сервера</label>
                                 <input type="text" name="base_url" id="reg_base_url" class="form-control form-control-sm"
-                                       placeholder="http://192.168.0.111:1234">
+                                       placeholder="http://host:port">
                                 <div class="form-text" id="reg_url_hint" style="font-size:0.72rem"></div>
                             </div>
                             <div class="col-3">
@@ -418,21 +423,34 @@
                 </details>
 
                 <script>
-                const LLM_REG_CTX_DEFAULTS = {ollama: 16384, lmstudio: 40960, llamacpp: 32768, deepseek: 131072, anthropic: 200000};
+                const LLM_REG_CTX_DEFAULTS = {ollama: 16384, lmstudio: 40960, llamacpp: 32768, deepseek: 131072, anthropic: 200000, gorynych: 262144};
                 function llmRegProviderHint() {
                     const p = document.getElementById("reg_provider").value;
                     document.getElementById("reg_url_hint").textContent = {
                         ollama:    "Ollama: обычно http://localhost:11434",
-                        lmstudio:  "LM Studio: обычно http://192.168.0.111:1234",
+                        lmstudio:  "LM Studio: обычно http://host:1234",
                         llamacpp:  "llama-server: обычно http://host:8080; имя модели — как в «Модели сервера» (алиас или файл GGUF)",
                         deepseek:  "DeepSeek: https://api.deepseek.com",
                         anthropic: "Не используется — подключение через SDK",
+                        gorynych:  "Шлюз: http://192.168.0.79:4000/src/analytics (без /v1). Модели: fast, flashnext, gemma; "
+                                   + "smart + xhigh — совет на 15–30 мин, не для цепочек. Модель, рассуждение и приоритет "
+                                   + "по виду разбора задаёт «Градация разбора»; параллельно — не больше 3",
                     }[p] || "";
                     const ctx = document.getElementById("reg_max_ctx");
                     if (!ctx.value) ctx.value = LLM_REG_CTX_DEFAULTS[p];
                     document.getElementById("reg_type").value = (p === "anthropic") ? "api" : "llm";
                     if (p === "deepseek" && !document.getElementById("reg_base_url").value)
                         document.getElementById("reg_base_url").value = "https://api.deepseek.com";
+                    if (p === "gorynych" && !document.getElementById("reg_entry_id").value) {
+                        // только для новой записи: при редактировании не затираем введённое
+                        if (!document.getElementById("reg_base_url").value)
+                            document.getElementById("reg_base_url").value = "http://192.168.0.79:4000/src/analytics";
+                        if (!document.getElementById("reg_model").value)
+                            document.getElementById("reg_model").value = "fast";
+                        document.getElementById("reg_max_conc").value = 2;
+                        document.getElementById("reg_max_ctx").value = LLM_REG_CTX_DEFAULTS.gorynych;
+                        document.getElementById("reg_stream").checked = true;
+                    }
                 }
                 function llmRegEdit(e) {
                     document.getElementById("llm-reg-form-details").open = true;
@@ -711,6 +729,67 @@
                 </div>
                 {% endfor %}
                 <button type="submit" class="btn btn-sm btn-primary">Сохранить маршрутизацию гейта</button>
+                <span class="text-muted small ms-2">Вступает в силу немедленно, без перезапуска.</span>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ─── Градация разбора (шлюз «Горыныч») ────────────────────────────── -->
+<div class="row g-3 mt-0" id="ai-depth">
+    <div class="col-12">
+        <div class="card mb-3">
+            <div class="card-header fw-semibold">🎚 Градация разбора — глубина по виду события (шлюз «Горыныч»)</div>
+            <div class="card-body">
+                <div class="text-muted small mb-3">
+                    Сколько думать над событием, решает вид события, а не выбор сервера: сегмент без
+                    происшествий — простой, ему хватит быстрой модели; авария заслуживает глубокой.
+                    Действует только на подключения шлюза «Горыныч» (общие настройки модели или запись
+                    реестра с провайдером «Горыныч») — прямые серверы работают как раньше.
+                    {% if not gorynych_in_use %}<br><strong>Сейчас шлюз не подключён — настройки сохранятся,
+                    но применятся после подключения.</strong>{% endif %}
+                    <br>Модель: <code>fast</code> (Qwen 27B, шлюз сам выбирает видеокарту),
+                    <code>flashnext</code> (Flash-Next 125B), <code>gemma</code> (огромные отчёты),
+                    <code>smart</code> (+ <code>xhigh</code> — совет на 15–30 мин, не для потока); пусто — модель подключения.
+                    Рассуждение «по умолчанию» — решает шлюз (у <code>fast</code> это без рассуждений).
+                    Приоритет: <code>interactive</code> — ждёт человек, <code>background</code> — никогда не
+                    переключает видеокарту (ответит запасная модель).
+                    <br>Модель из градации действует на <em>все</em> записи «Горыныча» в цепочке, поэтому
+                    шлюзу в цепочке хватит одной записи: запасные модели он подставляет сам; следом — Claude.
+                </div>
+                <form method="post" action="/settings/ai-depth">
+                <datalist id="gorynych_models">
+                    <option value="fast"><option value="flashnext"><option value="gemma">
+                    <option value="smart"><option value="q27-3090"><option value="q27-5090">
+                </datalist>
+                <table class="table table-sm align-middle mb-3">
+                    <thead class="table-light">
+                        <tr><th>Вид разбора</th><th style="width:170px">Модель</th>
+                            <th style="width:150px">Рассуждение</th><th style="width:150px">Приоритет</th></tr>
+                    </thead>
+                    <tbody>
+                    {% for d in ai_depth %}
+                    <tr>
+                        <td><div class="fw-semibold small">{{ d.label }}</div>
+                            <div class="text-muted" style="font-size:0.72rem">{{ d.hint }}</div></td>
+                        <td><input type="text" name="depth_{{ d.kind }}_model" list="gorynych_models"
+                                   class="form-control form-control-sm" value="{{ d.model }}" placeholder="модель подключения"></td>
+                        <td><select name="depth_{{ d.kind }}_reasoning" class="form-select form-select-sm">
+                            {% for r in ai_depth_reasoning %}
+                            <option value="{{ r }}" {% if d.reasoning == r %}selected{% endif %}>{{ 'по умолчанию' if r == 'default' else ('выкл' if r == 'off' else r) }}</option>
+                            {% endfor %}
+                        </select></td>
+                        <td><select name="depth_{{ d.kind }}_priority" class="form-select form-select-sm">
+                            {% for pr in ai_depth_priorities %}
+                            <option value="{{ pr }}" {% if d.priority == pr %}selected{% endif %}>{{ pr }}</option>
+                            {% endfor %}
+                        </select></td>
+                    </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+                <button type="submit" class="btn btn-sm btn-primary">Сохранить градацию</button>
                 <span class="text-muted small ms-2">Вступает в силу немедленно, без перезапуска.</span>
                 </form>
             </div>

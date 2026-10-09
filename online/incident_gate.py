@@ -360,8 +360,10 @@ async def analyze_incident(
     try:
         if provider == "llm":
             from llm.client import chat
+            # У шлюза «Горыныч» модель, рассуждение и приоритет — по градации
+            # («разбор аварийного останова»), а не имя модели маршрута уровня
             analysis = (await chat(get_prompt("warning_claude"), prompt,
-                                   model=model or None)).strip()
+                                   model=model or None, depth="incident")).strip()
         else:
             analysis = (await _ask_claude(prompt, model)).strip()
     except Exception:

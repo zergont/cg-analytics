@@ -818,6 +818,9 @@ async def settings_page(request: Request):
         WARNING_LEVELS as _WL, WARNING_LEVEL_LABELS as _WL_LABELS,
         WARNING_LEVEL_SLUGS as _WL_SLUGS, get_all_warning_level_routes as _get_wl_routes,
         CHAIN_TASKS as _CHAIN_TASKS, get_all_chains as _get_chains,
+        DEPTH_KINDS as _DEPTH_KINDS, DEPTH_HINTS as _DEPTH_HINTS,
+        DEPTH_PRIORITIES as _DEPTH_PRIOS, DEPTH_REASONING as _DEPTH_REAS,
+        get_all_depth as _get_depth,
     )
     from llm.registry import get_entries as _get_llm_entries
     _wl_routes = _get_wl_routes()
@@ -849,6 +852,15 @@ async def settings_page(request: Request):
         "llm_registry": _llm_entries,
         "ai_chains":    _get_chains(),
         "chain_tasks":  list(_CHAIN_TASKS),
+        "ai_depth": [
+            {"kind": k, "label": lbl, "hint": _DEPTH_HINTS.get(k, ""), **prof}
+            for k, lbl in _DEPTH_KINDS.items()
+            for prof in [_get_depth()[k]]
+        ],
+        "ai_depth_priorities": list(_DEPTH_PRIOS),
+        "ai_depth_reasoning":  list(_DEPTH_REAS),
+        "gorynych_in_use": (get_llm_settings().get("provider") == "gorynych"
+                            or any(e.get("provider") == "gorynych" for e in _llm_entries)),
     })
 
 
@@ -1023,6 +1035,26 @@ async def update_ai_routing(request: Request):
     return RedirectResponse(url="/settings#ai-routing", status_code=303)
 
 
+@router.post("/settings/ai-depth")
+async def update_ai_depth(request: Request):
+    """Градация разбора: модель, рассуждение и приоритет шлюза по виду разбора."""
+    from llm.router import (
+        DEPTH_KINDS as _KINDS, DEPTH_SETTING_KEY as _KEY,
+        apply_depth, serialize_depth,
+    )
+    form = await request.form()
+    for kind in _KINDS:
+        apply_depth(
+            kind,
+            str(form.get(f"depth_{kind}_model", "")).strip(),
+            str(form.get(f"depth_{kind}_reasoning", "default")).strip(),
+            str(form.get(f"depth_{kind}_priority", "")).strip(),
+        )
+    await analytics.set_app_setting(_KEY, serialize_depth())
+    logger.info("Градация разбора сохранена: %s", serialize_depth())
+    return RedirectResponse(url="/settings#ai-depth", status_code=303)
+
+
 @router.post("/settings/warning-gate-routing")
 async def update_warning_gate_routing(request: Request):
     """Гейт предупреждений: провайдер + модель отдельно по уровню серьёзности."""
@@ -1088,7 +1120,7 @@ async def ai_playground_run(request: Request):
                 async for token in chat_stream(
                     system_prompt, user_message,
                     model=model_override or None, stream=use_stream, entry=entry,
-                    reasoning=reasoning,
+                    reasoning=reasoning, priority="interactive",
                 ):
                     raw_chunks.append(token)
                     yield f"data: {_json.dumps({'token': token})}\n\n"

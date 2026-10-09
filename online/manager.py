@@ -574,7 +574,7 @@ _LLM_VERDICT_SUFFIX = (
 
 
 async def _run_warning_gate_llm(
-    user_prompt: str, model: str,
+    user_prompt: str, model: str, depth: str | None = None, meta: dict | None = None,
 ) -> tuple[str, str, str, int, int]:
     """Гейт через локальную LLM (Ollama/LM Studio): вердикт — текстовый маркер, не tool_use.
 
@@ -582,14 +582,23 @@ async def _run_warning_gate_llm(
     Текст анализа никогда не теряется: если модель ответила ТОЛЬКО маркером
     (без анализа), после вырезания маркера остался бы пустой analysis — тогда
     сохраняем исходный необрезанный ответ, чтобы событие не пропадало из
-    истории «немо». Токены локальной генерации не учитываются (chat() их не
-    отдаёт) — tokens_in/out=0.
+    истории «немо». Токены — из usage ответа, если сервер его отдал (шлюз
+    отдаёт), иначе 0.
+
+    depth — вид разбора для градации шлюза «Горыныч»; meta — сюда клиент
+    кладёт, какая голова шлюза реально ответила (для подписи и журнала гейта).
     """
     from llm.client import chat
     from llm.router import get_prompt
 
     system = get_prompt("warning_claude") + _LLM_VERDICT_SUFFIX
-    raw = (await chat(system, user_prompt, model=model or None)).strip()
+    if meta is None:
+        meta = {}
+    raw = (await chat(system, user_prompt, model=model or None,
+                      depth=depth, meta=meta)).strip()
+    usage = meta.get("usage") or {}
+    t_in = int(usage.get("prompt_tokens") or 0)
+    t_out = int(usage.get("completion_tokens") or 0)
 
     m = _LLM_VERDICT_RE.search(raw)
     if m:
@@ -600,7 +609,7 @@ async def _run_warning_gate_llm(
     else:
         decision, reason = "pass", "вердикт не вынесен (fail-open)"
         analysis = raw or "(локальная модель вернула пустой ответ)"
-    return analysis, decision, reason, 0, 0
+    return analysis, decision, reason, t_in, t_out
 
 
 async def _analyze_warning_claude(
@@ -719,14 +728,20 @@ async def _analyze_warning_claude(
         )
         can_cancel  = struct.get("panel_severity", "норма") == "норма"
 
+        _gw_meta: dict = {}
         if provider == "llm":
+            from llm.router import depth_for_gate
             analysis, decision, reason, tokens_in, tokens_out = await _run_warning_gate_llm(
-                user_prompt, model,
+                user_prompt, model, depth=depth_for_gate(level), meta=_gw_meta,
             )
         else:
             analysis, decision, reason, tokens_in, tokens_out = await _run_warning_gate_api(
                 user_prompt, model, claude_cfg,
             )
+        # Подпись и журнал — по реально ответившей модели (у шлюза это голова,
+        # а не имя из маршрута уровня)
+        from llm.client import gateway_label
+        model = gateway_label(_gw_meta, model)
         if analysis:
             from llm.router import format_ai_signature
             analysis = analysis + format_ai_signature(model)

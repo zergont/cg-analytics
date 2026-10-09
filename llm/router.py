@@ -154,6 +154,129 @@ def get_all_warning_level_routes() -> dict[str, dict[str, str]]:
     return {k: dict(v) for k, v in _warning_level_routing.items()}
 
 
+# ── Градация разбора: модель, рассуждение и приоритет по виду разбора ─────────
+# Действует на подключения шлюза «Горыныч» (provider gorynych): шлюз держит
+# очередь видеокарт и подменяет модели сам, поэтому глубину разбора задаём
+# видом разбора, а не выбором сервера. Сегмент без происшествий — простой,
+# ему хватит быстрой модели; авария — заслуживает глубокой. Для прямых
+# серверов (LM Studio, llama-server) градация не применяется.
+#
+# model     — имя модели шлюза (fast, flashnext, gemma, smart…); пусто — модель
+#             подключения. smart + xhigh — совет на 15–30 мин, не для потока.
+# reasoning — default (решает шлюз) | off | low | medium | high | xhigh
+# priority  — interactive | normal | batch | background (класс очереди шлюза)
+
+DEPTH_SETTING_KEY = "ai_depth_profiles"
+
+DEPTH_KINDS: dict[str, str] = {
+    "seg_norma":    "Заключение по сегменту — 🟢 норма, без замечаний",
+    "seg_caution":  "Заключение по сегменту — 🟡 замечания аналитики",
+    "seg_warning":  "Заключение по сегменту — 🟠 предупреждение панели",
+    "seg_shutdown": "Заключение по сегменту — 🔴 авария панели",
+    "gate_caution": "Гейт — 🟡 предупреждение аналитики (онлайн)",
+    "gate_warning": "Гейт — 🟠 сигнал панели (онлайн)",
+    "incident":     "Разбор аварийного останова",
+    "humanize":     "Пересказ заключения для оператора",
+    "manual":       "Ручные запросы: разбор сегмента, «Ручной анализ»",
+}
+
+DEPTH_HINTS: dict[str, str] = {
+    "seg_norma":    "Закрытие сегмента, детекций нет. Больше трети всех заключений.",
+    "seg_caution":  "Закрытие сегмента с предупреждениями нашей аналитики.",
+    "seg_warning":  "Закрытие сегмента с предупреждением панели управления.",
+    "seg_shutdown": "Закрытие аварийного сегмента: авария панели или аварийный стоп.",
+    "gate_caution": "Предупреждение аналитики держится 60 с — разбор и вердикт «отменить/пропустить».",
+    "gate_warning": "Сигнал панели держится 60 с — разбор для оператора (отменить нельзя).",
+    "incident":     "Акт аварийного останова готов — разбор причины по циклу от нормального останова.",
+    "humanize":     "Переписывает готовое заключение простым языком — новых выводов не делает.",
+    "manual":       "Человек нажал кнопку и ждёт ответа.",
+}
+
+DEPTH_PRIORITIES: tuple[str, ...] = ("interactive", "normal", "batch", "background")
+DEPTH_REASONING: tuple[str, ...] = ("default", "off", "low", "medium", "high", "xhigh")
+
+# Пока градация не выстроена — всем быстрая модель (решение владельца 09.10.2026);
+# приоритет — по тому, ждёт ли ответа человек
+_DEPTH_DEFAULT_PRIORITY: dict[str, str] = {
+    "seg_norma":    "batch",
+    "seg_caution":  "normal",
+    "seg_warning":  "normal",
+    "seg_shutdown": "normal",
+    "gate_caution": "interactive",
+    "gate_warning": "interactive",
+    "incident":     "normal",
+    "humanize":     "batch",
+    "manual":       "interactive",
+}
+
+
+def _default_depth(kind: str) -> dict[str, str]:
+    return {"model": "fast", "reasoning": "default",
+            "priority": _DEPTH_DEFAULT_PRIORITY.get(kind, "normal")}
+
+
+_depth: dict[str, dict[str, str]] = {k: _default_depth(k) for k in DEPTH_KINDS}
+
+
+def get_depth(kind: str) -> dict[str, str]:
+    """Профиль вида разбора (неизвестный вид — профиль по умолчанию)."""
+    return dict(_depth.get(kind) or _default_depth(kind))
+
+
+def apply_depth(kind: str, model: str, reasoning: str, priority: str) -> None:
+    if kind not in DEPTH_KINDS:
+        raise ValueError(f"Неизвестный вид разбора: {kind}")
+    _depth[kind] = {
+        "model":     str(model or "").strip(),
+        "reasoning": reasoning if reasoning in DEPTH_REASONING else "default",
+        "priority":  priority if priority in DEPTH_PRIORITIES else _DEPTH_DEFAULT_PRIORITY[kind],
+    }
+
+
+def get_all_depth() -> dict[str, dict[str, str]]:
+    return {k: dict(v) for k, v in _depth.items()}
+
+
+def load_depth(json_str: str) -> None:
+    """Профили из app_settings (JSON); отсутствующие виды — по умолчанию."""
+    import json
+    try:
+        raw = json.loads(json_str) if json_str else {}
+    except json.JSONDecodeError:
+        logger.error("ai_router: битый JSON градации разбора — профили по умолчанию")
+        raw = {}
+    for kind in DEPTH_KINDS:
+        prof = raw.get(kind) if isinstance(raw, dict) else None
+        if isinstance(prof, dict):
+            apply_depth(kind, prof.get("model", ""), prof.get("reasoning", "default"),
+                        prof.get("priority", ""))
+        else:
+            _depth[kind] = _default_depth(kind)
+
+
+def serialize_depth() -> str:
+    import json
+    return json.dumps(_depth, ensure_ascii=False)
+
+
+_SEG_DEPTH_BY_LEVEL: dict[str, str] = {
+    "НОРМА":    "seg_norma",
+    "CAUTION":  "seg_caution",
+    "WARNING":  "seg_warning",
+    "SHUTDOWN": "seg_shutdown",
+}
+
+
+def depth_for_segment(alarm_level: str | None) -> str:
+    """Вид разбора заключения по уровню тревоги сегмента (вердикт блока аналитики)."""
+    return _SEG_DEPTH_BY_LEVEL.get(alarm_level or "", "seg_caution")
+
+
+def depth_for_gate(level: str | None) -> str:
+    """Вид разбора гейта по уровню серьёзности (status_assembler.compute_severity_level)."""
+    return "gate_caution" if level == "предупреждение" else "gate_warning"
+
+
 # ── Приоритетные цепочки моделей (fallback по размеру и ошибкам) ──────────────
 # Цепочка — упорядоченный список id записей реестра (llm.registry).
 # Непустая цепочка у задачи имеет приоритет над одиночным provider задачи.

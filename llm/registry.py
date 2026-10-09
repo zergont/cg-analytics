@@ -13,8 +13,10 @@
   id             — слаг-идентификатор (ссылка из приоритетных цепочек)
   name           — человекочитаемое имя для UI
   type           — "llm" (plain chat) | "api" (Claude-агент с инструментами)
-  provider       — ollama | lmstudio | llamacpp | deepseek | anthropic
-                   (llamacpp — llama-server из llama.cpp, OpenAI-совместимый API)
+  provider       — ollama | lmstudio | llamacpp | deepseek | anthropic | gorynych
+                   (llamacpp — llama-server из llama.cpp, OpenAI-совместимый API;
+                   gorynych — шлюз «Горыныч»: очередь видеокарт, приоритеты,
+                   подмена моделей; модель и глубину задаёт градация разбора)
   base_url       — адрес сервера (для anthropic не используется)
   model          — имя модели
   api_key        — ключ API (deepseek; для локальных пусто)
@@ -40,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 REGISTRY_SETTING_KEY = "llm_model_registry"
 
-ENTRY_PROVIDERS = ("ollama", "lmstudio", "llamacpp", "deepseek", "anthropic")
+ENTRY_PROVIDERS = ("ollama", "lmstudio", "llamacpp", "deepseek", "anthropic", "gorynych")
 ENTRY_TYPES     = ("llm", "api")
 REASONING_LEVELS = ("default", "off", "low", "medium", "high", "xhigh")
 # Локальные серверы: по умолчанию строго последовательно (один запрос за раз)
@@ -53,7 +55,17 @@ DEFAULT_MAX_CTX = {
     "llamacpp":  32768,
     "deepseek":  131072,
     "anthropic": 200000,
+    # Шлюз сам выбирает голову, в окно которой влезает промпт (Gemma — 262 144);
+    # не влезло никуда — 400 context_length_exceeded, цепочка идёт дальше
+    "gorynych":  262144,
 }
+
+# Шлюз «Горыныч»: адрес для аналитики (клиент сам добавляет /v1/...)
+GORYNYCH_DEFAULT_URL = "http://192.168.0.79:4000/src/analytics"
+# Очередь — на шлюзе: больше 2–3 параллельных запросов смысла нет, лишние
+# займут места интерактивных
+GORYNYCH_DEFAULT_CONCURRENT = 2
+GORYNYCH_MAX_CONCURRENT = 3
 
 _entries: list[dict] = []
 _semaphores: dict[str, asyncio.Semaphore] = {}
@@ -85,7 +97,10 @@ def normalize_entry(raw: dict) -> dict:
     except (TypeError, ValueError):
         max_conc = 0
     if max_conc < 1:
-        max_conc = 1 if provider in LOCAL_PROVIDERS else 4
+        max_conc = (GORYNYCH_DEFAULT_CONCURRENT if provider == "gorynych"
+                    else 1 if provider in LOCAL_PROVIDERS else 4)
+    if provider == "gorynych":
+        max_conc = min(max_conc, GORYNYCH_MAX_CONCURRENT)
     try:
         temperature = float(raw.get("temperature", 0.1))
     except (TypeError, ValueError):
@@ -94,18 +109,24 @@ def normalize_entry(raw: dict) -> dict:
         num_ctx = int(raw.get("num_ctx") or 16384)
     except (TypeError, ValueError):
         num_ctx = 16384
+    base_url = str(raw.get("base_url", "")).strip().rstrip("/")
+    if provider == "gorynych":
+        base_url = base_url or GORYNYCH_DEFAULT_URL
+        if base_url.endswith("/v1"):     # клиент добавляет /v1 сам
+            base_url = base_url[:-3].rstrip("/")
     return {
         "id":             entry_id,
         "name":           name,
         "type":           etype,
         "provider":       provider,
-        "base_url":       str(raw.get("base_url", "")).strip().rstrip("/"),
+        "base_url":       base_url,
         "model":          str(raw.get("model", "")).strip(),
         "api_key":        str(raw.get("api_key", "")).strip(),
         "max_ctx_tokens": max_ctx,
         "temperature":    temperature,
         "num_ctx":        num_ctx,
-        "stream":         bool(raw.get("stream", True)),
+        # Шлюз — только потоком (псевдопоток с пингами держит соединение живым)
+        "stream":         True if provider == "gorynych" else bool(raw.get("stream", True)),
         "reasoning":      (str(raw.get("reasoning", "default")).strip()
                            if str(raw.get("reasoning", "default")).strip() in REASONING_LEVELS
                            else "default"),
