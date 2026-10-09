@@ -105,7 +105,7 @@ def retriable_llm_error(exc: Exception) -> bool:
     """
     if isinstance(exc, LLMError):
         if exc.gateway and exc.code:
-            return exc.code in _GATEWAY_RETRY_CODES
+            return _is_gateway_stop(exc)
         return exc.status == 429 or exc.status >= 500
     if isinstance(exc, httpx.TransportError):
         return True
@@ -116,7 +116,18 @@ def retriable_llm_error(exc: Exception) -> bool:
 
 
 def _is_gateway_stop(exc: Exception) -> bool:
-    return isinstance(exc, LLMError) and exc.gateway and exc.code in _GATEWAY_RETRY_CODES
+    """Шлюз остановился или перезапускается — запрос стоит повторить.
+
+    `stopped` с причиной operator / client_disconnected — задачу сняли
+    намеренно (оператор шлюза разгружает очередь): повтор поставил бы её в
+    очередь снова — ровно то, от чего её снимали. Повторяем только остановку
+    самого шлюза (reason=shutdown, gateway_stopping).
+    """
+    if not (isinstance(exc, LLMError) and exc.gateway):
+        return False
+    if exc.code == "stopped":
+        return exc.reason == "shutdown"
+    return exc.code in _GATEWAY_RETRY_CODES
 
 
 def _retry_delay(exc: Exception, attempt: int, gateway_restart: bool = False) -> float:
@@ -440,11 +451,17 @@ async def chat_stream(
             yielded = False
             if meta is not None:
                 meta.clear()
+                if gateway:
+                    # Что заказано — для подписи, если шлюз голову не назовёт
+                    meta["requested"] = {"model": payload.get("model"),
+                                         "reasoning": payload.get("reasoning_effort")}
             try:
                 if use_stream:
                     async with _http_client() as client:
                         async with client.stream("POST", url, json=payload, headers=headers) as response:
                             await _raise_for_status(response, stream_mode=True, gateway=gateway)
+                            if gateway:
+                                _note_gateway_task(response, meta)
                             it = (_iter_openai_stream(response, meta, gateway=gateway)
                                   if cfg.get("provider") in _OPENAI_COMPAT
                                   else _iter_ollama_stream(response))
@@ -478,25 +495,43 @@ async def chat_stream(
             sem.release()
 
 
+def _note_gateway_task(response, meta: dict | None) -> None:
+    """task_id шлюза — в журнал сразу, при приёме задачи: чтобы зависшую или
+    лишнюю задачу можно было найти и снять (DELETE /v1/tasks/{task_id}), не
+    дожидаясь ответа, который может не прийти."""
+    tid = response.headers.get("x-gorynych-task-id")
+    if tid:
+        if meta is not None:
+            meta["task_id"] = tid
+        logger.info("Горыныч: задача %s принята", tid)
+
+
 def _log_gateway(meta: dict | None) -> None:
     g = (meta or {}).get("gorynych")
     if g:
-        logger.info("Горыныч: ответила %s (%s), task=%s, %s мс%s",
-                    g.get("backend"), g.get("reasoning_level"), g.get("task_id"),
+        logger.info("Горыныч: ответила %s, task=%s, %s мс%s",
+                    gateway_label(meta, "?"), g.get("task_id"),
                     g.get("duration_ms"), f", подмена: {g['note']}" if g.get("note") else "")
 
 
 def gateway_label(meta: dict | None, fallback: str) -> str:
     """Подпись модели по реально ответившей голове шлюза: «flashnext (xhigh)».
 
-    Без метаданных шлюза — fallback (имя модели из настроек), как раньше.
+    Итог совета шлюз головой не подписывает (backend пуст) — тогда подпись по
+    заказанной модели: «smart (xhigh)». Без метаданных шлюза — fallback (имя
+    модели из настроек), как раньше: у гейта это путь к gguf прямого сервера.
     """
-    g = (meta or {}).get("gorynych") or {}
+    meta = meta or {}
+    g = meta.get("gorynych") or {}
     backend = g.get("backend")
-    if not backend:
-        return fallback
-    level = g.get("reasoning_level")
-    return f"{backend} ({level})" if level else str(backend)
+    if backend:
+        level = g.get("reasoning_level")
+        return f"{backend} ({level})" if level else str(backend)
+    req = meta.get("requested") or {}
+    if req.get("model"):
+        level = req.get("reasoning")
+        return f"{req['model']} ({level})" if level else str(req["model"])
+    return fallback
 
 
 async def chat(

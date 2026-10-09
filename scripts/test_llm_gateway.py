@@ -107,6 +107,8 @@ check("temperature" not in b, "1ж: температуру шлюзу не шл�
 check(meta.get("gorynych", {}).get("backend") == "flashnext" and meta.get("usage", {}).get("total_tokens") == 1020,
       f"1з: метаданные ответа не собраны: {meta}")
 check(client.gateway_label(meta, "fast") == "flashnext (xhigh)", "1и: подпись по реально ответившей голове")
+check(meta.get("task_id") == "t-42", f"1й: task_id шлюза — в meta сразу при приёме: {meta.get('task_id')}")
+check(meta.get("requested") == {"model": "flashnext", "reasoning": "xhigh"}, f"1й2: заказ в meta: {meta.get('requested')}")
 
 srv = Server(sse(chunk("ok"))).install()
 run(client.chat("SYS", "отчёт", entry=GW, depth="seg_norma"))
@@ -151,6 +153,23 @@ srv = Server(sse({"error": {"message": "остановлен", "code": "stopped"
              sse(chunk("после рестарта"))).install()
 txt = run(client.chat("SYS", "отчёт", entry=GW))
 check(txt == "после рестарта" and len(srv.requests) == 2, f"3в: stopped повторяется: {txt!r}, {len(srv.requests)}")
+
+# Задачу снял оператор шлюза — не повторять: повтор поставил бы её в очередь снова
+for reason in ("operator", "client_disconnected"):
+    srv = Server(sse({"error": {"message": "снята", "code": "stopped", "reason": reason, "task_id": "t-5"}}),
+                 sse(chunk("не должно быть"))).install()
+    try:
+        run(client.chat("SYS", "отчёт", entry=GW))
+        check(False, f"3в2: снятие ({reason}) не дало исключения")
+    except client.LLMError as e:
+        check(e.code == "stopped" and e.reason == reason, f"3в2: {e}")
+    check(len(srv.requests) == 1, f"3в3: снятие оператором ({reason}) не повторяется: {len(srv.requests)}")
+srv = Server(sse({"error": {"message": "отменён", "code": "council_cancelled"}}), sse(chunk("x"))).install()
+try:
+    run(client.chat("SYS", "отчёт", entry=GW))
+except client.LLMError:
+    pass
+check(len(srv.requests) == 1, "3в4: council_cancelled не повторяется")
 
 srv = Server((503, json.dumps({"error": {"message": "занято", "code": "backend_unavailable",
                                          "task_id": "t-9"}}), {"content-type": "application/json"})).install()
