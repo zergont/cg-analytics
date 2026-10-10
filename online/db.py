@@ -236,6 +236,7 @@ async def upsert_open_segment(data: dict[str, Any]) -> int:
                     -- в ней что-то появилось. На сотне машин это разница между
                     -- сотней бессмысленных перезаписей JSONB в минуту и нулём
                     chronology_json        = COALESCE($15::jsonb, chronology_json),
+                    report_summary_json    = COALESCE($16::jsonb, report_summary_json),
                     updated_at             = now()
                 WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
                   AND t_end IS NULL
@@ -257,6 +258,8 @@ async def upsert_open_segment(data: dict[str, Any]) -> int:
                     if data.get("incident_json") is not None else None,
                 json.dumps(data.get("chronology_json"), ensure_ascii=False)
                     if data.get("chronology_json") is not None else None,
+                json.dumps(data.get("report_summary_json"), ensure_ascii=False)
+                    if data.get("report_summary_json") is not None else None,
             )
 
             if row:
@@ -271,9 +274,10 @@ async def upsert_open_segment(data: dict[str, Any]) -> int:
                     analytics_version,
                     current_values_json, active_detections_json,
                     continued_from, characteristics_json, report_md,
-                    report_summary_md, incident_json, chronology_json, updated_at
+                    report_summary_md, incident_json, chronology_json, report_summary_json,
+                    updated_at
                 ) VALUES ($1,$2,$3,$4,NULL,$5,$6::jsonb,$7,$8::jsonb,$9::jsonb,$10,$11::jsonb,$12,$13,
-                          $14::jsonb,$15::jsonb,now())
+                          $14::jsonb,$15::jsonb,$16::jsonb,now())
                 RETURNING id
             """,
                 data["router_sn"], data["equip_type"], data["panel_id"],
@@ -292,6 +296,8 @@ async def upsert_open_segment(data: dict[str, Any]) -> int:
                     if data.get("incident_json") is not None else None,
                 json.dumps(data.get("chronology_json"), ensure_ascii=False)
                     if data.get("chronology_json") is not None else None,
+                json.dumps(data.get("report_summary_json"), ensure_ascii=False)
+                    if data.get("report_summary_json") is not None else None,
             )
         return row["id"]
     finally:
@@ -313,10 +319,10 @@ async def insert_closed_segment(data: dict[str, Any]) -> int:
                 characteristics_json, report_md, report_summary_md,
                 incident_json, chronology_json,
                 warning_analysis_md, warning_analyzed_hash, warning_analyses,
-                gate_log, gate_suppressed_hash,
+                gate_log, gate_suppressed_hash, report_summary_json,
                 updated_at
             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13::jsonb,$14,$15,$16::jsonb,
-                      $22::jsonb,$17,$18,$19::jsonb,$20::jsonb,$21,now())
+                      $22::jsonb,$17,$18,$19::jsonb,$20::jsonb,$21,$23::jsonb,now())
             ON CONFLICT (router_sn, equip_type, panel_id, t_start)
                 WHERE t_end IS NOT NULL
             DO UPDATE SET
@@ -330,6 +336,7 @@ async def insert_closed_segment(data: dict[str, Any]) -> int:
                 characteristics_json = EXCLUDED.characteristics_json,
                 report_md           = EXCLUDED.report_md,
                 report_summary_md   = EXCLUDED.report_summary_md,
+                report_summary_json = EXCLUDED.report_summary_json,
                 -- Без COALESCE: оба поля детерминированно выводятся из
                 -- истории, и при повторном анализе должны ПЕРЕЗАПИСЫВАТЬСЯ.
                 -- Иначе старый акт залипает после правки кода или смены
@@ -368,6 +375,8 @@ async def insert_closed_segment(data: dict[str, Any]) -> int:
             data.get("gate_suppressed_hash"),
             json.dumps(data.get("chronology_json"), ensure_ascii=False)
                 if data.get("chronology_json") is not None else None,
+            json.dumps(data.get("report_summary_json"), ensure_ascii=False)
+                if data.get("report_summary_json") is not None else None,
         )
         seg_id = row["id"]
 
@@ -566,7 +575,7 @@ async def get_segments_for_calendar(
                        split_reason, continued_from, continues_to,
                        coking_risk_json, analytics_version,
                        active_detections_json, characteristics_json,
-                       gate_suppressed_hash,
+                       gate_suppressed_hash, report_summary_json,
                        -- сам акт тяжёлый, в календарь тянем только признак
                        (incident_json IS NOT NULL) AS has_incident
                 FROM auto_segments
@@ -717,6 +726,51 @@ async def _resolve_segment_target(
         LIMIT 1
     """, router_sn, equip_type, panel_id, ts)
     return int(row["id"]) if row else None
+
+
+async def resolve_segment_id(
+    router_sn: str, equip_type: str, panel_id: int,
+    segment_id: int | None, ts: datetime,
+) -> int | None:
+    """id сегмента, которому принадлежит запись в момент ts (см. _resolve_segment_target)."""
+    conn = await _connect()
+    try:
+        return await _resolve_segment_target(conn, router_sn, equip_type, panel_id, segment_id, ts)
+    finally:
+        await conn.close()
+
+
+async def apply_late_gate_suppression(seg_id: int, scenarios: list[str]) -> tuple[bool, bool]:
+    """Поздняя отмена гейтом в закрытом сегменте: пересчитать части сводки и md.
+
+    Части закрытого сегмента замораживаются при закрытии; вердикт гейта,
+    вернувшийся позже, лёг в эту строку хешем, но вердикт сводки (единый для
+    ИИ, календаря и карточки) его не видел.
+
+    Возвращает (изменено, сменился уровень вердикта). Частей нет (старый
+    сегмент, без связи) или пересчёт ничего не меняет — строка не трогается.
+    """
+    from analytics.serializer import apply_gate_suppression, render_summary_md
+    conn = await _connect()
+    try:
+        raw = await conn.fetchval(
+            "SELECT report_summary_json FROM auto_segments WHERE id=$1 AND t_end IS NOT NULL",
+            seg_id)
+        parts = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(parts, dict) or not parts.get("version"):
+            return False, False
+        new_parts = apply_gate_suppression(parts, scenarios)
+        if new_parts == parts:
+            return False, False
+        await conn.execute(
+            """UPDATE auto_segments SET report_summary_json = $2::jsonb,
+                   report_summary_md = $3, updated_at = now() WHERE id = $1""",
+            seg_id, json.dumps(new_parts, ensure_ascii=False), render_summary_md(new_parts))
+        old_lvl = (parts.get("verdict") or {}).get("level")
+        new_lvl = (new_parts.get("verdict") or {}).get("level")
+        return True, old_lvl != new_lvl
+    finally:
+        await conn.close()
 
 
 async def save_segment_warning(

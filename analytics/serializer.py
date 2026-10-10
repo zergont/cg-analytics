@@ -173,37 +173,35 @@ _SEV_RANK_MD = {"SHUTDOWN": 4, "WARNING": 3, "CAUTION": 2, "INFO": 1}
 _SRC_RU = {"panel": "панель", "analytics": "аналитика"}
 
 
-def build_summary_md(
+SUMMARY_PARTS_VERSION = 1
+
+# Уровень в частях сводки — те же значения, что alarm_level корпуса (догма v4.9.32)
+_LEVEL_RANK = {"НОРМА": 0, "CAUTION": 1, "WARNING": 2, "SHUTDOWN": 3}
+
+
+def build_summary_parts(
     segments: list[Segment],
     episodes: list[dict[str, Any]] | None = None,
     tz=None,
     trip_roles: list[str] | None = None,
-) -> str:
-    """Верхняя часть отчёта (report_summary_md): вердикт → замечания → показатели.
+) -> dict[str, Any]:
+    """Сводка сегмента частями — единый источник вердикта (v5.1.0).
 
-    Полные таблицы остаются в report_md — UI сворачивает его как «Технические
-    данные». Отдельное поле вместо HTML <details>: react-markdown в
-    UI-telemetry вырезает сырой HTML.
+    Из частей печатается report_summary_md (render_summary_md) и их же читают
+    цепочка ИИ (глубина разбора, шапка «не пересматривать», вердикт корпуса),
+    календарь и карточка UI — раньше вердикт считался в трёх местах по-разному.
 
     Вердикт детерминированный (эпизоды + sequence-проверки), мнение ИИ —
     отдельными панелями. Эпизоды, отменённые гейтом, в вердикт не входят,
     но в замечаниях показываются с пометкой.
+
+    Ключи: verdict {level, title, note, remarks_n, suppressed_n};
+    end_level — что висит на конец окна (живое, не снятое ИИ): по нему красится
+    стоп-сегмент в календаре (v4.9.73); mttr {kind, label, sec} | None;
+    remarks — замечания по причинам, с фазами before / appeared / open;
+    failed_checks; key_metrics {rows} | None; coking {level} | None; no_data.
     """
     episodes = episodes or []
-    lines: list[str] = []
-    a = lines.append
-
-    live = [e for e in episodes if not e.get("gate_suppressed")]
-    panel_shutdown = [
-        e for e in live
-        if e.get("source") == "panel" and e.get("severity") == "SHUTDOWN"
-    ]
-    panel_warning = [
-        e for e in live
-        if e.get("source") == "panel" and e.get("severity") == "WARNING"
-    ]
-    analytics_eps = [e for e in live if e.get("source") == "analytics"]
-    suppressed = [e for e in episodes if e.get("gate_suppressed")]
     failed_checks = [
         c for s in segments for c in (getattr(s, "sequence_checks", None) or [])
         if isinstance(c, dict) and not c.get("passed", True)
@@ -214,25 +212,11 @@ def build_summary_md(
     # решает вид стопа, но в детекцию не идёт.
     emergency = [s for s in segments if getattr(s, "stop_kind", None) == "EMERGENCY"]
 
-    # ── Вердикт (догма v4.9.32: SHUTDOWN🔴 / WARNING🟠 / CAUTION🟡 / НОРМА🟢) ──
-    if panel_shutdown or emergency:
-        a("## 🔴 АВАРИЯ — аварийный останов панели")
-    elif panel_warning:
-        a("## 🟠 ВНИМАНИЕ — предупреждение панели управления")
-    elif analytics_eps or failed_checks:
-        n = len(analytics_eps) + len(failed_checks)
-        a(f"## 🟡 ЗАМЕЧАНИЯ К РАБОТЕ — {n}")
-    elif suppressed:
-        a("## 🟢 НОРМА")
-        a(f"Предупреждения аналитики ({len(suppressed)}) сняты ИИ.")
-    else:
-        a("## 🟢 НОРМА")
-        a("Замечаний к работе нет.")
-
     # Сегмент закрыт по устранению неисправностей → время до устранения (MTTR):
     # от первого фронта панельного кода до момента чистоты (границы сегмента).
     # SHUTDOWN_CLEARED — тот же рез в новой модели СТОПа: там граница ставится
     # по снятию аварийной маски, а не по полной чистоте (v4.9.74)
+    mttr_part = None
     _cc = getattr(segments[-1], "cause_close", None) if segments else None
     if _cc in ("FAULT_CLEARED", "SHUTDOWN_CLEARED"):
         # Якорь зависит от того, ЧТО именно устранили. На резе по снятию
@@ -271,60 +255,270 @@ def build_summary_md(
                     t_first = t_first.replace(tzinfo=timezone.utc)
                 mttr = (t_end - t_first).total_seconds()
                 if mttr > 0:
-                    a("")
-                    _what = ("Авария снята" if _cc == "SHUTDOWN_CLEARED"
-                             else "Неисправности устранены")
-                    a(f"⏱ **{_what}** — время до устранения: "
-                      f"**{_fmt_duration(mttr)}** (от первого кода до сброса)")
+                    mttr_part = {
+                        "kind": _cc,
+                        "label": ("Авария снята" if _cc == "SHUTDOWN_CLEARED"
+                                  else "Неисправности устранены"),
+                        "sec": mttr,
+                    }
             except (ValueError, TypeError):
                 pass
 
     # ── Замечания: агрегируем эпизоды по причине (поэпизодный список — в полном отчёте) ──
-    if episodes or failed_checks:
+    seg_start = None
+    if segments:
+        try:
+            seg_start = datetime.fromisoformat(segments[0].t_start)
+            if seg_start.tzinfo is None:
+                seg_start = seg_start.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError, AttributeError):
+            seg_start = None
+
+    def _group_key(e: dict):
+        if e.get("source") == "panel":
+            return ("panel", e.get("addr"), e.get("bit"))
+        return ("analytics", e.get("scenario"))
+
+    def _group_name(e: dict) -> str:
+        if e.get("source") == "panel":
+            vals = e.get("open_values_json")
+            if isinstance(vals, str):
+                try:
+                    vals = json.loads(vals)
+                except Exception:
+                    vals = {}
+            name = (vals or {}).get("fault_name")
+            return name or f"Неисправность панели (addr={e.get('addr')}, bit={e.get('bit')})"
+        sc = e.get("scenario") or "?"
+        return SCENARIO_RU.get(sc, sc)
+
+    # Что висит на конец окна — по данным последнего подсегмента, как раньше
+    # красился простой стоп (v4.9.73, _seg_active_dets): висит маска, у которой
+    # в последнем подсегменте есть детекция без снятого фронта (fault_end) —
+    # снятая панелью уже не висит, хотя эпизод ещё в дебаунсе закрытия, а
+    # поднятая снова после снятия висит; аналитика висит, только если её
+    # детекция есть в последнем подсегменте
+    last_sub = None
+    if segments and getattr(segments[-1], "subsegments", None):
+        last_sub = segments[-1].subsegments[-1]
+    last_dets = getattr(last_sub, "detections", None) if last_sub is not None else None
+    panel_live: set[tuple] | None = None
+    analytics_at_end: set[str] | None = None
+    if last_dets is not None:
+        panel_live, analytics_at_end = set(), set()
+        for d in last_dets:
+            dd = d.to_dict() if hasattr(d, "to_dict") else d
+            if dd.get("scenario") == "CONTROLLER_FAULT":
+                v = dd.get("values") or {}
+                if not v.get("fault_end"):
+                    panel_live.add((v.get("addr"), v.get("bit")))
+            else:
+                analytics_at_end.add(dd.get("scenario"))
+
+    groups: dict[tuple, dict] = {}
+    for e in episodes:
+        g = groups.setdefault(_group_key(e), {
+            "name": _group_name(e), "source": e.get("source"),
+            "scenario": e.get("scenario"),
+            "sev_rank": 0, "severity": e.get("severity"),
+            "count": 0, "active_sec": 0.0, "blind_sec": 0.0,
+            "suppressed": 0, "open": 0, "open_live": 0, "before": False, "appeared": False,
+            "at_end": False,
+        })
+        g["count"] += 1
+        g["active_sec"] += e.get("active_sec") or 0
+        g["blind_sec"] += e.get("blind_sec") or 0
+        rank = _SEV_RANK_MD.get(e.get("severity") or "", 0)
+        if rank > g["sev_rank"]:
+            g["sev_rank"], g["severity"] = rank, e.get("severity")
+        if e.get("gate_suppressed"):
+            g["suppressed"] += 1
+        if not e.get("t_close"):
+            g["open"] += 1
+            if not e.get("gate_suppressed"):
+                # Открытые и не снятые — их и снимет поздний вердикт гейта
+                # (set_episodes_gate_suppressed метит только открытые эпизоды)
+                g["open_live"] += 1
+                if e.get("source") == "panel":
+                    hangs = panel_live is None or (e.get("addr"), e.get("bit")) in panel_live
+                else:
+                    hangs = analytics_at_end is None or e.get("scenario") in analytics_at_end
+                if hangs:
+                    g["at_end"] = True
+        # Фаза относительно сегмента: было до начала / появилось в нём
+        t_open = e.get("t_open")
+        if isinstance(t_open, str):
+            try:
+                t_open = datetime.fromisoformat(t_open)
+            except ValueError:
+                t_open = None
+        if isinstance(t_open, datetime) and seg_start is not None:
+            if t_open.tzinfo is None:
+                t_open = t_open.replace(tzinfo=timezone.utc)
+            if t_open < seg_start:
+                g["before"] = True
+            else:
+                g["appeared"] = True
+    remarks = sorted(groups.values(), key=lambda g: (-g["sev_rank"], -g["active_sec"]))
+    for g in remarks:
+        g.pop("sev_rank", None)
+
+    checks = []
+    for c in failed_checks:
+        det = c.get("details") or c.get("detail") or ""
+        checks.append({"check": c.get("check"), "details": det})
+
+    verdict, end_level = _verdict_from_remarks(remarks, checks, bool(emergency))
+
+    # ── Ключевые показатели: trip_snapshot-роли последнего рабочего подсегмента ──
+    key_metrics = None
+    coking = None
+    work_seg = next(
+        (s for s in reversed(segments)
+         if getattr(s, "run_state", None) == 3 and s.subsegments),
+        None,
+    )
+    if work_seg and trip_roles:
+        sub = work_seg.subsegments[-1]
+        rows = [
+            {"role": role, "median": sub.characteristics[role].get("median"),
+             "min": sub.characteristics[role].get("min"),
+             "max": sub.characteristics[role].get("max"),
+             "unit": sub.characteristics[role].get("unit", "")}
+            for role in trip_roles
+            if isinstance(sub.characteristics.get(role), dict)
+        ]
+        if rows:
+            key_metrics = {"rows": rows}
+        coking = {"level": sub.risk_accumulators.coking_risk.risk_level}
+
+    return {
+        "version": SUMMARY_PARTS_VERSION,
+        "verdict": verdict,
+        "end_level": end_level,
+        "mttr": mttr_part,
+        "remarks": remarks,
+        "has_remarks": bool(episodes or failed_checks),
+        "failed_checks": checks,
+        "emergency": bool(emergency),
+        "key_metrics": key_metrics,
+        "coking": coking,
+        "no_data": False,
+    }
+
+
+# Проверки последовательности, которые говорят о качестве данных, а не о
+# работе машины: замечанием к работе не считаются (решение 11.10, 2а) — строкой
+# в «Замечаниях» остаются, на вердикт не влияют
+_DATA_QUALITY_CHECKS = frozenset({"subseg_data_coverage"})
+
+
+def _verdict_from_remarks(
+    remarks: list[dict], checks: list[dict], emergency: bool,
+) -> tuple[dict, str]:
+    """Вердикт периода и уровень на конец окна — из групп замечаний.
+
+    Из групп, а не из эпизодов, чтобы вердикт можно было пересчитать, когда
+    поздняя отмена гейтом помечает замечание снятым (apply_gate_suppression).
+    Живой панельный CAUTION («Общая авария» + несброшенный 40012) — замечание
+    к работе (решение 11.10, 1а): раньше заголовок писал «НОРМА — замечаний нет»
+    при 🟡 строке ниже.
+    """
+    def live(g):
+        return g["count"] - g.get("suppressed", 0)
+
+    panel = [g for g in remarks if g.get("source") == "panel" and live(g) > 0]
+    shutdown = any(g.get("severity") == "SHUTDOWN" for g in panel)
+    warning = any(g.get("severity") == "WARNING" for g in panel)
+    n = (sum(live(g) for g in remarks if g.get("source") == "analytics")
+         + sum(live(g) for g in panel if g.get("severity") not in ("SHUTDOWN", "WARNING"))
+         + sum(1 for c in checks if c.get("check") not in _DATA_QUALITY_CHECKS))
+    suppressed_n = sum(g.get("suppressed", 0) for g in remarks)
+
+    if shutdown or emergency:
+        verdict = {"level": "SHUTDOWN", "title": "🔴 АВАРИЯ — аварийный останов панели", "note": None}
+    elif warning:
+        verdict = {"level": "WARNING", "title": "🟠 ВНИМАНИЕ — предупреждение панели управления",
+                   "note": None}
+    elif n:
+        verdict = {"level": "CAUTION", "title": f"🟡 ЗАМЕЧАНИЯ К РАБОТЕ — {n}", "note": None}
+    elif suppressed_n:
+        verdict = {"level": "НОРМА", "title": "🟢 НОРМА",
+                   "note": f"Предупреждения аналитики ({suppressed_n}) сняты ИИ."}
+    else:
+        verdict = {"level": "НОРМА", "title": "🟢 НОРМА", "note": "Замечаний к работе нет."}
+    verdict["remarks_n"] = n
+    verdict["suppressed_n"] = suppressed_n
+
+    end_level = "НОРМА"
+    for g in remarks:
+        if not g.get("at_end"):
+            continue
+        if g.get("source") == "panel":
+            lvl = g.get("severity") if g.get("severity") in ("SHUTDOWN", "WARNING") else "CAUTION"
+        else:
+            lvl = "CAUTION"
+        if _LEVEL_RANK[lvl] > _LEVEL_RANK[end_level]:
+            end_level = lvl
+    if emergency:
+        end_level = "SHUTDOWN"
+    return verdict, end_level
+
+
+def apply_gate_suppression(parts: dict[str, Any], scenarios) -> dict[str, Any]:
+    """Пометить снятыми аналитические замечания этих сценариев и пересчитать вердикт.
+
+    Для поздней отмены гейтом: разбор вернулся после закрытия сегмента, его
+    вердикт лёг в закрытую строку, а части там заморожены при закрытии.
+    Несимметрию гейт не снимает (online.status_assembler.UNCANCELLABLE_SCENARIOS).
+    """
+    from online.status_assembler import UNCANCELLABLE_SCENARIOS
+    sc = {x for x in scenarios if x not in UNCANCELLABLE_SCENARIOS}
+    if not sc or not parts or parts.get("no_data"):
+        return parts
+    out = json.loads(json.dumps(parts))
+    remarks = out.get("remarks") or []
+    # Без отметок «на конец» уровень конца из групп не восстановить — прежний
+    keep_end = not all("at_end" in g for g in remarks)
+    for g in remarks:
+        if g.get("source") == "analytics" and g.get("scenario") in sc:
+            # Вердикт гейта касается открытых эпизодов: закрывшиеся раньше в
+            # этом же сегменте остаются замечаниями, как и при живой пометке
+            n = g.get("open_live")
+            if n is None:
+                n = g["count"] - g.get("suppressed", 0)
+            g["suppressed"] = g.get("suppressed", 0) + n
+            g["open_live"] = 0
+            g["at_end"] = False
+    out["verdict"], end_level = _verdict_from_remarks(
+        remarks, out.get("failed_checks") or [], bool(out.get("emergency")))
+    if not keep_end:
+        out["end_level"] = end_level
+    return out
+
+
+def render_summary_md(parts: dict[str, Any]) -> str:
+    """report_summary_md из частей сводки (build_summary_parts)."""
+    lines: list[str] = []
+    a = lines.append
+    v = parts.get("verdict") or {}
+    a(f"## {v.get('title', '')}")
+    if v.get("note"):
+        a(v["note"])
+
+    m = parts.get("mttr")
+    if m:
+        a("")
+        a(f"⏱ **{m['label']}** — время до устранения: "
+          f"**{_fmt_duration(m['sec'])}** (от первого кода до сброса)")
+
+    if parts.get("has_remarks"):
         a("")
         a("### Замечания")
-
-        def _group_key(e: dict):
-            if e.get("source") == "panel":
-                return ("panel", e.get("addr"), e.get("bit"))
-            return ("analytics", e.get("scenario"))
-
-        def _group_name(e: dict) -> str:
-            if e.get("source") == "panel":
-                vals = e.get("open_values_json")
-                if isinstance(vals, str):
-                    try:
-                        vals = json.loads(vals)
-                    except Exception:
-                        vals = {}
-                name = (vals or {}).get("fault_name")
-                return name or f"Неисправность панели (addr={e.get('addr')}, bit={e.get('bit')})"
-            sc = e.get("scenario") or "?"
-            return SCENARIO_RU.get(sc, sc)
-
-        groups: dict[tuple, dict] = {}
-        for e in episodes:
-            g = groups.setdefault(_group_key(e), {
-                "name": _group_name(e), "source": e.get("source"),
-                "sev_rank": 0, "severity": e.get("severity"),
-                "count": 0, "active_sec": 0.0, "blind_sec": 0.0,
-                "suppressed": 0, "open": 0,
-            })
-            g["count"] += 1
-            g["active_sec"] += e.get("active_sec") or 0
-            g["blind_sec"] += e.get("blind_sec") or 0
-            rank = _SEV_RANK_MD.get(e.get("severity") or "", 0)
-            if rank > g["sev_rank"]:
-                g["sev_rank"], g["severity"] = rank, e.get("severity")
-            if e.get("gate_suppressed"):
-                g["suppressed"] += 1
-            if not e.get("t_close"):
-                g["open"] += 1
-
         _eps_ru = lambda n: ("эпизод" if n % 10 == 1 and n % 100 != 11 else
                              "эпизода" if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else
                              "эпизодов")
-        for g in sorted(groups.values(), key=lambda g: (-g["sev_rank"], -g["active_sec"])):
+        for g in parts.get("remarks") or []:
             emoji = _SEVERITY_EMOJI.get(g["severity"], "")
             src_ru = _SRC_RU.get(g["source"], g["source"] or "")
             line = (f"- {emoji} **{g['name']}** [{src_ru}]: {g['count']} {_eps_ru(g['count'])}, "
@@ -339,37 +533,48 @@ def build_summary_md(
             if g["open"]:
                 line += " — **активен на конец периода**"
             a(line)
-
-        for c in failed_checks:
-            det = c.get("details") or c.get("detail") or ""
+        for c in parts.get("failed_checks") or []:
+            det = c.get("details") if isinstance(c, dict) else c
             a(f"- ❗ {det}" if det else "- ❗ проверка не пройдена")
 
-    # ── Ключевые показатели: trip_snapshot-роли последнего рабочего подсегмента ──
-    work_seg = next(
-        (s for s in reversed(segments)
-         if getattr(s, "run_state", None) == 3 and s.subsegments),
-        None,
-    )
-    if work_seg and trip_roles:
-        sub = work_seg.subsegments[-1]
-        rows = [
-            (role, sub.characteristics[role])
-            for role in trip_roles
-            if isinstance(sub.characteristics.get(role), dict)
-        ]
-        if rows:
-            a("")
-            a("### Ключевые показатели")
-            a("| Параметр | Медиана | Мин | Макс | Ед. |")
-            a("|----------|--------:|----:|----:|-----|")
-            for role, ch in rows:
-                a(f"| {role} | {_fmt_val(ch.get('median'))} | {_fmt_val(ch.get('min'))} "
-                  f"| {_fmt_val(ch.get('max'))} | {ch.get('unit', '')} |")
-        cr = sub.risk_accumulators.coking_risk
+    km = parts.get("key_metrics")
+    if km and km.get("rows"):
         a("")
-        a(f"Закоксовка: **{cr.risk_level}**")
+        a("### Ключевые показатели")
+        a("| Параметр | Медиана | Мин | Макс | Ед. |")
+        a("|----------|--------:|----:|----:|-----|")
+        for r in km["rows"]:
+            a(f"| {r['role']} | {_fmt_val(r.get('median'))} | {_fmt_val(r.get('min'))} "
+              f"| {_fmt_val(r.get('max'))} | {r.get('unit', '')} |")
+    if parts.get("coking"):
+        a("")
+        a(f"Закоксовка: **{parts['coking']['level']}**")
 
     return "\n".join(lines).strip() + "\n"
+
+
+def build_summary_md(
+    segments: list[Segment],
+    episodes: list[dict[str, Any]] | None = None,
+    tz=None,
+    trip_roles: list[str] | None = None,
+) -> str:
+    """Верхняя часть отчёта (report_summary_md): вердикт → замечания → показатели.
+
+    Полные таблицы остаются в report_md — UI сворачивает его как «Технические
+    данные». Отдельное поле вместо HTML <details>: react-markdown в
+    UI-telemetry вырезает сырой HTML. Собирается из частей (build_summary_parts).
+    """
+    return render_summary_md(build_summary_parts(segments, episodes, tz, trip_roles))
+
+
+def no_data_summary_parts() -> dict[str, Any]:
+    """Части сводки сегмента без связи: вердикта нет, ИИ не нужен."""
+    return {
+        "version": SUMMARY_PARTS_VERSION, "verdict": None, "end_level": None,
+        "mttr": None, "remarks": [], "has_remarks": False, "failed_checks": [],
+        "emergency": False, "key_metrics": None, "coking": None, "no_data": True,
+    }
 
 
 def build_no_data_report(

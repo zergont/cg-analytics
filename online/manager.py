@@ -32,7 +32,7 @@ from typing import Any
 
 from analytics.contract import CokingRisk
 from online import db as online_db
-from online.engine import OnlinePollEngine, _coking_from_json, _tz_utc
+from online.engine import OnlinePollEngine, _coking_from_json, _enqueue_segment, _tz_utc
 
 logger = logging.getLogger(__name__)
 
@@ -939,6 +939,28 @@ async def _analyze_warning_claude(
                 )
             except Exception:
                 logger.warning("WarningGate: не удалось пометить эпизоды gate_suppressed",
+                               exc_info=True)
+            # Вердикт лёг в уже закрытый сегмент — пересчитать его сводку: её
+            # части (единый вердикт) заморожены при закрытии. Только после
+            # пометки эпизодов: сегмент, закрывшийся между ними, собрал сводку
+            # по непомеченным; закрывшийся после — уже по помеченным (пересчёт
+            # тогда ничего не меняет)
+            try:
+                _cur = await online_db.get_open_segment(router_sn, equip_type, panel_id)
+                _landed = await online_db.resolve_segment_id(
+                    router_sn, equip_type, panel_id, _seg_id, _gate_ts)
+                if _landed is not None and (_cur is None or _landed != _cur.get("id")):
+                    _changed, _lvl_changed = await online_db.apply_late_gate_suppression(
+                        _landed, _alarm_scenarios)
+                    if _changed:
+                        logger.info("WarningGate: сводка закрытого сегмента %s пересчитана "
+                                    "после поздней отмены%s", _landed,
+                                    " — вердикт сменился, заключение перезаказано"
+                                    if _lvl_changed else "")
+                    if _lvl_changed:
+                        _enqueue_segment(_landed, again=True)
+            except Exception:
+                logger.warning("WarningGate: сводка закрытого сегмента не пересчитана",
                                exc_info=True)
 
         saved = None

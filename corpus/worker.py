@@ -35,11 +35,14 @@ class AnalysisWorker:
 
     # ── Очередь ──────────────────────────────────────────────────────────────
 
-    def enqueue(self, seg_id: int, priority: int = PRIORITY_NORMAL, force: bool = False) -> None:
+    def enqueue(self, seg_id: int, priority: int = PRIORITY_NORMAL, force: bool = False,
+                again: bool = False) -> None:
         """Добавить сегмент в очередь на анализ.
 
         force=True разрешает обработку открытых сегментов (t_end IS NULL).
         Автоматически выставляется при priority=PRIORITY_MANUAL.
+        again=True — повторный заказ: ставится и тогда, когда сегмент в работе
+        (вердикт сменился после того, как заключение начало готовиться).
         """
         _force = force or (priority == PRIORITY_MANUAL)
         task_id = "seg_manual" if priority == PRIORITY_MANUAL else "seg_auto"
@@ -47,7 +50,7 @@ class AnalysisWorker:
         if best is not None and best <= priority:
             logger.debug("corpus/worker: #%d уже в очереди — пропуск", seg_id)
             return
-        if seg_id == self._current and priority != PRIORITY_MANUAL:
+        if seg_id == self._current and priority != PRIORITY_MANUAL and not again:
             logger.debug("corpus/worker: #%d сейчас в работе — пропуск", seg_id)
             return
         self._pending[seg_id] = priority

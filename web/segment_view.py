@@ -98,6 +98,38 @@ def _seg_gate_checked(dets: list[dict], gate_suppressed_hash: str | None) -> boo
     )
 
 
+_LEVEL_TO_SEVERITY = {"SHUTDOWN": "SHUTDOWN", "WARNING": "WARNING", "CAUTION": "CAUTION",
+                      "НОРМА": None}
+
+
+def summary_parts(val: Any) -> dict | None:
+    """Части сводки (report_summary_json) версии ≥1 или None — у старых сегментов."""
+    p = _parse_json(val, None, ctx="report_summary_json")
+    return p if isinstance(p, dict) and p.get("version") else None
+
+
+def severity_from_parts(parts: dict, stop_kind: str | None) -> str | None:
+    """Severity для API по частям сводки — тот же вердикт, что видит ИИ и карточка.
+
+    Правило окраски стоп-сегмента сохраняется (v4.9.73): EMERGENCY — всегда
+    SHUTDOWN; SIMPLE — по тому, что висит на конец окна (end_level); остальные
+    режимы — по вердикту периода. Снятое гейтом не учитывается.
+    """
+    if stop_kind == "EMERGENCY":
+        return "SHUTDOWN"
+    if parts.get("no_data"):
+        return None
+    if stop_kind == "SIMPLE":
+        return _LEVEL_TO_SEVERITY.get(parts.get("end_level") or "НОРМА")
+    return _LEVEL_TO_SEVERITY.get(((parts.get("verdict") or {}).get("level")) or "НОРМА")
+
+
+def gate_checked_from_parts(parts: dict) -> bool:
+    """«Проверено ИИ — угрозы нет»: гейт что-то снял, и вердикт сегмента — норма."""
+    v = parts.get("verdict") or {}
+    return bool(v.get("suppressed_n")) and v.get("level") == "НОРМА"
+
+
 def _seg_severity(
     chars_json: Any, active_dets_json: Any = None,
     gate_suppressed_hash: str | None = None,

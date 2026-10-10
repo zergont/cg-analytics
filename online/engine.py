@@ -135,10 +135,76 @@ def _drop_debounce_tails(eps: list[dict], segments: list,
     return out
 
 
-def _enqueue_segment(seg_id: int | None) -> None:
+def _gate_suppressed_scenarios(gate_state: dict | None, seg) -> set[str]:
+    """Сценарии аналитики, снятые гейтом на составе, активном на конец сегмента.
+
+    Хеш снятия — из записей гейта открытой строки, которую цикл закрытия удаляет.
+    """
+    h = (gate_state or {}).get("suppressed_hash")
+    if not h:
+        return set()
+    from online.status_assembler import UNCANCELLABLE_SCENARIOS, is_analytics_suppressed
+    try:
+        _, dets = _extract_open_segment_data(seg)
+    except Exception:
+        logger.warning("Не удалось снять активные тревоги сегмента", exc_info=True)
+        return set()
+    if not is_analytics_suppressed({"gate_suppressed_hash": h}, dets):
+        return set()
+    return {d.get("scenario") for d in dets
+            if d.get("scenario") and d.get("scenario") != "CONTROLLER_FAULT"} - UNCANCELLABLE_SCENARIOS
+
+
+def _live_new_episodes(segments: list, eps: list[dict], live_keys: set[str],
+                       t_end: datetime, suppressed_sc: set[str] | None = None) -> list[dict]:
+    """Тревоги, появившиеся в закрываемом сегменте и продолжающиеся в открытом.
+
+    Живой эпизод по ним заведётся только после закрытия (_process_episodes идёт
+    после сводок), эфемерный не сеется (тревога переживает рез) — в сводку
+    закрываемого сегмента они не попадали, хотя детекция лежит в его данных.
+    Для сводки — синтетический открытый эпизод с фазой «появилось»; снятый
+    гейтом состав (suppressed_sc) помечается снятым, как пометит живой эпизод
+    _process_episodes.
+    """
+    if not live_keys:
+        return []
+    # Закрытый эпизод того же ключа — прежняя вспышка, текущую он не покрывает
+    have = {_episode_key(e) for e in eps if e.get("t_close") is None}
+    out: dict[str, dict] = {}
+    for seg in segments or []:
+        for sub in getattr(seg, "subsegments", None) or []:
+            for d in sub.detections:
+                dd = d.to_dict()
+                key = _alert_key(dd)
+                if key not in live_keys or key in have or key in out:
+                    continue
+                v = dd.get("values") or {}
+                try:
+                    t_open = _tz_utc(datetime.fromisoformat(dd.get("t_detected")))
+                except (TypeError, ValueError):
+                    t_open = _tz_utc(t_end)
+                panel = dd.get("scenario") == "CONTROLLER_FAULT"
+                out[key] = {
+                    "scenario": dd.get("scenario"),
+                    "source": "panel" if panel else "analytics",
+                    "severity": dd.get("severity"),
+                    "addr": v.get("addr") if panel else None,
+                    "bit": v.get("bit") if panel else None,
+                    "t_open": t_open, "t_close": None,
+                    "active_sec": max(0.0, (_tz_utc(t_end) - t_open).total_seconds()),
+                    "blind_sec": 0.0,
+                    "gate_suppressed": not panel and dd.get("scenario") in (suppressed_sc or ()),
+                    "open_values_json": {"fault_name": v.get("fault_name")} if panel else None,
+                }
+    return list(out.values())
+
+
+def _enqueue_segment(seg_id: int | None, again: bool = False) -> None:
     """Добавить закрытый сегмент в очередь Claude-анализа (Этап 2).
 
     Fire-and-forget: если воркер не запущен или авто-анализ выключен — молча пропускаем.
+    again — повторный заказ (вердикт сегмента сменился): ставится, даже если
+    сегмент сейчас в работе — заключение по старому вердикту устарело.
     """
     if seg_id is None:
         return
@@ -156,7 +222,12 @@ def _enqueue_segment(seg_id: int | None) -> None:
                 from db.analytics import get_app_setting
                 flag = await get_app_setting("corpus_auto_analyze", "false")
                 if flag == "true":
-                    worker.enqueue(seg_id, PRIORITY_NORMAL)
+                    if again:
+                        # Статус в БД — чтобы перезаказ пережил перезапуск
+                        # (очередь в памяти; enqueue_pending подберёт «в очереди»)
+                        from corpus.db import set_status
+                        await set_status(seg_id, "queued")
+                    worker.enqueue(seg_id, PRIORITY_NORMAL, again=again)
             except Exception:
                 logger.warning("Автопостановка сегмента %s в очередь Claude-анализа не удалась", seg_id, exc_info=True)
 
@@ -1095,6 +1166,9 @@ class OnlinePollEngine:
         self._episodes: dict[str, dict] = {}
         # База начисления живого времени эпизодов (тикает только по времени с данными)
         self._episode_accrual_ts: datetime | None = None
+        # Новые аналитические эпизоды, чью проверку на снятие гейтом пришлось
+        # отложить: цикл смены режима удалил открытую строку до _process_episodes
+        self._supp_recheck: tuple[list[str], list[dict]] | None = None
         # id открытого сегмента с прошлого цикла — справочная ссылка новых эпизодов
         self._last_open_seg_id: int | None = None
         # Подпись ленты открытого сегмента (t_start, число событий) — чтобы не
@@ -1292,6 +1366,27 @@ class OnlinePollEngine:
 
     # ── Эпизоды тревог ────────────────────────────────────────────────────────
 
+    async def _inherit_gate_suppression(self, scenarios: list[str], curr_dets: list[dict]) -> bool:
+        """Пометить новые эпизоды снятыми, если гейт уже снял их состав.
+
+        False — открытой строки нет (проверку надо повторить после upsert).
+        """
+        try:
+            from online.status_assembler import UNCANCELLABLE_SCENARIOS, is_analytics_suppressed
+            _row = await online_db.get_open_segment(
+                self.router_sn, self.equip_type, self.panel_id)
+            if not _row:
+                return False
+            if is_analytics_suppressed(_row, curr_dets):
+                await online_db.set_episodes_gate_suppressed(
+                    self.router_sn, self.equip_type, self.panel_id,
+                    [s for s in scenarios if s not in UNCANCELLABLE_SCENARIOS],
+                )
+        except Exception:
+            logger.warning("OnlineEngine[%s]: не удалось перенести снятие гейтом "
+                           "на новый эпизод", self.key, exc_info=True)
+        return True
+
     async def _process_episodes(
         self, curr_dets: list[dict], t_to: datetime, gaps: list[dict],
         cleared_at: dict[str, datetime] | None = None,
@@ -1319,6 +1414,7 @@ class OnlinePollEngine:
         self._episode_accrual_ts = now_ts
 
         # Открытие новых / обновление живущих
+        _new_analytics: list[str] = []
         for key, d in curr_map.items():
             ep = self._episodes.get(key)
             sc = d.get("scenario")
@@ -1354,6 +1450,8 @@ class OnlinePollEngine:
                     continue
                 self._episodes[key] = {"id": ep_id, "severity": sev,
                                        "miss": 0, "first_miss_ts": None}
+                if sc != "CONTROLLER_FAULT":
+                    _new_analytics.append(sc)
                 logger.info("OnlineEngine[%s]: эпизод открыт — %s (severity=%s)",
                             self.key, key, sev)
                 if sc == "CONTROLLER_FAULT" and sev == "SHUTDOWN":
@@ -1374,6 +1472,14 @@ class OnlinePollEngine:
                 except Exception:
                     logger.warning("OnlineEngine[%s]: не удалось обновить эпизод %s",
                                    self.key, key, exc_info=True)
+
+        # Новый аналитический эпизод того состава, который гейт уже снял: живой
+        # статус по хешу открытой строки — «норма», гейт не перезапустится, и
+        # флаг эпизоду иначе не поставит никто — в сводке выйдет живое замечание
+        if _new_analytics and not await self._inherit_gate_suppression(_new_analytics, curr_dets):
+            # Открытую строку цикл смены режима уже удалил, новая ещё не записана —
+            # проверить после upsert (хвост гейта с хешем переносится туда же)
+            self._supp_recheck = (_new_analytics, curr_dets)
 
         # Дебаунс закрытия — только когда данные реально шли (в дыре всё замирает)
         if live_sec <= 0:
@@ -1552,12 +1658,15 @@ class OnlinePollEngine:
 
     async def _build_summary_md_for(
         self, segments: list, t_from: datetime, t_to: datetime,
-        closing: bool = False,
-    ) -> str | None:
-        """report_summary_md: вердикт + замечания (эпизоды окна) + показатели.
+        closing: bool = False, live_keys: set[str] | None = None,
+        suppressed_sc: set[str] | None = None,
+    ) -> tuple[str | None, dict | None]:
+        """Сводка сегмента: (report_summary_md, части) — вердикт, замечания, показатели.
 
-        closing — сводка закрываемого сегмента: открытые эпизоды без детекции в
-        его данных — хвосты дебаунса, в сводку не идут (_drop_debounce_tails).
+        Части (report_summary_json) — единый источник вердикта сегмента, md
+        печатается из них. closing — сводка закрываемого сегмента: открытые
+        эпизоды без детекции в его данных — хвосты дебаунса, в сводку не идут
+        (_drop_debounce_tails).
         """
         try:
             eps = await online_db.get_episodes_overlapping(
@@ -1572,13 +1681,16 @@ class OnlinePollEngine:
             )
             if closing:
                 eps = _drop_debounce_tails(eps, segments, self._episodes)
-            from analytics.serializer import build_summary_md as _bsm
-            return _bsm(segments, episodes=eps, tz=self.tz,
-                        trip_roles=self.cfg.trip_snapshot_roles)
+                eps = eps + _live_new_episodes(segments, eps, live_keys or set(), _tz_utc(t_to),
+                                               suppressed_sc)
+            from analytics.serializer import build_summary_parts, render_summary_md
+            parts = build_summary_parts(segments, episodes=eps, tz=self.tz,
+                                        trip_roles=self.cfg.trip_snapshot_roles)
+            return render_summary_md(parts), parts
         except Exception:
             logger.warning("OnlineEngine[%s]: не удалось построить summary-отчёт",
                            self.key, exc_info=True)
-            return None
+            return None, None
 
     # ── Главный цикл ──────────────────────────────────────────────────────────
 
@@ -1734,6 +1846,7 @@ class OnlinePollEngine:
         # Тревоги, активные на конец окна: живой эпизод по ним заведётся на
         # следующем цикле, поэтому «эфемерными» их считать нельзя
         _live_keys = _live_alert_keys(segments[-1])
+        _supp_sc = _gate_suppressed_scenarios(_gate_state, segments[-1])
         # Уже засеянные в этом окне — одна тревога на несколько сегментов
         # должна дать один эпизод, а не по одному на сегмент
         _seeded: set[str] = set()
@@ -1823,6 +1936,8 @@ class OnlinePollEngine:
             # Генерация Markdown-отчёта для закрытого сегмента
             if _seg_no_data:
                 from analytics.serializer import build_no_data_report as _nd_report
+                from analytics.serializer import no_data_summary_parts as _nd_parts
+                summary_parts = _nd_parts()
                 report_md, summary_md = _nd_report(
                     self.router_sn, self.equip_type, self.panel_id,
                     _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end,
@@ -1842,8 +1957,10 @@ class OnlinePollEngine:
                     logger.exception("OnlineEngine[%s]: не удалось построить отчёт закрытого сегмента, сохраняю без report_md", self.key)
                     report_md = None
 
-                summary_md = await self._build_summary_md_for(
+                summary_md, summary_parts = await self._build_summary_md_for(
                     [seg], datetime.fromisoformat(seg.t_start), seg_t_end, closing=True,
+                    live_keys=_live_keys if is_last else None,
+                    suppressed_sc=_supp_sc,
                 )
 
             db_id = await online_db.insert_closed_segment({
@@ -1862,6 +1979,7 @@ class OnlinePollEngine:
                 "characteristics_json": seg_dict,
                 "report_md":          report_md,
                 "report_summary_md":  summary_md,
+                "report_summary_json": summary_parts,
                 # Пустой сегмент (нет связи) акта не лишается: акт и лента
                 # собираются из enum-периодов и фронтов масок, аналоговых
                 # данных не трогают. Заглушка «нет связи» существует потому,
@@ -2166,6 +2284,7 @@ class OnlinePollEngine:
             # Тревоги, активные в остающемся открытом сегменте: по ним ниже в
             # этом же цикле заведётся живой эпизод (память движка отстаёт)
             _live_keys = _live_alert_keys(segments[-1])
+            _rs_supp_sc = _gate_suppressed_scenarios(_rs_gate_state, segments[-1])
             # Уже засеянные в этом окне — см. тот же накопитель в _close_window
             _seeded: set[str] = set()
             for ci, seg in enumerate(closed_segs):
@@ -2192,6 +2311,8 @@ class OnlinePollEngine:
 
                 if _rs_no_data:
                     from analytics.serializer import build_no_data_report as _nd_report
+                    from analytics.serializer import no_data_summary_parts as _nd_parts
+                    summary_parts_rs = _nd_parts()
                     report_md_rs, summary_md_rs = _nd_report(
                         self.router_sn, self.equip_type, self.panel_id,
                         _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end_rs,
@@ -2211,9 +2332,11 @@ class OnlinePollEngine:
                         logger.exception("OnlineEngine[%s]: не удалось построить отчёт сегмента RUN_STATE_CHANGE, сохраняю без report_md", self.key)
                         report_md_rs = None
 
-                    summary_md_rs = await self._build_summary_md_for(
+                    summary_md_rs, summary_parts_rs = await self._build_summary_md_for(
                         [seg], datetime.fromisoformat(seg.t_start), seg_t_end_rs,
                         closing=True,
+                        live_keys=_live_keys if ci == len(closed_segs) - 1 else None,
+                        suppressed_sc=_rs_supp_sc,
                     )
 
                 _rs_seg_dict = seg.to_dict()
@@ -2285,6 +2408,7 @@ class OnlinePollEngine:
                     "characteristics_json": _rs_seg_dict,
                     "report_md":          report_md_rs,
                     "report_summary_md":  summary_md_rs,
+                    "report_summary_json": summary_parts_rs,
                     "incident_json":      _rs_incident,
                     "chronology_json":    _rs_chronology,
                     **_slice_gate_state(
@@ -2406,7 +2530,7 @@ class OnlinePollEngine:
             logger.exception("OnlineEngine[%s]: не удалось построить отчёт открытого сегмента", self.key)
             open_report_md = None
 
-        open_summary_md = await self._build_summary_md_for(
+        open_summary_md, open_summary_parts = await self._build_summary_md_for(
             [open_seg], self.cursor_ts, t_to
         )
         logger.debug(
@@ -2497,6 +2621,7 @@ class OnlinePollEngine:
             },
             "report_md":              open_report_md,
             "report_summary_md":      open_summary_md,
+            "report_summary_json":    open_summary_parts,
             "continued_from":         open_continued_from,
             "incident_json":          _open_incident,
             "chronology_json":        _open_chronology,
@@ -2519,6 +2644,12 @@ class OnlinePollEngine:
             except Exception:
                 logger.warning("OnlineEngine[%s]: хвост записей гейта не восстановлен",
                                self.key, exc_info=True)
+
+        # Отложенная проверка снятия гейтом новых эпизодов (см. _process_episodes)
+        if self._supp_recheck:
+            _sc, _dets = self._supp_recheck
+            self._supp_recheck = None
+            await self._inherit_gate_suppression(_sc, _dets)
 
         # Записать события жизненного цикла тревог (segment_id теперь известен)
         if _alert_events:

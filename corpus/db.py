@@ -202,7 +202,7 @@ async def get_segment_row(seg_id: int) -> dict | None:
                    gate_suppressed_hash,
                    -- Причина закрытия (MTTR в заключении) и сводка — для
                    -- единого входа модели; без них строка MTTR не выводилась
-                   cause_close, report_summary_md,
+                   cause_close, report_summary_md, report_summary_json,
                    t_start, t_end
             FROM auto_segments
             WHERE id = $1

@@ -406,6 +406,57 @@ def _format_incident(incident_json: Any) -> str:
     return "\n".join(out)
 
 
+_LEVEL_VERDICT = {"НОРМА": "норма", "CAUTION": "требует внимания",
+                  "WARNING": "требует внимания", "SHUTDOWN": "авария"}
+
+
+def _verdict_from_summary(segment_row: dict) -> tuple[str, str] | None:
+    """(verdict, alarm_level) из частей сводки (v5.1.0) — единый вердикт сегмента.
+
+    Тот же, что показан в «Виде сегмента» и сводке: по эпизодам, со снятым
+    гейтом. Раньше корпус считал свой — по детекциям и хешу снятия, который в
+    закрытые сегменты не переносится, — и сегмент с «🟢 НОРМА, сняты ИИ» уходил
+    модели как CAUTION «не пересматривать». None — у сегментов до v5.1.0.
+    """
+    parts = _parse_json(segment_row.get("report_summary_json"))
+    if not isinstance(parts, dict) or not parts.get("version"):
+        return None
+    level = (parts.get("verdict") or {}).get("level")
+    if level not in _LEVEL_VERDICT:
+        return None
+    return _LEVEL_VERDICT[level], level
+
+
+def _remarks_from_summary(segment_row: dict) -> str | None:
+    """Обнаружения для шапки — из замечаний сводки (тот же вердикт, что уровень).
+
+    Уровень шапки берётся из частей, а список обнаружений раньше — из детекций и
+    хеша снятия, которого в закрытых сегментах нет: «снято ИИ» терялось.
+    """
+    parts = _parse_json(segment_row.get("report_summary_json"))
+    if not isinstance(parts, dict) or not parts.get("version"):
+        return None
+    from analytics.serializer import _DATA_QUALITY_CHECKS
+    items = []
+    for g in parts.get("remarks") or []:
+        tags = [g.get("severity") or "?", "панель" if g.get("source") == "panel" else "аналитика"]
+        k, n = g.get("suppressed") or 0, g.get("count") or 0
+        if k and k >= n:
+            tags.append("снято ИИ")
+        elif k:
+            tags.append(f"снято ИИ: {k} из {n}")
+        if g.get("at_end"):
+            tags.append("активно на конец")
+        items.append(f"{g.get('name')} [{', '.join(tags)}]")
+    # Проваленные проверки последовательности — тоже строки «Замечаний»; обрыв
+    # связи на вердикт не влияет (решение 11.10, 2а) — так и помечаем
+    for c in parts.get("failed_checks") or []:
+        det = (c.get("details") if isinstance(c, dict) else c) or "проверка не пройдена"
+        dq = isinstance(c, dict) and c.get("check") in _DATA_QUALITY_CHECKS
+        items.append(f"{det} [{'связь, на вердикт не влияет' if dq else 'проверка'}]")
+    return "; ".join(items) if items else "нет"
+
+
 def build_claude_input(segment_row: dict) -> str:
     """Сформировать полный вход для Claude: шапка вердикта + реконструкция + report_md."""
     chars_json = segment_row.get("characteristics_json")
@@ -413,10 +464,11 @@ def build_claude_input(segment_row: dict) -> str:
     report_md = segment_row.get("report_md") or ""
 
     detections = _extract_detections(chars_json)
-    verdict, alarm_level = _extract_verdict(
+    verdict, alarm_level = _verdict_from_summary(segment_row) or _extract_verdict(
         detections, _gate_suppressed(segment_row, detections),
         _stop_kind(chars_json),
     )
+    remarks_line = _remarks_from_summary(segment_row)
     run_state_label = (
         RUN_STATE_RU.get(run_state, str(run_state))
         if run_state is not None
@@ -428,7 +480,7 @@ def build_claude_input(segment_row: dict) -> str:
         f"Режим: {run_state_label} (RUN_STATE={run_state})\n"
         f"Вердикт: {verdict}\n"
         f"Уровень тревоги: {alarm_level}\n"
-        f"Обнаружения: {_fmt_detections(detections)}\n"
+        f"Обнаружения: {remarks_line or _fmt_detections(detections)}\n"
         f"Задача: объясни зафиксированную картину. "
         f"Не пересматривай вердикт. Не ищи дополнительных проблем.\n"
         f"---\n\n"
@@ -441,6 +493,9 @@ def build_claude_input(segment_row: dict) -> str:
 
 def extract_verdict_alarm(segment_row: dict) -> tuple[str, str]:
     """Публичный метод: (verdict, alarm_level) для записи в БД."""
+    from_summary = _verdict_from_summary(segment_row)
+    if from_summary:
+        return from_summary
     chars_json = segment_row.get("characteristics_json")
     detections = _extract_detections(chars_json)
     return _extract_verdict(detections, _gate_suppressed(segment_row, detections),

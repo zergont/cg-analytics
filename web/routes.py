@@ -27,6 +27,9 @@ from web.segment_view import (  # noqa: F401  — реэкспорт: испол
     _seg_collect_dets,
     _seg_gate_checked,
     _seg_severity,
+    gate_checked_from_parts as _gate_checked_from_parts,
+    severity_from_parts as _severity_from_parts,
+    summary_parts as _summary_parts,
 )
 
 logger = logging.getLogger(__name__)
@@ -1582,12 +1585,21 @@ async def online_calendar(
     # Группируем по операционному дню (сутки = 09:00 local → следующие 09:00)
     from online.status_assembler import compute_severity_level
 
-    def _violation_level(characteristics_json) -> str | None:
+    _SEV_RU = {"SHUTDOWN": "авария", "WARNING": "внимание", "CAUTION": "предупреждение"}
+
+    def _violation_level(characteristics_json, summary_json=None) -> str | None:
         """None = нет данных/открытый; иначе итоговый уровень как в status_assembler:
         норма / предупреждение (аналитика) / внимание (панель WARNING) / авария (панель SHUTDOWN)."""
         characteristics_json = _parse_json(characteristics_json, ctx="characteristics_json в календаре")
         if not characteristics_json or not isinstance(characteristics_json, dict):
             return None
+        # Единый вердикт сегмента — из частей сводки (как /segments и карточка)
+        _parts = _summary_parts(summary_json)
+        if _parts:
+            if _parts.get("no_data"):
+                return None
+            return _SEV_RU.get(
+                _severity_from_parts(_parts, characteristics_json.get("stop_kind")), "норма")
         checks = characteristics_json.get("sequence_checks") or []
         if not any(isinstance(c, dict) for c in checks):
             return None
@@ -1617,7 +1629,7 @@ async def online_calendar(
         if s.get("t_end"):
             s["t_end"] = s["t_end"].astimezone(tz)
         _chars = _parse_json(s.get("characteristics_json"), ctx="characteristics_json в календаре")
-        s["violation_level"] = _violation_level(_chars)
+        s["violation_level"] = _violation_level(_chars, s.get("report_summary_json"))
         # Закрытый сегмент без единой строки телеметрии — «нет связи»
         _dq = _chars.get("data_quality") if isinstance(_chars, dict) else None
         s["no_data"] = seg.get("t_end") is not None and _dq == 0.0
@@ -2363,13 +2375,18 @@ async def api_machine_segments(
         _chars    = _parse_json(seg.get("characteristics_json"), ctx="characteristics_json в /segments")
         dq        = _chars.get("data_quality") if isinstance(_chars, dict) else None
         _stop_kind = _chars.get("stop_kind")   if isinstance(_chars, dict) else None
-        sev       = _seg_severity(seg.get("characteristics_json"), seg.get("active_detections_json"),
-                                  gate_suppressed_hash=seg.get("gate_suppressed_hash"),
-                                  stop_kind=_stop_kind)
-        gate_ok   = _seg_gate_checked(
-            _seg_collect_dets(seg.get("characteristics_json"), seg.get("active_detections_json")),
-            seg.get("gate_suppressed_hash"),
-        )
+        _parts    = _summary_parts(seg.get("report_summary_json"))
+        if _parts:
+            sev     = _severity_from_parts(_parts, _stop_kind)
+            gate_ok = _gate_checked_from_parts(_parts)
+        else:
+            sev       = _seg_severity(seg.get("characteristics_json"), seg.get("active_detections_json"),
+                                      gate_suppressed_hash=seg.get("gate_suppressed_hash"),
+                                      stop_kind=_stop_kind)
+            gate_ok   = _seg_gate_checked(
+                _seg_collect_dets(seg.get("characteristics_json"), seg.get("active_detections_json")),
+                seg.get("gate_suppressed_hash"),
+            )
         dur       = None
         if seg.get("t_start") and seg.get("t_end"):
             dur = (seg["t_end"] - seg["t_start"]).total_seconds()
@@ -2429,13 +2446,18 @@ async def api_segment_detail(seg_id: int):
     _chars    = _parse_json(seg.get("characteristics_json"), ctx="characteristics_json в /segment")
     dq        = _chars.get("data_quality") if isinstance(_chars, dict) else None
     _stop_kind = _chars.get("stop_kind")   if isinstance(_chars, dict) else None
-    sev       = _seg_severity(seg.get("characteristics_json"), seg.get("active_detections_json"),
-                              gate_suppressed_hash=seg.get("gate_suppressed_hash"),
-                              stop_kind=_stop_kind)
-    gate_ok   = _seg_gate_checked(
-        _seg_collect_dets(seg.get("characteristics_json"), seg.get("active_detections_json")),
-        seg.get("gate_suppressed_hash"),
-    )
+    _parts    = _summary_parts(seg.get("report_summary_json"))
+    if _parts:
+        sev     = _severity_from_parts(_parts, _stop_kind)
+        gate_ok = _gate_checked_from_parts(_parts)
+    else:
+        sev       = _seg_severity(seg.get("characteristics_json"), seg.get("active_detections_json"),
+                                  gate_suppressed_hash=seg.get("gate_suppressed_hash"),
+                                  stop_kind=_stop_kind)
+        gate_ok   = _seg_gate_checked(
+            _seg_collect_dets(seg.get("characteristics_json"), seg.get("active_detections_json")),
+            seg.get("gate_suppressed_hash"),
+        )
 
     # ИИ-анализ (только для закрытых)
     analysis = None
@@ -2482,6 +2504,9 @@ async def api_segment_detail(seg_id: int):
         # Верхняя часть отчёта: вердикт, замечания (эпизоды), ключевые
         # показатели. UI показывает её сверху, report_md сворачивает
         "report_summary_md": seg.get("report_summary_md"),
+        # Сводка частями (v5.1.0): вердикт, замечания с фазами, показатели;
+        # null у сегментов до v5.1.0 — тогда показывать report_summary_md целиком
+        "summary": _parts,
         # ИИ-анализ
         "analysis":      analysis,
         # Акт аварийного останова («Следователь»): вердикт характера и лента

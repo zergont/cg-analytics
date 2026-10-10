@@ -230,6 +230,13 @@ CREATE INDEX IF NOT EXISTS idx_alarm_episodes_open
 ALTER TABLE auto_segments
     ADD COLUMN IF NOT EXISTS report_summary_md TEXT;
 
+-- Миграция v5.1.0: сводка частями — единый источник вердикта сегмента
+-- (analytics.serializer.build_summary_parts). Из неё печатается
+-- report_summary_md; её же читают цепочка ИИ, календарь и карточка UI.
+-- Только расширение, без CHECK (файл играется целиком при каждом старте).
+ALTER TABLE auto_segments
+    ADD COLUMN IF NOT EXISTS report_summary_json JSONB;
+
 -- Миграция v4.9.22: per-fault ключ панельных аварий. Один scenario
 -- CONTROLLER_FAULT покрывает все биты панели — чтобы аварии не затирали
 -- друг друга (severity, счётчики, журнал), эпизод ключуется по (scenario,
