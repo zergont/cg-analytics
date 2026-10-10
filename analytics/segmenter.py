@@ -607,10 +607,15 @@ def _compute_data_quality(
     gaps: list[dict],
     cfg: AnalyticsConfig,
 ) -> float:
-    """Качество связи [0.0, 1.0] = 1 - (суммарное время gap / длительность окна).
+    """Качество связи [0.0, 1.0] = 1 - (время без связи / длительность окна).
 
     Единственный источник истины — таблица data_gaps. Каждый gap обрезается
     по границам окна; незакрытый gap (gap_end IS NULL) считается до t_end.
+    Время без связи — по ОБЪЕДИНЕНИЮ интервалов: разрывы перекрываются (внешний
+    сервис пишет несколько на одно окно, движок добавляет синтетический по
+    max(history.ts)), и сумма длин занижала качество вплоть до 0 — а при 0
+    сегмент считается «без связи» (заглушка, без ИИ). ДЭС №3 09.10: 0,40 при
+    реальных ≥0,55, подсегмент с данными помечен 0%.
     """
     t0 = _tz(t_start)
     t1 = _tz(t_end)
@@ -618,15 +623,33 @@ def _compute_data_quality(
     if duration_sec <= 0:
         return 1.0
 
-    gap_sec = 0.0
+    spans = []
     for g in gaps:
         gs = max(_tz(g["gap_start"]), t0)
         ge_raw = g.get("gap_end")
         ge = min(_tz(ge_raw) if ge_raw else t1, t1)
         if ge > gs:
-            gap_sec += (ge - gs).total_seconds()
+            spans.append((gs, ge))
+    gap_sec = union_seconds(spans)
 
     return round(max(0.0, 1.0 - gap_sec / duration_sec), 3)
+
+
+def union_seconds(spans) -> float:
+    """Длина объединения интервалов (start, end) в секундах — без двойного счёта
+    перекрытий."""
+    total = 0.0
+    cur_s = cur_e = None
+    for s, e in sorted(spans):
+        if cur_e is None or s > cur_e:
+            if cur_e is not None:
+                total += (cur_e - cur_s).total_seconds()
+            cur_s, cur_e = s, e
+        elif e > cur_e:
+            cur_e = e
+    if cur_e is not None:
+        total += (cur_e - cur_s).total_seconds()
+    return total
 
 
 # ── Построение подсегментов ───────────────────────────────────────────────────

@@ -737,7 +737,17 @@ def _append_subsegment(
     # Интервалы потери связи (слепые зоны) — где именно данных не было
     gaps = getattr(sub, "data_gaps", None) or []
     if gaps:
-        total = sum(g.get("duration_sec", 0) for g in gaps)
+        # Суммарно — по объединению: разрывы перекрываются, сумма длин бывала
+        # больше самого подсегмента (ДЭС №3: 7 ч 19 мин в подсегменте 5 ч 11 мин)
+        from analytics.segmenter import union_seconds
+        _spans = []
+        for g in gaps:
+            try:
+                _spans.append((datetime.fromisoformat(g["start"]), datetime.fromisoformat(g["end"])))
+            except (KeyError, TypeError, ValueError):
+                pass
+        total = (union_seconds(_spans) if len(_spans) == len(gaps)
+                 else sum(g.get("duration_sec", 0) for g in gaps))
         a(f"**⚠ Потеря связи ({len(gaps)}, суммарно {_fmt_duration(total)}):**")
         a("")
         for g in gaps:
