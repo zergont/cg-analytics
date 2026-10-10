@@ -71,6 +71,70 @@ def _filter_window_episodes(
     return out
 
 
+def _episode_key(ep: dict) -> str:
+    """Ключ эпизода из строки alarm_episodes — тот же, что _alert_key детекции."""
+    if ep.get("scenario") == "CONTROLLER_FAULT":
+        return f'CONTROLLER_FAULT|{ep.get("addr")}|{ep.get("bit")}'
+    return ep.get("scenario", "?")
+
+
+def _panel_cleared_at(segments: list) -> dict[str, datetime]:
+    """Когда панель сняла неисправность: ключ эпизода → fault_end (самый поздний).
+
+    Снятие панель пишет сразу, с точным временем, а движок обрабатывает окно с
+    отставанием на цикл (N+1 буфер). Первый «промах» эпизода раньше ставился
+    временем горизонта обработки — t_close выходил раньше реального снятия
+    (06.10: 09:04:07 при снятии кнопки в 09:04:26).
+    """
+    out: dict[str, datetime] = {}
+    for seg in segments or []:
+        for sub in getattr(seg, "subsegments", None) or []:
+            for d in sub.detections:
+                if d.scenario != "CONTROLLER_FAULT":
+                    continue
+                fe = (d.values or {}).get("fault_end")
+                if not fe:
+                    continue
+                try:
+                    ts = _tz_utc(datetime.fromisoformat(fe))
+                except (TypeError, ValueError):
+                    continue
+                key = _alert_key(d.to_dict())
+                if key not in out or ts > out[key]:
+                    out[key] = ts
+    return out
+
+
+def _drop_debounce_tails(eps: list[dict], segments: list,
+                         live_episodes: dict[str, dict]) -> list[dict]:
+    """Убрать из сводки ЗАКРЫВАЕМОГО сегмента эпизоды, снятые до него.
+
+    Эпизод закрывается после нескольких чистых циклов (дебаунс), и в цикле, где
+    одним пакетом пришли снятие тревоги и смена режима, он ещё открыт — сводка
+    следующего короткого сегмента получала «живую на конец окна» тревогу
+    (06.10: «АВАРИЯ» в 9-секундном прогреве после снятой кнопки).
+    Открытый эпизод без детекции в данных самого сегмента — хвост дебаунса:
+    у панели это точно (детекция строится по периоду неисправности), у
+    аналитики — только если движок уже видит промах (miss > 0).
+    """
+    det_keys = {
+        _alert_key(d.to_dict())
+        for seg in segments or []
+        for sub in getattr(seg, "subsegments", None) or []
+        for d in sub.detections
+    }
+    out = []
+    for ep in eps:
+        if ep.get("t_close") is None:
+            key = _episode_key(ep)
+            if key not in det_keys:
+                mem = live_episodes.get(key) or {}
+                if ep.get("scenario") == "CONTROLLER_FAULT" or mem.get("miss", 0) > 0:
+                    continue
+        out.append(ep)
+    return out
+
+
 def _enqueue_segment(seg_id: int | None) -> None:
     """Добавить закрытый сегмент в очередь Claude-анализа (Этап 2).
 
@@ -1229,7 +1293,8 @@ class OnlinePollEngine:
     # ── Эпизоды тревог ────────────────────────────────────────────────────────
 
     async def _process_episodes(
-        self, curr_dets: list[dict], t_to: datetime, gaps: list[dict]
+        self, curr_dets: list[dict], t_to: datetime, gaps: list[dict],
+        cleared_at: dict[str, datetime] | None = None,
     ) -> None:
         """Материализовать эпизоды тревог из снимка активных детекций.
 
@@ -1319,7 +1384,9 @@ class OnlinePollEngine:
             ep = self._episodes[key]
             ep["miss"] += 1
             if ep["first_miss_ts"] is None:
-                ep["first_miss_ts"] = now_ts
+                # Панель знает точное время снятия (fault_end) — оно и есть
+                # конец эпизода; иначе — горизонт обработки, как раньше
+                ep["first_miss_ts"] = (cleared_at or {}).get(key) or now_ts
             if ep["miss"] < debounce:
                 continue
             try:
@@ -1484,9 +1551,14 @@ class OnlinePollEngine:
     # ── Summary-отчёт (Фаза D) ────────────────────────────────────────────────
 
     async def _build_summary_md_for(
-        self, segments: list, t_from: datetime, t_to: datetime
+        self, segments: list, t_from: datetime, t_to: datetime,
+        closing: bool = False,
     ) -> str | None:
-        """report_summary_md: вердикт + замечания (эпизоды окна) + показатели."""
+        """report_summary_md: вердикт + замечания (эпизоды окна) + показатели.
+
+        closing — сводка закрываемого сегмента: открытые эпизоды без детекции в
+        его данных — хвосты дебаунса, в сводку не идут (_drop_debounce_tails).
+        """
         try:
             eps = await online_db.get_episodes_overlapping(
                 self.router_sn, self.equip_type, self.panel_id,
@@ -1498,6 +1570,8 @@ class OnlinePollEngine:
                 eps, _tz_utc(t_from), _tz_utc(t_to),
                 tail_sec=(debounce + 1) * self.poll_interval_sec,
             )
+            if closing:
+                eps = _drop_debounce_tails(eps, segments, self._episodes)
             from analytics.serializer import build_summary_md as _bsm
             return _bsm(segments, episodes=eps, tz=self.tz,
                         trip_roles=self.cfg.trip_snapshot_roles)
@@ -1769,7 +1843,7 @@ class OnlinePollEngine:
                     report_md = None
 
                 summary_md = await self._build_summary_md_for(
-                    [seg], datetime.fromisoformat(seg.t_start), seg_t_end
+                    [seg], datetime.fromisoformat(seg.t_start), seg_t_end, closing=True,
                 )
 
             db_id = await online_db.insert_closed_segment({
@@ -2138,7 +2212,8 @@ class OnlinePollEngine:
                         report_md_rs = None
 
                     summary_md_rs = await self._build_summary_md_for(
-                        [seg], datetime.fromisoformat(seg.t_start), seg_t_end_rs
+                        [seg], datetime.fromisoformat(seg.t_start), seg_t_end_rs,
+                        closing=True,
                     )
 
                 _rs_seg_dict = seg.to_dict()
@@ -2287,7 +2362,8 @@ class OnlinePollEngine:
         # Эпизоды тревог — ДО обогащения: счётчики уже включат текущий эпизод
         try:
             _, _raw_curr_dets = _extract_open_segment_data(open_seg)
-            await self._process_episodes(_raw_curr_dets, t_to, gaps)
+            await self._process_episodes(_raw_curr_dets, t_to, gaps,
+                                         cleared_at=_panel_cleared_at(segments))
         except Exception:
             logger.warning("OnlineEngine[%s]: ошибка обработки эпизодов тревог",
                            self.key, exc_info=True)
