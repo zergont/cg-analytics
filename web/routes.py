@@ -2401,7 +2401,7 @@ async def api_machine_segments(
             # Наличие ИИ-анализа
             "has_report":    bool(seg.get("report_md") if "report_md" in (seg or {}) else None),
             "has_claude":    ai_status.get("status") == "done",
-            "has_qwen":      bool(ai_status.get("humanized_md")),
+            "has_qwen":      bool(ai_status.get("has_qwen")),
         })
 
     return JSONResponse(result)

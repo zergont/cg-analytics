@@ -25,6 +25,10 @@ PRIORITY_NORMAL  = 1   # авто-закрытие сегмента + истор
 class AnalysisWorker:
     def __init__(self) -> None:
         self._queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
+        # Ждут в очереди: id → лучший приоритет. Один сегмент — один разбор:
+        # старт ставит и незаконченные, и новые закрытия, тумблер — ещё раз;
+        # без этого сегмент мог уйти в модель дважды (с советом — надолго)
+        self._pending: dict[int, int] = {}
         self._current: int | None = None
         self._running: bool = False
         self._task: asyncio.Task | None = None
@@ -39,12 +43,24 @@ class AnalysisWorker:
         """
         _force = force or (priority == PRIORITY_MANUAL)
         task_id = "seg_manual" if priority == PRIORITY_MANUAL else "seg_auto"
+        best = self._pending.get(seg_id)
+        if best is not None and best <= priority:
+            logger.debug("corpus/worker: #%d уже в очереди — пропуск", seg_id)
+            return
+        if seg_id == self._current and priority != PRIORITY_MANUAL:
+            logger.debug("corpus/worker: #%d сейчас в работе — пропуск", seg_id)
+            return
+        self._pending[seg_id] = priority
         self._queue.put_nowait((priority, seg_id, _force, task_id))
         logger.debug("corpus/worker: enqueue #%d (p=%d force=%s task=%s)",
                      seg_id, priority, _force, task_id)
 
     async def enqueue_pending(self) -> int:
-        """Batch: все закрытые сегменты без анализа → NORMAL очередь."""
+        """Batch: закрытые сегменты без анализа и незаконченные → NORMAL очередь.
+
+        Незаконченные — строки «в очереди» / «в работе»: очередь живёт в памяти,
+        и после перезапуска их никто не подбирал, сегмент вечно «готовился».
+        """
         from corpus.db import get_unanalyzed_segments
         seg_ids = await get_unanalyzed_segments()
         for seg_id in seg_ids:
@@ -72,6 +88,10 @@ class AnalysisWorker:
             except asyncio.CancelledError:
                 break
 
+            # Дубль, уже разобранный по записи с лучшим приоритетом, — пропуск
+            if self._pending.pop(seg_id, None) is None:
+                self._queue.task_done()
+                continue
             self._current = seg_id
             try:
                 await _process_segment(seg_id, force=_force, task_id=_task_id)

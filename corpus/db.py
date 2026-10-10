@@ -122,7 +122,11 @@ async def get_analysis(auto_segment_id: int) -> dict | None:
 
 
 async def get_unanalyzed_segments(limit: int = 500) -> list[int]:
-    """ID закрытых сегментов без анализа — для batch-прогона при старте."""
+    """ID закрытых сегментов без анализа или с незаконченным — для batch-прогона.
+
+    Незаконченный — статус queued/processing: очередь воркера в памяти, после
+    перезапуска такие строки иначе не подбирал никто.
+    """
     conn = await _connect()
     try:
         rows = await conn.fetch(
@@ -131,7 +135,7 @@ async def get_unanalyzed_segments(limit: int = 500) -> list[int]:
             FROM auto_segments a
             LEFT JOIN segment_analyses sa ON sa.auto_segment_id = a.id
             WHERE a.t_end IS NOT NULL
-              AND sa.id IS NULL
+              AND (sa.id IS NULL OR sa.status IN ('queued', 'processing'))
             ORDER BY a.t_start DESC
             LIMIT $1
             """,
@@ -196,6 +200,9 @@ async def get_segment_row(seg_id: int) -> dict | None:
                    -- Читается препроцессором (_gate_suppressed), а в выборке
                    -- его не было: вердикт гейта «отменить» не влиял на вывод
                    gate_suppressed_hash,
+                   -- Причина закрытия (MTTR в заключении) и сводка — для
+                   -- единого входа модели; без них строка MTTR не выводилась
+                   cause_close, report_summary_md,
                    t_start, t_end
             FROM auto_segments
             WHERE id = $1
