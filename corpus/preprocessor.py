@@ -66,7 +66,9 @@ def _gate_suppressed(segment_row: dict, detections: list[dict]) -> bool:
     suppressed = segment_row.get("gate_suppressed_hash")
     if not suppressed:
         return False
-    from online.status_assembler import compute_analytics_hash
+    from online.status_assembler import compute_analytics_hash, has_uncancellable
+    if has_uncancellable(detections):
+        return False
     has_analytics = any(
         isinstance(d, dict) and d.get("scenario") != "CONTROLLER_FAULT"
         for d in detections

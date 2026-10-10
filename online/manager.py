@@ -874,7 +874,10 @@ async def _analyze_warning_claude(
             prev_analyses=_prev_analyses,
             episode_timeline=_timeline,
         )
-        can_cancel  = struct.get("panel_severity", "норма") == "норма"
+        from online.status_assembler import (
+            UNCANCELLABLE_SCENARIOS, gate_can_cancel, has_uncancellable,
+        )
+        can_cancel  = gate_can_cancel(struct)
 
         if provider == "llm":
             from llm.router import depth_for_gate
@@ -896,7 +899,10 @@ async def _analyze_warning_claude(
         # Отмена допустима только для чисто аналитического предупреждения
         applied = decision == "cancel" and can_cancel
         if decision == "cancel" and not can_cancel:
-            logger.warning("WarningGate: cancel отклонён — активны сигналы панели (%s/%s/%s)",
+            logger.warning("WarningGate: cancel отклонён — %s (%s/%s/%s)",
+                           "в составе несимметрия"
+                           if has_uncancellable(struct.get("analytics_alarms") or [])
+                           else "активны сигналы панели",
                            router_sn, equip_type, panel_id)
 
         if applied:
@@ -928,7 +934,8 @@ async def _analyze_warning_claude(
             # копим статистику ложных срабатываний для тюнинга порогов
             try:
                 await online_db.set_episodes_gate_suppressed(
-                    router_sn, equip_type, panel_id, _alarm_scenarios,
+                    router_sn, equip_type, panel_id,
+                    [sc for sc in _alarm_scenarios if sc not in UNCANCELLABLE_SCENARIOS],
                 )
             except Exception:
                 logger.warning("WarningGate: не удалось пометить эпизоды gate_suppressed",

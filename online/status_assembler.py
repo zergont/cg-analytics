@@ -155,10 +155,36 @@ def compute_analytics_hash(dets: list[dict]) -> str:
     return hashlib.md5(str(key).encode()).hexdigest()[:12]
 
 
+# Ранний сигнал несимметрии — предвестник отказа на стороне трансформатора или
+# нагрузки (Сининда 29.09: провал фазы и ток нейтрали за 2,5 ч до отключения).
+# Решение владельца 11.10: гейт его НЕ снимает, только пропускает с пояснением.
+# Снятие у гейта — по составу целиком, поэтому состав с несимметрией не снимается
+# весь; снимется, когда несимметрия уйдёт и состав сменится.
+UNCANCELLABLE_SCENARIOS = frozenset({
+    "NEGATIVE_SEQUENCE", "PHASE_CURRENT_SPREAD", "NEUTRAL_CURRENT",
+})
+
+
+def has_uncancellable(dets: list[dict]) -> bool:
+    """Есть ли в составе сигнал, который гейт снимать не вправе."""
+    return any(isinstance(d, dict) and d.get("scenario") in UNCANCELLABLE_SCENARIOS
+               for d in dets or [])
+
+
+def gate_can_cancel(s: dict) -> bool:
+    """Может ли гейт снять состав: панель в норме и нет несимметрии."""
+    return (s.get("panel_severity", "норма") == "норма"
+            and not has_uncancellable(s.get("analytics_alarms") or []))
+
+
 def is_analytics_suppressed(seg_row: dict, active_dets: list[dict]) -> bool:
     """Действует ли вердикт гейта «отменить» для текущего состава аналитических детекций."""
     suppressed = seg_row.get("gate_suppressed_hash")
     if not suppressed:
+        return False
+    # Вердикт, поставленный до правила (или на составе, совпавшем по хешу), не
+    # гасит несимметрию
+    if has_uncancellable(active_dets):
         return False
     has_analytics = any(
         isinstance(d, dict) and d.get("scenario") != "CONTROLLER_FAULT" for d in active_dets
@@ -557,15 +583,22 @@ def build_warning_prompt(
     lines.append(f"Итоговый уровень: {s['severity_level']}")
     lines.append(f"Источник панели: {s.get('panel_severity', 'норма')}")
     lines.append(f"Источник аналитики: {s.get('analytics_severity', 'норма')}")
-    if s.get("panel_severity", "норма") == "норма":
-        lines.append(
-            "Гейт: сигналов панели нет — предупреждение чисто аналитическое, "
-            "вердикт cancel ДОПУСТИМ, если угроза не подтверждается."
-        )
-    else:
+    if s.get("panel_severity", "норма") != "норма":
         lines.append(
             "Гейт: активны сигналы панели управления — отмена НЕДОСТУПНА, "
             "вердикт только pass."
+        )
+    elif has_uncancellable(s.get("analytics_alarms") or []):
+        lines.append(
+            "Гейт: в составе ранний сигнал несимметрии (ток обратной "
+            "последовательности, перекос фаз или ток нейтрали) — отмена НЕДОСТУПНА, "
+            "вердикт только pass. Поясни, что проверить: распределение однофазной "
+            "нагрузки по фазам, соединения, трансформатор."
+        )
+    else:
+        lines.append(
+            "Гейт: сигналов панели нет — предупреждение чисто аналитическое, "
+            "вердикт cancel ДОПУСТИМ, если угроза не подтверждается."
         )
     lines.append("")
 

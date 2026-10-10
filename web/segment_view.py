@@ -81,7 +81,10 @@ def _seg_gate_checked(dets: list[dict], gate_suppressed_hash: str | None) -> boo
     календаре жёлтая с щитом. Поэтому при активном сигнале панели тяжести
     WARNING или выше вердикт считается недействительным.
     """
-    from online.status_assembler import compute_analytics_hash
+    from online.status_assembler import compute_analytics_hash, has_uncancellable
+    # Несимметрию гейт не снимает (решение 11.10) — и старый вердикт её не гасит
+    if has_uncancellable(dets):
+        return False
     panel_loud = any(
         d.get("scenario") == "CONTROLLER_FAULT"
         and d.get("severity") in ("SHUTDOWN", "WARNING")
