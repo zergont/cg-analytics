@@ -494,7 +494,7 @@ def build_summary_parts(
     отдельными панелями. Эпизоды, отменённые гейтом, в вердикт не входят,
     но в замечаниях показываются с пометкой.
 
-    Ключи: verdict {level, title, note, remarks_n, suppressed_n};
+    Ключи: verdict {level, title, note, remarks_n, suppressed_n, unconfirmed_n};
     end_level — что висит на конец окна (живое, не снятое ИИ): по нему красится
     стоп-сегмент в календаре (v4.9.73); mttr {kind, label, sec} | None;
     remarks — замечания по причинам, с фазами before / appeared / open;
@@ -653,6 +653,43 @@ def build_summary_parts(
             cur["severity"] = e.get("severity")
     episodes = list(_by_onset.values())
 
+    # Подтверждение итоговым расчётом (решение 11.10, а): эпизод аналитики рождается
+    # в живой обработке на подсегменте, который итоговая нарезка сегмента считает
+    # иначе (COOLING_FAILURE, фаза 2: подсегмент только что перешёл порог 300 с) —
+    # в детекциях сегмента его нет, заключение его не видит (гейт — как успел). Такой
+    # — «по живым данным, в итоговом расчёте не подтверждено»: в замечаниях с пометкой,
+    # в вердикт и счёт замечаний не идёт (ДЭС №3: 93 эпизода за 30 дней, 35765).
+    # Проверки перехода (охлаждение, прогрев) не сверяются: их ставит межсегментная
+    # проверка, а итоговый расчёт сегмента начинается с его головы и предыдущего
+    # сегмента не видит — отсутствие детекции там ничего не опровергает (ревью v5.1.8:
+    # 4 из 5 настоящих «без охлаждения» за 30 дней выпали бы из вердикта)
+    _subs = [sub for s in segments for sub in (getattr(s, "subsegments", None) or [])]
+    _sub_scs = [
+        (_dt(getattr(sub, "t_start", None)), _dt(getattr(sub, "t_end", None)),
+         {_as_dict(d).get("scenario") for d in (getattr(sub, "detections", None) or [])})
+        for sub in _subs
+    ]
+    # Сверять не с чем — подсегменты без сведений о детекциях (не из сегментатора)
+    _can_confirm = any(getattr(sub, "detections", None) is not None for sub in _subs)
+
+    def _confirmed(e: dict) -> bool:
+        if (not _can_confirm or e.get("source") == "panel"
+                or e.get("scenario") == "CONTROLLER_FAULT"
+                or e.get("scenario") in _TRANSITION_SCENARIOS):
+            return True
+        a0, a1 = _dt(e.get("t_open")), _dt(e.get("t_close"))
+        if w0 is not None and (a0 is None or a0 < w0):
+            a0 = w0
+        if w1 is not None and (a1 is None or a1 > w1):
+            a1 = w1
+        sc = e.get("scenario")
+        return any(
+            sc in scs
+            and (a1 is None or s0 is None or s0 <= a1)
+            and (a0 is None or s1 is None or s1 >= a0)
+            for s0, s1, scs in _sub_scs
+        )
+
     groups: dict[tuple, dict] = {}
     for e in episodes:
         g = groups.setdefault(_group_key(e), {
@@ -660,10 +697,14 @@ def build_summary_parts(
             "scenario": e.get("scenario"),
             "sev_rank": 0, "severity": e.get("severity"),
             "count": 0, "active_sec": 0.0, "blind_sec": 0.0,
-            "suppressed": 0, "open": 0, "open_live": 0, "before": False, "appeared": False,
-            "at_end": False, "_iv": [], "_on": {},
+            "suppressed": 0, "unconfirmed": 0, "open": 0, "open_live": 0,
+            "before": False, "appeared": False, "at_end": False, "_iv": [], "_on": {},
         })
         g["count"] += 1
+        # Снятое ИИ и неподтверждённое не суммируются: снятие главнее
+        _unconf = not e.get("gate_suppressed") and not _confirmed(e)
+        if _unconf:
+            g["unconfirmed"] += 1
         _to, _tc = _dt(e.get("t_open")), _dt(e.get("t_close"))
         if w0 is not None and w1 is not None and _to is not None:
             _end = min(_tc or w1, w1)
@@ -680,7 +721,7 @@ def build_summary_parts(
             g["suppressed"] += 1
         if not e.get("t_close"):
             g["open"] += 1
-            if not e.get("gate_suppressed"):
+            if not e.get("gate_suppressed") and not _unconf:
                 # Открытые и не снятые — их и снимет поздний вердикт гейта
                 # (set_episodes_gate_suppressed метит только открытые эпизоды)
                 g["open_live"] += 1
@@ -718,7 +759,8 @@ def build_summary_parts(
             g["since"] = before[0].isoformat()
             g["since_text"] = _fmt_dm(g["since"], tz)
     remarks = sorted(groups.values(),
-                     key=lambda g: (-g["sev_rank"], -g.get("period_sec", g["active_sec"])))
+                     key=lambda g: (-g["sev_rank"], _remark_live(g) <= 0,
+                                    -g.get("period_sec", g["active_sec"])))
     for g in remarks:
         g.pop("sev_rank", None)
 
@@ -728,7 +770,7 @@ def build_summary_parts(
         remarks.append({
             "name": SCENARIO_RU["COKING_RISK"], "source": "analytics", "scenario": "COKING_RISK",
             "severity": "CAUTION", "count": 1, "active_sec": coking_part["added_sec"] or 0.0,
-            "blind_sec": 0.0, "suppressed": 0, "open": 0, "open_live": 0,
+            "blind_sec": 0.0, "suppressed": 0, "unconfirmed": 0, "open": 0, "open_live": 0,
             "period_sec": coking_part["added_sec"] or 0.0, "period_blind_sec": 0.0,
             "before": coking_part["level_start"] not in (None, "GREEN"),
             "appeared": coking_part["level_start"] in (None, "GREEN"),
@@ -775,6 +817,15 @@ _NO_VERDICT_CHECKS = _DATA_QUALITY_CHECKS | _INFO_CHECKS
 _HIDDEN_CHECKS = frozenset({"no_active_shutdown_fault"})
 
 
+# Детекции межсегментных проверок перехода (segmenter._inter_segment_checks)
+_TRANSITION_SCENARIOS = frozenset({"COOLDOWN_VIOLATION", "WARMUP_VIOLATION"})
+
+
+def _remark_live(g: dict) -> int:
+    """Эпизоды группы, идущие в вердикт: без снятых ИИ и неподтверждённых итоговым расчётом."""
+    return g["count"] - g.get("suppressed", 0) - g.get("unconfirmed", 0)
+
+
 def _verdict_from_remarks(
     remarks: list[dict], checks: list[dict], emergency: bool,
 ) -> tuple[dict, str]:
@@ -786,8 +837,7 @@ def _verdict_from_remarks(
     к работе (решение 11.10, 1а): раньше заголовок писал «НОРМА — замечаний нет»
     при 🟡 строке ниже.
     """
-    def live(g):
-        return g["count"] - g.get("suppressed", 0)
+    live = _remark_live
 
     panel = [g for g in remarks if g.get("source") == "panel" and live(g) > 0]
     shutdown = any(g.get("severity") == "SHUTDOWN" for g in panel)
@@ -796,6 +846,7 @@ def _verdict_from_remarks(
          + sum(live(g) for g in panel if g.get("severity") not in ("SHUTDOWN", "WARNING"))
          + sum(1 for c in checks if c.get("check") not in _NO_VERDICT_CHECKS))
     suppressed_n = sum(g.get("suppressed", 0) for g in remarks)
+    unconfirmed_n = sum(g.get("unconfirmed", 0) for g in remarks)
 
     if shutdown or emergency:
         verdict = {"level": "SHUTDOWN", "title": "🔴 АВАРИЯ — аварийный останов панели", "note": None}
@@ -804,13 +855,19 @@ def _verdict_from_remarks(
                    "note": None}
     elif n:
         verdict = {"level": "CAUTION", "title": f"🟡 ЗАМЕЧАНИЯ К РАБОТЕ — {n}", "note": None}
-    elif suppressed_n:
-        verdict = {"level": "НОРМА", "title": "🟢 НОРМА",
-                   "note": f"Предупреждения аналитики ({suppressed_n}) сняты ИИ."}
+    elif suppressed_n or unconfirmed_n:
+        _notes = []
+        if suppressed_n:
+            _notes.append(f"Предупреждения аналитики ({suppressed_n}) сняты ИИ.")
+        if unconfirmed_n:
+            _notes.append(f"Эпизоды по живым данным ({unconfirmed_n}) итоговым расчётом "
+                          f"не подтверждены.")
+        verdict = {"level": "НОРМА", "title": "🟢 НОРМА", "note": " ".join(_notes)}
     else:
         verdict = {"level": "НОРМА", "title": "🟢 НОРМА", "note": "Замечаний к работе нет."}
     verdict["remarks_n"] = n
     verdict["suppressed_n"] = suppressed_n
+    verdict["unconfirmed_n"] = unconfirmed_n
 
     end_level = "НОРМА"
     for g in remarks:
@@ -848,7 +905,7 @@ def apply_gate_suppression(parts: dict[str, Any], scenarios) -> dict[str, Any]:
             # этом же сегменте остаются замечаниями, как и при живой пометке
             n = g.get("open_live")
             if n is None:
-                n = g["count"] - g.get("suppressed", 0)
+                n = _remark_live(g)
             g["suppressed"] = g.get("suppressed", 0) + n
             g["open_live"] = 0
             g["at_end"] = False
@@ -907,6 +964,11 @@ def render_summary_md(parts: dict[str, Any]) -> str:
             if g["suppressed"]:
                 line += (" — *снято ИИ*" if g["suppressed"] == g["count"]
                          else f" — *снято ИИ: {g['suppressed']} из {g['count']}*")
+            _u = g.get("unconfirmed") or 0
+            if _u:
+                line += (" — *по живым данным, в итоговом расчёте не подтверждено*"
+                         if _u == g["count"] - (g["suppressed"] or 0)
+                         else f" — *в итоговом расчёте не подтверждено: {_u} из {g['count']}*")
             # То же, что end_level и шапка ИИ: снятое ИИ и снятое панелью к концу не висит
             if g.get("at_end", g["open"] and not g["suppressed"]):
                 line += " — **активен на конец периода**"

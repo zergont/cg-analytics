@@ -1363,6 +1363,11 @@ def _check_cooldown_transition(
 
     # Была ли фаза охлаждения (RUN_STATE 4/5) между running и stop?
     segs_between = prev_segs[last_running_idx + 1:]
+    # Только первый стоп после работы: дальнейшие стоп-сегменты того же останова
+    # (рез по снятию аварии, неудачный пуск) — тот же останов, а не новый; до
+    # v5.1.8 каждый заводил свой эпизод (ДГУ №1 17.09: 8 «нарушений» на сутки)
+    if any(s.run_state == 0 for s in segs_between):
+        return
     cooldown_dur = sum(s.duration_sec for s in segs_between if s.run_state in (4, 5))
     had_cooldown_phase = cooldown_dur > 0
 
