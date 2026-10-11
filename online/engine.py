@@ -183,6 +183,10 @@ def _live_new_episodes(segments: list, eps: list[dict], live_keys: set[str],
                 if (key not in live_keys or key in have or key in out
                         or dd.get("scenario") in STATE_SCENARIOS):
                     continue
+                # Снятый панелью фронт того же бита — не живой (с v5.1.6 у «Общей
+                # аварии» по детекции на каждый период: брался закрытый фронт)
+                if dd.get("scenario") == "CONTROLLER_FAULT" and (dd.get("values") or {}).get("fault_end"):
+                    continue
                 v = dd.get("values") or {}
                 try:
                     t_open = _tz_utc(datetime.fromisoformat(dd.get("t_detected")))
@@ -383,6 +387,22 @@ async def _coking_before(router_sn: str, equip_type: str, panel_id: int,
     return _coking_from_json(prev.get("coking_risk_json")) if prev else CokingRisk()
 
 
+def _chain_link(i: int, continued_from_id, prev_hint, seg):
+    """Ссылка на предка суточной цепочки: только голова окна и только в том же режиме."""
+    if i != 0 or continued_from_id is None:
+        return None
+    prev_rs = getattr(prev_hint, "run_state", None)
+    return continued_from_id if prev_rs is None or prev_rs == seg.run_state else None
+
+
+def _rs_carry(inh: dict[int, float] | None, rs: int | None) -> dict[int, float]:
+    """Унаследованное время только режима сегмента: переход внутри обрыва связи
+    на суточной границе не должен тащить в отчёт время чужого режима (35690:
+    «Время в останове 18 ч» в сегменте работы)."""
+    v = (inh or {}).get(rs) if rs is not None else None
+    return {rs: float(v)} if v else {}
+
+
 def _load_rs_sec_from_ff(ff: dict | None) -> dict[int, float]:
     """Извлечь накопленное время RS из forward_fill_json (_run_state_sec ключ)."""
     if not isinstance(ff, dict):
@@ -503,11 +523,11 @@ def _accrual_split(
     live — span минус gap, только для дебаунса закрытия: объявлять тревогу
     снятой, пока мы её не видим, нельзя.
     """
-    from analytics.accumulators import _gap_overlap_sec
+    from analytics.accumulators import gap_union_overlap_sec
     if prev_base is None or now_ts <= prev_base:
         return 0.0, 0.0, 0.0
     span = (now_ts - prev_base).total_seconds()
-    gap = min(span, max(0.0, _gap_overlap_sec(gaps, prev_base, now_ts)))
+    gap = min(span, max(0.0, gap_union_overlap_sec(gaps, prev_base, now_ts)))
     return span, gap, max(0.0, span - gap)
 
 
@@ -1001,7 +1021,9 @@ async def _collect_and_enrich_detections(
     for sub in seg.subsegments:
         for d in sub.detections:
             k = _alert_key({"scenario": d.scenario, "values": d.values})
-            if k not in seen:
+            # Панель — по фронту: бит, снятый и поднятый в одном сегменте, — две тревоги
+            sk = (k, d.t_detected) if d.scenario == "CONTROLLER_FAULT" else k
+            if sk not in seen:
                 v = d.values or {}
                 fc = int(v.get("front_count", 1))
                 t_open = None
@@ -1011,7 +1033,8 @@ async def _collect_and_enrich_detections(
                     except Exception:
                         logger.warning("Некорректный t_detected %r в детекции %s",
                                        d.t_detected, d.scenario)
-                seen[k] = {
+                seen[sk] = {
+                    "key": k,
                     "scenario": d.scenario, "severity": d.severity,
                     "run_state": seg.run_state, "fc": fc,
                     "addr": v.get("addr"), "bit": v.get("bit"), "t_open": t_open,
@@ -1034,18 +1057,33 @@ async def _collect_and_enrich_detections(
         except Exception:
             logger.warning("Не удалось проверить существующие эпизоды", exc_info=True)
             _already = set()
-        for k, info in seen.items():
-            if k in open_keys or info["scenario"] in STATE_SCENARIOS:
+        for _sk, info in seen.items():
+            k = info["key"]
+            if info["scenario"] in STATE_SCENARIOS:
+                continue
+            # Панель: живой ключ блокирует только свой (не снятый) фронт — снятые
+            # раньше фронты того же бита засеваются; засеянное — по фронту
+            _panel = info["scenario"] == "CONTROLLER_FAULT"
+            _cleared = _panel and bool((info.get("values") or {}).get("fault_end"))
+            if (k in open_keys and not _cleared) or (k, info.get("t_open")) in open_keys:
                 continue
             if (k, info.get("t_open")) in _already:
                 continue
             t_open = info["t_open"] or _tz_utc(seg_t_end)
+            # Снятая панелью тревога закрывается временем снятия, а не концом сегмента
+            t_close = _tz_utc(seg_t_end)
+            _fe = (info.get("values") or {}).get("fault_end")
+            if _fe:
+                try:
+                    t_close = min(_tz_utc(datetime.fromisoformat(_fe)), t_close)
+                except (TypeError, ValueError):
+                    pass
             # Воздействие — астрономическое, слепая доля считается рядом
-            _span = max(0.0, (_tz_utc(seg_t_end) - t_open).total_seconds())
+            _span = max(0.0, (t_close - t_open).total_seconds())
             _blind = 0.0
             if gaps and _span > 0:
-                from analytics.accumulators import _gap_overlap_sec as _gos
-                _blind = min(_span, _gos(gaps, t_open, _tz_utc(seg_t_end)))
+                from analytics.accumulators import gap_union_overlap_sec as _gos
+                _blind = min(_span, _gos(gaps, t_open, t_close))
             try:
                 await online_db.insert_closed_episode(
                     router_sn, equip_type, panel_id,
@@ -1053,14 +1091,14 @@ async def _collect_and_enrich_detections(
                     source="panel" if info["scenario"] == "CONTROLLER_FAULT" else "analytics",
                     severity=info["severity"],
                     t_open=t_open,
-                    t_close=_tz_utc(seg_t_end),
+                    t_close=t_close,
                     active_sec=_span,
                     open_values=info["values"],
                     addr=info["addr"], bit=info["bit"],
                     blind_sec=_blind,
                 )
                 if seeded_out is not None:
-                    seeded_out.add(k)
+                    seeded_out.add((k, info.get("t_open")) if _panel else k)
             except Exception:
                 logger.warning("Не удалось создать эпизод для %s", k, exc_info=True)
 
@@ -1084,6 +1122,8 @@ async def _collect_and_enrich_detections(
                 d.values["history_blind_30d_sec"]    = round(c.get("blind_window", 0))
                 d.values["startup_count"]            = c["count_since"]
                 d.values["startup_duration_sec"]     = round(c["dur_since"])
+                if run_origin_ts is not None:
+                    d.values["startup_since"]        = _tz_utc(run_origin_ts).isoformat()
 
     # События для detection_events (переходный период) — по тревоге
     events = [
@@ -1141,6 +1181,8 @@ async def _enrich_open_seg_detections(
                 d.values["history_blind_30d_sec"]    = round(c.get("blind_window", 0))
                 d.values["startup_count"]            = c["count_since"]
                 d.values["startup_duration_sec"]     = round(c["dur_since"])
+                if run_origin_ts is not None:
+                    d.values["startup_since"]        = _tz_utc(run_origin_ts).isoformat()
 
 
 class OnlinePollEngine:
@@ -1265,8 +1307,18 @@ class OnlinePollEngine:
                             logger.warning("OnlineEngine[%s]: битый forward_fill_json в сегменте %s", self.key, last.get("id"))
                             ff = None
                     self.forward_fill_memory = ff
-                    self.continued_from_id = last["id"]
-                    self.inherited_run_state_sec = _load_rs_sec_from_ff(ff)
+                    # Пустой сегмент (нет связи весь период) цепочку не продолжает —
+                    # как и в рабочем пути: иначе «с пуска» уходит за обрыв (v5.1.6)
+                    _dq_last = None
+                    try:
+                        _ch = last.get("characteristics_json")
+                        _ch = json.loads(_ch) if isinstance(_ch, str) else _ch
+                        _dq_last = (_ch or {}).get("data_quality")
+                    except Exception:
+                        _dq_last = None
+                    self.continued_from_id = None if _dq_last == 0.0 else last["id"]
+                    self.inherited_run_state_sec = _rs_carry(_load_rs_sec_from_ff(ff),
+                                                             last.get("run_state"))
                 else:
                     self.forward_fill_memory = None
                     self.continued_from_id = None
@@ -1401,6 +1453,29 @@ class OnlinePollEngine:
 
     # ── Эпизоды тревог ────────────────────────────────────────────────────────
 
+    async def _gaps_back_to(self, t0: datetime, gaps: list[dict], gaps_from: datetime | None,
+                            cache: dict) -> list[dict]:
+        """Разрывы связи с t0, если голова эпизода раньше окна (v5.1.6).
+
+        Окно знает только свои разрывы: у эпизода с фронтом 06.10, заведённого
+        11.10, слепая доля головы выходила 0 при 22 ч без связи. Глубина —
+        не больше 30 суток (дольше висящие неисправности — редкость).
+        """
+        if gaps_from is None or t0 >= gaps_from:
+            return gaps
+        t0 = max(t0, gaps_from - timedelta(days=30))
+        if cache.get("from") is None or t0 < cache["from"]:
+            try:
+                from analytics import source as _src
+                cache["head"] = await _src.get_data_gaps(
+                    self.router_sn, self.equip_type, self.panel_id, t0, gaps_from)
+                cache["from"] = t0
+            except Exception:
+                logger.warning("OnlineEngine[%s]: разрывы до окна не догружены — голова эпизода "
+                               "без них", self.key, exc_info=True)
+                return gaps
+        return (cache.get("head") or []) + gaps
+
     async def _inherit_gate_suppression(self, scenarios: list[str], curr_dets: list[dict]) -> bool:
         """Пометить новые эпизоды снятыми, если гейт уже снял их состав.
 
@@ -1425,6 +1500,7 @@ class OnlinePollEngine:
     async def _process_episodes(
         self, curr_dets: list[dict], t_to: datetime, gaps: list[dict],
         cleared_at: dict[str, datetime] | None = None,
+        gaps_from: datetime | None = None,
     ) -> None:
         """Материализовать эпизоды тревог из снимка активных детекций.
 
@@ -1452,6 +1528,7 @@ class OnlinePollEngine:
 
         # Открытие новых / обновление живущих
         _new_analytics: list[str] = []
+        _hc: dict = {}    # кэш разрывов до окна (голова эпизода)
         for key, d in curr_map.items():
             ep = self._episodes.get(key)
             sc = d.get("scenario")
@@ -1485,8 +1562,9 @@ class OnlinePollEngine:
                     # Слепая доля хвоста — от закрытия (не раньше фронта)
                     tail_blind = 0.0
                     if was_closed:
-                        _, tail_blind, _ = _accrual_split(
-                            max(_tz_utc(prev["t_close"]), t_open), now_ts, gaps)
+                        _t0 = max(_tz_utc(prev["t_close"]), t_open)
+                        _g = await self._gaps_back_to(_t0, gaps, gaps_from, _hc)
+                        _, tail_blind, _ = _accrual_split(_t0, now_ts, _g)
                     try:
                         await online_db.reopen_episode(
                             ep_id, now_ts=now_ts, blind_sec_add=tail_blind,
@@ -1511,7 +1589,8 @@ class OnlinePollEngine:
                 # тикают поцикловые приращения от той же базы, так что
                 # интервалы стыкуются и не накладываются. Без этого эпизод,
                 # проживший ровно один снимок, записывался нулевым.
-                head_sec, head_blind, _ = _accrual_split(t_open, now_ts, gaps)
+                _g = await self._gaps_back_to(t_open, gaps, gaps_from, _hc)
+                head_sec, head_blind, _ = _accrual_split(t_open, now_ts, _g)
                 try:
                     ep_id = await online_db.open_episode(
                         self.router_sn, self.equip_type, self.panel_id,
@@ -1772,7 +1851,8 @@ class OnlinePollEngine:
                 eps = _drop_same_onset(eps, _syn) + _syn
             from analytics.serializer import build_summary_parts, render_summary_md
             parts = build_summary_parts(segments, episodes=eps, tz=self.tz,
-                                        trip_roles=self.cfg.trip_snapshot_roles)
+                                        trip_roles=self.cfg.trip_snapshot_roles,
+                                        t_from=_tz_utc(t_from), t_to=_tz_utc(t_to))
             return render_summary_md(parts), parts
         except Exception:
             logger.warning("OnlineEngine[%s]: не удалось построить summary-отчёт",
@@ -1915,6 +1995,9 @@ class OnlinePollEngine:
             "continued_from":         None,
         })
 
+        # Предок головы окна — для ссылки цепочки (до того как цикл сдвинет подсказку)
+        _prev_hint_i0 = self._prev_seg_hint
+
         # Вычислить начало текущего непрерывного запуска (для счётчика «с пуска»)
         chain_origin_ts: datetime | None = None
         if self.continued_from_id is not None:
@@ -1977,7 +2060,7 @@ class OnlinePollEngine:
 
             # Унаследованное время RS для report_md этого сегмента:
             # i==0 — прямое продолжение предыдущей цепочки; i>0 — новый RS (смена).
-            seg_inherited_rs = running_rs_sec if i == 0 else {}
+            seg_inherited_rs = _rs_carry(running_rs_sec, seg.run_state) if i == 0 else {}
 
             # forward-fill память + накопленное время RS для суточного реза
             # (пустой сегмент память не строит — значения до обрыва не переносятся)
@@ -1985,10 +2068,9 @@ class OnlinePollEngine:
             updated_rs_sec: dict[int, float] | None = None
             if is_last and close_reason == "DAILY_BOUNDARY" and not _seg_no_data:
                 if i == 0:
-                    updated_rs_sec = dict(running_rs_sec)
-                    updated_rs_sec[seg.run_state] = (
-                        updated_rs_sec.get(seg.run_state, 0.0) + seg.duration_sec
-                    )
+                    # Только время своего режима: чужой ключ — устаревший остаток
+                    updated_rs_sec = {seg.run_state:
+                                      seg_inherited_rs.get(seg.run_state, 0.0) + seg.duration_sec}
                 else:
                     # Последний сегмент начался с новым RS — счётчик свежий
                     updated_rs_sec = {seg.run_state: seg.duration_sec}
@@ -2001,7 +2083,7 @@ class OnlinePollEngine:
             # Начало запуска: i==0 продолжает цепочку, i>0 — новый запуск
             _run_origin = (
                 (chain_origin_ts or _tz_utc(datetime.fromisoformat(seg.t_start)))
-                if i == 0
+                if _chain_link(i, self.continued_from_id, _prev_hint_i0, seg) is not None
                 else _tz_utc(datetime.fromisoformat(seg.t_start))
             )
 
@@ -2059,7 +2141,11 @@ class OnlinePollEngine:
                 "run_state":          seg.run_state,
                 "cause_close":        seg_cause_close,
                 "split_reason":       "DAILY_BOUNDARY" if seg_cause_close == "DAILY_BOUNDARY" else None,
-                "continued_from":     None,
+                # Голова окна в том же режиме — продолжение суточной цепочки. Без
+                # ссылки начало пуска обрывалось на каждом резе: «Срабатываний с
+                # пуска: 0» у эпизода, открытого в момент пуска (v5.1.6)
+                "continued_from":     (None if _seg_no_data
+                                       else _chain_link(i, self.continued_from_id, _prev_hint_i0, seg)),
                 "coking_risk_json":   coking_risk.to_dict(),
                 "forward_fill_json":  ff_json,
                 "analytics_version":  ANALYTICS_VERSION,
@@ -2366,6 +2452,8 @@ class OnlinePollEngine:
             )
             # Первый закрытый сегмент в окне может быть продолжением после DAILY_BOUNDARY
             carry_continued_from = self.continued_from_id
+            # Подсказка предка головы окна — цикл ниже перезаписывает _prev_seg_hint
+            _prev_hint_rs0 = self._prev_seg_hint
             # Унаследованное RS время: ci==0 продолжает цепочку, ci>0 — новый RS
             _rs_inherited_before = dict(self.inherited_run_state_sec)
             # Тревоги, активные в остающемся открытом сегменте: по ним ниже в
@@ -2381,10 +2469,13 @@ class OnlinePollEngine:
                 # Пустой сегмент (нет связи весь период): заглушка, без corpus-анализа
                 _rs_no_data = seg.data_quality == 0.0
 
-                # Начало запуска: ci==0 продолжает цепочку, ci>0 — новый запуск
+                # Начало запуска: голова окна продолжает цепочку только в том же
+                # режиме (как в _close_window), иначе — новый запуск
+                _rs_link = (None if _rs_no_data
+                            else _chain_link(ci, carry_continued_from, _prev_hint_rs0, seg))
                 _rs_run_origin = (
                     (chain_origin_ts or _tz_utc(datetime.fromisoformat(seg.t_start)))
-                    if ci == 0
+                    if _rs_link is not None
                     else _tz_utc(datetime.fromisoformat(seg.t_start))
                 )
 
@@ -2413,7 +2504,8 @@ class OnlinePollEngine:
                             _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end_rs,
                             ANALYTICS_VERSION, tz=self.tz, prev_seg=ps_rs,
                             fault_ref=self._fault_ref,
-                            inherited_run_state_sec=_rs_inherited_before if ci == 0 else {},
+                            inherited_run_state_sec=(_rs_carry(_rs_inherited_before, seg.run_state)
+                                                     if ci == 0 else {}),
                         )
                     except Exception:
                         logger.exception("OnlineEngine[%s]: не удалось построить отчёт сегмента RUN_STATE_CHANGE, сохраняю без report_md", self.key)
@@ -2489,7 +2581,7 @@ class OnlinePollEngine:
                     "run_state":          seg.run_state,
                     "cause_close":        seg.cause_close or "RUN_STATE_CHANGE",
                     "split_reason":       None,
-                    "continued_from":     carry_continued_from,
+                    "continued_from":     _rs_link,
                     "coking_risk_json":   coking_risk.to_dict(),
                     "analytics_version":  ANALYTICS_VERSION,
                     "characteristics_json": _rs_seg_dict,
@@ -2564,17 +2656,25 @@ class OnlinePollEngine:
 
         # Начало запуска для открытого сегмента:
         # если были смены RS — открытый сегмент начинается свежо; иначе — продолжает цепочку
-        _open_run_origin = (
-            _tz_utc(datetime.fromisoformat(open_seg.t_start))
-            if closed_segs
-            else (chain_origin_ts or _tz_utc(self.cursor_ts))
+        # Ссылка на предка: только без смен в окне и в том же режиме — переход
+        # внутри обрыва связи на суточной границе начинает новую цепочку (v5.1.6)
+        open_continued_from = (
+            None if closed_segs
+            else _chain_link(0, self.continued_from_id, self._prev_seg_hint, open_seg)
         )
+        if closed_segs:
+            _open_run_origin = _tz_utc(datetime.fromisoformat(open_seg.t_start))
+        elif open_continued_from is not None or self.continued_from_id is None:
+            _open_run_origin = chain_origin_ts or _tz_utc(self.cursor_ts)
+        else:
+            _open_run_origin = _tz_utc(datetime.fromisoformat(open_seg.t_start))
 
         # Эпизоды тревог — ДО обогащения: счётчики уже включат текущий эпизод
         try:
             _, _raw_curr_dets = _extract_open_segment_data(open_seg)
             await self._process_episodes(_raw_curr_dets, t_to, gaps,
-                                         cleared_at=_panel_cleared_at(segments))
+                                         cleared_at=_panel_cleared_at(segments),
+                                         gaps_from=ts_from_utc)
         except Exception:
             logger.warning("OnlineEngine[%s]: ошибка обработки эпизодов тревог",
                            self.key, exc_info=True)
@@ -2603,9 +2703,8 @@ class OnlinePollEngine:
         )
         self._active_alerts = {_alert_key(d): d for d in active_detections}
 
-        # continued_from: если после DAILY_BOUNDARY не было смен RUN_STATE,
-        # открытый сегмент сам является продолжением pre-boundary сегмента
-        open_continued_from = self.continued_from_id
+        # continued_from (open_continued_from выше): если после DAILY_BOUNDARY не
+        # было смен RUN_STATE, открытый сегмент — продолжение pre-boundary сегмента
 
         _t0 = _time.perf_counter()
         try:
@@ -2615,7 +2714,7 @@ class OnlinePollEngine:
                 _tz_utc(self.cursor_ts), _tz_utc(t_to),
                 ANALYTICS_VERSION, tz=self.tz, prev_seg=self._prev_seg_hint,
                 fault_ref=self._fault_ref,
-                inherited_run_state_sec=self.inherited_run_state_sec,
+                inherited_run_state_sec=_rs_carry(self.inherited_run_state_sec, open_seg.run_state),
             )
         except Exception:
             logger.exception("OnlineEngine[%s]: не удалось построить отчёт открытого сегмента", self.key)
@@ -2703,10 +2802,9 @@ class OnlinePollEngine:
             "characteristics_json":   {
                 **open_seg.to_dict(),
                 "_total_run_state_sec": {
-                    **self.inherited_run_state_sec,
                     open_seg.run_state: (
-                        self.inherited_run_state_sec.get(open_seg.run_state, 0.0)
-                        + open_seg.duration_sec
+                        _rs_carry(self.inherited_run_state_sec, open_seg.run_state)
+                        .get(open_seg.run_state, 0.0) + open_seg.duration_sec
                     ),
                 },
             },

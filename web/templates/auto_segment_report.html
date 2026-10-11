@@ -91,12 +91,20 @@
       </div>
     </div>
 
-    {# Риск закоксовки #}
+    {# Риск нагара — накопленное состояние (v5.1.3–5.1.5); по частям сводки, иначе старая карточка #}
     <div class="card mb-3">
-      <div class="card-header fw-semibold py-2">Риск закоксовки</div>
+      <div class="card-header fw-semibold py-2">Риск нагара</div>
       <div class="card-body py-2 px-3">
+        {% if coking_view %}
+        <span class="badge bg-{{ coking_colors.get(coking_view.level,'secondary') }} fs-6 mb-2">{{ coking_view.level_ru }}</span>
+        {% if coking_view.before_start %}<span class="badge bg-warning text-dark ms-1">перед пуском</span>{% endif %}
+        {% if coking_view.service %}<span class="badge bg-danger ms-1">нужен сервисный прожиг</span>{% endif %}
+        {% if coking_view.text %}<div style="font-size:.8rem" class="text-muted mt-1">{{ coking_view.text }}</div>{% endif %}
+        {% if coking_view.calendar %}<div style="font-size:.8rem" class="text-muted mt-1">{{ coking_view.calendar }}</div>{% endif %}
+        {% else %}
         <span class="badge bg-{{ coking_colors.get(cr_level,'secondary') }} fs-6 mb-2">{{ cr_level }}</span>
-        {% if cr %}
+        {% endif %}
+        {% if cr and not coking_view %}
         <div style="font-size:.8rem" class="text-muted">
           Хол. ход: {{ "%.0f"|format(cr.get("idle_low_rpm_sec",0)) }} с |
           Низк. нагр.: {{ "%.0f"|format(cr.get("low_load_zone_sec",0)) }} с |
@@ -239,17 +247,22 @@
   <div class="col-md-8 col-lg-9 d-flex flex-column">
 
     {% if is_open %}
-    {# ── Открытый: статус-баннер ── #}
-    {% set max_sev = run.get("max_severity") if run else None %}
-    {% if max_sev == "SHUTDOWN" %}
-      <div class="alert alert-danger py-2 mb-2">🔴 <strong>SHUTDOWN</strong> — аварийный останов</div>
-    {% elif max_sev == "WARNING" %}
-      <div class="alert alert-warning py-2 mb-2">🟠 <strong>WARNING</strong> — панельная тревога</div>
-    {% elif max_sev == "CAUTION" %}
-      <div class="alert alert-warning py-2 mb-2">🟡 <strong>ПРЕДУПРЕЖДЕНИЕ АНАЛИТИКИ</strong>
-        {%- if gate_checked %} — ✓ проверено ИИ, угрозы нет{% endif %}</div>
+    {# ── Открытый: статус-баннер — единый вердикт сводки (v5.1.6) ── #}
+    {% set v = verdict or {} %}
+    {% if v.no_data %}
+      <div class="alert alert-secondary py-2 mb-2">⚠ <strong>Нет связи весь период</strong> — анализ невозможен</div>
+    {% elif v.level == "SHUTDOWN" %}
+      <div class="alert alert-danger py-2 mb-2">🔴 <strong>АВАРИЯ</strong> — аварийный останов панели</div>
+    {% elif v.level == "WARNING" %}
+      <div class="alert alert-warning py-2 mb-2">🟠 <strong>ВНИМАНИЕ</strong> — предупреждение панели управления
+        {%- if v.end_note %} (на конец периода — норма){% endif %}</div>
+    {% elif v.level == "CAUTION" %}
+      <div class="alert alert-warning py-2 mb-2">🟡 <strong>ЗАМЕЧАНИЯ К РАБОТЕ</strong>
+        {%- if v.remarks_n %} — {{ v.remarks_n }}{% endif %}
+        {%- if v.end_note %} (на конец периода — норма){% endif %}</div>
     {% else %}
-      <div class="alert alert-success py-2 mb-2">🟢 <strong>Норма</strong> — нарушений не выявлено</div>
+      <div class="alert alert-success py-2 mb-2">🟢 <strong>НОРМА</strong>
+        {%- if v.gate_checked %} — ✓ проверено ИИ, угрозы нет{% else %} — замечаний к работе нет{% endif %}</div>
     {% endif %}
 
     {# Детерминированный статус и анализ предупреждения #}
@@ -382,16 +395,22 @@
     {% else %}
     {# ── Закрытый: Markdown-отчёт с табами ── #}
     {% if run %}
-    {# Статус-баннер #}
-    {% set max_sev = run.get("max_severity") %}
-    {% if max_sev == "SHUTDOWN" %}
-      <div class="alert alert-danger py-2 mb-2">🔴 <strong>SHUTDOWN</strong> — аварийный останов</div>
-    {% elif max_sev == "WARNING" %}
-      <div class="alert alert-warning py-2 mb-2">🟠 <strong>WARNING</strong> — панельная тревога</div>
-    {% elif max_sev == "CAUTION" %}
-      <div class="alert alert-warning py-2 mb-2">🟡 <strong>ПРЕДУПРЕЖДЕНИЕ АНАЛИТИКИ</strong></div>
+    {# Статус-баннер — единый вердикт сводки (v5.1.6) #}
+    {% set v = verdict or {} %}
+    {% if v.no_data %}
+      <div class="alert alert-secondary py-2 mb-2">⚠ <strong>Нет связи весь период</strong> — анализ невозможен</div>
+    {% elif v.level == "SHUTDOWN" %}
+      <div class="alert alert-danger py-2 mb-2">🔴 <strong>АВАРИЯ</strong> — аварийный останов панели</div>
+    {% elif v.level == "WARNING" %}
+      <div class="alert alert-warning py-2 mb-2">🟠 <strong>ВНИМАНИЕ</strong> — предупреждение панели управления
+        {%- if v.end_note %} (на конец периода — норма){% endif %}</div>
+    {% elif v.level == "CAUTION" %}
+      <div class="alert alert-warning py-2 mb-2">🟡 <strong>ЗАМЕЧАНИЯ К РАБОТЕ</strong>
+        {%- if v.remarks_n %} — {{ v.remarks_n }}{% endif %}
+        {%- if v.end_note %} (на конец периода — норма){% endif %}</div>
     {% else %}
-      <div class="alert alert-success py-2 mb-2">🟢 <strong>Норма</strong> — нарушений не выявлено</div>
+      <div class="alert alert-success py-2 mb-2">🟢 <strong>НОРМА</strong>
+        {%- if v.gate_checked %} — ✓ проверено ИИ, угрозы нет{% else %} — замечаний к работе нет{% endif %}</div>
     {% endif %}
 
     {# Тулбар #}

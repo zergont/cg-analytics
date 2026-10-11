@@ -141,6 +141,15 @@ def compute_severity_level(active_dets: list[dict]) -> str:
     return max(panel, analytics, key=lambda x: _OVERALL_RANK.get(x, 0))
 
 
+def _hash_codes(d: dict) -> tuple:
+    """Подключ состава гейта: у аналитики — справочные коды (стабильны, различают
+    параметр LIMIT_PROXIMITY), у панели — её код. Старые детекции без ref_codes дают
+    то же, что раньше: у них fault_codes и были справочными (v5.1.6)."""
+    if d.get("scenario") != "CONTROLLER_FAULT" and d.get("ref_codes"):
+        return tuple(sorted(d["ref_codes"]))
+    return tuple(sorted(d.get("fault_codes") or []))
+
+
 def compute_analytics_hash(dets: list[dict]) -> str:
     """Хэш состава аналитических детекций (без панельных) — ключ подавления гейта.
 
@@ -149,7 +158,7 @@ def compute_analytics_hash(dets: list[dict]) -> str:
     """
     analytics = [d for d in dets if isinstance(d, dict) and d.get("scenario") != "CONTROLLER_FAULT"]
     key = tuple(sorted(
-        (d.get("scenario", ""), tuple(sorted(d.get("fault_codes") or [])))
+        (d.get("scenario", ""), _hash_codes(d))
         for d in analytics
     ))
     return hashlib.md5(str(key).encode()).hexdigest()[:12]
@@ -325,6 +334,13 @@ def build_structural_status(
                 except (TypeError, ValueError):
                     pass
 
+        # Аналитику не подписывать именем кода Cummins: «Высокая температура масла 1»
+        # у сигнала «близко к порогу» (v5.1.6, решение B)
+        if not description and scenario != "CONTROLLER_FAULT":
+            from analytics.serializer import SCENARIO_RU
+            description = (f"{trigger.split(':', 1)[0].strip()} у паспортного порога"
+                           if scenario == "LIMIT_PROXIMITY" and ":" in (trigger or "")
+                           else SCENARIO_RU.get(scenario))
         if not description:
             description = trigger or scenario
 
@@ -335,6 +351,7 @@ def build_structural_status(
             "severity":          severity,
             "trigger":           trigger,
             "fault_codes":       fault_codes,
+            "ref_codes":         d.get("ref_codes"),
             "description":       description,
             "history_count_30d":        det_vals.get("history_count_30d"),
             "history_duration_30d_sec": det_vals.get("history_duration_30d_sec"),
@@ -421,7 +438,7 @@ def compute_fault_hash(s: dict) -> str:
     """
     all_alarms = s.get("panel_alarms", []) + s.get("analytics_alarms", [])
     key = tuple(sorted(
-        (alarm.get("scenario", ""), tuple(sorted(alarm.get("fault_codes") or [])))
+        (alarm.get("scenario", ""), _hash_codes(alarm))
         for alarm in all_alarms
     ))
     return hashlib.md5(str(key).encode()).hexdigest()[:12]
@@ -695,7 +712,9 @@ def build_warning_prompt(
             codes         = ", ".join(str(c) for c in a.get("fault_codes", []))
             count_30d     = a.get("history_count_30d")
             count_startup = a.get("startup_count")
-            line = f"  [{a['severity']}] {desc}" + (f" (коды: {codes})" if codes else "")
+            trig          = a.get("trigger")
+            line = (f"  [{a['severity']}] {desc}" + (f": {trig}" if trig and trig != desc else "")
+                    + (f" (код панели выставлен: {codes})" if codes else ""))
             if count_30d is not None:
                 line += f" — за 30 дней: {count_30d}"
                 dur_30d = a.get("history_duration_30d_sec")

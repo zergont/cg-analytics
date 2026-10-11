@@ -30,6 +30,43 @@ def _iso(ts: datetime) -> str:
     return _tz(ts).isoformat()
 
 
+def panel_codes_in(periods: list[dict] | None, t0: datetime, t1: datetime) -> set[int]:
+    """Коды, которые 40012 принимал в [t0, t1] — по периодам состояния (v5.1.1)."""
+    if isinstance(t0, str):
+        t0 = datetime.fromisoformat(t0)
+    if isinstance(t1, str):
+        t1 = datetime.fromisoformat(t1)
+    out: set[int] = set()
+    for p in periods or []:
+        try:
+            v = int(p.get("value") or 0)
+        except (TypeError, ValueError):
+            continue
+        # Граница включительно: код, выставленный ровно на конце подсегмента (рез по
+        # самой неисправности), относится к нему (151 у ДЭС №3 — 0 из 2 без этого)
+        if v <= 0 or _tz(p["state_start"]) > _tz(t1):
+            continue
+        if p.get("state_end") is not None and _tz(p["state_end"]) <= _tz(t0):
+            continue
+        out.add(v)
+    return out
+
+
+def confirm_panel_codes(dets: list, codes: set[int]) -> None:
+    """Аналитике — только коды, которые панель реально выставила (решение B, v5.1.6).
+
+    Статичные списки детекторов (OIL_DILUTION → 143/415, LIMIT_PROXIMITY → 214…)
+    становятся справочными (ref_codes): за 60 дней панель ни разу не выставила
+    143, 415, 214, 1448, 2342, а модель по их справочнику советовала «нажмите СБРОС».
+    """
+    for det in dets:
+        if det.scenario == "CONTROLLER_FAULT":
+            continue      # у панели код настоящий
+        if not det.ref_codes:
+            det.ref_codes = list(det.fault_codes)
+        det.fault_codes = [c for c in det.ref_codes if c in codes]
+
+
 def run_all_detectors(
     characteristics: dict[str, Any],
     derived: DerivedMetrics,
@@ -41,6 +78,7 @@ def run_all_detectors(
     seg_end: datetime,
     prev_zone: str | None,
     cfg: AnalyticsConfig,
+    state_periods: dict[int, list[dict]] | None = None,
 ) -> list[Detection]:
     """Запустить все включённые детекторы, вернуть список сработавших Detection."""
     detections: list[Detection] = []
@@ -101,12 +139,14 @@ def run_all_detectors(
 
     if cfg.det("CONTROLLER_FAULT", "enabled", default=True):
         detections.extend(_detect_controller_faults(
-            fault_periods_in_seg, characteristics, seg_start, seg_end, cfg
+            fault_periods_in_seg, characteristics, seg_start, seg_end, cfg, state_periods
         ))
 
     if cfg.det("RPM_UNDERSPEED", "enabled", default=True) and run_state == 3:
         detections.extend(_detect_rpm_underspeed(characteristics, derived, seg_start, cfg))
 
+    lfc = (state_periods or {}).get(cfg.role_to_addr("LAST_FAULT_CODE")) or []
+    confirm_panel_codes(detections, panel_codes_in(lfc, seg_start, seg_end))
     return detections
 
 
@@ -820,12 +860,34 @@ def _limit_detection(role, val, limit, label, fcodes, seg_start, cfg) -> Detecti
 
 # ── CONTROLLER_FAULT ─────────────────────────────────────────────────────────
 
+def _last_nonzero(periods: list[dict] | None, a: datetime, b: datetime) -> tuple[int, datetime | None]:
+    """Последний ненулевой код периодов состояния в [a, b) и момент его конца.
+
+    Не значение ровно на снятии: сброс гасит 40012 то через 4 с после бита, то раньше.
+    """
+    best, at = 0, None
+    for p in periods or []:
+        s = _tz(p["state_start"])
+        e = _tz(p["state_end"]) if p.get("state_end") else b
+        if s >= b or e <= a:
+            continue
+        try:
+            v = int(p.get("value") or 0)
+        except (TypeError, ValueError):
+            continue
+        end = min(e, b)
+        if v > 0 and (at is None or end >= at):
+            best, at = v, end
+    return best, at
+
+
 def _detect_controller_faults(
     fault_periods: list[dict[str, Any]],
     characteristics: dict[str, Any],
     seg_start: datetime,
     seg_end: datetime,
     cfg: AnalyticsConfig,
+    state_periods: dict[int, list[dict]] | None = None,
 ) -> list[Detection]:
     results: list[Detection] = []
     t_start = _tz(seg_start)
@@ -836,7 +898,8 @@ def _detect_controller_faults(
     # при молчащих остальных активных битах он даёт CAUTION (см. ниже).
     ca_addr = cfg.det("CONTROLLER_FAULT", "common_alarm_addr", default=None)
     ca_bit = cfg.det("CONTROLLER_FAULT", "common_alarm_bit", default=None)
-    common_alarm_fp: dict[str, Any] | None = None
+    common_alarm_fps: list[dict[str, Any]] = []
+    loud: list[tuple[datetime, datetime]] = []   # периоды не-INFO битов
 
     for fp in fault_periods:
         fs = _tz(fp["fault_start"])
@@ -853,8 +916,9 @@ def _detect_controller_faults(
         severity = cfg.bitmap_severity(raw_sev)
         if severity == "INFO":
             if ca_addr is not None and fp.get("addr") == ca_addr and fp.get("bit") == ca_bit:
-                common_alarm_fp = fp
+                common_alarm_fps.append(fp)
             continue  # информационные биты (ReadyToLoad, NotInAuto и т.п.) не детектируем
+        loud.append((max(fs, t_start), min(fe, t_end)))
 
         name = fp.get("fault_name_ru") or fp.get("fault_name") or f"addr={fp['addr']} bit={fp['bit']}"
         addr = fp.get("addr", 0)
@@ -880,43 +944,56 @@ def _detect_controller_faults(
             },
         ))
 
-    # Несброшенная неисправность: CommonAlarm активен, остальные активные
-    # не-INFO биты молчат, код 40012 на конец окна не сброшен (сбрасывается
-    # только кнопкой после устранения) → промежуточное состояние между
-    # НОРМОЙ и WARNING → CAUTION.
-    if common_alarm_fp is not None and not results:
-        lfc = characteristics.get("LAST_FAULT_CODE") or {}
-        try:
-            code = int(lfc.get("value_end") or 0)
-        except (TypeError, ValueError):
-            code = 0
-        if code > 0:
+    # Несброшенная неисправность: CommonAlarm активен, остальные не-INFO биты в
+    # это время молчат, код 40012 не сброшен (сбрасывается только кнопкой после
+    # устранения) → промежуточное состояние между НОРМОЙ и WARNING → CAUTION.
+    # v5.1.6: каждый период аварии в подсегменте отдельно (раньше — только
+    # последний), код — последний ненулевой за период по периодам 40012 (раньше —
+    # value_end подсегмента: авария, сброшенная внутри подсегмента, пропадала)
+    lfc_p = (state_periods or {}).get(cfg.role_to_addr("LAST_FAULT_CODE"))
+    lft_p = (state_periods or {}).get(cfg.role_to_addr("LAST_FAULT_TYPE"))
+    for ca in common_alarm_fps:
+        fs = _tz(ca["fault_start"])
+        fe_raw = ca.get("fault_end")
+        a_ = max(fs, t_start)
+        b_ = min(_tz(fe_raw) if fe_raw else t_end, t_end)
+        if b_ <= a_ or any(s < b_ and e > a_ for s, e in loud):
+            continue      # панель в это время говорит громче — CAUTION не нужен
+        if lfc_p is not None:
+            code, at = _last_nonzero(lfc_p, a_, b_)
+            ftype = (_last_nonzero(lft_p, a_, at)[0] or None) if at and lft_p is not None else None
+        else:             # без периодов (старые вызовы) — как раньше, по концу подсегмента
+            lfc = characteristics.get("LAST_FAULT_CODE") or {}
+            try:
+                code = int(lfc.get("value_end") or 0)
+            except (TypeError, ValueError):
+                code = 0
             lft = characteristics.get("LAST_FAULT_TYPE") or {}
             try:
                 ftype = int(lft["value_end"]) if lft.get("value_end") is not None else None
             except (TypeError, ValueError):
                 ftype = None
-            fs = _tz(common_alarm_fp["fault_start"])
-            fe_raw = common_alarm_fp.get("fault_end")
-            results.append(Detection(
-                scenario="CONTROLLER_FAULT",
-                severity=cfg.det("CONTROLLER_FAULT", "unconfirmed_severity", default="CAUTION"),
-                t_detected=_iso(fs),
-                source="CONTROLLER_FAULT",
-                trigger=f"Общая авария (CommonAlarm) при несброшенном коде неисправности {code}",
-                related_roles=[f"FAULT_MASK_{ca_addr - 40400}", "LAST_FAULT_CODE"],
-                fault_codes=[code],
-                description_key="CONTROLLER_FAULT.common_alarm_unconfirmed",
-                values={
-                    "addr": ca_addr,
-                    "bit": ca_bit,
-                    "fault_name": "CommonAlarm (Общая авария)",
-                    "last_fault_code": code,
-                    "last_fault_type": ftype,
-                    "fault_start": _iso(fs),
-                    "fault_end": _iso(_tz(fe_raw)) if fe_raw else None,
-                },
-            ))
+        if code <= 0:
+            continue
+        results.append(Detection(
+            scenario="CONTROLLER_FAULT",
+            severity=cfg.det("CONTROLLER_FAULT", "unconfirmed_severity", default="CAUTION"),
+            t_detected=_iso(fs),
+            source="CONTROLLER_FAULT",
+            trigger=f"Общая авария (CommonAlarm) при несброшенном коде неисправности {code}",
+            related_roles=[f"FAULT_MASK_{ca_addr - 40400}", "LAST_FAULT_CODE"],
+            fault_codes=[code],
+            description_key="CONTROLLER_FAULT.common_alarm_unconfirmed",
+            values={
+                "addr": ca_addr,
+                "bit": ca_bit,
+                "fault_name": "CommonAlarm (Общая авария)",
+                "last_fault_code": code,
+                "last_fault_type": ftype,
+                "fault_start": _iso(fs),
+                "fault_end": _iso(_tz(fe_raw)) if fe_raw else None,
+            },
+        ))
 
     return results
 
@@ -957,18 +1034,22 @@ def _detect_rpm_underspeed(
     fault_code = int(fault_code_raw) if fault_code_raw is not None else 1448
 
     rpm_max = rpm_char.get("max")
-    drop_rpm = (rpm_max - rpm_min) if rpm_max is not None else None
-    drop_pct = (drop_rpm / rated * 100) if drop_rpm is not None else None
+    # «Просадка 37» читалась как «на 37 ниже порога», а это размах от максимума:
+    # ниже порога 1485 − 1473 = 12 (v5.1.6)
+    below = threshold - rpm_min
+    spread = (rpm_max - rpm_min) if rpm_max is not None else None
+    drop_rpm, drop_pct = spread, (spread / rated * 100) if spread is not None else None  # устар., = размах
     front_count = derived.rpm_underspeed_fronts_count if derived.rpm_underspeed_fronts_count else 1
 
     return [Detection(
         scenario="RPM_UNDERSPEED",
-        severity=cfg.det("RPM_UNDERSPEED", "severity_default", default="WARNING"),
+        severity=cfg.det("RPM_UNDERSPEED", "severity_default", default="CAUTION"),
         t_detected=_iso(seg_start),
         source="METRIC_RULE",
         trigger=(
-            f"RPM_min={rpm_min:.0f} об/мин < {threshold:.0f} об/мин"
-            + (f" (просадка {drop_rpm:.0f} об/мин = {drop_pct:.1f}%, фронтов: {front_count})" if drop_pct is not None else f" (фронтов: {front_count})")
+            f"RPM мин. {rpm_min:.0f} об/мин — на {below:.0f} ниже порога {threshold:.0f}"
+            + (f" (размах {spread:.0f} об/мин от макс. {rpm_max:.0f})" if spread is not None else "")
+            + f", фронтов: {front_count}"
         ),
         related_roles=["RPM", "ACTIVE_POWER_TOTAL"],
         fault_codes=[fault_code],
@@ -980,6 +1061,8 @@ def _detect_rpm_underspeed(
             "threshold_rpm": threshold,
             "panel_setpoint_rpm": panel_setpoint,
             "rated_rpm": rated,
+            "below_threshold_rpm": round(below, 1),
+            "spread_rpm": spread,
             "drop_rpm": drop_rpm,
             "drop_pct": round(drop_pct, 1) if drop_pct is not None else None,
             "front_count": front_count,

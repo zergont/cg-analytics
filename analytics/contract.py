@@ -285,6 +285,10 @@ class Detection:
     fault_codes: list[int]
     description_key: str           # ключ для LLM/локализации, НЕ человеческий текст
     values: dict[str, Any]         # снимок значений на момент срабатывания
+    # Справочные коды панели, на которые похож сценарий аналитики (OIL_DILUTION →
+    # 143/415). В отчёт и промпт не идут — только подключ состава гейта: в
+    # fault_codes аналитики остаётся лишь код, который панель реально выставила (v5.1.6)
+    ref_codes: list[int] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -295,6 +299,7 @@ class Detection:
             "trigger": self.trigger,
             "related_roles": self.related_roles,
             "fault_codes": self.fault_codes,
+            "ref_codes": self.ref_codes,
             "description_key": self.description_key,
             "values": self.values,
         }

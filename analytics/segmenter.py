@@ -667,6 +667,20 @@ def _collect_preamble(
     return preamble, earliest
 
 
+def _apply_scale(by_addr: dict[int, list[dict]], cfg: AnalyticsConfig) -> dict[int, list[dict]]:
+    """Перевод в единицы карты (v5.1.6: наработка 40070 в БД — секунды, в карте — ч).
+
+    Строки КОПИРУЮТСЯ: history — кэш открытого окна движка, мутация
+    масштабировала бы его заново на каждом цикле.
+    """
+    for addr, meta in cfg.register_map.items():
+        k = meta.get("_scale")
+        if k and addr in by_addr:
+            by_addr[addr] = [{**r, "value": float(r["value"]) * k if r.get("value") is not None else None}
+                             for r in by_addr[addr]]
+    return by_addr
+
+
 def _get_engine_hours(
     by_addr: dict[int, list[dict]],
     t_start: datetime,
@@ -776,7 +790,7 @@ def _build_single_subsegment(
     ]
     detections = run_all_detectors(
         chars, derived, new_acc, faults_in,
-        load_zone, run_state, t_start, t_end, prev_zone, cfg,
+        load_zone, run_state, t_start, t_end, prev_zone, cfg, state_periods,
     )
 
     dq = _compute_data_quality(seg_by_addr, t_start, t_end, gaps, cfg)
@@ -932,7 +946,7 @@ def _build_subsegments_for_running(
         ]
         detections = run_all_detectors(
             chars, derived, accumulators, faults_in_sub,
-            zone, run_state, t_sub_start, t_sub_end, prev_sub_zone, cfg,
+            zone, run_state, t_sub_start, t_sub_end, prev_sub_zone, cfg, state_periods,
         )
 
         sub_gaps = _filter_gaps(gaps, t_sub_start, t_sub_end)
@@ -992,16 +1006,23 @@ def _sequence_checks(
                 else:
                     runs.append([i])
 
+            # Окна нулевой длины (подсегмент 06:00:00–06:00:00 на резе) — не обрыв
+            runs = [r for r in runs if subsegments[r[-1]].t_end != subsegments[r[0]].t_start]
             ranges = [
                 f"{_hms(subsegments[run[0]].t_start)}–{_hms(subsegments[run[-1]].t_end)}"
                 for run in runs
             ]
-            details = "отсутствие связи/данных: " + ", ".join(ranges)
+            details = ("отсутствие связи/данных: " + ", ".join(ranges)) if ranges else "ok"
+        else:
+            runs = []
 
         checks.append({
             "check": "subseg_data_coverage",
-            "passed": len(empty_idx) == 0,
-            "details": details,
+            "passed": not runs,
+            "details": details,        # UTC-текст — для старых читателей
+            # Окна структурно: сводка и отчёт печатают их в местном времени
+            "ranges": [{"start": subsegments[r[0]].t_start, "end": subsegments[r[-1]].t_end}
+                       for r in runs],
         })
 
     # Проверка: нет активных критических fault в конце сегмента
@@ -1036,6 +1057,14 @@ def _check_stop_profile(
     подозрение на отказ клапана отсечки топлива (пожароопасно!).
     """
     from datetime import datetime as _DT
+    from datetime import timedelta as _TD
+
+    # Только голова стопа — сегмент открыт сменой режима. На суточном резе
+    # (REPORT_START) и резах по аварии машина уже стоит, и «время останова»
+    # выходило временем до первого замера RPM (35761: «замедленный 37 с»;
+    # 35641: ложный STOP_PROFILE WARNING на 6 ч 45 мин) — v5.1.6
+    if stop_seg.cause_open != "RUN_STATE_CHANGE":
+        return
 
     rpm_addr = cfg.role_to_addr("RPM")
     if rpm_addr is None:
@@ -1049,21 +1078,41 @@ def _check_stop_profile(
 
     T_stop_max = float(cfg.seg("transitions", "T_stop_max_sec", default=30.0))
     rpm_thr = float(cfg.seg("transitions", "rpm_stopped_threshold", default=50.0))
+    # Вердикт «не остановился» — только после горизонта с запасом на медленный
+    # останов (самый медленный штатный за 60 дней — 74 с): иначе открытое окно на
+    # 30–60-й секунде давало ложное «НАРУШЕНИЕ» (эпизоды 13516, 14768, 14786)
+    T_violation = float(cfg.seg("transitions", "T_stop_violation_sec", default=90.0))
 
-    # RPM-ряд в сегменте останова (только реальные измерения)
-    rpm_rows = sorted(
+    # RPM-ряд (только реальные измерения)
+    rpm_all = sorted(
         (
             (_tz(r["ts"]), float(r["value"]))
             for r in all_by_addr.get(rpm_addr, [])
-            if t0 <= _tz(r["ts"]) < t1
-            and r.get("value") is not None
-            and not r.get("is_carried_forward", False)
+            if r.get("value") is not None and not r.get("is_carried_forward", False)
         ),
         key=lambda x: x[0],
     )
+    # Голова, обрезанная резом стопа (авария снята, суточная граница), — ряд и после
+    # реза: короткая голова иначе не получала вердикта никогда (отказ отсечки с
+    # E-Stop в первые 30 с). При смене режима (пуск) — только свой сегмент
+    t_eval = t1
+    if stop_seg.cause_close not in (None, "RUN_STATE_CHANGE"):
+        t_eval = max(t1, t0 + _TD(seconds=T_violation))
+    rpm_rows = [(ts, v) for ts, v in rpm_all if t0 <= ts < t_eval]
+    if t_eval > t1:
+        # Первый замер на горизонте (не позже минуты за ним — не через обрыв связи)
+        nxt = next(((ts, v) for ts, v in rpm_all if ts >= t_eval), None)
+        if nxt and nxt[0] <= t_eval + _TD(seconds=60):
+            rpm_rows.append(nxt)
 
     if not rpm_rows:
         return  # нет данных RPM — не можем проверить
+
+    # «Из работы»: двигатель вращался в момент смены режима — последний замер до
+    # t0 (история грузится с запасом), иначе первый в окне. Не вращался — проверять нечего
+    before = [v for ts, v in rpm_all if t0 - _TD(seconds=300) <= ts < t0]
+    if (before[-1] if before else rpm_rows[0][1]) < rpm_thr:
+        return
 
     seg_dur = (t1 - t0).total_seconds()
 
@@ -1094,8 +1143,14 @@ def _check_stop_profile(
                 "details": f"замедленный останов: RPM упали за {stop_time:.0f}с > {T_stop_max:.0f}с",
             })
     else:
+        # Судить «не остановился» можно, только когда норматив истёк ПО ДАННЫМ: в
+        # первом цикле открытого стопа окно короче (35604: 709→545→120 за 20 с —
+        # «НАРУШЕНИЕ», а остановился за 31 с) — v5.1.6
+        if (rpm_rows[-1][0] - t0).total_seconds() < T_violation:
+            return
         # RPM так и не упали — клапан отсечки подозревается
         rpm_min = min(v for _, v in rpm_rows)
+        obs = (rpm_rows[-1][0] - t0).total_seconds()
         stop_seg.sequence_checks.append({
             "check": "rpm_stop_profile",
             "passed": False,
@@ -1104,7 +1159,7 @@ def _check_stop_profile(
             "seg_duration_sec": seg_dur,
             "T_stop_max_sec": T_stop_max,
             "details": (
-                f"НАРУШЕНИЕ: RPM не достигли {rpm_thr:.0f} rpm за {seg_dur:.0f}с "
+                f"НАРУШЕНИЕ: RPM не достигли {rpm_thr:.0f} rpm за {obs:.0f}с "
                 f"(минимум {rpm_min:.0f} rpm) — подозрение на отказ клапана отсечки!"
             ),
         })
@@ -1134,6 +1189,7 @@ def _inter_segment_checks(
     segments: list[Segment],
     all_by_addr: dict[int, list[dict]],
     cfg: AnalyticsConfig,
+    state_periods: dict[int, list[dict]] | None = None,
 ) -> None:
     """Второй проход по готовому списку сегментов: проверяет переходы между ними.
 
@@ -1161,6 +1217,13 @@ def _inter_segment_checks(
         # STOP_PROFILE: диагностика профиля останова (клапан отсечки топлива)
         if seg.run_state == 0 and stop_profile_en:
             _check_stop_profile(seg, all_by_addr, cfg, Detection)
+
+        # Коды панели у добавленных детекций (COOLDOWN 611 и т.п.) — только выставленные
+        if seg.subsegments:
+            from .detectors import confirm_panel_codes, panel_codes_in
+            lfc = (state_periods or {}).get(cfg.role_to_addr("LAST_FAULT_CODE")) or []
+            for sub in seg.subsegments:
+                confirm_panel_codes(sub.detections, panel_codes_in(lfc, sub.t_start, sub.t_end))
 
 
 def _check_warmup_transition(
@@ -1390,8 +1453,8 @@ def segment(
     tf = _tz(ts_from)
     tt = _tz(ts_to)
 
-    # Индексируем историю по адресу
-    all_by_addr = _build_by_addr(history)
+    # Индексируем историю по адресу; единицы — как в карте (наработка: с → ч)
+    all_by_addr = _apply_scale(_build_by_addr(history), cfg)
     # Регистры-состояния для характеристик подсегментов (код неисправности)
     state_periods = _state_periods(enum_periods, cfg)
 
@@ -1580,6 +1643,6 @@ def segment(
         segments.append(seg)
 
     # Второй проход: межсегментные проверки (warmup / cooldown / cold_start / stop_profile)
-    _inter_segment_checks(segments, all_by_addr, cfg)
+    _inter_segment_checks(segments, all_by_addr, cfg, state_periods)
 
     return segments

@@ -420,6 +420,9 @@ class AnalyticsConfig:
             data = yaml.safe_load(f) or {}
         return data
 
+    # Перевод «единица в БД → единица карты» (source_unit → unit)
+    _UNIT_FACTORS = {("s", "h"): 1.0 / 3600.0}
+
     def _build_register_map(self) -> dict[int, dict[str, Any]]:
         result: dict[int, dict[str, Any]] = {}
         for addr_str, meta in self.mapping.get("registers", {}).items():
@@ -427,7 +430,14 @@ class AnalyticsConfig:
                 addr = int(addr_str)
             except (ValueError, TypeError):
                 continue
-            result[addr] = meta or {}
+            meta = dict(meta or {})
+            src = meta.get("source_unit")
+            if src and meta.get("unit") and src != meta["unit"]:
+                k = self._UNIT_FACTORS.get((src, meta["unit"]))
+                if k is None:
+                    raise ValueError(f"mapping {addr}: нет перевода {src} → {meta['unit']}")
+                meta["_scale"] = k
+            result[addr] = meta
         return result
 
     def _build_whitelist(self, kind: str) -> frozenset[int]:

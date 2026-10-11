@@ -130,6 +130,49 @@ def gate_checked_from_parts(parts: dict) -> bool:
     return bool(v.get("suppressed_n")) and v.get("level") == "НОРМА"
 
 
+def segment_verdict(seg: dict, chars: dict | None) -> dict[str, Any]:
+    """Вердикт сегмента для консоли .194 — тот же, что сводка, календарь и API (v5.1.6).
+
+    Баннер считался максимумом по сырым детекциям и спорил со сводкой под ним
+    (35761: «🟡 ПРЕДУПРЕЖДЕНИЕ АНАЛИТИКИ» над «🟢 НОРМА, сняты ИИ»).
+    """
+    sk = (chars or {}).get("stop_kind")
+    p = summary_parts(seg.get("report_summary_json"))
+    if p:
+        v = p.get("verdict") or {}
+        lvl = None if p.get("no_data") else (v.get("level") or "НОРМА")
+        return {
+            "no_data": bool(p.get("no_data")), "level": lvl, "remarks_n": v.get("remarks_n"),
+            "gate_checked": gate_checked_from_parts(p), "severity": severity_from_parts(p, sk),
+            # Простой стоп: за период были замечания, на конец — норма (цвет календаря)
+            "end_note": sk == "SIMPLE" and lvl not in (None, "НОРМА") and p.get("end_level") == "НОРМА",
+        }
+    sev = _seg_severity(seg.get("characteristics_json"), seg.get("active_detections_json"),
+                        gate_suppressed_hash=seg.get("gate_suppressed_hash"), stop_kind=sk)
+    dets = _seg_collect_dets(seg.get("characteristics_json"), seg.get("active_detections_json"))
+    return {
+        "no_data": seg.get("t_end") is not None and (chars or {}).get("data_quality") == 0.0,
+        "level": {"SHUTDOWN": "SHUTDOWN", "WARNING": "WARNING", "CAUTION": "CAUTION"}.get(sev, "НОРМА"),
+        "remarks_n": None, "gate_checked": _seg_gate_checked(dets, seg.get("gate_suppressed_hash")),
+        "severity": sev, "end_note": False,
+    }
+
+
+def coking_view(seg: dict, chars: dict | None) -> dict[str, Any] | None:
+    """Риск нагара для консоли по частям сводки (v5.1.3–5.1.5); None — старая карточка."""
+    p = summary_parts(seg.get("report_summary_json"))
+    ck = (p or {}).get("coking")
+    if not isinstance(ck, dict) or "debt_sec" not in ck:
+        return None
+    from analytics.serializer import _COKING_LEVEL_RU, coking_calendar_text, coking_state_text
+    return {
+        "level": ck.get("level"), "level_ru": _COKING_LEVEL_RU.get(ck.get("level"), ck.get("level")),
+        "text": coking_state_text(ck), "before_start": bool(ck.get("before_start")),
+        "service": bool(ck.get("service_needed")),
+        "calendar": coking_calendar_text(ck, only_overdue=not ck.get("stop")),
+    }
+
+
 def _seg_severity(
     chars_json: Any, active_dets_json: Any = None,
     gate_suppressed_hash: str | None = None,

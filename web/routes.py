@@ -1790,17 +1790,13 @@ async def online_segment_detail(request: Request, seg_id: int):
     except Exception as _ce:
         logger.debug("corpus: анализ для #%d недоступен: %s", seg_id, _ce)
 
+    # Вердикт и нагар — по частям сводки, как в календаре и API (v5.1.6)
+    from web.segment_view import coking_view as _coking_view, segment_verdict as _segment_verdict
+    _verdict = _segment_verdict(seg, chars_dict if isinstance(chars_dict, dict) else {})
+    _coking = _coking_view(seg, chars_dict if isinstance(chars_dict, dict) else {})
+
     if is_open:
-        _sev_rank = {"SHUTDOWN": 4, "WARNING": 3, "CAUTION": 2, "INFO": 1}
-        _open_dets = []
-        if chars_dict:
-            for _sub in chars_dict.get("subsegments", []):
-                _open_dets.extend(_sub.get("detections", []))
-        _max_sev_open = max(
-            (_d.get("severity") for _d in _open_dets),
-            key=lambda s: _sev_rank.get(s, 0),
-            default=None,
-        ) if _open_dets else None
+        _max_sev_open = _verdict["severity"]
 
         run_open = {
             "id":                str(seg_id),
@@ -1818,11 +1814,11 @@ async def online_segment_detail(request: Request, seg_id: int):
             "_seg_id":           seg_id,
             "_calendar_url":     f"/online/calendar/{seg['router_sn']}/{seg['equip_type']}/{seg['panel_id']}",
         }
-        from online.status_assembler import is_analytics_suppressed as _gate_sup
         return templates.TemplateResponse(request, "auto_segment_report.html", {
             "seg": seg, "is_open": True,
             "run": run_open,
-            "gate_checked": _gate_sup(seg, active_dets or []),
+            "verdict": _verdict, "coking_view": _coking,
+            "gate_checked": _verdict["gate_checked"],
             "current_values": current_vals,
             "active_detections": active_dets,
             "coking_risk": coking_risk,
@@ -1846,8 +1842,7 @@ async def online_segment_detail(request: Request, seg_id: int):
             if dq is not None:
                 dq_pairs.append((dq, dur))
 
-    sev_rank = {"SHUTDOWN": 4, "WARNING": 3, "CAUTION": 2, "INFO": 1}
-    max_sev = max((d.get("severity") for d in detections), key=lambda s: sev_rank.get(s, 0), default=None)
+    max_sev = _verdict["severity"]
     total_dur = sum(w for _, w in dq_pairs)
     dq_avg = sum(q * w for q, w in dq_pairs) / total_dur if total_dur > 0 else None
 
@@ -1884,6 +1879,8 @@ async def online_segment_detail(request: Request, seg_id: int):
     return templates.TemplateResponse(request, "auto_segment_report.html", {
         "seg": seg, "is_open": False,
         "run": run,
+        "verdict": _verdict, "coking_view": _coking,
+        "gate_checked": _verdict["gate_checked"],
         "claude_analysis": claude_analysis,
         "prev_run_state_label": prev_run_state_label,
         "prev_nav": prev_nav,

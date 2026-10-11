@@ -57,7 +57,8 @@ def _age(sec: float) -> str:
 
 
 # Не параметры, а коды: последняя неисправность и её тип идут в ленту
-_NOT_PARAMS = {"LAST_FAULT_CODE", "LAST_FAULT_TYPE"}
+# Счётчик наработки — монотонный, не параметр режима (в акте «мин–макс» бессмыслен)
+_NOT_PARAMS = {"LAST_FAULT_CODE", "LAST_FAULT_TYPE", "ENGINE_HOURS"}
 
 
 def _chars_of(seg: dict[str, Any]) -> dict[str, dict[str, Any]]:

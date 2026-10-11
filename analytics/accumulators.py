@@ -40,6 +40,30 @@ def _gap_overlap_sec(gaps: list[dict], t_start: datetime, t_end: datetime) -> fl
     return total
 
 
+def gap_union_overlap_sec(gaps: list[dict], t_start: datetime, t_end: datetime) -> float:
+    """Время без связи в [t_start, t_end) по ОБЪЕДИНЕНИЮ разрывов: внешний сервис
+    пишет их парами со сдвигом ~5 мин, сумма завышала слепую долю на ~47 % (v5.1.6)."""
+    t0, t1 = _tz(t_start), _tz(t_end)
+    spans = []
+    for g in gaps or []:
+        gs = max(_tz(g["gap_start"]), t0)
+        ge = min(_tz(g["gap_end"]) if g.get("gap_end") else t1, t1)
+        if ge > gs:
+            spans.append((gs, ge))
+    spans.sort()
+    tot, cur_s, cur_e = 0.0, None, None
+    for s, e in spans:
+        if cur_e is None or s > cur_e:
+            if cur_e is not None:
+                tot += (cur_e - cur_s).total_seconds()
+            cur_s, cur_e = s, e
+        else:
+            cur_e = max(cur_e, e)
+    if cur_e is not None:
+        tot += (cur_e - cur_s).total_seconds()
+    return tot
+
+
 def _pair_spans_gap(ts1: datetime, ts2: datetime, gaps: list[dict]) -> bool:
     """True если между соседними строками лежит дыра связи (dt через дыру — не факт)."""
     for g in gaps:

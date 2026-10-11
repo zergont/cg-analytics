@@ -193,7 +193,9 @@ def _group_worst(scenario: str, values_list: list[dict]) -> str | None:
     elif scenario == "RPM_UNDERSPEED":
         mins = _nums("rpm_min")
         if mins:
-            return f"мин. {min(mins):.0f} об/мин"
+            thr = _nums("threshold_rpm")
+            base = f"мин. {min(mins):.0f} об/мин"
+            return base + (f" — на {thr[0] - min(mins):.0f} ниже порога {thr[0]:.0f}" if thr else "")
     elif scenario == "COKING_RISK":
         secs = _nums("low_load_zone_sec")
         if secs:

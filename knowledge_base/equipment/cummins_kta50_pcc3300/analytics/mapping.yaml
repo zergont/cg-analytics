@@ -239,8 +239,11 @@ registers:
     role: ENGINE_HOURS
     group: STATE
     unit: h
+    # В БД — секунды (raw × 0,1 с); аналитика переводит в часы (v5.1.6: «54 млн
+    # моточасов» и «ENGINE_HOURS=40036320 с/ед.» в заключениях)
+    source_unit: s
     kind: analog
-    description: Наработка двигателя (склеена в БД, выдаётся обработанной)
+    description: Наработка двигателя, ч (в БД — секунды, склеена из двух регистров)
     _source: PASSPORT_РЭ
 
   40290:

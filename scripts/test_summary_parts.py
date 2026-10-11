@@ -43,10 +43,10 @@ def seg(rs=3, stop_kind=None, cc=None):
               cause_open="DAILY_BOUNDARY", subsegments=[sub])
 
 
-def ep(source="analytics", sev="CAUTION", supp=False, closed=False, before=False, sc="OIL_DILUTION"):
+def ep(source="analytics", sev="CAUTION", supp=False, closed=False, before=False, sc="OIL_DILUTION", h=1):
     return {"source": source, "severity": sev, "gate_suppressed": supp,
             "scenario": sc if source == "analytics" else "CONTROLLER_FAULT", "addr": 40407, "bit": 5,
-            "t_open": T0 - timedelta(hours=400) if before else T0 + timedelta(hours=1),
+            "t_open": T0 - timedelta(hours=400) if before else T0 + timedelta(hours=h),
             "t_close": T0 + timedelta(hours=2) if closed else None,
             "active_sec": 3600.0, "blind_sec": 0.0, "open_values_json": {"fault_name": "Кнопка"}}
 
@@ -63,7 +63,7 @@ row = {"report_summary_json": json.dumps(p), "characteristics_json": {}, "gate_s
 check(extract_verdict_alarm(row) == ("норма", "НОРМА"), f"1е: корпус — норма из частей: {extract_verdict_alarm(row)}")
 
 # 2. Работа: живое замечание аналитики и снятое — CAUTION, бейджа нет
-p = build_summary_parts([seg()], [ep(sc="OIL_DILUTION"), ep(supp=True)])
+p = build_summary_parts([seg()], [ep(sc="OIL_DILUTION"), ep(supp=True, h=3)])   # разные фронты
 check(p["verdict"]["level"] == "CAUTION" and severity_from_parts(p, None) == "CAUTION", "2: CAUTION")
 check(not gate_checked_from_parts(p), "2б: при живом замечании «угрозы нет» не пишем")
 check(extract_verdict_alarm({"report_summary_json": p}) == ("требует внимания", "CAUTION"), "2в: корпус — CAUTION")
@@ -172,7 +172,7 @@ check(build_summary_parts([s12], [ep("panel", "WARNING")])["end_level"] == "НО
       "12б: детекции в последнем подсегменте нет — не висит (как _seg_active_dets)")
 
 # 13. Поздняя отмена снимает только открытые живые эпизоды
-p = build_summary_parts([seg()], [ep(sc="OIL_DILUTION", closed=True), ep(sc="OIL_DILUTION")])
+p = build_summary_parts([seg()], [ep(sc="OIL_DILUTION", closed=True), ep(sc="OIL_DILUTION", h=3)])
 p2 = apply_gate_suppression(p, ["OIL_DILUTION"])
 g = p2["remarks"][0]
 check(g["suppressed"] == 1 and g["count"] == 2 and p2["verdict"]["level"] == "CAUTION",

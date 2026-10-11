@@ -15,7 +15,8 @@ Markdown — структурированный отчёт для человек
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+import math
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .contract import Segment, Subsegment
@@ -175,7 +176,7 @@ _SEV_RANK_MD = {"SHUTDOWN": 4, "WARNING": 3, "CAUTION": 2, "INFO": 1}
 _SRC_RU = {"panel": "панель", "analytics": "аналитика"}
 
 
-SUMMARY_PARTS_VERSION = 1
+SUMMARY_PARTS_VERSION = 2   # v5.1.6: воздействие за период / с начала, показатели за сегмент
 
 # Уровень в частях сводки — те же значения, что alarm_level корпуса (догма v4.9.32)
 _LEVEL_RANK = {"НОРМА": 0, "CAUTION": 1, "WARNING": 2, "SHUTDOWN": 3}
@@ -361,6 +362,8 @@ def coking_state_text(ck: dict | None) -> str | None:
     if not ck or ck.get("level") in (None, "GREEN"):
         return None
     lvl = _COKING_LEVEL_RU.get(ck["level"], ck["level"])
+    if "debt_sec" not in ck:   # части до v5.1.3: накопителей нет — без выдуманных подробностей
+        return f"уровень {lvl} на конец периода"
     txt = f"уровень {lvl}; {_coking_accum_text(ck)}"
     if ck.get("stop"):
         txt += "; в этом сегменте установка стояла — риск не изменился (накоплен при прошлой работе)"
@@ -395,11 +398,98 @@ def coking_calendar_text(ck: dict | None, only_overdue: bool = False) -> str | N
     return ("Прогоны по Cummins: " + "; ".join(parts)) if parts else None
 
 
+def _dt(v) -> datetime | None:
+    if isinstance(v, str):
+        try:
+            v = datetime.fromisoformat(v)
+        except ValueError:
+            return None
+    if isinstance(v, datetime):
+        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _merge_iv(iv: list[tuple]) -> list[tuple]:
+    out: list[list] = []
+    for s, e in sorted(x for x in iv if x[1] > x[0]):
+        if out and s <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], e)
+        else:
+            out.append([s, e])
+    return [(s, e) for s, e in out]
+
+
+def _iv_len(iv: list[tuple]) -> float:
+    return sum((e - s).total_seconds() for s, e in iv)
+
+
+def _iv_cross(a: list[tuple], b: list[tuple]) -> float:
+    tot = 0.0
+    for s1, e1 in a:
+        for s2, e2 in b:
+            lo, hi = max(s1, s2), min(e1, e2)
+            if hi > lo:
+                tot += (hi - lo).total_seconds()
+    return tot
+
+
+def _weighted_median(pairs: list[tuple]) -> float | None:
+    """Нижняя взвешенная медиана [(значение, вес)]."""
+    pts = sorted((float(v), float(w)) for v, w in pairs if v is not None and w and w > 0)
+    if not pts:
+        return None
+    half, acc = sum(w for _, w in pts) / 2, 0.0
+    for v, w in pts:
+        acc += w
+        if acc >= half:
+            return v
+    return pts[-1][0]
+
+
+def _key_metrics_part(segments: list, trip_roles: list[str] | None) -> dict[str, Any] | None:
+    """Ключевые показатели за весь период работы (v5.1.6; раньше — последний
+    подсегмент: у ДЭС №3 «36,7 %» при сутках в основном на малой нагрузке).
+
+    Медиана — по медианам подсегментов, взвешенная по времени с данными
+    (длительность × качество); мин/макс — точные за период.
+    """
+    subs = [(sub, float(getattr(sub, "duration_sec", 0) or 0)
+             * float(sub.data_quality if getattr(sub, "data_quality", None) is not None else 1.0))
+            for s in segments if getattr(s, "run_state", None) == 3
+            for sub in (getattr(s, "subsegments", None) or [])]
+    subs = [(sub, w) for sub, w in subs if w > 0]
+    if not subs or not trip_roles:
+        return None
+    rows = []
+    for role in trip_roles:
+        meds, mins, maxs, unit = [], [], [], ""
+        for sub, w in subs:
+            ch = (getattr(sub, "characteristics", None) or {}).get(role)
+            if not isinstance(ch, dict) or ch.get("kind") == "state":
+                continue
+            meds.append((ch.get("median"), w))
+            unit = ch.get("unit") or unit
+            if ch.get("min") is not None:
+                mins.append(ch["min"])
+            if ch.get("max") is not None:
+                maxs.append(ch["max"])
+        if meds or mins:
+            rows.append({"role": role, "median": _weighted_median(meds),
+                         "min": min(mins, default=None), "max": max(maxs, default=None),
+                         "unit": unit})
+    if not rows:
+        return None
+    return {"rows": rows, "basis": "period", "work_sec": sum(w for _, w in subs),
+            "subsegments": len(subs)}
+
+
 def build_summary_parts(
     segments: list[Segment],
     episodes: list[dict[str, Any]] | None = None,
     tz=None,
     trip_roles: list[str] | None = None,
+    t_from: datetime | None = None,
+    t_to: datetime | None = None,
 ) -> dict[str, Any]:
     """Сводка сегмента частями — единый источник вердикта (v5.1.0).
 
@@ -492,6 +582,15 @@ def build_summary_parts(
         except (ValueError, TypeError, AttributeError):
             seg_start = None
 
+    # Окно сводки: воздействие и слепая доля — за период и отдельно «с начала»
+    # (v5.1.6, решение A: «481 ч» эпизода в суточном сегменте ДГУ №2)
+    w0 = _dt(t_from) or seg_start
+    w1 = _dt(t_to) or (_dt(getattr(segments[-1], "t_end", None)) if segments else None)
+    gap_iv = _merge_iv([(_dt(g.get("start")), _dt(g.get("end")))
+                        for s in segments for sub in (getattr(s, "subsegments", None) or [])
+                        for g in (getattr(sub, "data_gaps", None) or [])
+                        if _dt(g.get("start")) and _dt(g.get("end"))])
+
     def _group_key(e: dict):
         if e.get("source") == "panel":
             return ("panel", e.get("addr"), e.get("bit"))
@@ -528,10 +627,35 @@ def build_summary_parts(
             dd = d.to_dict() if hasattr(d, "to_dict") else d
             if dd.get("scenario") == "CONTROLLER_FAULT":
                 v = dd.get("values") or {}
-                if not v.get("fault_end"):
+                # Снятие позже конца окна (перепрогон, добор, запаздывание закрытия)
+                # — на конец периода тревога ещё висела
+                _fe, _end = _dt(v.get("fault_end")), _dt(getattr(last_sub, "t_end", None))
+                if not _fe or (_end is not None and _fe >= _end):
                     panel_live.add((v.get("addr"), v.get("bit")))
             else:
                 analytics_at_end.add(dd.get("scenario"))
+
+    # Строки одного фронта — один эпизод (дубли до v5.1.1: «Общая авария» 8 строк на
+    # один фронт; заголовок «ЗАМЕЧАНИЯ — n» считал строки, список — фронты)
+    _by_onset: dict[tuple, dict] = {}
+    for e in episodes:
+        k = (_group_key(e), str(e.get("t_open")))
+        cur = _by_onset.get(k)
+        if cur is None:
+            _by_onset[k] = dict(e)
+            continue
+        if not e.get("t_close") or not cur.get("t_close"):
+            # открытая строка главнее: её состояние (снятие ИИ) действует сейчас
+            if not e.get("t_close"):
+                cur["gate_suppressed"] = e.get("gate_suppressed")
+            cur["t_close"] = None
+        else:
+            cur["t_close"] = max(_dt(cur["t_close"]) or _dt(e["t_close"]), _dt(e["t_close"]) or _dt(cur["t_close"]))
+        cur["active_sec"] = max(float(cur.get("active_sec") or 0), float(e.get("active_sec") or 0))
+        cur["blind_sec"] = max(float(cur.get("blind_sec") or 0), float(e.get("blind_sec") or 0))
+        if _SEV_RANK_MD.get(e.get("severity") or "", 0) > _SEV_RANK_MD.get(cur.get("severity") or "", 0):
+            cur["severity"] = e.get("severity")
+    episodes = list(_by_onset.values())
 
     groups: dict[tuple, dict] = {}
     for e in episodes:
@@ -541,9 +665,16 @@ def build_summary_parts(
             "sev_rank": 0, "severity": e.get("severity"),
             "count": 0, "active_sec": 0.0, "blind_sec": 0.0,
             "suppressed": 0, "open": 0, "open_live": 0, "before": False, "appeared": False,
-            "at_end": False,
+            "at_end": False, "_iv": [], "_on": {},
         })
         g["count"] += 1
+        _to, _tc = _dt(e.get("t_open")), _dt(e.get("t_close"))
+        if w0 is not None and w1 is not None and _to is not None:
+            _end = min(_tc or w1, w1)
+            g["_iv"].append((max(_to, w0), _end))
+            on = g["_on"].setdefault(_to, {"end": _end, "blind": 0.0})
+            on["end"] = max(on["end"], _end)
+            on["blind"] = max(on["blind"], float(e.get("blind_sec") or 0))
         g["active_sec"] += e.get("active_sec") or 0
         g["blind_sec"] += e.get("blind_sec") or 0
         rank = _SEV_RANK_MD.get(e.get("severity") or "", 0)
@@ -577,7 +708,21 @@ def build_summary_parts(
                 g["before"] = True
             else:
                 g["appeared"] = True
-    remarks = sorted(groups.values(), key=lambda g: (-g["sev_rank"], -g["active_sec"]))
+    for g in groups.values():
+        iv, ons = _merge_iv(g.pop("_iv")), g.pop("_on")
+        if w0 is None or w1 is None or not ons:
+            continue
+        g["period_sec"] = _iv_len(iv)
+        g["period_blind_sec"] = _iv_cross(iv, gap_iv)
+        g["onsets"] = len(ons)
+        before = sorted(t for t in ons if t < w0)
+        if before:
+            g["total_sec"] = _iv_len(_merge_iv([(t, ons[t]["end"]) for t in ons]))
+            g["total_blind_sec"] = sum(ons[t]["blind"] for t in before)
+            g["since"] = before[0].isoformat()
+            g["since_text"] = _fmt_dm(g["since"], tz)
+    remarks = sorted(groups.values(),
+                     key=lambda g: (-g["sev_rank"], -g.get("period_sec", g["active_sec"])))
     for g in remarks:
         g.pop("sev_rank", None)
 
@@ -588,6 +733,7 @@ def build_summary_parts(
             "name": SCENARIO_RU["COKING_RISK"], "source": "analytics", "scenario": "COKING_RISK",
             "severity": "CAUTION", "count": 1, "active_sec": coking_part["added_sec"] or 0.0,
             "blind_sec": 0.0, "suppressed": 0, "open": 0, "open_live": 0,
+            "period_sec": coking_part["added_sec"] or 0.0, "period_blind_sec": 0.0,
             "before": coking_part["level_start"] not in (None, "GREEN"),
             "appeared": coking_part["level_start"] in (None, "GREEN"),
             "at_end": True, "kind": "state",
@@ -595,31 +741,13 @@ def build_summary_parts(
 
     checks = []
     for c in failed_checks:
-        det = c.get("details") or c.get("detail") or ""
-        checks.append({"check": c.get("check"), "details": det})
+        checks.append({"check": c.get("check"), "details": _check_details(c, tz)})
 
     verdict, end_level = _verdict_from_remarks(remarks, checks, bool(emergency))
 
-    # ── Ключевые показатели: trip_snapshot-роли последнего рабочего подсегмента ──
-    key_metrics = None
+    # ── Ключевые показатели — за весь период работы ──
+    key_metrics = _key_metrics_part(segments, trip_roles)
     coking = coking_part
-    work_seg = next(
-        (s for s in reversed(segments)
-         if getattr(s, "run_state", None) == 3 and s.subsegments),
-        None,
-    )
-    if work_seg and trip_roles:
-        sub = work_seg.subsegments[-1]
-        rows = [
-            {"role": role, "median": sub.characteristics[role].get("median"),
-             "min": sub.characteristics[role].get("min"),
-             "max": sub.characteristics[role].get("max"),
-             "unit": sub.characteristics[role].get("unit", "")}
-            for role in trip_roles
-            if isinstance(sub.characteristics.get(role), dict)
-        ]
-        if rows:
-            key_metrics = {"rows": rows}
 
     return {
         "version": SUMMARY_PARTS_VERSION,
@@ -754,16 +882,28 @@ def render_summary_md(parts: dict[str, Any]) -> str:
                 ck = parts.get("coking") or {}
                 a(f"- {emoji} **{g['name']}** [{src_ru}]: {coking_state_text(ck) or ''}")
                 continue
-            line = (f"- {emoji} **{g['name']}** [{src_ru}]: {g['count']} {_eps_ru(g['count'])}, "
-                    f"воздействие {_fmt_duration(g['active_sec'])}")
-            # Слепая доля — обязательная оговорка: внутри неё мог быть сброс
-            if g["blind_sec"] >= 1:
-                line += (f" (из них {_fmt_duration(g['blind_sec'])} без связи — "
-                         f"снятие могло произойти раньше)")
+            if "period_sec" in g:
+                n = g.get("onsets") or g["count"]
+                line = (f"- {emoji} **{g['name']}** [{src_ru}]: {n} {_eps_ru(n)}, "
+                        f"воздействие за период {_fmt_duration(g['period_sec'])}")
+                if g.get("since"):
+                    line += (f" (с начала {_fmt_duration(g['total_sec'])} — "
+                             f"с {g.get('since_text') or g['since']})")
+                # Слепая доля — обязательная оговорка: внутри неё мог быть сброс
+                if g.get("period_blind_sec", 0) >= 1:
+                    line += (f"; из них {_fmt_duration(g['period_blind_sec'])} без связи — "
+                             f"снятие могло произойти раньше")
+            else:   # части v1 (до v5.1.6)
+                line = (f"- {emoji} **{g['name']}** [{src_ru}]: {g['count']} {_eps_ru(g['count'])}, "
+                        f"воздействие {_fmt_duration(g['active_sec'])}")
+                if g["blind_sec"] >= 1:
+                    line += (f" (из них {_fmt_duration(g['blind_sec'])} без связи — "
+                             f"снятие могло произойти раньше)")
             if g["suppressed"]:
                 line += (" — *снято ИИ*" if g["suppressed"] == g["count"]
                          else f" — *снято ИИ: {g['suppressed']} из {g['count']}*")
-            if g["open"]:
+            # То же, что end_level и шапка ИИ: снятое ИИ и снятое панелью к концу не висит
+            if g.get("at_end", g["open"] and not g["suppressed"]):
                 line += " — **активен на конец периода**"
             a(line)
         for c in parts.get("failed_checks") or []:
@@ -774,6 +914,10 @@ def render_summary_md(parts: dict[str, Any]) -> str:
     if km and km.get("rows"):
         a("")
         a("### Ключевые показатели")
+        if km.get("basis") == "period":
+            a(f"*За период работы {_fmt_duration(km.get('work_sec') or 0)}: медиана — по времени, "
+              f"мин/макс — за весь период.*")
+            a("")
         a("| Параметр | Медиана | Мин | Макс | Ед. |")
         a("|----------|--------:|----:|----:|-----|")
         for r in km["rows"]:
@@ -828,9 +972,9 @@ def render_summary_md(parts: dict[str, Any]) -> str:
         if cal_txt:
             a("")
             a(cal_txt)
-    elif ck:
+    elif ck and ck.get("level") not in (None, "GREEN"):   # части до v5.1.3
         a("")
-        a(f"Закоксовка: **{ck.get('level')}**")
+        a(f"Риск нагара на конец: **{_COKING_LEVEL_RU.get(ck['level'], ck['level'])}**")
 
     return "\n".join(lines).strip() + "\n"
 
@@ -901,6 +1045,225 @@ def build_no_data_report(
     return report_md, summary_md
 
 
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    n = abs(int(n))
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return few
+    return many
+
+
+def _fmt_dq(q: float | None) -> str:
+    """Качество данных с одним знаком; неполное покрытие не округляется до 100 %."""
+    if q is None:
+        return "—"
+    if q >= 1.0:
+        return "100%"
+    return f"{math.floor(q * 1000) / 10:.1f}%"
+
+
+def _rs_time_label(rs: int) -> str:
+    if rs == 3:
+        return "Время под нагрузкой (RUN_STATE=3)"
+    if rs == 0:
+        return "Время в останове (RUN_STATE=0)"
+    return f"Время в режиме «{RUN_STATE_RU.get(rs, rs)}» (RUN_STATE={rs})"
+
+
+def _det_name(d: dict) -> str:
+    """Русское имя обнаружения вместо ключа сценария (OIL_DILUTION читалось как
+    «разжижение масла», хотя это давление ниже паспорта; ключ в KB не меняется)."""
+    sc = d.get("scenario") or "?"
+    v = d.get("values") or {}
+    if sc == "CONTROLLER_FAULT":
+        return (v.get("fault_name") or (d.get("trigger") or "").split(" (addr=")[0].strip()
+                or SCENARIO_RU.get(sc, sc))
+    if sc == "LIMIT_PROXIMITY" and ":" in (d.get("trigger") or ""):
+        return f"{SCENARIO_RU.get(sc, sc)} ({d['trigger'].split(':', 1)[0].strip()})"
+    return SCENARIO_RU.get(sc, sc)
+
+
+def _det_kind_key(d: dict) -> tuple:
+    """Вид обнаружения: сценарий, у панели — бит, у порогов — параметр."""
+    sc = d.get("scenario")
+    v = d.get("values") or {}
+    if sc == "CONTROLLER_FAULT":
+        return (sc, v.get("addr"), v.get("bit"))
+    if sc == "LIMIT_PROXIMITY":
+        return (sc, d.get("description_key"))
+    return (sc,)
+
+
+def _det_group_key(d: dict) -> tuple:
+    """Пункт свёртки: вид, у панели ещё и фронт (бит, поднятый заново, — другой пункт)."""
+    if d.get("scenario") == "CONTROLLER_FAULT":
+        v = d.get("values") or {}
+        return _det_kind_key(d) + (v.get("fault_start") or d.get("t_detected"),)
+    return _det_kind_key(d)
+
+
+def _fmt_sub_ranges(idxs: list[int], seg_idx: int) -> str:
+    """[1,3,4,5] → «1.1, 1.3–1.5»."""
+    out, run = [], []
+    for i in sorted(set(idxs)):
+        if run and i == run[-1] + 1:
+            run.append(i)
+            continue
+        if run:
+            out.append(run)
+        run = [i]
+    if run:
+        out.append(run)
+    return ", ".join(f"{seg_idx}.{r[0]}" if len(r) == 1 else f"{seg_idx}.{r[0]}–{seg_idx}.{r[-1]}"
+                     for r in out)
+
+
+# Худшее значение группы: (ключ values, направление) — что «хуже» для сценария
+_WORST_KEY = {
+    "OIL_DILUTION": ("oil_press_min", min),
+    "RPM_UNDERSPEED": ("rpm_min", min),
+    "LIMIT_PROXIMITY": ("value", max),
+    "COOLING_FAILURE": ("coolant_temp_max", max),
+    "PHASE_CURRENT_SPREAD": ("pct_max", max),
+    "NEUTRAL_CURRENT": ("pct_max", max),
+    "NEGATIVE_SEQUENCE": ("i2_pct_max", max),
+}
+
+
+def _det_worst(entries: list[tuple[int, dict]]) -> tuple[int, dict] | None:
+    """Вхождение с худшим значением (минимум давления/оборотов, максимум температуры…)."""
+    if not entries:
+        return None
+    rule = _WORST_KEY.get(entries[0][1].get("scenario"))
+    if not rule:
+        return None
+    key, pick = rule
+    vals = [(i, d) for i, d in entries
+            if isinstance((d.get("values") or {}).get(key), (int, float))]
+    if not vals:
+        return None
+    return pick(vals, key=lambda x: x[1]["values"][key])
+
+
+def _group_detections(subsegments: list) -> list[dict]:
+    """Одна детекция во многих подсегментах — один пункт (v5.1.6: повторы по
+    подсегментам давали «45 обнаружений» вместо 4 видов и до 18 % отчёта)."""
+    groups: dict[tuple, dict] = {}
+    for i, sub in enumerate(subsegments, 1):
+        for _d in sub.detections:
+            d = _as_dict(_d)
+            g = groups.setdefault(_det_group_key(d), {
+                "name": _det_name(d), "severity": d.get("severity"), "subs": [],
+                "triggers": {}, "sources": [], "codes": [], "last": d, "first_sub": i,
+                "entries": [],
+            })
+            g["entries"].append((i, d))
+            if _SEV_RANK_MD.get(d.get("severity") or "", 0) > _SEV_RANK_MD.get(g["severity"] or "", 0):
+                g["severity"] = d.get("severity")
+            g["subs"].append(i)
+            g["triggers"].setdefault(d.get("trigger") or "", []).append(i)
+            if d.get("source") and d["source"] not in g["sources"]:
+                g["sources"].append(d["source"])
+            for c in d.get("fault_codes") or []:
+                if c not in g["codes"]:
+                    g["codes"].append(c)
+            g["last"] = d
+    return sorted(groups.values(),
+                  key=lambda g: (-_SEV_RANK_MD.get(g["severity"] or "", 0), g["first_sub"]))
+
+
+def _det_counter_lines(d: dict, fmt_ts) -> list[str]:
+    v = d.get("values") or {}
+    out = []
+    count_30d = v.get("history_count_30d")
+    if count_30d is not None:
+        dur_30d = v.get("history_duration_30d_sec")
+        blind_30d = v.get("history_blind_30d_sec")
+        suffix = f" (суммарно {_fmt_duration(dur_30d)})" if dur_30d else ""
+        if dur_30d and blind_30d:
+            suffix = (f" (суммарно {_fmt_duration(dur_30d)}, из них "
+                      f"{_fmt_duration(blind_30d)} без связи)")
+        out.append(f"  - Срабатываний этого типа за 30 дней: **{count_30d}**{suffix}")
+    startup_count = v.get("startup_count")
+    if startup_count is not None:
+        dur_startup = v.get("startup_duration_sec")
+        suffix = f" (суммарно {_fmt_duration(dur_startup)})" if dur_startup else ""
+        # Тревога поднята до пуска и висит: фронтов «с пуска» нет, но это не «чисто»
+        onset, since = v.get("fault_start") or d.get("t_detected"), v.get("startup_since")
+        if not startup_count and onset and since and str(onset) < str(since):
+            suffix = f" (активна с {fmt_ts(onset)} — до пуска)"
+        out.append(f"  - Срабатываний с пуска: **{startup_count}**{suffix}")
+    return out
+
+
+def _append_detections(lines: list[str], seg: Segment, idx: int, fmt_ts) -> None:
+    """Обнаружения сегмента одним блоком, повторы по подсегментам свёрнуты."""
+    groups = _group_detections(seg.subsegments)
+    if not groups:
+        return
+    a = lines.append
+    m = len(seg.subsegments)
+    hits = sum(len(g["subs"]) for g in groups)
+    a(f"**Обнаружения:** {len(groups)} {_plural(len(groups), 'пункт', 'пункта', 'пунктов')}"
+      + (f", {hits} {_plural(hits, 'срабатывание', 'срабатывания', 'срабатываний')} по подсегментам"
+         if m > 1 else ""))
+    a("")
+    for g in groups:
+        n = len(set(g["subs"]))
+        where = ("" if m == 1 else f" — во всех {m} подсегментах" if n == m
+                 else f" — в подсегменте {idx}.{g['subs'][0]}" if n == 1
+                 else f" — в {n} из {m} подсегментов: {_fmt_sub_ranges(g['subs'], idx)}")
+        a(f"- {_SEVERITY_EMOJI.get(g['severity'], '')} **{g['name']}** ({g['severity']}){where}")
+        trig = [(t, s) for t, s in g["triggers"].items() if t]
+        if len(trig) <= 3:
+            for t, s in trig:
+                a(f"  - {t}" + (f" — {_fmt_sub_ranges(s, idx)}" if m > 1 and len(trig) > 1 else ""))
+        else:
+            # Много разных значений: первое, худшее (самая тяжёлая точка — её нельзя
+            # терять: модель «не ищет сверх обнаружений») и последнее по времени
+            (t0, s0) = trig[0]
+            li, ld = max(g["entries"], key=lambda x: x[0])
+            a(f"  - первое ({_fmt_sub_ranges(s0[:1], idx)}): {t0}")
+            w = _det_worst(g["entries"])
+            if w and w[1].get("trigger") not in (t0, ld.get("trigger")):
+                a(f"  - худшее ({_fmt_sub_ranges([w[0]], idx)}): {w[1].get('trigger')}")
+            a(f"  - последнее ({_fmt_sub_ranges([li], idx)}): {ld.get('trigger')}")
+            a(f"  - всего разных значений: {len(trig)}")
+        lv = g["last"].get("values") or {}
+        if g["last"].get("scenario") == "CONTROLLER_FAULT" and lv.get("fault_start"):
+            a(f"  - Активна с {fmt_ts(lv['fault_start'])}")
+        a(f"  - Источник: `{', '.join(g['sources'])}`")
+        if g["codes"]:
+            a(f"  - Код панели (выставлен): {g['codes']}")
+        lines.extend(_det_counter_lines(g["last"], fmt_ts))
+    a("")
+
+
+def _fmt_span(start: str, end: str, tz=None) -> str:
+    s, e = _fmt_dm(start, tz), _fmt_dm(end, tz)
+    try:
+        ds = datetime.fromisoformat(start)
+        de = datetime.fromisoformat(end)
+        if tz is not None:
+            ds, de = ds.astimezone(tz), de.astimezone(tz)
+        sec = lambda x: x.strftime(":%S")   # noqa: E731
+        if ds.date() == de.date():
+            return f"{s}{sec(ds)}–{de.strftime('%H:%M:%S')}"
+        return f"{s}{sec(ds)} – {e}{sec(de)}"
+    except (TypeError, ValueError):
+        return f"{start}–{end}"
+
+
+def _check_details(c: dict, tz=None) -> str:
+    """Подробности проверки; окно связи — в местном времени (было в UTC при МСК
+    в остальной сводке)."""
+    rng = c.get("ranges")
+    if c.get("check") == "subseg_data_coverage" and rng:
+        return "отсутствие связи/данных: " + ", ".join(_fmt_span(r["start"], r["end"], tz) for r in rng)
+    return c.get("details") or c.get("detail") or ""
+
+
 def to_markdown(
     segments: list[Segment],
     router_sn: str,
@@ -935,56 +1298,69 @@ def to_markdown(
 
     # ── Сводка ──
     all_detections: list[dict] = []
-    total_running_sec = float((inherited_run_state_sec or {}).get(3, 0.0))
-    total_stopped_sec = float((inherited_run_state_sec or {}).get(0, 0.0))
+    period_rs: dict[int, float] = {}
     total_elevated_sec = 0.0
     seg_dqs: list[float] = []
 
     for seg in segments:
         seg_dqs.append(seg.data_quality)
-        if seg.run_state == 3:
-            total_running_sec += seg.duration_sec
-        elif seg.run_state == 0:
-            total_stopped_sec += seg.duration_sec
+        period_rs[seg.run_state] = period_rs.get(seg.run_state, 0.0) + seg.duration_sec
         for sub in seg.subsegments:
             all_detections.extend(_as_dict(d) for d in sub.detections)
             tr = sub.risk_accumulators.thermal_risk
             total_elevated_sec += tr.elevated_zone_sec
 
-    by_severity: dict[str, int] = {}
-    for d in all_detections:
-        by_severity[d["severity"]] = by_severity.get(d["severity"], 0) + 1
-
     avg_dq = sum(seg_dqs) / len(seg_dqs) if seg_dqs else 1.0
-    max_sev = _max_severity(all_detections)
 
     a("## Сводка")
     a("")
     a(f"| Параметр | Значение |")
     a(f"|----------|----------|")
     a(f"| Сегментов | {len(segments)} |")
-    a(f"| Время под нагрузкой (RUN_STATE=3) | {_fmt_duration(total_running_sec)} |")
-    a(f"| Время в останове (RUN_STATE=0) | {_fmt_duration(total_stopped_sec)} |")
-    a(f"| Время в зоне повышенной нагрузки | {_fmt_duration(total_elevated_sec)} |")
-    a(f"| Всего обнаружений | {len(all_detections)} |")
-    for sev in ["SHUTDOWN", "WARNING", "CAUTION", "INFO"]:
-        cnt = by_severity.get(sev, 0)
-        if cnt:
-            a(f"| — {_SEVERITY_EMOJI.get(sev, '')} {_SEVERITY_LABEL.get(sev, sev)} | {cnt} |")
-    a(f"| Качество данных (среднее) | {avg_dq:.1%} |")
-    if max_sev:
-        a(f"| Максимальный уровень тревоги | {_SEVERITY_EMOJI.get(max_sev, '')} {_SEVERITY_LABEL.get(max_sev, max_sev)} |")
+    # Время в режиме: за период — по сегментам окна; с начала состояния — только
+    # у головы и только её режима (раньше строки показывали сквозное время цепочки
+    # без подписи: «280 ч в останове» в суточном отчёте)
+    for rs in sorted(period_rs, key=lambda r: (r != 3, r != 0, r)):
+        a(f"| {_rs_time_label(rs)} за период | {_fmt_duration(period_rs[rs])} |")
+    head = segments[0] if segments else None
+    inh = float((inherited_run_state_sec or {}).get(head.run_state) or 0.0) if head else 0.0
+    if inh > 0:
+        try:
+            t0 = (datetime.fromisoformat(head.t_start) - timedelta(seconds=inh)).isoformat()
+            since = f" (с {_fmt_dm(t0, tz)})"
+        except (TypeError, ValueError):
+            since = ""
+        a(f"| {_rs_time_label(head.run_state)} с начала состояния{since} | "
+          f"{_fmt_duration(inh + head.duration_sec)} |")
+    if 3 in period_rs:
+        a(f"| Время в зоне повышенной нагрузки | {_fmt_duration(total_elevated_sec)} |")
+    # Подсчёт по видам; уровня и вердикта здесь нет: отчёт замораживается при
+    # закрытии, а вердикт (единый, со снятием ИИ) — в сводке сегмента
+    hits = len(all_detections)
+    kinds = len({_det_kind_key(d) for d in all_detections})
+    a("| Обнаружения детекторов | " + (
+        f"{kinds} {_plural(kinds, 'вид', 'вида', 'видов')}, {hits} "
+        f"{_plural(hits, 'срабатывание', 'срабатывания', 'срабатываний')} по подсегментам"
+        if hits else "нет") + " |")
+    a(f"| Качество данных (среднее) | {_fmt_dq(avg_dq)} |")
     a("")
-
-    # ── Быстрый список тревог ──
-    alarm_detections = [d for d in all_detections if d["severity"] in ("SHUTDOWN", "WARNING")]
-    if alarm_detections:
-        a("## Тревоги")
+    if hits:
+        a("*Уровни у обнаружений — уровни детекторов до разбора ИИ; вердикт периода — "
+          "в сводке сегмента.*")
         a("")
-        for d in alarm_detections:
-            emoji = _SEVERITY_EMOJI.get(d["severity"], "")
-            ts_str = fmt_ts(d.get("t_detected"))
-            a(f"- {emoji} **{d['scenario']}** @ {ts_str}: {d['trigger']}")
+
+    # ── Панель: аварии и предупреждения (свёрнуто по фронтам) ──
+    panel_groups = [g for seg in segments for g in _group_detections(seg.subsegments)
+                    if g["last"].get("scenario") == "CONTROLLER_FAULT"
+                    and g["severity"] in ("SHUTDOWN", "WARNING")]
+    if panel_groups:
+        a("## Панель: аварии и предупреждения")
+        a("")
+        for g in panel_groups:
+            lv = g["last"].get("values") or {}
+            ts_str = fmt_ts(lv.get("fault_start") or g["last"].get("t_detected"))
+            a(f"- {_SEVERITY_EMOJI.get(g['severity'], '')} **{g['name']}** @ {ts_str}: "
+              f"{g['last'].get('trigger')}")
         a("")
 
     # ── Детали по сегментам ──
@@ -993,7 +1369,7 @@ def to_markdown(
 
     for seg_idx, seg in enumerate(segments, 1):
         ps = segments[seg_idx - 2] if seg_idx >= 2 else prev_seg
-        _append_segment(lines, seg, seg_idx, fmt_ts, prev_seg=ps, fault_ref=fault_ref)
+        _append_segment(lines, seg, seg_idx, fmt_ts, prev_seg=ps, fault_ref=fault_ref, tz=tz)
 
     return "\n".join(lines)
 
@@ -1005,16 +1381,18 @@ def _append_segment(
     fmt_ts,
     prev_seg: "Segment | None" = None,
     fault_ref=None,
+    tz=None,
 ) -> None:
     a = lines.append
     state_label = (
         seg.run_state_label
         or RUN_STATE_RU.get(seg.run_state, f"RUN_STATE={seg.run_state}")
     )
-    dq_str = f"{seg.data_quality:.0%}"
+    dq_str = _fmt_dq(seg.data_quality)
     dur_str = _fmt_duration(seg.duration_sec)
+    # Наработка — в часах (v5.1.6: сегментатор переводит 40070 из секунд)
     hours_str = (
-        f" | Мото-часы: {seg.engine_hours_start:.0f} с ({seg.engine_hours_start / 3600:.0f} ч)"
+        f" | Наработка: {seg.engine_hours_start:.0f} ч"
         if seg.engine_hours_start is not None else ""
     )
 
@@ -1183,16 +1561,27 @@ def _append_segment(
         a("**Предупреждения по последовательности:**")
         a("")
         for c in failed_checks:
-            a(f"- ⚠️ `{c['check']}`: {c.get('details', '')}")
+            a(f"- ⚠️ `{c['check']}`: {_check_details(c, tz)}")
         a("")
+
+    # Обнаружения — одним блоком на сегмент, повторы по подсегментам свёрнуты
+    _append_detections(lines, seg, idx, fmt_ts)
 
     # Подсегменты
     if len(seg.subsegments) > 1:
         a(f"**Подсегментов:** {len(seg.subsegments)}")
         a("")
 
+    # Состояния (код и тип неисправности) — только при смене значения
+    prev_state: dict[str, Any] = {}
     for sub_idx, sub in enumerate(seg.subsegments, 1):
-        _append_subsegment(lines, sub, idx, sub_idx, fmt_ts, short=(len(seg.subsegments) == 1))
+        skip = {r for r, ch in sub.characteristics.items()
+                if isinstance(ch, dict) and ch.get("kind") == "state" and sub_idx > 1
+                and ch.get("min") == ch.get("max") == prev_state.get(r)}
+        _append_subsegment(lines, sub, idx, sub_idx, fmt_ts, short=(len(seg.subsegments) == 1),
+                           skip_roles=skip)
+        prev_state.update({r: ch.get("value_end") for r, ch in sub.characteristics.items()
+                           if isinstance(ch, dict) and ch.get("kind") == "state"})
 
 
 def _append_subsegment(
@@ -1202,6 +1591,7 @@ def _append_subsegment(
     sub_idx: int,
     fmt_ts,
     short: bool = False,
+    skip_roles: set[str] | None = None,
 ) -> None:
     a = lines.append
     zone_ru = _ZONE_RU.get(sub.load_zone, sub.load_zone)
@@ -1215,7 +1605,7 @@ def _append_subsegment(
         a(f"| Начало | {fmt_ts(sub.t_start)} |")
         a(f"| Конец | {fmt_ts(sub.t_end)} |")
         a(f"| Длительность | {dur_str} |")
-        a(f"| Качество данных | {sub.data_quality:.0%} |")
+        a(f"| Качество данных | {_fmt_dq(sub.data_quality)} |")
         a(f"| Причина открытия | {sub.cause_open} |")
         if sub.cause_close:
             a(f"| Причина закрытия | {sub.cause_close} |")
@@ -1249,9 +1639,12 @@ def _append_subsegment(
         a("| Роль | Ед. | Медиана | Мин | Макс | Тренд/с |")
         a("|------|-----|---------|-----|------|---------|")
         for role, ch in sub.characteristics.items():
-            med = _fmt_val(ch.get("median"))
-            mn = _fmt_val(ch.get("min"))
-            mx = _fmt_val(ch.get("max"))
+            if role in (skip_roles or ()):
+                continue
+            dec = 0 if ch.get("kind") == "state" else 2   # код — целым: «1453», не «1453.00»
+            med = _fmt_val(ch.get("median"), dec)
+            mn = _fmt_val(ch.get("min"), dec)
+            mx = _fmt_val(ch.get("max"), dec)
             slope = _fmt_val(ch.get("slope"))
             unit = ch.get("unit", "")
             a(f"| {role} | {unit} | {med} | {mn} | {mx} | {slope} |")
@@ -1291,35 +1684,7 @@ def _append_subsegment(
             a(f"| Тепловой | {_RISK_EMOJI.get(tr_lvl, '')} {tr_lvl} | {details} |")
         a("")
 
-    # Обнаружения
-    if sub.detections:
-        a("**Обнаружения:**")
-        a("")
-        for _d in sub.detections:
-            d = _as_dict(_d)
-            emoji = _SEVERITY_EMOJI.get(d["severity"], "")
-            a(f"- {emoji} **{d['scenario']}** ({d['severity']}): {d['trigger']}")
-            a(f"  - Источник: `{d['source']}`")
-            if d.get("fault_codes"):
-                a(f"  - Коды: {d['fault_codes']}")
-            count_30d = (d.get("values") or {}).get("history_count_30d")
-            if count_30d is not None:
-                dur_30d = (d.get("values") or {}).get("history_duration_30d_sec")
-                blind_30d = (d.get("values") or {}).get("history_blind_30d_sec")
-                suffix = f" (суммарно {_fmt_duration(dur_30d)})" if dur_30d else ""
-                if dur_30d and blind_30d:
-                    suffix = (f" (суммарно {_fmt_duration(dur_30d)}, из них "
-                              f"{_fmt_duration(blind_30d)} без связи)")
-                a(f"  - Срабатываний этого типа за 30 дней: **{count_30d}**{suffix}")
-            startup_count = (d.get("values") or {}).get("startup_count")
-            if startup_count is not None:
-                dur_startup = (d.get("values") or {}).get("startup_duration_sec")
-                suffix = f" (суммарно {_fmt_duration(dur_startup)})" if dur_startup else ""
-                a(f"  - Срабатываний с пуска: **{startup_count}**{suffix}")
-        a("")
-    elif not short:
-        a("*Обнаружений нет.*")
-        a("")
+    # Обнаружения — блоком на уровне сегмента (_append_detections), здесь не повторяются
 
 
 def _fmt_val(v: Any, decimals: int = 2) -> str:
