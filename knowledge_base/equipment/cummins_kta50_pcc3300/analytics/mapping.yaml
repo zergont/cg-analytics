@@ -287,7 +287,12 @@ registers:
     role: LAST_FAULT_CODE
     group: STATE
     unit: ~
-    kind: analog
+    kind: enum
+    # Состояние, а не замер: держится, пока его не сменят (код — до кнопки
+    # сброса). В декодере unit: enum, данные — периоды enum_history. В
+    # характеристики подсегмента идёт из периодов (на начало / на конец /
+    # смены), без forward-fill; до v5.1.1 был analog — код жил 90 с.
+    state_characteristic: true
     description: Код последней неисправности
     _source: PASSPORT_РЭ
 
@@ -295,7 +300,12 @@ registers:
     role: LAST_FAULT_TYPE
     group: STATE
     unit: ~
-    kind: analog
+    kind: enum
+    # Состояние, а не замер: держится, пока его не сменят (код — до кнопки
+    # сброса). В декодере unit: enum, данные — периоды enum_history. В
+    # характеристики подсегмента идёт из периодов (на начало / на конец /
+    # смены), без forward-fill; до v5.1.1 был analog — код жил 90 с.
+    state_characteristic: true
     description: Тип последней неисправности (enum)
     states:
       0: None

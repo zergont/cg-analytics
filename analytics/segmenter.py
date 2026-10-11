@@ -32,7 +32,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from .config import AnalyticsConfig
-from .contract import RiskAccumulators, Segment, Subsegment
+from .contract import Characteristic, RiskAccumulators, Segment, Subsegment
 from .forward_fill import apply_forward_fill
 from .metrics import compute_characteristics, compute_derived_metrics
 from .accumulators import update_accumulators
@@ -130,6 +130,7 @@ def _split_stop_on_fault_cleared(
     all_by_addr: dict[int, list[dict]],
     cfg,
     tt: datetime,
+    enum_periods: list[dict] | None = None,
 ) -> list[dict]:
     """Разрезать СТОП-периоды (RUN_STATE=0) по устранению неисправностей.
 
@@ -157,18 +158,32 @@ def _split_stop_on_fault_cleared(
         if fe > fs:
             dirty_bits.append((fs, fe))
 
-    # Интервалы несброшенного кода 40012 (step-функция по замерам)
-    lfc_rows = all_by_addr.get(lfc_addr) or []
-    prev_ts, prev_dirty = None, False
-    for r in lfc_rows:
-        v = _fv(r)
-        is_dirty = v is not None and v != 0
-        ts = _tz(r["ts"])
-        if prev_dirty and prev_ts is not None:
-            dirty_bits.append((prev_ts, ts))
-        prev_ts, prev_dirty = ts, is_dirty
-    if prev_dirty and prev_ts is not None and tt > prev_ts:
-        dirty_bits.append((prev_ts, tt))
+    # Интервалы несброшенного кода 40012 — по периодам состояния (v5.1.1;
+    # раньше step-функция по «замерам», которых в окне могло не быть)
+    lfc_periods = [p for p in (enum_periods or []) if p.get("addr") == lfc_addr]
+    if lfc_periods:
+        for p in lfc_periods:
+            try:
+                is_dirty = p.get("value") is not None and float(p["value"]) != 0
+            except (TypeError, ValueError):
+                is_dirty = False
+            if is_dirty:
+                s = _tz(p["state_start"])
+                e = _tz(p["state_end"]) if p.get("state_end") else tt
+                if e > s:
+                    dirty_bits.append((s, e))
+    else:
+        lfc_rows = all_by_addr.get(lfc_addr) or []
+        prev_ts, prev_dirty = None, False
+        for r in lfc_rows:
+            v = _fv(r)
+            is_dirty = v is not None and v != 0
+            ts = _tz(r["ts"])
+            if prev_dirty and prev_ts is not None:
+                dirty_bits.append((prev_ts, ts))
+            prev_ts, prev_dirty = ts, is_dirty
+        if prev_dirty and prev_ts is not None and tt > prev_ts:
+            dirty_bits.append((prev_ts, tt))
 
     dirty = _merge_intervals(dirty_bits)
     if not dirty:
@@ -425,6 +440,75 @@ def _classify_stop_periods(
     return out
 
 
+def _state_periods(enum_periods: list[dict], cfg: AnalyticsConfig) -> dict[int, list[dict]]:
+    """Периоды регистров-состояний, идущих в характеристики подсегмента.
+
+    Это `kind: enum` с `state_characteristic: true` в карте (PCC3300: код и тип
+    последней неисправности 40012/40013). По адресу, отсортированы по началу.
+    """
+    addrs = {a for a, m in cfg.register_map.items()
+             if m.get("kind") == "enum" and m.get("state_characteristic")}
+    out: dict[int, list[dict]] = {}
+    for p in enum_periods or []:
+        a = p.get("addr")
+        if a not in addrs or p.get("value") is None:
+            continue
+        # «Нет данных» декодера (u16 NA = 65535) пишется в enum_history как
+        # значение — это не код неисправности, состояние в этот период неизвестно
+        na = cfg.register_map[a].get("na_values") or [65535]
+        try:
+            if int(p["value"]) in {int(x) for x in na}:
+                continue
+        except (TypeError, ValueError):
+            continue
+        out.setdefault(a, []).append(p)
+    for lst in out.values():
+        lst.sort(key=lambda p: _tz(p["state_start"]))
+    return out
+
+
+def _state_characteristics(
+    state_periods: dict[int, list[dict]], t_start: datetime, t_end: datetime,
+    cfg: AnalyticsConfig,
+) -> dict[str, Any]:
+    """Характеристики состояний за [t_start, t_end) — из периодов enum_history.
+
+    Состояние держится, пока его не сменят: период, начавшийся днями раньше и
+    не закрытый, покрывает любое окно. Поэтому значение известно в каждом
+    подсегменте — в отличие от замера, который forward-fill переносит не
+    дольше 90 с. До v5.1.1 код 40012 подменялся «замером» в начале окна и жил
+    только в первом подсегменте, а при суточном закрытии терялся целиком.
+
+    Форма — как у замера (value_start / value_end / min / max), потребители
+    читают те же поля; median = значение на конец, slope — нет.
+    """
+    t0, t1 = _tz(t_start), _tz(t_end)
+    result: dict[str, Any] = {}
+    for addr, periods in state_periods.items():
+        vals: list[float] = []
+        for p in periods:
+            s = _tz(p["state_start"])
+            e = _tz(p["state_end"]) if p.get("state_end") else None
+            if s >= t1 or (e is not None and e <= t0):
+                continue
+            try:
+                vals.append(float(p["value"]))
+            except (TypeError, ValueError):
+                continue
+        if not vals:
+            continue
+        meta = cfg.register_map.get(addr, {})
+        role = meta.get("role", f"addr_{addr}")
+        char = Characteristic(
+            role=role, unit=meta.get("unit") or "", sample_count=len(vals),
+            median=vals[-1], mad=None, min=min(vals), max=max(vals),
+            value_start=vals[0], value_end=vals[-1], slope=None,
+        ).to_dict()
+        char["kind"] = "state"
+        result[role] = char
+    return result
+
+
 def _build_ts_index(by_addr: dict[int, list[dict]]) -> dict[int, list[datetime]]:
     """Tz-нормализованный индекс меток времени для bisect-срезов."""
     return {addr: [_tz(r["ts"]) for r in rows] for addr, rows in by_addr.items()}
@@ -670,6 +754,7 @@ def _build_single_subsegment(
     prev_zone: str | None,
     cfg: AnalyticsConfig,
     fault_periods: list[dict],
+    state_periods: dict[int, list[dict]] | None = None,
 ) -> tuple[Subsegment, RiskAccumulators]:
     """Создать один подсегмент (для нейтральных состояний RUN_STATE ≠ 3)."""
     subseg_id = f"{seg_id}.{idx}"
@@ -680,6 +765,7 @@ def _build_single_subsegment(
     sub_win   = _slice_by_addr(seg_by_addr, ts_index, t_start, t_end)
 
     chars   = compute_characteristics(sub_chars, char_t_start, t_end, cfg)
+    chars.update(_state_characteristics(state_periods or {}, t_start, t_end, cfg))
     derived = compute_derived_metrics(sub_win, t_start, t_end, gaps, cfg)
     new_acc = update_accumulators(accumulators, sub_win, t_start, t_end, load_zone, run_state, cfg, gaps)
 
@@ -725,6 +811,7 @@ def _build_subsegments_for_running(
     prev_accumulators: RiskAccumulators,
     run_state: int,
     cfg: AnalyticsConfig,
+    state_periods: dict[int, list[dict]] | None = None,
 ) -> tuple[list[Subsegment], RiskAccumulators]:
     """L2-сегментация внутри RUN_STATE=3: ZoneTracker + fault-события."""
     t_start_tz = _tz(seg_start)
@@ -834,6 +921,7 @@ def _build_subsegments_for_running(
         sub_win   = _slice_by_addr(seg_by_addr, ts_index, t_sub_start, t_sub_end)
 
         chars        = compute_characteristics(sub_chars, char_t_start, t_sub_end, cfg)
+        chars.update(_state_characteristics(state_periods or {}, t_sub_start, t_sub_end, cfg))
         derived      = compute_derived_metrics(sub_win, t_sub_start, t_sub_end, gaps, cfg)
         accumulators = update_accumulators(accumulators, sub_win, t_sub_start, t_sub_end, zone, run_state, cfg, gaps)
 
@@ -1304,6 +1392,8 @@ def segment(
 
     # Индексируем историю по адресу
     all_by_addr = _build_by_addr(history)
+    # Регистры-состояния для характеристик подсегментов (код неисправности)
+    state_periods = _state_periods(enum_periods, cfg)
 
     # Параметры конфигурации
     preamble_slices = int(cfg.seg("preamble", "slices", default=3))
@@ -1325,7 +1415,7 @@ def segment(
         )
     else:
         run_state_periods = _split_stop_on_fault_cleared(
-            run_state_periods, fault_periods, all_by_addr, cfg, tt,
+            run_state_periods, fault_periods, all_by_addr, cfg, tt, enum_periods,
         )
         run_state_periods = _split_stop_on_shutdown(
             run_state_periods, fault_periods, cfg, tt,
@@ -1413,6 +1503,7 @@ def segment(
                 prev_accumulators=accumulators,
                 run_state=run_state,
                 cfg=cfg,
+                state_periods=state_periods,
             )
         else:
             subseg, accumulators = _build_single_subsegment(
@@ -1431,6 +1522,7 @@ def segment(
                 prev_zone=None,
                 cfg=cfg,
                 fault_periods=fault_periods_in_seg,
+                state_periods=state_periods,
             )
             subsegments = [subseg]
 

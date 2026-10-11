@@ -193,53 +193,12 @@ def enum_read_addrs(cfg: Any) -> list[int]:
 
     Широкий ридер (Следователь, Фаза 2): журнал ключа 40010 / RUN_STATE 40011 /
     RunCommand 40599 / топл. соленоида / возбуждения / GensetCB / Сброса / кодов
-    40012-40013 — всё, из чего реконструктор строит ленту действий. 40012/40013
-    kind=analog, но читаются из enum_history (см. apply_fault_code_source_swap),
-    поэтому добавляются явно.
+    40012-40013 — всё, из чего реконструктор строит ленту действий. Коды с
+    v5.1.1 объявлены kind=enum (характеристика подсегмента — из периодов, см.
+    segmenter._state_characteristics); явное добавление — страховка для карт,
+    где они ещё analog.
     """
     return sorted(set(cfg.whitelist_enum) | set(FAULT_CODE_ADDRS))
-
-
-def apply_fault_code_source_swap(
-    history: list[dict[str, Any]],
-    enum_periods: list[dict[str, Any]],
-    addrs: tuple[int, ...] = FAULT_CODE_ADDRS,
-    window_from: datetime | None = None,
-) -> list[dict[str, Any]]:
-    """Подменить analog-строки fault-code регистров синтезом из enum_history.
-
-    Каждый enum-период → analog-строка {addr, ts, value=код}. Строки прочих
-    адресов не трогаются; enum_periods упорядочены (addr, state_start), так что
-    синтез по каждому addr отсортирован по ts (как ждёт _build_by_addr).
-
-    window_from — начало окна загрузки аналога. Код 40012 — это ДЕРЖАЩЕЕСЯ
-    состояние (висит, пока не сбросят), а данные по нему — только события смены.
-    Несброшенный код, вставший НЕСКОЛЬКО ДНЕЙ назад, даёт единственную строку вне
-    окна → срез сегмента пуст → характеристика LAST_FAULT_CODE не строится, и
-    блок несброшенной неисправности молча исчезает из отчётов. Поэтому период,
-    начавшийся ДО окна, прижимаем к его границе: состояние активно с начала окна.
-    Смены ВНУТРИ окна сохраняют реальный момент (важно для fault_cleared).
-
-    Fail-safe: если enum-данных по addrs нет — возвращаем history как есть.
-    """
-    swap = set(addrs)
-    synth: list[dict[str, Any]] = []
-    for p in enum_periods:
-        if p.get("addr") not in swap or p.get("value") is None:
-            continue
-        ts = p.get("state_start")
-        if window_from is not None and ts is not None:
-            try:
-                if ts < window_from:
-                    ts = window_from
-            except TypeError:
-                pass  # несравнимые tz-aware/naive — оставляем как есть
-        synth.append({"addr": p["addr"], "ts": ts, "value": p["value"],
-                      "is_carried_forward": False})
-    if not synth:
-        return history
-    kept = [r for r in history if r.get("addr") not in swap]
-    return kept + synth
 
 
 async def get_fault_periods(

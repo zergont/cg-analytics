@@ -1062,6 +1062,62 @@ async def existing_episode_onsets(
         await conn.close()
 
 
+async def find_episode_by_onset(
+    router_sn: str, equip_type: str, panel_id: int, *,
+    scenario: str, addr: int | None, bit: int | None, t_open: datetime,
+) -> dict[str, Any] | None:
+    """Последний эпизод той же тревоги с тем же онсетом (t_open до микросекунды).
+
+    Совпадение онсета означает ту же тревогу (см. existing_episode_onsets): у
+    панельной это фронт неисправности из fault_history.
+    """
+    conn = await _connect()
+    try:
+        row = await conn.fetchrow("""
+            SELECT id, t_close, severity
+            FROM alarm_episodes
+            WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+              AND scenario = $4
+              AND addr IS NOT DISTINCT FROM $5 AND bit IS NOT DISTINCT FROM $6
+              AND t_open = $7
+            ORDER BY id DESC
+            LIMIT 1
+        """, router_sn, equip_type, panel_id, scenario, addr, bit, t_open)
+        return dict(row) if row else None
+    finally:
+        await conn.close()
+
+
+async def reopen_episode(
+    episode_id: int, *, now_ts: datetime, blind_sec_add: float = 0.0,
+    severity: str | None = None,
+) -> None:
+    """Снова открыть эпизод того же онсета — тревога не снималась.
+
+    Воздействие астрономическое, как в close_episode: от фронта до конца окна
+    (GREATEST, а не приращение — t_close промаха бывает раньше уже начисленного,
+    если его взяли из снятия прежнего периода той же маски). Снятие гейтом у
+    закрытого эпизода сбрасывается: его заново поставит проверка текущего
+    состава (_inherit_gate_suppression), как у нового эпизода. Открытый —
+    просто подхватывается.
+    """
+    conn = await _connect()
+    try:
+        await conn.execute("""
+            UPDATE alarm_episodes
+            SET gate_suppressed = CASE WHEN t_close IS NOT NULL THEN FALSE
+                                       ELSE gate_suppressed END,
+                t_close = NULL, close_reason = NULL,
+                active_sec = GREATEST(active_sec, EXTRACT(EPOCH FROM ($2 - t_open))),
+                blind_sec  = blind_sec + $3,
+                severity   = COALESCE($4, severity),
+                updated_at = now()
+            WHERE id = $1
+        """, episode_id, now_ts, max(0.0, float(blind_sec_add)), severity)
+    finally:
+        await conn.close()
+
+
 async def insert_closed_episode(
     router_sn: str, equip_type: str, panel_id: int, *,
     scenario: str, source: str, severity: str | None,
@@ -1253,12 +1309,27 @@ async def count_episodes_batch(
     открытые); длительность — сумма active_sec (астрономическое воздействие),
     blind_window — сколько из неё прошло без связи. since_ts=None → счётчики
     «с пуска» = 0.
+
+    Срабатывание — онсет, а не строка: до v5.1.1 одна неисправность давала
+    несколько строк с одним t_open (эпизод закрывался промахом и заводился
+    заново, каждый — от фронта), и ДЭС №3 получала «14 срабатываний, 725 ч за
+    30 суток». По строкам одного онсета — максимум воздействия и слепой доли.
     """
     if not scenarios:
         return {}
     conn = await _connect()
     try:
         rows = await conn.fetch("""
+            WITH e AS (
+                SELECT scenario, addr, bit, t_open,
+                       MAX(active_sec) AS active_sec, MAX(blind_sec) AS blind_sec
+                FROM alarm_episodes
+                WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+                  AND scenario = ANY($4::text[])
+                  AND (t_open > now() - ($5 || ' days')::interval
+                       OR ($6::timestamptz IS NOT NULL AND t_open >= $6))
+                GROUP BY scenario, addr, bit, t_open
+            )
             SELECT scenario, addr, bit,
                    COUNT(*) FILTER (
                        WHERE t_open > now() - ($5 || ' days')::interval) AS count_window,
@@ -1270,11 +1341,7 @@ async def count_episodes_batch(
                        WHERE $6::timestamptz IS NOT NULL AND t_open >= $6) AS count_since,
                    COALESCE(SUM(active_sec) FILTER (
                        WHERE $6::timestamptz IS NOT NULL AND t_open >= $6), 0) AS dur_since
-            FROM alarm_episodes
-            WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
-              AND scenario = ANY($4::text[])
-              AND (t_open > now() - ($5 || ' days')::interval
-                   OR ($6::timestamptz IS NOT NULL AND t_open >= $6))
+            FROM e
             GROUP BY scenario, addr, bit
         """, router_sn, equip_type, panel_id, scenarios, str(window_days), since_ts)
         # Ключ — per-fault (совпадает с engine._alert_key)

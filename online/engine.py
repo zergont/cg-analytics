@@ -168,8 +168,12 @@ def _live_new_episodes(segments: list, eps: list[dict], live_keys: set[str],
     """
     if not live_keys:
         return []
-    # Закрытый эпизод того же ключа — прежняя вспышка, текущую он не покрывает
+    # Закрытый эпизод того же ключа — прежняя вспышка, текущую он не покрывает.
+    # Кроме того же онсета (v5.1.1): это та же тревога, закрытая промахом, —
+    # синтетика её заменяет (вызывающий убирает строку, _drop_same_onset)
     have = {_episode_key(e) for e in eps if e.get("t_close") is None}
+    closed_onsets = {(_episode_key(e), _tz_utc(e["t_open"])): e for e in eps
+                     if e.get("t_close") is not None and e.get("t_open")}
     out: dict[str, dict] = {}
     for seg in segments or []:
         for sub in getattr(seg, "subsegments", None) or []:
@@ -184,6 +188,7 @@ def _live_new_episodes(segments: list, eps: list[dict], live_keys: set[str],
                 except (TypeError, ValueError):
                     t_open = _tz_utc(t_end)
                 panel = dd.get("scenario") == "CONTROLLER_FAULT"
+                same = closed_onsets.get((key, t_open))
                 out[key] = {
                     "scenario": dd.get("scenario"),
                     "source": "panel" if panel else "analytics",
@@ -192,11 +197,21 @@ def _live_new_episodes(segments: list, eps: list[dict], live_keys: set[str],
                     "bit": v.get("bit") if panel else None,
                     "t_open": t_open, "t_close": None,
                     "active_sec": max(0.0, (_tz_utc(t_end) - t_open).total_seconds()),
-                    "blind_sec": 0.0,
+                    "blind_sec": float((same or {}).get("blind_sec") or 0.0),
                     "gate_suppressed": not panel and dd.get("scenario") in (suppressed_sc or ()),
                     "open_values_json": {"fault_name": v.get("fault_name")} if panel else None,
                 }
     return list(out.values())
+
+
+def _drop_same_onset(eps: list[dict], synthetic: list[dict]) -> list[dict]:
+    """Убрать закрытые строки, которые синтетика того же онсета заменяет."""
+    onsets = {(_episode_key(s), _tz_utc(s["t_open"])) for s in synthetic if s.get("t_open")}
+    if not onsets:
+        return eps
+    return [e for e in eps
+            if not (e.get("t_close") is not None and e.get("t_open")
+                    and (_episode_key(e), _tz_utc(e["t_open"])) in onsets)]
 
 
 def _enqueue_segment(seg_id: int | None, again: bool = False) -> None:
@@ -609,12 +624,9 @@ async def _load_data(
     history, enum_periods, fault_periods, gaps = await asyncio.gather(
         history_task, enum_task, fault_task, gaps_task
     )
-    # 40012/40013 — из постоянного enum_history (не из history_rich с ретенцией).
-    # window_from = начало загруженного аналога: несброшенный код из прошлого
-    # прижимается к границе окна, иначе он не попадёт в срез сегмента.
-    history = _src.apply_fault_code_source_swap(
-        history, enum_periods, window_from=ts_history_from
-    )
+    # 40012/40013 — состояния из enum_history: характеристики подсегментов
+    # сегментатор строит из периодов (v5.1.1). Подмена в «замер», прижатый к
+    # ts_from−300 с, уходила в преамбулу и терялась при суточном закрытии
     return history, enum_periods, fault_periods, gaps
 
 
@@ -1351,6 +1363,7 @@ class OnlinePollEngine:
                 self._episodes[k] = {
                     "id": e["id"], "severity": e.get("severity"),
                     "miss": 0, "first_miss_ts": None,
+                    "t_open": _tz_utc(e["t_open"]) if e.get("t_open") else None,
                 }
             if self._episodes:
                 logger.info(
@@ -1427,6 +1440,49 @@ class OnlinePollEngine:
                         t_open = _tz_utc(datetime.fromisoformat(d["t_detected"]))
                     except Exception:
                         pass
+                # Тот же онсет — та же тревога (см. existing_episode_onsets):
+                # эпизод, закрытый промахом, переоткрываем, а не заводим новый
+                # от того же фронта. До v5.1.1 код 40012 жил в первых 90 с окна,
+                # «Общая авария» гасла на смене зоны нагрузки и на каждом резе
+                # заводилась заново — у ДЭС №3 8 строк на одну неисправность.
+                prev = None
+                try:
+                    prev = await online_db.find_episode_by_onset(
+                        self.router_sn, self.equip_type, self.panel_id,
+                        scenario=sc, addr=_vals.get("addr"), bit=_vals.get("bit"),
+                        t_open=t_open,
+                    )
+                except Exception:
+                    logger.warning("OnlineEngine[%s]: не удалось проверить онсет %s",
+                                   self.key, key, exc_info=True)
+                if prev is not None:
+                    ep_id = prev["id"]
+                    was_closed = prev.get("t_close") is not None
+                    # Слепая доля хвоста — от закрытия (не раньше фронта)
+                    tail_blind = 0.0
+                    if was_closed:
+                        _, tail_blind, _ = _accrual_split(
+                            max(_tz_utc(prev["t_close"]), t_open), now_ts, gaps)
+                    try:
+                        await online_db.reopen_episode(
+                            ep_id, now_ts=now_ts, blind_sec_add=tail_blind,
+                            severity=_max_severity(prev.get("severity"), sev),
+                        )
+                    except Exception:
+                        logger.warning("OnlineEngine[%s]: не удалось переоткрыть эпизод %s",
+                                       self.key, key, exc_info=True)
+                        continue
+                    if was_closed:
+                        logger.info("OnlineEngine[%s]: эпизод %s переоткрыт — %s "
+                                    "(тот же онсет %s)", self.key, ep_id, key,
+                                    t_open.isoformat())
+                    self._episodes[key] = {"id": ep_id,
+                                           "severity": _max_severity(prev.get("severity"), sev),
+                                           "miss": 0, "first_miss_ts": None,
+                                           "t_open": t_open}
+                    if sc != "CONTROLLER_FAULT":
+                        _new_analytics.append(sc)
+                    continue
                 # Время от фронта неисправности до конца этого окна. Дальше
                 # тикают поцикловые приращения от той же базы, так что
                 # интервалы стыкуются и не накладываются. Без этого эпизод,
@@ -1449,7 +1505,8 @@ class OnlinePollEngine:
                                    self.key, key, exc_info=True)
                     continue
                 self._episodes[key] = {"id": ep_id, "severity": sev,
-                                       "miss": 0, "first_miss_ts": None}
+                                       "miss": 0, "first_miss_ts": None,
+                                       "t_open": t_open}
                 if sc != "CONTROLLER_FAULT":
                     _new_analytics.append(sc)
                 logger.info("OnlineEngine[%s]: эпизод открыт — %s (severity=%s)",
@@ -1491,8 +1548,13 @@ class OnlinePollEngine:
             ep["miss"] += 1
             if ep["first_miss_ts"] is None:
                 # Панель знает точное время снятия (fault_end) — оно и есть
-                # конец эпизода; иначе — горизонт обработки, как раньше
-                ep["first_miss_ts"] = (cleared_at or {}).get(key) or now_ts
+                # конец эпизода; иначе — горизонт обработки, как раньше.
+                # Снятие раньше фронта — это прежний период той же маски
+                # (_panel_cleared_at берёт самый поздний fault_end по ключу)
+                _ca = (cleared_at or {}).get(key)
+                if _ca is not None and ep.get("t_open") is not None and _ca < ep["t_open"]:
+                    _ca = None
+                ep["first_miss_ts"] = _ca or now_ts
             if ep["miss"] < debounce:
                 continue
             try:
@@ -1681,8 +1743,9 @@ class OnlinePollEngine:
             )
             if closing:
                 eps = _drop_debounce_tails(eps, segments, self._episodes)
-                eps = eps + _live_new_episodes(segments, eps, live_keys or set(), _tz_utc(t_to),
-                                               suppressed_sc)
+                _syn = _live_new_episodes(segments, eps, live_keys or set(), _tz_utc(t_to),
+                                          suppressed_sc)
+                eps = _drop_same_onset(eps, _syn) + _syn
             from analytics.serializer import build_summary_parts, render_summary_md
             parts = build_summary_parts(segments, episodes=eps, tz=self.tz,
                                         trip_roles=self.cfg.trip_snapshot_roles)
@@ -2198,11 +2261,7 @@ class OnlinePollEngine:
             if synth_gap is not None:
                 gaps = gaps + [synth_gap]
 
-            # 40012/40013 — из постоянного enum_history (после synth_gap: связность
-            # считаем по исходной аналоговой истории, до подмены кодов).
-            history = _src.apply_fault_code_source_swap(
-                history, enum_periods, window_from=ts_from_utc
-            )
+            # 40012/40013 — состояния: сегментатор берёт их из enum_periods (v5.1.1)
 
             segments = await asyncio.to_thread(
                 functools.partial(

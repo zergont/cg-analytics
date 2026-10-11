@@ -478,6 +478,10 @@ class OnlineManager:
                 already_analyzed = (
                     seg.get("warning_analyzed_hash") == fault_hash
                     or (done_row is not None and done_row == seg.get("id"))
+                    # Память _gate_done живёт в процессе: после перезапуска
+                    # (выкладки) состав, разобранный в этой строке, уходил
+                    # снова — 4 повтора в 35765. Разборы строки хранят хеш
+                    or fault_hash in _analyzed_hashes(seg)
                 )
 
                 if already_analyzed:
@@ -604,6 +608,20 @@ _GATE_TIMEOUT_SEC = 3 * 3600
 _GATE_RETRY_AFTER_SEC = 15 * 60
 # Сколько разобранных составов помнить на машину
 _GATE_DONE_KEEP = 32
+
+
+def _analyzed_hashes(seg: dict) -> set[str]:
+    """Хеши составов, разобранных в этой строке (warning_analyses)."""
+    raw = seg.get("warning_analyses")
+    if isinstance(raw, str):
+        try:
+            import json as _json
+            raw = _json.loads(raw)
+        except ValueError:
+            return set()
+    if not isinstance(raw, list):
+        return set()
+    return {a.get("fault_hash") for a in raw if isinstance(a, dict) and a.get("fault_hash")}
 # Повтор записи разбора, вернувшегося в окно между удалением открытой строки и
 # вставкой закрытой (цикл закрытия)
 _GATE_SAVE_RETRIES = 3

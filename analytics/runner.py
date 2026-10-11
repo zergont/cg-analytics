@@ -240,11 +240,8 @@ async def _load_data(
     history, enum_periods, fault_periods, gaps = await asyncio.gather(
         history_task, enum_task, fault_task, gaps_task
     )
-    # Коды неисправностей (40012/40013) — из постоянного enum_history, не из
-    # тающего history_rich (ретенция ~30 дней). Пайплайн ниже не меняется.
-    history = analytics_source.apply_fault_code_source_swap(
-        history, enum_periods, window_from=ts_from
-    )
+    # Коды неисправностей (40012/40013) — состояния из enum_history: сегментатор
+    # строит их характеристики из периодов (v5.1.1), подмена в «замеры» не нужна
     return history, enum_periods, fault_periods, gaps
 
 
