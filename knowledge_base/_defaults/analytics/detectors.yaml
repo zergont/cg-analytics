@@ -222,8 +222,31 @@ COKING_RISK:
   # границы 30 % (решение 11.10.2026: ДЭС №3 работает у порога, без допуска в прожиг
   # попадало 23 % времени при ≥30 %)
   purge_dip_tolerance_sec: 60
+  # По Cummins (v5.1.5, docs/plans/research_cummins_light_load.md). Потолка долга у
+  # Cummins нет; штатное лечение — годовой прогон T-030 §7.5.5 (≥3 ч, из них 1 ч около
+  # номинала) = 32 ч в наших ставках. Долг выше — «нужен сервисный прожиг» (осмотр
+  # выпуска/турбины, ступенчатый прогон, проба масла на топливо — SB 3810340, 5 %)
+  service_purge_debt_sec: 115200
+  # Прогон по T-030 засчитывается как полный прожиг
+  t030_run_min_sec: 10800
+  t030_high_pct: 75                  # «около номинала»: Cummins числа не даёт, 75 % — NFPA 110
+  t030_high_min_sec: 3600
+  # Календарь прогонов: ежемесячно ≥30 мин при ≥30 % (A035B516, T-030 §7.5.3), ежегодно — T-030
+  monthly_run_min_sec: 1800
+  monthly_period_days: 30
+  annual_period_days: 365
   severity_default: CAUTION
   _source: PASSPORT_РЭ + отраслевые нормы (research_coking_wet_stacking.md)
+
+# ─── NO_LOAD_TOO_LONG: без нагрузки на номинальных оборотах дольше нормы ─────
+# Замечание сегмента (v5.1.5). Cummins A035B516 вып. 6 §5.4.2: без нагрузки — не
+# дольше 15 мин подряд. Холостой ход (RUN_STATE 2/5) — отдельно, IDLE_TOO_LONG.
+NO_LOAD_TOO_LONG:
+  enabled: true
+  load_pct: 10
+  max_continuous_sec: 900
+  severity_default: CAUTION
+  _source: CUMMINS  # A035B516 вып. 6 §5.4.2
 
 # ─── IDLE_TOO_LONG: непрерывный холостой ход дольше нормы РЭ ────────────────
 # Замечание сегмента (v5.1.3). Норма — один отрезок х.х.: K38-50 РЭ, Cummins

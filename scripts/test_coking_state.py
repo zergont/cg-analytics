@@ -226,6 +226,55 @@ _found = inp7.split("Обнаружения:")[1].split("\n")[0]
 check("в этом сегменте вырос — замечание" in inp7 and "нагар" not in _found,
       f"9б: в рабочем — подпись «вырос», в «Обнаружениях» не дублируется:\n{inp7[:600]}")
 
+# 11. По Cummins (v5.1.5): эскалация > 32 ч, прогон T-030, без нагрузки, календарь, QSX15
+from analytics.detectors import _detect_no_load_too_long  # noqa: E402
+big = CokingRisk(low_load_zone_sec=40 * 3600)
+upd(big, 1, rs=0)
+check(big.service_needed and big.risk_level == "RED", "11: долг 40 ч — нужен сервисный прожиг")
+upd(big, 180, load=50, start=T0 + timedelta(minutes=1))
+check(big.service_needed and big.low_load_zone_sec > 0 and big.last_annual_run_ts is None,
+      f"11б: 3 ч при 50 % — не T-030 (нет часа ≥75 %), эскалация держится до полного погашения: {big.low_load_zone_sec / 3600:.1f} ч")
+big = CokingRisk(low_load_zone_sec=60 * 3600)
+upd(big, 1, rs=0)
+upd(big, 120, load=50, start=T0)
+upd(big, 60, load=80, start=T0 + timedelta(minutes=120))
+check(big.low_load_zone_sec == 0 and not big.service_needed and big.last_annual_run_ts and big.risk_level == "GREEN",
+      f"11в: прогон T-030 (3 ч, из них 1 ч ≥75 %) — полный прожиг: {big.low_load_zone_sec}, {big.last_annual_run_ts}")
+check(big.last_monthly_run_ts is not None, "11г: ежемесячный прогон отмечен")
+svc = CokingRisk(low_load_zone_sec=40 * 3600, last_purge_ts="2026-07-06T07:43:16+00:00")
+upd(svc, 1, rs=0)
+p = build_summary_parts([seg(0, svc, svc)], [], tz=MSK)
+md = render_summary_md(p)
+check(p["coking"]["service_needed"] and "нужен сервисный прожиг" in md and "пробу масла на топливо" in md,
+      f"11д: эскалация в сводке:\n{md}")
+check("Прогоны по Cummins: ежемесячный (≥30 мин при ≥30 %) — нет сведений с" in md, f"11е: календарь у стоящей машины:\n{md}")
+st_ = build_structural_status({"run_state": 0, "characteristics_json": {"stop_kind": "SIMPLE"},
+                               "current_values_json": {}, "active_detections_json": [],
+                               "coking_risk_json": svc.to_dict(), "t_start": T0})
+check("нужен сервисный прожиг (долг больше 32 ч)" in format_status_text(st_), f"11ж: «Состояние»: {format_status_text(st_)}")
+nl = CokingRisk()
+upd(nl, 20, load=5)
+d = _detect_no_load_too_long(RiskAccumulators(coking_risk=nl), T0, cfg)
+check(len(d) == 1 and "20 мин подряд" in d[0].trigger, f"11з: без нагрузки 20 мин — замечание: {d}")
+nl = CokingRisk()
+upd(nl, 10, load=5)
+upd(nl, 2, load=40, start=T0 + timedelta(minutes=10))
+upd(nl, 10, load=5, start=T0 + timedelta(minutes=12))
+check(_detect_no_load_too_long(RiskAccumulators(coking_risk=nl), T0, cfg) == [],
+      "11и: выход под нагрузку на 2 мин рвёт отрезок «без нагрузки»")
+old = CokingRisk(calendar_since_ts="2026-08-01T06:00:00+00:00")
+upd(old, 1, rs=0)
+p = build_summary_parts([seg(0, old, old)], [], tz=MSK)
+check(p["coking"]["calendar"]["monthly"]["overdue"], f"11к: ежемесячный просрочен: {p['coking']['calendar']}")
+cfg_q = binding.build_config(ROOT / "knowledge_base", controller_id="pcc3300", engine_id="cummins_qsx15")
+q = CokingRisk(low_load_zone_sec=3 * 3600)
+by = rows(30, 50.0, cool=65.0)
+_update_coking(q, by, T0, T0 + timedelta(minutes=30), "NA", 3, 1800, cfg_q, [])
+k_ = CokingRisk(low_load_zone_sec=3 * 3600)
+_update_coking(k_, by, T0, T0 + timedelta(minutes=30), "NA", 3, 1800, cfg, [])
+check(q.debt_paid_total_sec == 0 and k_.debt_paid_total_sec > 0,
+      f"11л: ОЖ 65 °C — QSX15 не прожиг (минимум 70), KTA50 прожиг: {q.debt_paid_total_sec}/{k_.debt_paid_total_sec}")
+
 # 10. Движок: эпизодов у нагара нет
 opened: list = []
 

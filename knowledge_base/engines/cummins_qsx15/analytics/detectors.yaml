@@ -1,0 +1,6 @@
+# Слой двигателя QSX15 поверх _defaults (deep-merge).
+# Минимальная рабочая температура ОЖ QSX15 — 70 °C (РЭ QSX15 бюллетень 4095226,
+# техданные): прожиг засчитывается только при прогретом до неё двигателе
+# (решение 11.10.2026, docs/plans/research_cummins_light_load.md). KTA50 — 60 °C.
+COKING_RISK:
+  purge_min_coolant_c: 70

@@ -41,6 +41,7 @@ SCENARIO_RU: dict[str, str] = {
     "OIL_DILUTION":       "Пониженное давление масла",
     "COKING_RISK":        "Риск нагара (недогруз до прожига)",
     "IDLE_TOO_LONG":      "Длительный холостой ход",
+    "NO_LOAD_TOO_LONG":   "Работа без нагрузки дольше нормы",
     "WARMUP_VIOLATION":   "Нарушение прогрева",
     "COOLDOWN_VIOLATION": "Нарушение охлаждения перед остановом",
     "START_FAILURE":      "Проблема пуска",
@@ -229,6 +230,13 @@ def _coking_part(segments: list, tz=None) -> dict[str, Any] | None:
     # давало замечание и там, где прожиг долг уменьшил (09.10: −16 ч, CAUTION)
     net = (added - paid) if added is not None and paid is not None else None
     level_start = (start or {}).get("risk_level")
+    # «Сейчас» для календаря — конец периода (у открытого — последний подсегмент)
+    now_iso = getattr(segments[-1], "t_end", None)
+    if not now_iso:
+        for s in reversed(segments):
+            if getattr(s, "subsegments", None):
+                now_iso = s.subsegments[-1].t_end
+                break
     purged_at = None
     lp = end.get("last_purge_ts")
     if lp and lp != (start or {}).get("last_purge_ts"):
@@ -258,7 +266,46 @@ def _coking_part(segments: list, tz=None) -> dict[str, Any] | None:
         "since_text": _fmt_dm(lp, tz)[:5] if lp else None,
         "accum_until_text": _fmt_dm(end.get("last_accum_ts"), tz),
         "purged_at_text": _fmt_dm(purged_at, tz),
+        # По Cummins (v5.1.5): эскалация и календарь прогонов
+        "service_needed": bool(end.get("service_needed")),
+        "calendar": _coking_calendar(end, now_iso, tz),
     }
+
+
+def _days_between(a_iso: str | None, b_iso: str | None) -> float | None:
+    try:
+        a = datetime.fromisoformat(a_iso)
+        b = datetime.fromisoformat(b_iso)
+    except (TypeError, ValueError):
+        return None
+    if a.tzinfo is None:
+        a = a.replace(tzinfo=timezone.utc)
+    if b.tzinfo is None:
+        b = b.replace(tzinfo=timezone.utc)
+    return (b - a).total_seconds() / 86400.0
+
+
+def _coking_calendar(cr: dict, now_iso: str | None, tz=None) -> dict[str, Any] | None:
+    """Календарь прогонов по Cummins (T-030 §7.5.3/§7.5.5, A035B516): ежемесячный
+    (≥30 мин при ≥30 %) и годовой (прогон T-030). Напоминание по ТО, на вердикт
+    не влияет. Учёт — с v5.1.5, историю не пересчитываем: «нет сведений с DD.MM».
+    """
+    since = cr.get("calendar_since_ts")
+    if not now_iso or not since:
+        return None
+    out: dict[str, Any] = {"since_text": (_fmt_dm(since, tz) or "")[:5]}
+    for key, ts_key, period in (("monthly", "last_monthly_run_ts", 30),
+                                ("annual", "last_annual_run_ts", 365)):
+        last = cr.get(ts_key)
+        days = _days_between(last or since, now_iso)
+        out[key] = {
+            "last_ts": last,
+            "last_text": (_fmt_dm(last, tz) or "")[:5] if last else None,
+            "days": round(days, 1) if days is not None else None,
+            "period_days": period,
+            "overdue": days is not None and days > period,
+        }
+    return out
 
 
 def _fmt_hm(sec: float) -> str:
@@ -279,7 +326,18 @@ def _coking_composition(ck: dict) -> str:
     return ", ".join(parts) or "менее минуты"
 
 
+_SERVICE_PURGE = ("сервисный прожиг по Cummins T-030 — не меньше 3 ч при нагрузке ≥30 %, "
+                  "из них не меньше 1 ч при ≥75 %")
+_SERVICE_ADVICE = ("Долг больше 32 ч — нужен сервисный прожиг (штатное лечение Cummins, "
+                   "годовой прогон T-030): до набора нагрузки осмотреть выпуск, стыки и турбину на подтёки "
+                   "масла и топлива, слить конденсат из выпуска; набирать нагрузку ступенями, "
+                   "при нехватке — нагрузочным стендом: не меньше 3 ч, из них не меньше 1 ч "
+                   "около номинала; взять пробу масла на топливо (ориентир Cummins — 5 %).")
+
+
 def _coking_left(ck: dict) -> str | None:
+    if ck.get("service_needed"):
+        return _SERVICE_PURGE
     lo, hi = ck.get("purge_left_low_min"), ck.get("purge_left_high_min")
     plo, phi = ck.get("purge_low_pct"), ck.get("purge_high_pct")
     if not lo or not plo:
@@ -308,10 +366,33 @@ def coking_state_text(ck: dict | None) -> str | None:
         txt += "; в этом сегменте установка стояла — риск не изменился (накоплен при прошлой работе)"
     elif (ck.get("net_sec") or 0) >= 60:
         txt += f"; за период долг до прожига вырос на ~{_fmt_hm(ck['net_sec'])} (в пересчёте на малую нагрузку)"
+    if ck.get("service_needed"):
+        txt += "; долг больше 32 ч — нужен сервисный прожиг"
     left = _coking_left(ck)
     if left:
         txt += f"; до сброса — {left}"
     return txt
+
+
+def coking_calendar_text(ck: dict | None, only_overdue: bool = False) -> str | None:
+    """Прогоны по Cummins одной строкой (напоминание по ТО, без влияния на вердикт)."""
+    cal = (ck or {}).get("calendar")
+    if not cal:
+        return None
+    parts = []
+    for key, what in (("monthly", "ежемесячный (≥30 мин при ≥30 %)"),
+                      ("annual", "годовой (≥3 ч, из них ≥1 ч при ≥75 %)")):
+        m = cal.get(key) or {}
+        if only_overdue and not m.get("overdue"):
+            continue
+        if m.get("last_text"):
+            s = f"{what} — {m['last_text']}"
+        else:
+            s = f"{what} — нет сведений с {cal.get('since_text')}"
+        if m.get("overdue"):
+            s += f" ⚠ просрочен: {m['days']:.0f} дн. при норме {m['period_days']}"
+        parts.append(s)
+    return ("Прогоны по Cummins: " + "; ".join(parts)) if parts else None
 
 
 def build_summary_parts(
@@ -713,6 +794,9 @@ def render_summary_md(parts: dict[str, Any]) -> str:
               "Опасный момент — пуск и первые минуты под нагрузкой: осмотреть стыки "
               "коллектора и срез трубы, слить конденсат, нагрузку набирать постепенно "
               "(до 70 % не быстрее ~15 мин), прожиг — под присмотром.")
+            if ck.get("service_needed"):
+                a("")
+                a(f"⚠ {_SERVICE_ADVICE}")
         elif not ck["stop"]:
             lvl = _COKING_LEVEL_RU.get(ck["level"], ck["level"])
             st = ck.get("level_start")
@@ -735,6 +819,15 @@ def render_summary_md(parts: dict[str, Any]) -> str:
                              and not ck.get("paid_sec")):
                 a("")
                 a(line)
+            if ck.get("service_needed"):
+                a("")
+                a(f"⚠ {_SERVICE_ADVICE}")
+        # Календарь прогонов: у стоящей машины — всегда (резервные), у работающей —
+        # только просрочка
+        cal_txt = coking_calendar_text(ck, only_overdue=not ck["stop"])
+        if cal_txt:
+            a("")
+            a(cal_txt)
     elif ck:
         a("")
         a(f"Закоксовка: **{ck.get('level')}**")

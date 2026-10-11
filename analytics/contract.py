@@ -148,6 +148,15 @@ class CokingRisk:
     purge_left_high_min: Optional[float] = None  # то же при высокой нагрузке
     purge_low_pct: Optional[float] = None    # пороги прожига (для подписей без cfg)
     purge_high_pct: Optional[float] = None
+    # v5.1.5 — по Cummins (docs/plans/research_cummins_light_load.md)
+    purge_high_sec: float = 0.0          # в текущем отрезке — время при ≥ t030_high_pct
+    t030_done: bool = False              # прогон T-030 в текущем отрезке уже засчитан
+    service_needed: bool = False         # долг > 32 ч — нужен сервисный прожиг (до полного погашения)
+    last_monthly_run_ts: Optional[str] = None  # последний прогон ≥30 мин при ≥30 % (ежемесячный)
+    last_annual_run_ts: Optional[str] = None   # последний прогон по T-030 (годовой)
+    calendar_since_ts: Optional[str] = None    # с какого момента ведётся учёт прогонов
+    noload_run_sec: float = 0.0          # без нагрузки на номинальных оборотах подряд
+    noload_break_sec: float = 0.0        # короткий выход из «без нагрузки» внутри отрезка
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -169,6 +178,14 @@ class CokingRisk:
             "purge_left_high_min": self.purge_left_high_min,
             "purge_low_pct": self.purge_low_pct,
             "purge_high_pct": self.purge_high_pct,
+            "purge_high_sec": self.purge_high_sec,
+            "t030_done": self.t030_done,
+            "service_needed": self.service_needed,
+            "last_monthly_run_ts": self.last_monthly_run_ts,
+            "last_annual_run_ts": self.last_annual_run_ts,
+            "calendar_since_ts": self.calendar_since_ts,
+            "noload_run_sec": self.noload_run_sec,
+            "noload_break_sec": self.noload_break_sec,
         }
 
     @classmethod
@@ -205,6 +222,14 @@ class CokingRisk:
             purge_left_high_min=o("purge_left_high_min"),
             purge_low_pct=o("purge_low_pct"),
             purge_high_pct=o("purge_high_pct"),
+            purge_high_sec=f("purge_high_sec"),
+            t030_done=bool(d.get("t030_done")),
+            service_needed=bool(d.get("service_needed")),
+            last_monthly_run_ts=d.get("last_monthly_run_ts"),
+            last_annual_run_ts=d.get("last_annual_run_ts"),
+            calendar_since_ts=d.get("calendar_since_ts"),
+            noload_run_sec=f("noload_run_sec"),
+            noload_break_sec=f("noload_break_sec"),
         )
 
 

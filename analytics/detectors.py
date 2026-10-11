@@ -81,6 +81,9 @@ def run_all_detectors(
     if cfg.det("IDLE_TOO_LONG", "enabled", default=True) and run_state in (2, 5):
         detections.extend(_detect_idle_too_long(accumulators, seg_start, cfg))
 
+    if cfg.det("NO_LOAD_TOO_LONG", "enabled", default=True) and run_state == 3:
+        detections.extend(_detect_no_load_too_long(accumulators, seg_start, cfg))
+
     # WARMUP_VIOLATION и COOLDOWN_VIOLATION требуют анализа соседних сегментов —
     # они вызываются из _inter_segment_checks() в segmenter.py, а не здесь.
 
@@ -566,6 +569,36 @@ def _detect_idle_too_long(
         fault_codes=[],
         description_key="IDLE_TOO_LONG.default",
         values={"idle_run_sec": run, "limit_sec": limit},
+    )]
+
+
+def _detect_no_load_too_long(
+    acc: RiskAccumulators,
+    seg_start: datetime,
+    cfg: AnalyticsConfig,
+) -> list[Detection]:
+    """Работа без нагрузки на номинальных оборотах дольше нормы Cummins (v5.1.5).
+
+    A035B516 вып. 6 §5.4.2: без нагрузки — не дольше 15 мин подряд. Детектор
+    холостого хода (RUN_STATE 2/5) машину, крутящуюся на номинале в ожидании
+    нагрузки, не видит.
+    """
+    limit = float(cfg.det("NO_LOAD_TOO_LONG", "max_continuous_sec", default=900))
+    pct = float(cfg.det("NO_LOAD_TOO_LONG", "load_pct", default=10))
+    run = acc.coking_risk.noload_run_sec
+    if run <= limit:
+        return []
+    return [Detection(
+        scenario="NO_LOAD_TOO_LONG",
+        severity=cfg.det("NO_LOAD_TOO_LONG", "severity_default", default="CAUTION"),
+        t_detected=_iso(seg_start),
+        source="METRIC_RULE",
+        trigger=(f"без нагрузки (<{pct:.0f} %) на номинальных оборотах {run / 60:.0f} мин подряд "
+                 f"при норме Cummins ≤{limit / 60:.0f} мин"),
+        related_roles=["LOAD_PCT", "RPM"],
+        fault_codes=[],
+        description_key="NO_LOAD_TOO_LONG.default",
+        values={"noload_run_sec": run, "limit_sec": limit, "load_pct": pct},
     )]
 
 

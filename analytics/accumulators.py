@@ -142,6 +142,17 @@ def _update_coking(
     min_block = float(cfg.thr("engine_operation", "tunable", "purge_min_duration_sec", default=900.0))
     purge_cool = float(cfg.det("COKING_RISK", "purge_min_coolant_c", default=60.0))
     dip_tol = float(cfg.det("COKING_RISK", "purge_dip_tolerance_sec", default=60.0))
+    # По Cummins (v5.1.5): прогон T-030 §7.5.5 (≥3 ч, из них ≥1 ч около номинала) —
+    # полный прожиг; ежемесячно ≥30 мин при ≥30 % (A035B516, T-030 §7.5.3);
+    # без нагрузки (<10 %) на номинальных оборотах — не дольше 15 мин (A035B516 §5.4.2)
+    t030_run = float(cfg.det("COKING_RISK", "t030_run_min_sec", default=10800.0))
+    t030_hi_pct = float(cfg.det("COKING_RISK", "t030_high_pct", default=75.0))
+    t030_hi = float(cfg.det("COKING_RISK", "t030_high_min_sec", default=3600.0))
+    monthly_min = float(cfg.det("COKING_RISK", "monthly_run_min_sec", default=1800.0))
+    service_debt = float(cfg.det("COKING_RISK", "service_purge_debt_sec", default=115200.0))
+    noload_pct = float(cfg.det("NO_LOAD_TOO_LONG", "load_pct", default=10.0))
+    if cr.calendar_since_ts is None:
+        cr.calendar_since_ts = t_start.isoformat()   # учёт прогонов — с первого обновления
     below_c = float(cfg.thr("coolant_temperature", "tunable", "below_60_risk_threshold_c", default=60.0))
 
     added = 0.0
@@ -167,6 +178,19 @@ def _update_coking(
         cr.purge_run_sec = 0.0
         cr.purge_pending_sec = 0.0
         cr.purge_dip_sec = 0.0
+        cr.purge_high_sec = 0.0
+        cr.t030_done = False
+
+    def full_purge(ts: datetime) -> None:
+        """Прогон по T-030 — лечение по Cummins выполнено: долг погашен целиком."""
+        cr.debt_paid_total_sec += debt()
+        cr.low_load_zone_sec = cr.idle_low_rpm_sec = cr.coolant_below_60_sec = 0.0
+        cr.purge_pending_sec = 0.0
+        cr.last_purge_ts = ts.isoformat()
+
+    def noload_reset() -> None:
+        cr.noload_run_sec = 0.0
+        cr.noload_break_sec = 0.0
 
     # 1. Холостой ход: суммарно — в долг, непрерывный отрезок — для замечания
     if run_state in IDLE_RUN_STATES:
@@ -198,6 +222,7 @@ def _update_coking(
     load_addr = cfg.role_to_addr("LOAD_PCT")
     if run_state != 3:
         break_run()
+        noload_reset()
     elif load_addr and load_addr in by_addr:
         # ОЖ по строкам — последняя известная к моменту строки нагрузки. Прожиг
         # не засчитывается только при ИЗВЕСТНОЙ холодной ОЖ: нет датчика или
@@ -218,15 +243,26 @@ def _update_coking(
             nxt = _tz(rows[i + 1]["ts"]) if i + 1 < len(rows) else t_end
             if i + 1 < len(rows) and _pair_spans_gap(r["ts"], rows[i + 1]["ts"], gaps):
                 break_run()       # не знаем, что было в дыре
+                noload_reset()
                 continue
             if i + 1 == len(rows) and _gap_overlap_sec(gaps, ts, nxt) > 0:
                 break_run()
+                noload_reset()
                 continue
             dt = max(0.0, (nxt - ts).total_seconds())
             if dt <= 0:
                 continue          # дубль метки — не интервал
             warm = cool_now is None or cool_now >= purge_cool
             v = _fv(r)
+            # Без нагрузки на номинальных оборотах — непрерывный отрезок с тем же
+            # допуском на короткие выходы, что и у прожига
+            if v < noload_pct:
+                cr.noload_run_sec += dt
+                cr.noload_break_sec = 0.0
+            elif cr.noload_run_sec > 0:
+                cr.noload_break_sec += dt
+                if cr.noload_break_sec > dip_tol:
+                    noload_reset()
             if v < low_pct:
                 cr.low_load_zone_sec += dt
                 added += dt
@@ -247,6 +283,8 @@ def _update_coking(
                 cr.purge_dip_sec = 0.0
                 credit = dt * (rate_high if v >= high_pct else rate_low)
                 cr.purge_run_sec += dt
+                if v >= t030_hi_pct:
+                    cr.purge_high_sec += dt
                 if cr.purge_run_sec - dt >= min_block:
                     pay(credit, nxt)
                 else:
@@ -254,6 +292,13 @@ def _update_coking(
                     if cr.purge_run_sec >= min_block:
                         pay(cr.purge_pending_sec, nxt)
                         cr.purge_pending_sec = 0.0
+                if cr.purge_run_sec >= monthly_min:
+                    cr.last_monthly_run_ts = nxt.isoformat()
+                if (not cr.t030_done and cr.purge_run_sec >= t030_run
+                        and cr.purge_high_sec >= t030_hi):
+                    full_purge(nxt)
+                    cr.t030_done = True
+                    cr.last_annual_run_ts = nxt.isoformat()
     # RS 3 без строк нагрузки (короткий подсегмент) — «нет сведений»: отрезок
     # не обрывается и не растёт
 
@@ -282,6 +327,13 @@ def _update_coking(
     # Для показа: долг и сколько прожига до сброса (отрезок не короче минимума)
     cr.purge_low_pct, cr.purge_high_pct = low_pct, high_pct
     cr.debt_sec = debt()
+    # Эскалация: потолка долга у Cummins нет, а штатное лечение — годовой прогон
+    # T-030 (32 ч в наших ставках). Выше — «нужен сервисный прожиг»; снимается
+    # только полным погашением или прогоном T-030 (решение 11.10.2026)
+    if cr.debt_sec > service_debt:
+        cr.service_needed = True
+    elif cr.debt_sec < 1.0:
+        cr.service_needed = False
     if cr.debt_sec >= 1.0:
         cr.purge_left_low_min = round(max(min_block, cr.debt_sec / rate_low) / 60.0, 1)
         cr.purge_left_high_min = round(max(min_block, cr.debt_sec / rate_high) / 60.0, 1)

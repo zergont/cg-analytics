@@ -211,7 +211,8 @@ def _coking_state(seg_row: dict) -> dict | None:
     return {k: raw.get(k) for k in (
         "risk_level", "low_load_zone_sec", "idle_low_rpm_sec", "coolant_below_60_sec",
         "debt_sec", "last_purge_ts", "last_accum_ts", "purge_left_low_min",
-        "purge_left_high_min", "purge_low_pct", "purge_high_pct")}
+        "purge_left_high_min", "purge_low_pct", "purge_high_pct",
+        "service_needed", "last_monthly_run_ts", "last_annual_run_ts", "calendar_since_ts")}
 
 
 def build_structural_status(
@@ -477,18 +478,42 @@ def _coking_status_part(ck: dict | None, run_state) -> str | None:
     Накопленный недогруз опасен при пуске и первых минутах под нагрузкой, поэтому
     знать о нём нужно до пуска (решение 11.10.2026).
     """
-    if not ck or ck.get("risk_level") in (None, "GREEN"):
+    if not ck:
         return None
+    overdue = _monthly_overdue_days(ck)
+    cal = (f"⚠ прогон под нагрузкой не выполнялся {overdue:.0f} дн. (Cummins — ежемесячно)"
+           if overdue else None)
+    if ck.get("risk_level") in (None, "GREEN"):
+        return cal
     lvl = _COKING_LEVEL_RU.get(ck["risk_level"], ck["risk_level"])
     left = ck.get("purge_left_low_min")
     pct = ck.get("purge_low_pct")
     tail = (f"до сброса ~{left:.0f} мин под нагрузкой ≥{pct:.0f} %"
             if left and pct else "")
+    if ck.get("service_needed"):
+        tail = "нужен сервисный прожиг (долг больше 32 ч)"
     if run_state == 0:
         since = (f"накоплен с прожига {ck['last_purge_ts'][8:10]}.{ck['last_purge_ts'][5:7]}"
                  if ck.get("last_purge_ts") else "накоплен при прошлой работе")
-        return f"⚠ перед пуском: риск нагара {lvl} — {since}" + (f"; {tail}" if tail else "")
-    return f"🟡 риск нагара {lvl}" + (f" — {tail}" if tail else "")
+        txt = f"⚠ перед пуском: риск нагара {lvl} — {since}" + (f"; {tail}" if tail else "")
+    else:
+        txt = f"🟡 риск нагара {lvl}" + (f" — {tail}" if tail else "")
+    return f"{txt} | {cal}" if cal else txt
+
+
+def _monthly_overdue_days(ck: dict) -> float | None:
+    """Сколько дней без ежемесячного прогона, если больше 30 (Cummins), иначе None."""
+    ref = ck.get("last_monthly_run_ts") or ck.get("calendar_since_ts")
+    if not ref:
+        return None
+    try:
+        t = datetime.fromisoformat(ref)
+    except (TypeError, ValueError):
+        return None
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    days = (datetime.now(timezone.utc) - t).total_seconds() / 86400.0
+    return days if days > 30 else None
 
 
 def extract_alarm_text(s: dict) -> str | None:
