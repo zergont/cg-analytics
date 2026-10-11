@@ -218,6 +218,10 @@ COKING_RISK:
   purge_high_load_pct: 70
   purge_rate_high: 16.0
   purge_min_coolant_c: 60            # прожиг засчитывается при прогретой ОЖ
+  # Провал ниже порога короче допуска отрезок прожига не рвёт — шум регулирования у
+  # границы 30 % (решение 11.10.2026: ДЭС №3 работает у порога, без допуска в прожиг
+  # попадало 23 % времени при ≥30 %)
+  purge_dip_tolerance_sec: 60
   severity_default: CAUTION
   _source: PASSPORT_РЭ + отраслевые нормы (research_coking_wet_stacking.md)
 

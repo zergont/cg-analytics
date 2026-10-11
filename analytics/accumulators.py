@@ -141,6 +141,7 @@ def _update_coking(
     rate_high = float(cfg.det("COKING_RISK", "purge_rate_high", default=16.0))
     min_block = float(cfg.thr("engine_operation", "tunable", "purge_min_duration_sec", default=900.0))
     purge_cool = float(cfg.det("COKING_RISK", "purge_min_coolant_c", default=60.0))
+    dip_tol = float(cfg.det("COKING_RISK", "purge_dip_tolerance_sec", default=60.0))
     below_c = float(cfg.thr("coolant_temperature", "tunable", "below_60_risk_threshold_c", default=60.0))
 
     added = 0.0
@@ -165,6 +166,7 @@ def _update_coking(
     def break_run() -> None:
         cr.purge_run_sec = 0.0
         cr.purge_pending_sec = 0.0
+        cr.purge_dip_sec = 0.0
 
     # 1. Холостой ход: суммарно — в долг, непрерывный отрезок — для замечания
     if run_state in IDLE_RUN_STATES:
@@ -230,10 +232,19 @@ def _update_coking(
                 added += dt
                 if dt > 0:
                     last_acc = nxt
-                break_run()
+                # Короткий провал ниже порога внутри отрезка — шум регулирования у
+                # границы 30 % (опрос 9 с): отрезок не рвётся, пока провал короче
+                # допуска (решение 11.10). Без него ДЭС №3, работающая у порога,
+                # засчитывала в прожиг 23 % времени при ≥30 %, и риск не гас никогда
+                cr.purge_dip_sec += dt
+                if cr.purge_run_sec <= 0 or cr.purge_dip_sec > dip_tol:
+                    break_run()
+                else:
+                    cr.purge_run_sec += dt
             elif not warm:
                 break_run()       # нагрузка есть, но мотор холодный — не прожиг
             else:
+                cr.purge_dip_sec = 0.0
                 credit = dt * (rate_high if v >= high_pct else rate_low)
                 cr.purge_run_sec += dt
                 if cr.purge_run_sec - dt >= min_block:

@@ -142,6 +142,7 @@ class CokingRisk:
     last_added_sec: float = 0.0         # прирост долга в последнем подсегменте
     purge_run_sec: float = 0.0          # текущий непрерывный отрезок под нагрузкой ≥ порога
     purge_pending_sec: float = 0.0      # зачёт отрезка, ждущий минимальной длины
+    purge_dip_sec: float = 0.0          # текущий короткий провал ниже порога внутри отрезка
     idle_run_sec: float = 0.0           # текущий непрерывный холостой ход
     purge_left_low_min: Optional[float] = None   # до сброса — минут при ≥ порога
     purge_left_high_min: Optional[float] = None  # то же при высокой нагрузке
@@ -162,6 +163,7 @@ class CokingRisk:
             "last_added_sec": self.last_added_sec,
             "purge_run_sec": self.purge_run_sec,
             "purge_pending_sec": self.purge_pending_sec,
+            "purge_dip_sec": self.purge_dip_sec,
             "idle_run_sec": self.idle_run_sec,
             "purge_left_low_min": self.purge_left_low_min,
             "purge_left_high_min": self.purge_left_high_min,
@@ -197,6 +199,7 @@ class CokingRisk:
             last_added_sec=f("last_added_sec"),
             purge_run_sec=f("purge_run_sec"),
             purge_pending_sec=f("purge_pending_sec"),
+            purge_dip_sec=f("purge_dip_sec"),
             idle_run_sec=f("idle_run_sec"),
             purge_left_low_min=o("purge_left_low_min"),
             purge_left_high_min=o("purge_left_high_min"),

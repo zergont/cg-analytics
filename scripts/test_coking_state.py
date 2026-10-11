@@ -106,6 +106,18 @@ check(cr.low_load_zone_sec > 3 * 3600 and cr.debt_paid_total_sec == 0, f"4: ко
 cr = upd(CokingRisk(low_load_zone_sec=3 * 3600), 30, load=50, cool=40.0)
 check(cr.debt_paid_total_sec == 0, "4б: ОЖ холодная — не прожиг")
 
+# 4в. Провал ниже 30 % короче 60 с — шум у порога, отрезок не рвётся (решение 11.10)
+cr = CokingRisk(low_load_zone_sec=3 * 3600)
+upd(cr, 10, load=50)
+upd(cr, 0.5, load=20, start=T0 + timedelta(minutes=10))
+upd(cr, 10, load=50, start=T0 + timedelta(seconds=630))
+check(cr.debt_paid_total_sec > 0 and cr.purge_dip_sec == 0, f"4в: провал 30 с не рвёт отрезок: {cr.debt_paid_total_sec}")
+cr = CokingRisk(low_load_zone_sec=3 * 3600)
+upd(cr, 10, load=50)
+upd(cr, 1.5, load=20, start=T0 + timedelta(minutes=10))
+upd(cr, 10, load=50, start=T0 + timedelta(seconds=690))
+check(cr.debt_paid_total_sec == 0, f"4г: провал 90 с рвёт отрезок: {cr.debt_paid_total_sec}")
+
 # 5. Холостой ход: суммарно в долг ×2, непрерывный >10 мин — замечание
 cr = upd(CokingRisk(), 14, rs=2)
 check(abs(cr.idle_low_rpm_sec - 840) < 1 and abs(cr.debt_sec - 1680) < 1, f"5: х.х. 14 мин, долг 28 мин: {cr.debt_sec}")
