@@ -270,6 +270,39 @@ class EmptyLLMResponse(Exception):
     """Модель вернула пустой текст — это ошибка, а не готовое заключение."""
 
 
+def _model_input(seg_row: dict) -> str:
+    """Вход заключения — один для всех провайдеров (build_claude_input).
+
+    Шапка единого вердикта (части сводки, v5.1.0), акт аварии, разборы гейта,
+    хронология стоянки и отчёт. До v5.1.2 модели шлюза и локальные получали
+    голый report_md — шапка доходила только до claude-api, последнего в
+    цепочке, а 276 из 285 заключений за месяц писал шлюз: «45 предупреждений»
+    из старой таблицы отчёта при вердикте «3 замечания, 9 снято ИИ».
+    """
+    try:
+        from corpus.preprocessor import build_claude_input
+        return build_claude_input(seg_row)
+    except Exception:
+        logger.warning("corpus/worker: вход заключения #%s не собран — отдаю отчёт",
+                       seg_row.get("id"), exc_info=True)
+        return seg_row.get("report_md") or ""
+
+
+def _verdict_fields(seg_row: dict) -> tuple[str | None, str | None]:
+    """(вердикт, уровень) для корпуса — тот же расчёт, что в шапке входа.
+
+    Пути llm и цепочки писали «LLM» и NULL: календарь .194 рисовал зелёный
+    бейдж «Claude: норма» у сегмента с замечаниями.
+    """
+    try:
+        from corpus.preprocessor import extract_verdict_alarm
+        return extract_verdict_alarm(seg_row)
+    except Exception:
+        logger.warning("corpus/worker: вердикт #%s не определён", seg_row.get("id"),
+                       exc_info=True)
+        return None, None
+
+
 async def _analyse_segment_llm(seg_row: dict, system_prompt: str,
                                depth: str | None = None) -> dict[str, Any]:
     """Анализ сегмента через локальную LLM (без инструментов, простой вызов)."""
@@ -278,20 +311,21 @@ async def _analyse_segment_llm(seg_row: dict, system_prompt: str,
     from llm.router import format_ai_signature
 
     t0 = time.monotonic()
-    report_md = seg_row.get("report_md") or ""
+    user_input = _model_input(seg_row)
+    verdict, alarm_level = _verdict_fields(seg_row)
     meta: dict = {}
 
     try:
         # chat() сам ретраит сеть/429/5xx и знает текущего провайдера
-        content = await chat(system_prompt, report_md, depth=depth, meta=meta)
+        content = await chat(system_prompt, user_input, depth=depth, meta=meta)
         if not content:
             raise EmptyLLMResponse("модель вернула пустой ответ")
         f = _llm_result_fields(meta, _cfg["model"])
         content += format_ai_signature(f["label"])
 
         return {
-            "verdict":            "LLM",
-            "alarm_level":        None,
+            "verdict":            verdict,
+            "alarm_level":        alarm_level,
             "conclusion_md":      content,
             "error":              None,
             "tokens_used":        f["tokens_used"],
@@ -299,7 +333,8 @@ async def _analyse_segment_llm(seg_row: dict, system_prompt: str,
             "loops_count":        0,
             "generation_time_sec": round(time.monotonic() - t0, 1),
             "debug_json":         {"provider": "llm", "model": _cfg["model"],
-                                   "depth": depth, **f["debug"]},
+                                   "depth": depth, "input_length": len(user_input),
+                                   **f["debug"]},
             "claude_model":       f["claude_model"] or _cfg["model"],
         }
     except Exception as exc:
@@ -341,8 +376,9 @@ async def _analyse_segment_chain(
     import time
     from llm.client import chat
 
-    report_md  = seg_row.get("report_md") or ""
-    est_tokens = (len(system_prompt) + len(report_md)) // _EST_CHARS_PER_TOKEN \
+    user_input = _model_input(seg_row)
+    verdict, alarm_level = _verdict_fields(seg_row)
+    est_tokens = (len(system_prompt) + len(user_input)) // _EST_CHARS_PER_TOKEN \
                  + _RESPONSE_RESERVE_TOKENS
     trace: list[dict] = []
 
@@ -367,7 +403,7 @@ async def _analyse_segment_chain(
             else:
                 from llm.router import format_ai_signature
                 meta: dict = {}
-                content = await chat(system_prompt, report_md,
+                content = await chat(system_prompt, user_input,
                                      entry=entry, stream=entry.get("stream", True),
                                      depth=depth, meta=meta)
                 if not content:
@@ -375,8 +411,8 @@ async def _analyse_segment_chain(
                 f = _llm_result_fields(meta, entry["model"])
                 content += format_ai_signature(f["label"])
                 result = {
-                    "verdict":            "LLM",
-                    "alarm_level":        None,
+                    "verdict":            verdict,
+                    "alarm_level":        alarm_level,
                     "conclusion_md":      content,
                     "error":              None,
                     "tokens_used":        f["tokens_used"],
@@ -384,7 +420,8 @@ async def _analyse_segment_chain(
                     "loops_count":        0,
                     "generation_time_sec": round(time.monotonic() - t0, 1),
                     "debug_json":         {"provider": entry["provider"], "entry": entry["id"],
-                                           "depth": depth, **f["debug"]},
+                                           "depth": depth, "input_length": len(user_input),
+                                           **f["debug"]},
                     "claude_model":       f["claude_model"] or f"{entry['name']} ({entry['model']})",
                 }
             trace.append({"entry": entry["id"], "action": "ok"})
