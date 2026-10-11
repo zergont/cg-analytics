@@ -273,7 +273,7 @@ def _detect_negative_sequence(
 
     return [Detection(
         scenario="NEGATIVE_SEQUENCE",
-        severity=cfg.det("NEGATIVE_SEQUENCE", "severity_default", default="WARNING"),
+        severity=cfg.det("NEGATIVE_SEQUENCE", "severity_default", default="CAUTION"),
         t_detected=_iso(seg_start),
         source="METRIC_RULE",
         trigger=(
@@ -549,7 +549,7 @@ def _detect_oil_dilution(
     if press_drop >= press_drop_thr and temp_rise >= temp_rise_thr:
         return [Detection(
             scenario="OIL_DILUTION",
-            severity=cfg.det("OIL_DILUTION", "severity_default", default="WARNING"),
+            severity=cfg.det("OIL_DILUTION", "severity_default", default="CAUTION"),
             t_detected=_iso(seg_start),
             source="METRIC_RULE",
             trigger=(f"oil_press_drop={press_drop:.0f}кПа >= {press_drop_thr:.0f}, "
@@ -642,72 +642,6 @@ def _detect_no_load_too_long(
     )]
 
 
-# ── WARMUP_VIOLATION ─────────────────────────────────────────────────────────
-
-def _detect_warmup_violation(
-    chars: dict[str, Any],
-    seg_start: datetime,
-    seg_end: datetime,
-    cfg: AnalyticsConfig,
-) -> list[Detection]:
-    duration_sec = (_tz(seg_end) - _tz(seg_start)).total_seconds()
-    min_warmup = float(cfg.det("WARMUP_VIOLATION", "min_warmup_sec", default=180.0))
-    cold_thr = float(cfg.det("WARMUP_VIOLATION", "cold_start_coolant_c", default=21.0))
-
-    # Проверяем что это был холодный пуск
-    cool_char = chars.get("COOLANT_TEMP")
-    if cool_char is None:
-        return []
-    start_temp = cool_char.get("value_start")
-    if start_temp is None or start_temp >= cold_thr:
-        return []  # не холодный пуск
-
-    if duration_sec >= min_warmup:
-        return []
-
-    return [Detection(
-        scenario="WARMUP_VIOLATION",
-        severity=cfg.det("WARMUP_VIOLATION", "severity_default", default="WARNING"),
-        t_detected=_iso(seg_start),
-        source="PASSPORT_THRESHOLD",
-        trigger=(f"warmup_duration={duration_sec:.0f}с < {min_warmup:.0f}с "
-                 f"при холодном пуске (Т ОЖ={start_temp:.1f}°C < {cold_thr}°C)"),
-        related_roles=["COOLANT_TEMP"],
-        fault_codes=[],
-        description_key="WARMUP_VIOLATION.insufficient_warmup",
-        values={
-            "warmup_duration_sec": duration_sec,
-            "required_sec": min_warmup,
-            "coolant_start_c": start_temp,
-            "cold_threshold_c": cold_thr,
-        },
-    )]
-
-
-# ── COOLDOWN_VIOLATION ───────────────────────────────────────────────────────
-
-def _detect_cooldown_violation(
-    prev_zone: str | None,
-    seg_start: datetime,
-    cfg: AnalyticsConfig,
-) -> list[Detection]:
-    required_after = cfg.det("COOLDOWN_VIOLATION", "required_after_zone", default="ELEVATED")
-    if prev_zone != required_after:
-        return []
-
-    return [Detection(
-        scenario="COOLDOWN_VIOLATION",
-        severity=cfg.det("COOLDOWN_VIOLATION", "severity_default", default="WARNING"),
-        t_detected=_iso(seg_start),
-        source="PASSPORT_THRESHOLD",
-        trigger=f"Останов после зоны {prev_zone} без фазы охлаждения (RUN_STATE 4/5)",
-        related_roles=["COOLANT_TEMP"],
-        fault_codes=[611],
-        description_key="COOLDOWN_VIOLATION.no_cooldown_after_elevated",
-        values={"previous_zone": prev_zone, "required_after_zone": required_after},
-    )]
-
-
 # ── START_FAILURE ─────────────────────────────────────────────────────────────
 
 def _detect_start_failure(
@@ -783,7 +717,7 @@ def _detect_thermal_highload(
 
     return [Detection(
         scenario="THERMAL_HIGHLOAD",
-        severity=cfg.det("THERMAL_HIGHLOAD", "severity_default", default="WARNING"),
+        severity=cfg.det("THERMAL_HIGHLOAD", "severity_default", default="CAUTION"),
         t_detected=_iso(seg_start),
         source="METRIC_RULE",
         trigger="; ".join(triggers),
@@ -847,7 +781,7 @@ def _limit_detection(role, val, limit, label, fcodes, seg_start, cfg) -> Detecti
     prox_pct = float(cfg.det("LIMIT_PROXIMITY", "proximity_pct", default=10.0))
     return Detection(
         scenario="LIMIT_PROXIMITY",
-        severity=cfg.det("LIMIT_PROXIMITY", "severity_default", default="WARNING"),
+        severity=cfg.det("LIMIT_PROXIMITY", "severity_default", default="CAUTION"),
         t_detected=_iso(seg_start),
         source="PASSPORT_THRESHOLD",
         trigger=f"{label}: {val:.2f} в пределах {prox_pct:.0f}% от порога {limit:.1f}",

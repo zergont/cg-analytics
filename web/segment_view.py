@@ -218,3 +218,27 @@ def _seg_severity(
     if any(d.get("scenario") != "CONTROLLER_FAULT" for d in dets):
         return "CAUTION"
     return None
+
+
+def _cap_ai_level(level: str | None, chars) -> str | None:
+    """Уровень сохранённого заключения ИИ — по догме (v5.1.7), БД не трогаем.
+
+    До v4.8.9 запасной расчёт корпуса ставил WARNING («предупреждение панели») по
+    любой детекции WARNING, в том числе аналитики (10 заключений июня), и ALARM —
+    легаси. WARNING/SHUTDOWN оставляем, только если их подтверждает панель; уровень
+    только понижаем — пересчёт мог бы поднять НОРМА, снятую гейтом.
+    """
+    if level not in ("WARNING", "ALARM", "SHUTDOWN"):
+        return level
+    ch = _parse_json(chars, {}, ctx="characteristics_json") or {}
+    if not isinstance(ch, dict):
+        return level
+    if ch.get("stop_kind") == "EMERGENCY":
+        return "SHUTDOWN" if level == "SHUTDOWN" else "WARNING"
+    panel = {d.get("severity")
+             for s in ch.get("subsegments") or [] if isinstance(s, dict)
+             for d in s.get("detections") or []
+             if isinstance(d, dict) and d.get("scenario") == "CONTROLLER_FAULT"}
+    if level == "SHUTDOWN" and "SHUTDOWN" in panel:
+        return "SHUTDOWN"
+    return "WARNING" if panel & {"WARNING", "SHUTDOWN"} else "CAUTION"

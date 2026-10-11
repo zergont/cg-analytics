@@ -25,6 +25,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from analytics.contract import cap_severity
+
 logger = logging.getLogger(__name__)
 
 # ── Константы ─────────────────────────────────────────────────────────────────
@@ -316,8 +318,8 @@ def build_structural_status(
     panel_alarms:     list[dict] = []
     analytics_alarms: list[dict] = []
     for d in active_dets:
-        severity    = d.get("severity", "INFO")
         scenario    = d.get("scenario", "?")
+        severity    = cap_severity(scenario, d.get("severity", "INFO"))
         trigger     = d.get("trigger", "")
         fault_codes = d.get("fault_codes") or []
 
@@ -619,7 +621,7 @@ def build_warning_prompt(
             )
             supp = " — отменена гейтом" if e.get("gate_suppressed") else ""
             lines.append(
-                f"  [{e.get('severity')}] {e.get('scenario')}: {span}, "
+                f"  [{cap_severity(e.get('scenario'), e.get('severity'))}] {e.get('scenario')}: {span}, "
                 f"воздействие {_fmt_duration(e.get('active_sec') or 0)}"
                 f"{_blind_note(e.get('blind_sec'))}{supp}"
             )
@@ -652,7 +654,8 @@ def build_warning_prompt(
         for al in trip_context.get("open_alarms", []):
             supp = " — отменена гейтом" if al.get("gate_suppressed") else ""
             lines.append(
-                f"  Висела тревога: {al.get('scenario')} [{al.get('severity')}]"
+                f"  Висела тревога: {al.get('scenario')} "
+                f"[{cap_severity(al.get('scenario'), al.get('severity'))}]"
                 f" {_fmt_duration(al.get('active_sec') or 0)}"
                 f"{_blind_note(al.get('blind_sec'))}{supp}"
             )

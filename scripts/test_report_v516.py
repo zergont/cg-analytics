@@ -163,23 +163,28 @@ def stop(cause_open, rows, dur=600, cause_close=None):
                 preamble_included=False, data_quality=1.0, subsegments=[sub(1, 1, [])], sequence_checks=[],
                 events=[])
     by_ = {cfg.role_to_addr("RPM"): [{"ts": T0 + timedelta(seconds=t), "value": v} for t, v in rows]}
-    _check_stop_profile(s, by_, cfg, Detection)
+    _check_stop_profile(s, by_, cfg)
     return s
+
+
+def _not_fell(s):
+    """«Обороты не упали» — наблюдение без детекции (v5.1.7: только панель)."""
+    return (not s.subsegments[0].detections
+            and any(c["check"] == "rpm_stop_profile" and not c["passed"] for c in s.sequence_checks))
 
 
 s_ = stop("REPORT_START", [(10, 0), (40, 0)])
 check(not s_.sequence_checks, "14: суточный рез — проверки профиля нет")
 s_ = stop("RUN_STATE_CHANGE", [(-5, 1500), (10, 709), (20, 545)], dur=20)
-check(not s_.subsegments[0].detections, "14б: окно 20 с < норматива — «нарушения» нет")
+check(not s_.sequence_checks, "14б: окно 20 с < норматива — «не упали» нет")
 s_ = stop("RUN_STATE_CHANGE", [(-5, 1500), (10, 900), (40, 800), (60, 700)], dur=70)
-check(not s_.subsegments[0].detections, "14в: 60 с < горизонта 90 с — медленный останов ещё не нарушение")
+check(not s_.sequence_checks, "14в: 60 с < горизонта 90 с — медленный останов ещё не «не упали»")
 s_ = stop("RUN_STATE_CHANGE", [(-5, 1500), (10, 900), (40, 800), (95, 800)], dur=120)
-check(any(d.scenario == "STOP_PROFILE" for d in s_.subsegments[0].detections), "14г: не упали за 95 с — нарушение")
+check(_not_fell(s_), "14г: не упали за 95 с — наблюдение без детекции")
 s_ = stop("RUN_STATE_CHANGE", [(-5, 1500), (10, 900), (50, 800), (95, 800)], dur=20, cause_close="FAULT_CLEARED")
-check(any(d.scenario == "STOP_PROFILE" for d in s_.subsegments[0].detections),
-      "14д: голова 20 с, обрезанная снятием аварии, — судим по ряду после реза")
+check(_not_fell(s_), "14д: голова 20 с, обрезанная снятием аварии, — судим по ряду после реза")
 s_ = stop("RUN_STATE_CHANGE", [(-5, 1500), (10, 900), (50, 800), (95, 800)], dur=20, cause_close="RUN_STATE_CHANGE")
-check(not s_.subsegments[0].detections, "14е: голова до нового пуска — чужой ряд не берём")
+check(not s_.sequence_checks, "14е: голова до нового пуска — чужой ряд не берём")
 
 # 14ж. Свёртка: худшее значение не теряется
 from analytics.serializer import _det_worst  # noqa: E402

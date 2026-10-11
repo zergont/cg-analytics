@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
     -- Сводные цифры (денормализованы для быстрого чтения)
     segments_count      INT,
     detections_count    INT,
-    max_severity        TEXT CHECK (max_severity IN ('SHUTDOWN','ALARM','WARNING','INFO') OR max_severity IS NULL),
+    max_severity        TEXT CHECK (max_severity IN ('SHUTDOWN','ALARM','WARNING','CAUTION','INFO') OR max_severity IS NULL),
     data_quality_avg    NUMERIC(4,3),
     -- Служебные
     duration_ms         INT,        -- время выполнения прогона в мс
@@ -82,6 +82,14 @@ CREATE INDEX IF NOT EXISTS idx_analysis_runs_equipment
     ON analysis_runs (router_sn, equip_type, panel_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_analysis_runs_period
     ON analysis_runs (ts_from, ts_to);
+
+-- v5.1.7: аналитика не выше CAUTION — максимум прогона бывает CAUTION. Старый
+-- CHECK его не пускал: прогон без панельных тревог не сохранялся (ошибка в лог).
+-- Только расширение списка — существующие строки ему удовлетворяют; файл
+-- играется при каждом старте, более узкого ADD CONSTRAINT с этим именем выше нет
+ALTER TABLE analysis_runs DROP CONSTRAINT IF EXISTS analysis_runs_max_severity_check;
+ALTER TABLE analysis_runs ADD CONSTRAINT analysis_runs_max_severity_check
+    CHECK (max_severity IN ('SHUTDOWN','ALARM','WARNING','CAUTION','INFO') OR max_severity IS NULL);
 
 -- ── Настройки приложения ──────────────────────────────────────────────────────
 -- Пары ключ-значение, редактируемые через Web UI без перезапуска сервиса.

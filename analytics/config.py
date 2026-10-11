@@ -279,6 +279,7 @@ class AnalyticsConfig:
 
         # ── Детекторы: severity_default ────────────────────────────────────
         valid_sev = {"INFO", "CAUTION", "WARNING", "SHUTDOWN"}
+        from .contract import PANEL_SCENARIOS, cap_severity
         for scenario, params in self.detectors.items():
             if not isinstance(params, dict):
                 continue
@@ -288,6 +289,14 @@ class AnalyticsConfig:
                     f"detectors.{scenario}.severity_default={sev!r} "
                     f"не входит в {valid_sev}"
                 )
+            # WARNING/SHUTDOWN — только панель (догма, 11.10.2026): уровень выше
+            # CAUTION у аналитики в KB не ошибка запуска, а понижение с записью в лог
+            elif sev is not None and scenario not in PANEL_SCENARIOS \
+                    and cap_severity(scenario, sev) != sev:
+                _log.warning(
+                    "detectors.%s.severity_default=%s: аналитика не выше CAUTION — понижено",
+                    scenario, sev)
+                params["severity_default"] = "CAUTION"
             # Числовые пороги >= 0
             for key, val in params.items():
                 if key.endswith(("_sec", "_pct", "_kpa", "_c", "_v", "_hz", "_kw_per_s")):

@@ -2,6 +2,9 @@
 # Источник: ТЗ аналитики, раздел 7.1; пороги из thresholds.yaml
 # ХАРДКОД ЗАПРЕЩЁН: числа только здесь, код ссылается на конфиг.
 # Изменение: только через веб-морду (раздел 9 ТЗ)
+# Уровни: WARNING и SHUTDOWN выставляет ТОЛЬКО панель (CONTROLLER_FAULT). У
+# аналитики severity_default — INFO или CAUTION; выше — понижается при загрузке
+# с записью в лог (догма, подтверждено 11.10.2026, v5.1.7).
 
 # ─── LOAD_STEP: Наброс/сброс нагрузки (Класс A — быстрые/электрические) ─────
 # Gate: только RUN_STATE = 3. Вне него понятие «наброс/сброс» бессмысленно.
@@ -157,8 +160,8 @@ COOLING_FAILURE:
   #
   # Калибровка на ДГУ 6003790403: нормальные значения slope = -12..+13 °C/ч.
   # Пороги выбраны заметно выше нормального прогрева, с требованием устойчивости.
-  cooling_slope_warning_c_per_h: 20.0   # Устойчивый тренд > 20 °C/ч → WARNING
-  cooling_slope_alarm_c_per_h:   40.0   # Устойчивый тренд > 40 °C/ч → ALARM
+  cooling_slope_warning_c_per_h: 20.0   # Устойчивый тренд > 20 °C/ч → CAUTION
+  cooling_slope_alarm_c_per_h:   40.0   # > 40 °C/ч — только в values (аналитика ≤ CAUTION)
   # Минимальная длительность подсегмента для применения детектора
   min_segment_duration_sec: 300         # Короткие сегменты (< 5 мин) игнорируем
   # Двухфазная логика (Addendum v1.4):
@@ -168,8 +171,8 @@ COOLING_FAILURE:
   #   coolant_temperature.tunable.asymptote_norm_max_c = 92
   # Фаза 2 — рабочий режим (T >= working_range_low): прямой детектор по slope.
   #   Пороги ниже — в ед./с (Addendum v1.4: внутрисегментные метрики → /сек).
-  cooling_slope_warning_c_per_s: 0.006  # ~20 °C/ч (slope > этого → WARNING)
-  cooling_slope_alarm_c_per_s:   0.011  # ~40 °C/ч (slope > этого → ALARM)
+  cooling_slope_warning_c_per_s: 0.006  # ~20 °C/ч (slope > этого → CAUTION)
+  cooling_slope_alarm_c_per_s:   0.011  # ~40 °C/ч — только в values (аналитика ≤ CAUTION)
   # Гейт по режиму: только RUN_STATE=3 (установившаяся работа)
   # valid_run_states: задаётся неявно в коде (run_state != 3 → return [])
   # Приближение к порогу HCT Warning (вторичная проверка по max-значению)
@@ -298,8 +301,8 @@ THERMAL_HIGHLOAD:
   enabled: true
   zone: ELEVATED
   # Приближение к порогам (берём из thresholds.yaml динамически)
-  coolant_proximity_pct: 10        # coolant > HCT_warning - 10% → WARNING
-  oil_proximity_pct: 10            # oil > HOT_warning - 10% → WARNING
+  coolant_proximity_pct: 10        # coolant > HCT_warning - 10% → в trigger (уровень CAUTION)
+  oil_proximity_pct: 10            # oil > HOT_warning - 10% → в trigger (уровень CAUTION)
   # Уровни теплового риска (сквозной аккумулятор)
   risk_yellow_elevated_sec: 3600   # 60 мин в ELEVATED → YELLOW
   risk_red_elevated_sec: 7200      # 120 мин в ELEVATED → RED
@@ -326,14 +329,15 @@ LIMIT_PROXIMITY:
   severity_default: CAUTION
   _source: TUNABLE
 
-# ─── STOP_PROFILE: Диагностика профиля останова ──────────────────────────────
-# Срабатывает на сегментах RUN_STATE=0 (Stop).
-# Проверяет: обороты снизились до нуля в пределах T_stop_max?
-# Если нет → подозрение на отказ клапана отсечки топлива (пожароопасно!).
-# T_stop_max берётся из segmentation.yaml → transitions.T_stop_max_sec.
+# ─── STOP_PROFILE: Профиль останова (наблюдение) ────────────────────────────
+# На голове стопа (RUN_STATE=0 после смены режима) — за сколько обороты упали.
+# С v5.1.7 только проверка rpm_stop_profile, БЕЗ детекции и уровня: на вердикт не
+# влияет. Отказ останова — авария самой панели (PCC3300: код 1245 «Неисправность
+# при останове двигателя», SHUTDOWN, маска 40405/15; 40407/3 FailtoShutdown — это
+# 1416 Battle Short), аналитика её не дублирует (решение владельца 11.10.2026). Пороги —
+# segmentation.yaml → transitions (T_stop_max_sec, T_stop_violation_sec).
 STOP_PROFILE:
   enabled: true
-  severity_default: WARNING   # отказ клапана отсечки — критичный дефект безопасности
   _source: TUNABLE
 
 # ─── RPM_UNDERSPEED: Просадка оборотов под нагрузкой ────────────────────────

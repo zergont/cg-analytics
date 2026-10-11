@@ -273,6 +273,25 @@ class RiskAccumulators:
 # цепочке coking_risk_json по сегментам, в сводке своя часть (v5.1.3).
 STATE_SCENARIOS = frozenset({"COKING_RISK"})
 
+# Догма уровней (подтверждено владельцем 11.10.2026): WARNING и SHUTDOWN выставляет
+# только панель управления. Предупреждение аналитики выше CAUTION не бывает.
+PANEL_SCENARIOS = frozenset({"CONTROLLER_FAULT"})
+_ABOVE_CAUTION = frozenset({"WARNING", "SHUTDOWN", "ALARM"})
+
+
+def cap_severity(scenario: str | None, severity: str | None) -> str | None:
+    """Уровень сигнала по догме: у аналитики — не выше CAUTION.
+
+    Тем же потолком читаются старые записи: до v5.1.7 «Двигатель не остановился»
+    и «останов без охлаждения» после высокой нагрузки выходили WARNING (наследие
+    переименования шкалы v4.8.9: ALARM аналитики стал панельным WARNING), до
+    v4.8.9 — ALARM.
+    """
+    if scenario in PANEL_SCENARIOS or severity not in _ABOVE_CAUTION:
+        return severity
+    return "CAUTION"
+
+
 @dataclass
 class Detection:
     """Сработавший диагностический сценарий."""
@@ -289,6 +308,10 @@ class Detection:
     # 143/415). В отчёт и промпт не идут — только подключ состава гейта: в
     # fault_codes аналитики остаётся лишь код, который панель реально выставила (v5.1.6)
     ref_codes: list[int] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # Единая точка: какой бы уровень ни дал детектор или KB, аналитика ≤ CAUTION
+        self.severity = cap_severity(self.scenario, self.severity)
 
     def to_dict(self) -> dict[str, Any]:
         return {

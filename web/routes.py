@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from analytics.serializer import RUN_STATE_RU as _RUN_STATE_LABELS
 from db import analytics, source
 from web.segment_view import (  # noqa: F401  — реэкспорт: используются ниже по файлу
+    _cap_ai_level,
     _parse_json,
     _seg_active_dets,
     _seg_collect_dets,
@@ -46,7 +47,18 @@ def _active_dets(seg_row: dict) -> tuple[list[dict], bool]:
     dets = _parse_json(seg_row.get("active_detections_json"), [], ctx="active_detections_json") or []
     # Риск нагара — состояние, не тревога (v5.1.3), как в build_structural_status
     dets = _without_state([d for d in dets if isinstance(d, dict)])
+    # Аналитика не выше CAUTION (v5.1.7) — и для записей, сделанных до неё
+    from analytics.contract import cap_severity
+    dets = [d if d.get("severity") == cap_severity(d.get("scenario"), d.get("severity"))
+            else dict(d, severity=cap_severity(d.get("scenario"), d.get("severity")))
+            for d in dets]
     return dets, is_analytics_suppressed(seg_row, dets)
+
+
+def _cap_sev(scenario: str | None, severity: str | None) -> str | None:
+    from analytics.contract import cap_severity
+    return cap_severity(scenario, severity)
+
 
 
 router = APIRouter()
@@ -1608,9 +1620,12 @@ async def online_calendar(
         dets = (_seg_active_dets(characteristics_json) if _stop_kind == "SIMPLE"
                 else _seg_collect_dets(characteristics_json))
         level = compute_severity_level(dets)
-        # Проваленная sequence-проверка без детекции — тоже сигнал аналитики
+        # Проваленная sequence-проверка без детекции — тоже сигнал аналитики;
+        # обрыв связи и наблюдения (профиль останова) на уровень не влияют
+        from analytics.serializer import _NO_VERDICT_CHECKS
         if level == "норма" and any(
-            not c.get("passed", True) for c in checks if isinstance(c, dict)
+            not c.get("passed", True) and c.get("check") not in _NO_VERDICT_CHECKS
+            for c in checks if isinstance(c, dict)
         ):
             level = "предупреждение"
         return level
@@ -1677,6 +1692,17 @@ async def online_calendar(
             ai_statuses = await get_analyses_for_segments(all_seg_ids)
         except Exception as _ae:
             logger.debug("corpus статусы недоступны: %s", _ae)
+        # Уровень заключения ИИ — по догме (v5.1.7): «предупреждение панели» без панели
+        # у старых сегментов показываем CAUTION; БД не трогаем
+        _chars_by_id = {
+            seg["id"]: seg.get("characteristics_json")
+            for row in grid for cell in row if cell is not None
+            for seg in cell.get("segments", []) if seg.get("id") is not None
+        }
+        for _sid, _ai in list(ai_statuses.items()):
+            if isinstance(_ai, dict) and _ai.get("alarm_level"):
+                ai_statuses[_sid] = dict(_ai, alarm_level=_cap_ai_level(
+                    _ai["alarm_level"], _chars_by_id.get(_sid)))
 
     return templates.TemplateResponse(request, "online_calendar.html", {
         "router_sn":        router_sn,
@@ -1784,6 +1810,10 @@ async def online_segment_detail(request: Request, seg_id: int):
         from corpus.db import get_analysis as _get_analysis
         from corpus.humanizer import _extract_block2 as _exb2
         claude_analysis = await _get_analysis(seg_id)
+        if claude_analysis and claude_analysis.get("alarm_level"):
+            claude_analysis = dict(claude_analysis)
+            claude_analysis["alarm_level"] = _cap_ai_level(
+                claude_analysis["alarm_level"], seg.get("characteristics_json"))
         if claude_analysis and claude_analysis.get("conclusion_md"):
             claude_analysis = dict(claude_analysis)
             claude_analysis["conclusion_block2"] = _exb2(claude_analysis["conclusion_md"])
@@ -2274,7 +2304,9 @@ async def api_machines():
             "active_alarms": [
                 {
                     "scenario":        e["scenario"],
-                    "severity":        e.get("severity"),
+                    # Аналитика — не выше CAUTION (v5.1.7): старые эпизоды
+                    # «не остановился» с WARNING не красят бегущую строку UI
+                    "severity":        _cap_sev(e["scenario"], e.get("severity")),
                     "source":          e.get("source"),
                     # per-fault: панельные аварии различаются по addr/bit
                     "addr":            e.get("addr"),

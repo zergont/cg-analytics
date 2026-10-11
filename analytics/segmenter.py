@@ -1025,17 +1025,32 @@ def _sequence_checks(
                        for r in runs],
         })
 
-    # Проверка: нет активных критических fault в конце сегмента
+    # Проверка: нет активных аварийных масок на конце сегмента. Наблюдение, на
+    # вердикт не влияет — аварию несёт сама панель. Сырые уровни масок в нижнем
+    # регистре ('shutdown') — до v5.1.7 сравнение с "SHUTDOWN" не срабатывало никогда
+    _seg_end = _tz(datetime.fromisoformat(subsegments[-1].t_end)) \
+        if subsegments and subsegments[-1].t_end else None
+
+    def _active_at_end(fp: dict) -> bool:
+        if _seg_end is None:
+            return fp.get("fault_end") is None
+        fs, fe = fp.get("fault_start"), fp.get("fault_end")
+        fs = _tz(datetime.fromisoformat(fs)) if isinstance(fs, str) else (_tz(fs) if fs else None)
+        fe = _tz(datetime.fromisoformat(fe)) if isinstance(fe, str) else (_tz(fe) if fe else None)
+        # Снятая ровно на конце (рез SHUTDOWN_CLEARED) — уже не активна
+        return (fs is None or fs <= _seg_end) and (fe is None or fe > _seg_end)
+
     shutdown_faults = [
         fp for fp in fault_periods
-        if fp.get("fault_end") is None and fp.get("severity") in ("SHUTDOWN",)
+        if cfg.bitmap_severity(fp.get("severity") or "") == "SHUTDOWN" and _active_at_end(fp)
     ]
     checks.append({
         "check": "no_active_shutdown_fault",
         "passed": len(shutdown_faults) == 0,
         "details": (
-            "в конце сегмента остаётся активная аварийная неисправность: "
-            + ", ".join(fp.get("fault_name") or "?" for fp in shutdown_faults)
+            "на конце сегмента активна аварийная маска панели: "
+            + ", ".join(fp.get("fault_name_ru") or fp.get("fault_name") or "?"
+                        for fp in shutdown_faults)
             if shutdown_faults else "ok"
         ),
     })
@@ -1049,12 +1064,16 @@ def _check_stop_profile(
     stop_seg: Segment,
     all_by_addr: dict[int, list[dict]],
     cfg: AnalyticsConfig,
-    Detection: type,
 ) -> None:
-    """Диагностика профиля останова: обороты должны упасть до нуля за T_stop_max.
+    """Профиль останова: за сколько обороты упали до rpm_stopped_threshold.
 
-    Если RPM не достигли порога rpm_stopped_threshold за T_stop_max секунд —
-    подозрение на отказ клапана отсечки топлива (пожароопасно!).
+    Только наблюдение (проверка rpm_stop_profile), без детекции и на вердикт не
+    влияет: отказ останова — авария самой панели, аналитика её не дублирует
+    (решение владельца 11.10.2026). У PCC3300 это код 1245 «Неисправность при
+    останове двигателя» (SHUTDOWN): контроллер снял питание с клапана отсечки, а
+    вращение продолжается — маска 40405/15 (ДЭС №3 16.09: оба раза вместе с
+    40012 = 1245). Бит 40407/3 FailtoShutdown — другое: код 1416, режим Battle Short.
+    До v5.1.7 здесь была детекция STOP_PROFILE уровня WARNING.
     """
     from datetime import datetime as _DT
     from datetime import timedelta as _TD
@@ -1078,9 +1097,9 @@ def _check_stop_profile(
 
     T_stop_max = float(cfg.seg("transitions", "T_stop_max_sec", default=30.0))
     rpm_thr = float(cfg.seg("transitions", "rpm_stopped_threshold", default=50.0))
-    # Вердикт «не остановился» — только после горизонта с запасом на медленный
-    # останов (самый медленный штатный за 60 дней — 74 с): иначе открытое окно на
-    # 30–60-й секунде давало ложное «НАРУШЕНИЕ» (эпизоды 13516, 14768, 14786)
+    # «Не упали» — только после горизонта с запасом на медленный останов (самый
+    # медленный штатный за 60 дней — 74 с): иначе открытое окно на 30–60-й
+    # секунде давало ложное «НАРУШЕНИЕ» (эпизоды 13516, 14768, 14786)
     T_violation = float(cfg.seg("transitions", "T_stop_violation_sec", default=90.0))
 
     # RPM-ряд (только реальные измерения)
@@ -1148,7 +1167,7 @@ def _check_stop_profile(
         # «НАРУШЕНИЕ», а остановился за 31 с) — v5.1.6
         if (rpm_rows[-1][0] - t0).total_seconds() < T_violation:
             return
-        # RPM так и не упали — клапан отсечки подозревается
+        # RPM так и не упали — наблюдение; аварию «отказ останова» (1245) выставляет панель
         rpm_min = min(v for _, v in rpm_rows)
         obs = (rpm_rows[-1][0] - t0).total_seconds()
         stop_seg.sequence_checks.append({
@@ -1159,30 +1178,11 @@ def _check_stop_profile(
             "seg_duration_sec": seg_dur,
             "T_stop_max_sec": T_stop_max,
             "details": (
-                f"НАРУШЕНИЕ: RPM не достигли {rpm_thr:.0f} rpm за {obs:.0f}с "
-                f"(минимум {rpm_min:.0f} rpm) — подозрение на отказ клапана отсечки!"
+                f"обороты не упали ниже {rpm_thr:.0f} об/мин за {obs:.0f} с после перехода "
+                f"в «Стоп» (минимум {rpm_min:.0f} об/мин); на вердикт не влияет — "
+                f"отказ останова выставляет панель (код 1245)"
             ),
         })
-        if stop_seg.subsegments:
-            stop_seg.subsegments[0].detections.append(Detection(
-                scenario="STOP_PROFILE",
-                severity=cfg.det("STOP_PROFILE", "severity_default", default="WARNING"),
-                t_detected=stop_seg.t_start,
-                source="METRIC_RULE",
-                trigger=(
-                    f"RPM не достигли {rpm_thr:.0f} rpm за {seg_dur:.0f}с "
-                    f"(норматив {T_stop_max:.0f}с) — клапан отсечки топлива?"
-                ),
-                related_roles=["RPM"],
-                fault_codes=[],
-                description_key="STOP_PROFILE.rpm_not_zero_fuel_shutoff_suspect",
-                values={
-                    "rpm_min_observed": rpm_min,
-                    "seg_duration_sec": seg_dur,
-                    "T_stop_max_sec": T_stop_max,
-                    "rpm_stopped_threshold": rpm_thr,
-                },
-            ))
 
 
 def _inter_segment_checks(
@@ -1195,7 +1195,7 @@ def _inter_segment_checks(
 
     Мутирует sequence_checks и detections сегментов/подсегментов на месте.
     Вызывается после основного цикла в segment(), перед возвратом результата.
-    all_by_addr нужен для STOP_PROFILE (доступ к сырому RPM-ряду останова).
+    all_by_addr нужен для профиля останова (сырой RPM-ряд останова).
     """
     from .contract import Detection
 
@@ -1214,9 +1214,9 @@ def _inter_segment_checks(
         if seg.run_state == 0 and cooldown_en:
             _check_cooldown_transition(seg, prev_segs, cfg, Detection)
 
-        # STOP_PROFILE: диагностика профиля останова (клапан отсечки топлива)
+        # Профиль останова — наблюдение, без детекции (v5.1.7)
         if seg.run_state == 0 and stop_profile_en:
-            _check_stop_profile(seg, all_by_addr, cfg, Detection)
+            _check_stop_profile(seg, all_by_addr, cfg)
 
         # Коды панели у добавленных детекций (COOLDOWN 611 и т.п.) — только выставленные
         if seg.subsegments:
@@ -1306,7 +1306,7 @@ def _check_warmup_transition(
         )
         running_seg.subsegments[0].detections.append(Detection(
             scenario="WARMUP_VIOLATION",
-            severity=cfg.det("WARMUP_VIOLATION", "severity_default", default="WARNING"),
+            severity=cfg.det("WARMUP_VIOLATION", "severity_default", default="CAUTION"),
             t_detected=running_seg.t_start,
             source="PASSPORT_THRESHOLD",
             trigger=trigger,
@@ -1332,12 +1332,9 @@ def _check_cooldown_transition(
     """Проверить наличие охлаждения после работы под нагрузкой (Addendum v1.4, п.4.2).
 
     ИСПРАВЛЕННАЯ логика: горячий останов без охлаждения → ВСЕГДА нарушение.
-    Причина останова НЕ подавляет тревогу — аварийная УСИЛИВАЕТ (риск заклинивания!).
-
-    severity:
-    - останов с ELEVATED/OVERLOAD → WARNING (риск заклинивания/коробления турбины)
-    - останов с NORMAL/LOW → CAUTION
-    Аварийный останов (SHUTDOWN-fault в сегменте) добавляет контекст в trigger.
+    Причина останова НЕ подавляет тревогу. Уровень — CAUTION из KB (аналитика
+    выше не бывает, v5.1.7); высокая нагрузка (ELEVATED/OVERLOAD — риск
+    заклинивания турбины) и аварийный останов — в тексте trigger.
     """
     required_after = cfg.det("COOLDOWN_VIOLATION", "required_after_zone", default="ELEVATED")
     min_cooldown = float(cfg.det("COOLDOWN_VIOLATION", "min_cooldown_sec", default=0.0))
@@ -1393,8 +1390,8 @@ def _check_cooldown_transition(
     })
 
     if not passed and stop_seg.subsegments:
-        # Severity: WARNING если была высокая нагрузка (риск турбины), иначе CAUTION
-        severity = "WARNING" if had_elevated else "CAUTION"
+        # Уровень — из KB (до v5.1.7 после высокой нагрузки был зашит WARNING)
+        severity = cfg.det("COOLDOWN_VIOLATION", "severity_default", default="CAUTION")
 
         # Контекст аварийного останова (SHUTDOWN-fault в сегменте останова)
         has_shutdown_fault = any(

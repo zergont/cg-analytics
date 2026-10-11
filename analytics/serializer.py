@@ -19,7 +19,7 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .contract import Segment, Subsegment
+from .contract import Segment, Subsegment, cap_severity
 
 
 # ── Вспомогательные ──────────────────────────────────────────────────────────
@@ -52,13 +52,6 @@ SCENARIO_RU: dict[str, str] = {
     "RPM_UNDERSPEED":     "Просадка оборотов",
     "DETECTION_COUNTER":  "Повторные срабатывания за период",
     "CONTROLLER_FAULT":   "Неисправность по данным контроллера",
-}
-
-_SEVERITY_LABEL = {
-    "SHUTDOWN": "АВАРИЯ (SHUTDOWN)",
-    "WARNING":  "АВАРИЯ (WARNING)",
-    "CAUTION":  "ПРЕДУПРЕЖДЕНИЕ АНАЛИТИКИ",
-    "INFO":     "INFO",
 }
 
 _ZONE_RU = {
@@ -509,10 +502,13 @@ def build_summary_parts(
     """
     # Риск нагара — состояние, у него своя часть (старые эпизоды до v5.1.3 не в счёт)
     from .contract import STATE_SCENARIOS
-    episodes = [e for e in (episodes or []) if e.get("scenario") not in STATE_SCENARIOS]
+    # Старые эпизоды аналитики с WARNING (до v5.1.7) читаются по догме — CAUTION
+    episodes = [dict(e, severity=cap_severity(e.get("scenario"), e.get("severity")))
+                for e in (episodes or []) if e.get("scenario") not in STATE_SCENARIOS]
     failed_checks = [
         c for s in segments for c in (getattr(s, "sequence_checks", None) or [])
         if isinstance(c, dict) and not c.get("passed", True)
+        and c.get("check") not in _HIDDEN_CHECKS
     ]
     # Аварийный стоп — авария панели, даже если эпизода SHUTDOWN нет: 1452
     # «Отказ включения автомата» роняет панель в Shutdown без бита в масках,
@@ -768,6 +764,15 @@ def build_summary_parts(
 # работе машины: замечанием к работе не считаются (решение 11.10, 2а) — строкой
 # в «Замечаниях» остаются, на вердикт не влияют
 _DATA_QUALITY_CHECKS = frozenset({"subseg_data_coverage"})
+# Наблюдения, а не замечания: аварию по ним несёт сама панель (v5.1.7) —
+# «обороты не упали после перехода в Стоп» (у панели код 1245), «на конце
+# сегмента активна аварийная маска»
+_INFO_CHECKS = frozenset({"rpm_stop_profile", "no_active_shutdown_fault"})
+# Проверки, не влияющие на вердикт
+_NO_VERDICT_CHECKS = _DATA_QUALITY_CHECKS | _INFO_CHECKS
+# Только в данных (characteristics_json): маску на конце уже показывают блок отчёта
+# «⚠ Активные неисправности» и панельное замечание сводки «активен на конец»
+_HIDDEN_CHECKS = frozenset({"no_active_shutdown_fault"})
 
 
 def _verdict_from_remarks(
@@ -789,7 +794,7 @@ def _verdict_from_remarks(
     warning = any(g.get("severity") == "WARNING" for g in panel)
     n = (sum(live(g) for g in remarks if g.get("source") == "analytics")
          + sum(live(g) for g in panel if g.get("severity") not in ("SHUTDOWN", "WARNING"))
-         + sum(1 for c in checks if c.get("check") not in _DATA_QUALITY_CHECKS))
+         + sum(1 for c in checks if c.get("check") not in _NO_VERDICT_CHECKS))
     suppressed_n = sum(g.get("suppressed", 0) for g in remarks)
 
     if shutdown or emergency:
@@ -908,7 +913,8 @@ def render_summary_md(parts: dict[str, Any]) -> str:
             a(line)
         for c in parts.get("failed_checks") or []:
             det = c.get("details") if isinstance(c, dict) else c
-            a(f"- ❗ {det}" if det else "- ❗ проверка не пройдена")
+            mark = "ℹ️" if isinstance(c, dict) and c.get("check") in _INFO_CHECKS else "❗"
+            a(f"- {mark} {det}" if det else f"- {mark} проверка не пройдена")
 
     km = parts.get("key_metrics")
     if km and km.get("rows"):
@@ -1153,6 +1159,8 @@ def _group_detections(subsegments: list) -> list[dict]:
     for i, sub in enumerate(subsegments, 1):
         for _d in sub.detections:
             d = _as_dict(_d)
+            if d.get("severity") != cap_severity(d.get("scenario"), d.get("severity")):
+                d = dict(d, severity=cap_severity(d.get("scenario"), d.get("severity")))
             g = groups.setdefault(_det_group_key(d), {
                 "name": _det_name(d), "severity": d.get("severity"), "subs": [],
                 "triggers": {}, "sources": [], "codes": [], "last": d, "first_sub": i,
@@ -1555,13 +1563,22 @@ def _append_segment(
                 lines.pop()
                 lines.pop()
 
-    # Sequence checks
-    failed_checks = [c for c in seg.sequence_checks if not c.get("passed")]
-    if failed_checks:
+    # Sequence checks: замечания и наблюдения (на вердикт не влияют) — раздельно
+    failed_checks = [c for c in seg.sequence_checks
+                     if not c.get("passed") and c.get("check") not in _HIDDEN_CHECKS]
+    _obs = [c for c in failed_checks if c.get("check") in _INFO_CHECKS]
+    _warn = [c for c in failed_checks if c.get("check") not in _INFO_CHECKS]
+    if _warn:
         a("**Предупреждения по последовательности:**")
         a("")
-        for c in failed_checks:
+        for c in _warn:
             a(f"- ⚠️ `{c['check']}`: {_check_details(c, tz)}")
+        a("")
+    if _obs:
+        a("**Наблюдения по последовательности** (на вердикт не влияют):")
+        a("")
+        for c in _obs:
+            a(f"- ℹ️ `{c['check']}`: {_check_details(c, tz)}")
         a("")
 
     # Обнаружения — одним блоком на сегмент, повторы по подсегментам свёрнуты

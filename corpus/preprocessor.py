@@ -44,10 +44,17 @@ def _extract_detections(chars_json: Any) -> list[dict]:
     parsed = _parse_json(chars_json)
     if not parsed:
         return []
+    from analytics.contract import cap_severity
     detections: list[dict] = []
     for sub in parsed.get("subsegments", []):
         for d in sub.get("detections", []):
-            detections.append(d if isinstance(d, dict) else {})
+            if not isinstance(d, dict):
+                detections.append({})
+                continue
+            # Аналитика не выше CAUTION (v5.1.7): старые сегменты со «не остановился»
+            # WARNING не получают вердикт «предупреждение панели» и разбор seg_warning
+            sev = cap_severity(d.get("scenario"), d.get("severity"))
+            detections.append(d if sev == d.get("severity") else dict(d, severity=sev))
     return detections
 
 
@@ -138,6 +145,7 @@ def _fmt_detections(detections: list[dict]) -> str:
 # ── Агрегированные «Обнаружения» для БЛОКА 1 заключения ──────────────────────
 # Человеческие названия сценариев — канонический словарь в analytics/serializer
 from analytics.serializer import SCENARIO_RU  # noqa: E402
+from analytics.contract import cap_severity  # noqa: E402
 
 _SEV_EMOJI = {"SHUTDOWN": "🔴", "ALARM": "🟠", "WARNING": "🟠",
               "CAUTION": "🟡", "INFO": "🔵"}
@@ -232,7 +240,7 @@ def _fmt_detections_hierarchy(chars_json: Any) -> str:
             if not isinstance(d, dict):
                 continue
             scenario = d.get("scenario", "?")
-            severity = d.get("severity", "INFO")
+            severity = cap_severity(scenario, d.get("severity", "INFO"))
             trigger = d.get("trigger", "") or ""
             is_panel = d.get("source") == "CONTROLLER_FAULT" or scenario == "CONTROLLER_FAULT"
 
@@ -438,12 +446,14 @@ def _remarks_from_summary(segment_row: dict) -> str | None:
     parts = _parse_json(segment_row.get("report_summary_json"))
     if not isinstance(parts, dict) or not parts.get("version"):
         return None
-    from analytics.serializer import _DATA_QUALITY_CHECKS
+    from analytics.contract import cap_severity
+    from analytics.serializer import _DATA_QUALITY_CHECKS, _INFO_CHECKS
     items = []
     for g in parts.get("remarks") or []:
         if g.get("kind") == "state":
             continue      # риск нагара — отдельной строкой состояния (_coking_from_summary)
-        tags = [g.get("severity") or "?", "панель" if g.get("source") == "panel" else "аналитика"]
+        tags = [cap_severity(g.get("scenario"), g.get("severity")) or "?",
+                "панель" if g.get("source") == "panel" else "аналитика"]
         k, n = g.get("suppressed") or 0, g.get("count") or 0
         if k and k >= n:
             tags.append("снято ИИ")
@@ -456,8 +466,10 @@ def _remarks_from_summary(segment_row: dict) -> str | None:
     # связи на вердикт не влияет (решение 11.10, 2а) — так и помечаем
     for c in parts.get("failed_checks") or []:
         det = (c.get("details") if isinstance(c, dict) else c) or "проверка не пройдена"
-        dq = isinstance(c, dict) and c.get("check") in _DATA_QUALITY_CHECKS
-        items.append(f"{det} [{'связь, на вердикт не влияет' if dq else 'проверка'}]")
+        ck = c.get("check") if isinstance(c, dict) else None
+        tag = ("связь, на вердикт не влияет" if ck in _DATA_QUALITY_CHECKS
+               else "наблюдение, на вердикт не влияет" if ck in _INFO_CHECKS else "проверка")
+        items.append(f"{det} [{tag}]")
     return "; ".join(items) if items else "нет"
 
 

@@ -607,8 +607,15 @@ def _diff_alerts(
 _SEV_RANK = {"SHUTDOWN": 4, "WARNING": 3, "CAUTION": 2, "INFO": 1}
 
 
-def _max_severity(a: str | None, b: str | None) -> str | None:
-    """Больший из двух severity по шкале SHUTDOWN > WARNING > CAUTION > INFO."""
+def _max_severity(a: str | None, b: str | None, scenario: str | None = None) -> str | None:
+    """Больший из двух severity по шкале SHUTDOWN > WARNING > CAUTION > INFO.
+
+    С scenario — с потолком аналитики (CAUTION): эпизод, восстановленный из
+    журнала или переоткрытый по онсету со старым WARNING, его не протащит.
+    """
+    if scenario is not None:
+        from analytics.contract import cap_severity
+        a, b = cap_severity(scenario, a), cap_severity(scenario, b)
     return a if _SEV_RANK.get(a or "", 0) >= _SEV_RANK.get(b or "", 0) else b
 
 
@@ -1568,7 +1575,7 @@ class OnlinePollEngine:
                     try:
                         await online_db.reopen_episode(
                             ep_id, now_ts=now_ts, blind_sec_add=tail_blind,
-                            severity=_max_severity(prev.get("severity"), sev),
+                            severity=_max_severity(prev.get("severity"), sev, sc),
                         )
                     except Exception:
                         logger.warning("OnlineEngine[%s]: не удалось переоткрыть эпизод %s",
@@ -1579,7 +1586,7 @@ class OnlinePollEngine:
                                     "(тот же онсет %s)", self.key, ep_id, key,
                                     t_open.isoformat())
                     self._episodes[key] = {"id": ep_id,
-                                           "severity": _max_severity(prev.get("severity"), sev),
+                                           "severity": _max_severity(prev.get("severity"), sev, sc),
                                            "miss": 0, "first_miss_ts": None,
                                            "t_open": t_open}
                     if sc != "CONTROLLER_FAULT":
@@ -1619,7 +1626,7 @@ class OnlinePollEngine:
             else:
                 ep["miss"] = 0
                 ep["first_miss_ts"] = None
-                new_sev = _max_severity(ep.get("severity"), sev)
+                new_sev = _max_severity(ep.get("severity"), sev, sc)
                 if (sc == "CONTROLLER_FAULT" and new_sev == "SHUTDOWN"
                         and ep.get("severity") != "SHUTDOWN"):
                     await self._attach_trip_context(ep["id"], now_ts)
