@@ -31,7 +31,7 @@ def check(cond: bool, msg: str) -> None:
         _errors.append(msg)
 
 
-LOW = {"scenario": "COKING_RISK", "severity": "CAUTION", "fault_codes": [2342]}
+LOW = {"scenario": "OIL_DILUTION", "severity": "CAUTION", "fault_codes": []}
 I2 = {"scenario": "NEGATIVE_SEQUENCE", "severity": "CAUTION", "fault_codes": []}
 NEU = {"scenario": "NEUTRAL_CURRENT", "severity": "CAUTION", "fault_codes": []}
 PANEL = {"scenario": "CONTROLLER_FAULT", "severity": "WARNING", "fault_codes": [1453]}

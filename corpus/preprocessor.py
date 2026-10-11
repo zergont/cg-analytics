@@ -197,7 +197,7 @@ def _group_worst(scenario: str, values_list: list[dict]) -> str | None:
     elif scenario == "COKING_RISK":
         secs = _nums("low_load_zone_sec")
         if secs:
-            return f"до {_fmt_dur(max(secs))} подряд"
+            return f"накоплено с прожига до {_fmt_dur(max(secs))} малой нагрузки"
     elif scenario == "COOLING_FAILURE":
         temps = _nums("coolant_temp_max")
         slopes = _nums("coolant_slope_c_per_s")
@@ -439,6 +439,8 @@ def _remarks_from_summary(segment_row: dict) -> str | None:
     from analytics.serializer import _DATA_QUALITY_CHECKS
     items = []
     for g in parts.get("remarks") or []:
+        if g.get("kind") == "state":
+            continue      # риск нагара — отдельной строкой состояния (_coking_from_summary)
         tags = [g.get("severity") or "?", "панель" if g.get("source") == "panel" else "аналитика"]
         k, n = g.get("suppressed") or 0, g.get("count") or 0
         if k and k >= n:
@@ -457,6 +459,28 @@ def _remarks_from_summary(segment_row: dict) -> str | None:
     return "; ".join(items) if items else "нет"
 
 
+def _coking_from_summary(segment_row: dict) -> str | None:
+    """Риск нагара из частей сводки — перенесённое состояние с датами (v5.1.3).
+
+    Модель писала «блок аналитики зафиксировал риск … по коду 2342» на машине,
+    которая сутки стояла: риск накоплен при прошлой работе, кода панель не давала.
+    """
+    parts = _parse_json(segment_row.get("report_summary_json"))
+    if not isinstance(parts, dict) or not parts.get("version"):
+        return None
+    try:
+        from analytics.serializer import coking_state_text
+        ck = parts.get("coking") or {}
+        txt = coking_state_text(ck)
+    except Exception:
+        return None
+    if not txt:
+        return None
+    if ck.get("remark"):
+        return f"Риск нагара (накопленное состояние; в этом сегменте вырос — замечание): {txt}"
+    return f"Риск нагара (накопленное состояние, не обнаружение этого сегмента): {txt}"
+
+
 def build_claude_input(segment_row: dict) -> str:
     """Сформировать полный вход для Claude: шапка вердикта + реконструкция + report_md."""
     chars_json = segment_row.get("characteristics_json")
@@ -469,6 +493,7 @@ def build_claude_input(segment_row: dict) -> str:
         _stop_kind(chars_json),
     )
     remarks_line = _remarks_from_summary(segment_row)
+    coking_line = _coking_from_summary(segment_row)
     run_state_label = (
         RUN_STATE_RU.get(run_state, str(run_state))
         if run_state is not None
@@ -481,7 +506,8 @@ def build_claude_input(segment_row: dict) -> str:
         f"Вердикт: {verdict}\n"
         f"Уровень тревоги: {alarm_level}\n"
         f"Обнаружения: {remarks_line or _fmt_detections(detections)}\n"
-        f"Задача: объясни зафиксированную картину. "
+        + (f"{coking_line}\n" if coking_line else "")
+        + f"Задача: объясни зафиксированную картину. "
         f"Не пересматривай вердикт. Не ищи дополнительных проблем.\n"
         f"---\n\n"
     )

@@ -42,9 +42,10 @@ def _active_dets(seg_row: dict) -> tuple[list[dict], bool]:
     при suppressed=True вызывающий делает сам — панельные severity считаются
     по полному списку.
     """
-    from online.status_assembler import is_analytics_suppressed
+    from online.status_assembler import _without_state, is_analytics_suppressed
     dets = _parse_json(seg_row.get("active_detections_json"), [], ctx="active_detections_json") or []
-    dets = [d for d in dets if isinstance(d, dict)]
+    # Риск нагара — состояние, не тревога (v5.1.3), как в build_structural_status
+    dets = _without_state([d for d in dets if isinstance(d, dict)])
     return dets, is_analytics_suppressed(seg_row, dets)
 
 
@@ -2411,6 +2412,10 @@ async def api_machine_segments(
             "data_quality":  dq,                          # 0.0–1.0, null у старых сегментов
             "no_data":       (not is_open) and dq == 0.0, # весь сегмент без связи → «нет связи» в UI
             "coking_risk":   None,                        # в calendar-запросе не грузим JSONB полностью
+            # Риск нагара перед пуском (стоп с накопленным недогрузом): вердикт
+            # остаётся «Норма», метка — отдельно (v5.1.3)
+            "coking_before_start": bool(((_parts or {}).get("coking") or {}).get("before_start")),
+            "coking_level":  ((_parts or {}).get("coking") or {}).get("level") if _parts else None,
             "analytics_version": seg.get("analytics_version"),
             # Наличие ИИ-анализа
             "has_report":    bool(seg.get("report_md") if "report_md" in (seg or {}) else None),

@@ -73,8 +73,13 @@ def run_all_detectors(
     if cfg.det("OIL_DILUTION", "enabled", default=True) and run_state in _oil_valid:
         detections.extend(_detect_oil_dilution(characteristics, seg_start, cfg))
 
-    if cfg.det("COKING_RISK", "enabled", default=True):
-        detections.extend(_detect_coking_risk(accumulators, run_state, load_zone, seg_start, cfg))
+    # Риск нагара — накопленное состояние, а не событие подсегмента (v5.1.3):
+    # детекции нет, его несут часть сводки «нагар» и таблица «Риски» отчёта.
+    # Раньше детекция с кодом 2342 повторялась в каждом подсегменте (ДЭС №3 —
+    # 501 за месяц) и на стоящей машине читалась моделью как «зафиксировал».
+
+    if cfg.det("IDLE_TOO_LONG", "enabled", default=True) and run_state in (2, 5):
+        detections.extend(_detect_idle_too_long(accumulators, seg_start, cfg))
 
     # WARMUP_VIOLATION и COOLDOWN_VIOLATION требуют анализа соседних сегментов —
     # они вызываются из _inter_segment_checks() в segmenter.py, а не здесь.
@@ -536,48 +541,31 @@ def _detect_oil_dilution(
 
 # ── COKING_RISK ──────────────────────────────────────────────────────────────
 
-def _detect_coking_risk(
+def _detect_idle_too_long(
     acc: RiskAccumulators,
-    run_state: int,
-    load_zone: str,
     seg_start: datetime,
     cfg: AnalyticsConfig,
 ) -> list[Detection]:
-    cr = acc.coking_risk
-    if cr.risk_level == "GREEN":
+    """Непрерывный холостой ход дольше нормы РЭ — замечание сегмента (v5.1.3).
+
+    Норма — один отрезок х.х. (K38-50 РЭ, Cummins O&M: ≤10 мин; код панели
+    2342 Max Idle Time тоже про непрерывный). Суммарный х.х. идёт в долг риска
+    нагара, а не сюда.
+    """
+    limit = float(cfg.det("IDLE_TOO_LONG", "max_continuous_sec", default=600))
+    run = acc.coking_risk.idle_run_sec
+    if run <= limit:
         return []
-
-    idle_thr = float(cfg.det("COKING_RISK", "idle_duration_warning_sec", default=600.0))
-    low_thr = float(cfg.det("COKING_RISK", "low_load_zone_warning_sec", default=3600.0))
-    cool_thr = float(cfg.det("COKING_RISK", "coolant_below_60_warning_sec", default=1800.0))
-
-    triggers = []
-    if cr.idle_low_rpm_sec >= idle_thr:
-        triggers.append(f"idle_low_rpm_sec={cr.idle_low_rpm_sec:.0f}с >= {idle_thr:.0f}с")
-    if cr.low_load_zone_sec >= low_thr:
-        triggers.append(f"low_load_zone_sec={cr.low_load_zone_sec:.0f}с >= {low_thr:.0f}с")
-    if cr.coolant_below_60_sec >= cool_thr:
-        triggers.append(f"coolant_below_60_sec={cr.coolant_below_60_sec:.0f}с >= {cool_thr:.0f}с")
-
-    if not triggers:
-        return []
-
     return [Detection(
-        scenario="COKING_RISK",
-        severity=cfg.det("COKING_RISK", "severity_default", default="WARNING"),
+        scenario="IDLE_TOO_LONG",
+        severity=cfg.det("IDLE_TOO_LONG", "severity_default", default="CAUTION"),
         t_detected=_iso(seg_start),
         source="METRIC_RULE",
-        trigger="; ".join(triggers),
-        related_roles=["COOLANT_TEMP", "RPM", "LOAD_PCT"],
-        fault_codes=[2342],
-        description_key=f"COKING_RISK.risk_{cr.risk_level.lower()}",
-        values={
-            "risk_level": cr.risk_level,
-            "idle_low_rpm_sec": cr.idle_low_rpm_sec,
-            "low_load_zone_sec": cr.low_load_zone_sec,
-            "coolant_below_60_sec": cr.coolant_below_60_sec,
-            "last_purge_ts": cr.last_purge_ts,
-        },
+        trigger=f"холостой ход {run / 60:.0f} мин подряд при норме РЭ ≤{limit / 60:.0f} мин",
+        related_roles=["RPM"],
+        fault_codes=[],
+        description_key="IDLE_TOO_LONG.default",
+        values={"idle_run_sec": run, "limit_sec": limit},
     )]
 
 

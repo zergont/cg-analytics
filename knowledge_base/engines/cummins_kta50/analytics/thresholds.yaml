@@ -123,5 +123,5 @@ engine_operation:
     _source: PASSPORT_РЭ
   tunable:
     purge_min_load_pct: 30      # нагрузка для «прожига» (сброс риска закоксовки)
-    purge_min_duration_sec: 300 # минимальная длина прожига (5 мин)
+    purge_min_duration_sec: 900 # минимальный непрерывный отрезок прожига (15 мин, v5.1.3)
     _source: TUNABLE

@@ -150,5 +150,5 @@ engine_operation:
     _source: QSX15_OM_22523849
   tunable:
     purge_min_load_pct: 30
-    purge_min_duration_sec: 300
+    purge_min_duration_sec: 900 # минимальный непрерывный отрезок прожига (15 мин, v5.1.3)
     _source: TUNABLE

@@ -39,7 +39,8 @@ SCENARIO_RU: dict[str, str] = {
     "NEUTRAL_CURRENT":    "Ток нейтрали",
     "COOLING_FAILURE":    "Отклонения температуры охлаждающей жидкости",
     "OIL_DILUTION":       "Пониженное давление масла",
-    "COKING_RISK":        "Длительная работа на малой нагрузке (риск нагара)",
+    "COKING_RISK":        "Риск нагара (недогруз до прожига)",
+    "IDLE_TOO_LONG":      "Длительный холостой ход",
     "WARMUP_VIOLATION":   "Нарушение прогрева",
     "COOLDOWN_VIOLATION": "Нарушение охлаждения перед остановом",
     "START_FAILURE":      "Проблема пуска",
@@ -179,6 +180,140 @@ SUMMARY_PARTS_VERSION = 1
 _LEVEL_RANK = {"НОРМА": 0, "CAUTION": 1, "WARNING": 2, "SHUTDOWN": 3}
 
 
+_COKING_LEVEL_RU = {"GREEN": "низкий", "YELLOW": "повышенный", "RED": "высокий"}
+
+
+def _fmt_dm(iso: str | None, tz=None) -> str | None:
+    """«06.07» / «29.09 16:06» в местном поясе."""
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    if tz is not None:
+        dt = dt.astimezone(tz)
+    return dt.strftime("%d.%m %H:%M")
+
+
+def _coking_part(segments: list, tz=None) -> dict[str, Any] | None:
+    """Риск нагара за период — накопленное состояние, а не событие (v5.1.3).
+
+    На начало — Segment.coking_start, на конец — накопитель последнего
+    подсегмента. Прирост и погашение за период — по монотонным счётчикам.
+    Замечание — только где долг вырос и уровень не низкий, и не в стопе: на
+    стоящей машине риск не меняется, его показывают «перед пуском» (решение
+    11.10.2026: вердикт стопа «Норма» + отдельная метка).
+    """
+    end = None
+    for s in reversed(segments or []):
+        if getattr(s, "subsegments", None):
+            cr = getattr(getattr(s.subsegments[-1], "risk_accumulators", None), "coking_risk", None)
+            end = cr.to_dict() if hasattr(cr, "to_dict") else None
+            break
+    if end is None:
+        return None
+    start = getattr(segments[0], "coking_start", None) or None
+    added = paid = None
+    if isinstance(start, dict):
+        added = max(0.0, float(end.get("debt_added_total_sec") or 0)
+                    - float(start.get("debt_added_total_sec") or 0))
+        paid = max(0.0, float(end.get("debt_paid_total_sec") or 0)
+                   - float(start.get("debt_paid_total_sec") or 0))
+    stop = all(getattr(s, "run_state", None) == 0 for s in segments)
+    working = all(getattr(s, "run_state", None) == 3 for s in segments)
+    level = end.get("risk_level") or "GREEN"
+    # Чистый рост долга за период: начислено минус погашено. Валовое начисление
+    # давало замечание и там, где прожиг долг уменьшил (09.10: −16 ч, CAUTION)
+    net = (added - paid) if added is not None and paid is not None else None
+    level_start = (start or {}).get("risk_level")
+    purged_at = None
+    lp = end.get("last_purge_ts")
+    if lp and lp != (start or {}).get("last_purge_ts"):
+        purged_at = lp
+    return {
+        "level": level,
+        "level_start": level_start,
+        "low_load_sec": float(end.get("low_load_zone_sec") or 0),
+        "idle_sec": float(end.get("idle_low_rpm_sec") or 0),
+        "cold_sec": float(end.get("coolant_below_60_sec") or 0),
+        "debt_sec": float(end.get("debt_sec") or 0),
+        "added_sec": added,
+        "paid_sec": paid,
+        "last_purge_ts": lp,
+        "last_accum_ts": end.get("last_accum_ts"),
+        "purged_at": purged_at,
+        "purge_left_low_min": end.get("purge_left_low_min"),
+        "purge_left_high_min": end.get("purge_left_high_min"),
+        "purge_low_pct": end.get("purge_low_pct"),
+        "purge_high_pct": end.get("purge_high_pct"),
+        "stop": stop,
+        "before_start": stop and level != "GREEN",
+        "net_sec": net,
+        # Замечание — только рабочий сегмент (решение 1), где риск вырос; в
+        # прогреве/охлаждении за х.х. отвечает IDLE_TOO_LONG, накопление — строкой
+        "remark": working and net is not None and net >= 60 and level != "GREEN",
+        "since_text": _fmt_dm(lp, tz)[:5] if lp else None,
+        "accum_until_text": _fmt_dm(end.get("last_accum_ts"), tz),
+        "purged_at_text": _fmt_dm(purged_at, tz),
+    }
+
+
+def _fmt_hm(sec: float) -> str:
+    """«4 ч 48 мин» — накопленное время риска без секунд."""
+    m = int(round((sec or 0) / 60.0))
+    h, m = divmod(m, 60)
+    return f"{h} ч {m} мин" if h else f"{m} мин"
+
+
+def _coking_composition(ck: dict) -> str:
+    parts = []
+    if ck.get("low_load_sec", 0) >= 60:
+        parts.append(f"малая нагрузка {_fmt_hm(ck['low_load_sec'])}")
+    if ck.get("idle_sec", 0) >= 60:
+        parts.append(f"холостой ход {_fmt_hm(ck['idle_sec'])}")
+    if ck.get("cold_sec", 0) >= 60:
+        parts.append(f"холодная ОЖ {_fmt_hm(ck['cold_sec'])}")
+    return ", ".join(parts) or "менее минуты"
+
+
+def _coking_left(ck: dict) -> str | None:
+    lo, hi = ck.get("purge_left_low_min"), ck.get("purge_left_high_min")
+    plo, phi = ck.get("purge_low_pct"), ck.get("purge_high_pct")
+    if not lo or not plo:
+        return None
+    s = f"~{lo:.0f} мин при нагрузке ≥{plo:.0f} %"
+    if hi and phi:
+        s += f" или ~{hi:.0f} мин при ≥{phi:.0f} %"
+    return s
+
+
+def _coking_accum_text(ck: dict) -> str:
+    """«накоплен при работе с последнего прожига 06.07 по 29.09 16:06: …»."""
+    since = (f"с последнего прожига {ck['since_text']}" if ck.get("since_text")
+             else "с начала наблюдения")
+    until = f" по {ck['accum_until_text']}" if ck.get("accum_until_text") else ""
+    return f"накоплен при работе {since}{until}: {_coking_composition(ck)}"
+
+
+def coking_state_text(ck: dict | None) -> str | None:
+    """Риск нагара одной строкой — для шапки заключения и консоли (перенесённое состояние)."""
+    if not ck or ck.get("level") in (None, "GREEN"):
+        return None
+    lvl = _COKING_LEVEL_RU.get(ck["level"], ck["level"])
+    txt = f"уровень {lvl}; {_coking_accum_text(ck)}"
+    if ck.get("stop"):
+        txt += "; в этом сегменте установка стояла — риск не изменился (накоплен при прошлой работе)"
+    elif (ck.get("net_sec") or 0) >= 60:
+        txt += f"; за период долг до прожига вырос на ~{_fmt_hm(ck['net_sec'])} (в пересчёте на малую нагрузку)"
+    left = _coking_left(ck)
+    if left:
+        txt += f"; до сброса — {left}"
+    return txt
+
+
 def build_summary_parts(
     segments: list[Segment],
     episodes: list[dict[str, Any]] | None = None,
@@ -201,7 +336,9 @@ def build_summary_parts(
     remarks — замечания по причинам, с фазами before / appeared / open;
     failed_checks; key_metrics {rows} | None; coking {level} | None; no_data.
     """
-    episodes = episodes or []
+    # Риск нагара — состояние, у него своя часть (старые эпизоды до v5.1.3 не в счёт)
+    from .contract import STATE_SCENARIOS
+    episodes = [e for e in (episodes or []) if e.get("scenario") not in STATE_SCENARIOS]
     failed_checks = [
         c for s in segments for c in (getattr(s, "sequence_checks", None) or [])
         if isinstance(c, dict) and not c.get("passed", True)
@@ -363,6 +500,18 @@ def build_summary_parts(
     for g in remarks:
         g.pop("sev_rank", None)
 
+    # Риск нагара: замечание — только где долг вырос (не в стопе)
+    coking_part = _coking_part(segments, tz)
+    if coking_part and coking_part["remark"]:
+        remarks.append({
+            "name": SCENARIO_RU["COKING_RISK"], "source": "analytics", "scenario": "COKING_RISK",
+            "severity": "CAUTION", "count": 1, "active_sec": coking_part["added_sec"] or 0.0,
+            "blind_sec": 0.0, "suppressed": 0, "open": 0, "open_live": 0,
+            "before": coking_part["level_start"] not in (None, "GREEN"),
+            "appeared": coking_part["level_start"] in (None, "GREEN"),
+            "at_end": True, "kind": "state",
+        })
+
     checks = []
     for c in failed_checks:
         det = c.get("details") or c.get("detail") or ""
@@ -372,7 +521,7 @@ def build_summary_parts(
 
     # ── Ключевые показатели: trip_snapshot-роли последнего рабочего подсегмента ──
     key_metrics = None
-    coking = None
+    coking = coking_part
     work_seg = next(
         (s for s in reversed(segments)
          if getattr(s, "run_state", None) == 3 and s.subsegments),
@@ -390,7 +539,6 @@ def build_summary_parts(
         ]
         if rows:
             key_metrics = {"rows": rows}
-        coking = {"level": sub.risk_accumulators.coking_risk.risk_level}
 
     return {
         "version": SUMMARY_PARTS_VERSION,
@@ -398,7 +546,7 @@ def build_summary_parts(
         "end_level": end_level,
         "mttr": mttr_part,
         "remarks": remarks,
-        "has_remarks": bool(episodes or failed_checks),
+        "has_remarks": bool(remarks or failed_checks),
         "failed_checks": checks,
         "emergency": bool(emergency),
         "key_metrics": key_metrics,
@@ -521,6 +669,10 @@ def render_summary_md(parts: dict[str, Any]) -> str:
         for g in parts.get("remarks") or []:
             emoji = _SEVERITY_EMOJI.get(g["severity"], "")
             src_ru = _SRC_RU.get(g["source"], g["source"] or "")
+            if g.get("kind") == "state":
+                ck = parts.get("coking") or {}
+                a(f"- {emoji} **{g['name']}** [{src_ru}]: {coking_state_text(ck) or ''}")
+                continue
             line = (f"- {emoji} **{g['name']}** [{src_ru}]: {g['count']} {_eps_ru(g['count'])}, "
                     f"воздействие {_fmt_duration(g['active_sec'])}")
             # Слепая доля — обязательная оговорка: внутри неё мог быть сброс
@@ -546,9 +698,46 @@ def render_summary_md(parts: dict[str, Any]) -> str:
         for r in km["rows"]:
             a(f"| {r['role']} | {_fmt_val(r.get('median'))} | {_fmt_val(r.get('min'))} "
               f"| {_fmt_val(r.get('max'))} | {r.get('unit', '')} |")
-    if parts.get("coking"):
+    ck = parts.get("coking")
+    if ck and isinstance(ck, dict) and "before_start" in ck:
+        if ck["before_start"]:
+            a("")
+            a("### Перед пуском")
+            acc_txt = _coking_accum_text(ck)
+            left = _coking_left(ck)
+            a(f"⚠ **Накоплен риск нагара в выпуске — {_COKING_LEVEL_RU.get(ck['level'], ck['level'])}.** "
+              f"{acc_txt[0].upper()}{acc_txt[1:]}. В этом сегменте установка стояла — риск "
+              f"не изменился." + (f" До сброса — {left}." if left else ""))
+            a("")
+            a("Остановка риск не снимает — снимает только работа под нагрузкой (прожиг). "
+              "Опасный момент — пуск и первые минуты под нагрузкой: осмотреть стыки "
+              "коллектора и срез трубы, слить конденсат, нагрузку набирать постепенно "
+              "(до 70 % не быстрее ~15 мин), прожиг — под присмотром.")
+        elif not ck["stop"]:
+            lvl = _COKING_LEVEL_RU.get(ck["level"], ck["level"])
+            st = ck.get("level_start")
+            show = (ck["level"] != "GREEN" or st not in (None, "GREEN")
+                    or ck.get("purged_at_text") or ck.get("paid_sec"))
+            line = (f"Риск нагара: на начало **{_COKING_LEVEL_RU.get(st, st)}** → на конец **{lvl}**"
+                    if st else f"Риск нагара на конец: **{lvl}**")
+            if ck.get("purged_at_text"):
+                line += (f" — прожиг завершён {ck['purged_at_text']}, недогруз погашен"
+                         if (ck.get("debt_sec") or 0) < 60 else
+                         f" — прожиг завершён {ck['purged_at_text']}, затем недогруз набрался снова")
+            elif ck.get("paid_sec"):
+                line += f" — прожигом погашено ~{_fmt_hm(ck['paid_sec'])} долга"
+            if ck["level"] != "GREEN" and not ck.get("remark"):
+                left = _coking_left(ck)
+                if left:
+                    line += f"; до сброса — {left}"
+            # Замечание о приросте уже всё сказало — строку не дублируем
+            if show and not (ck.get("remark") and not ck.get("purged_at_text")
+                             and not ck.get("paid_sec")):
+                a("")
+                a(line)
+    elif ck:
         a("")
-        a(f"Закоксовка: **{parts['coking']['level']}**")
+        a(f"Закоксовка: **{ck.get('level')}**")
 
     return "\n".join(lines).strip() + "\n"
 
@@ -999,11 +1188,11 @@ def _append_subsegment(
         a(f"|------|---------|--------|")
         if cr_lvl != "GREEN":
             details = (
-                f"простой: {_fmt_duration(cr['idle_low_rpm_sec'])}, "
-                f"ОЖ<60°C: {_fmt_duration(cr['coolant_below_60_sec'])}, "
-                f"LOW зона: {_fmt_duration(cr['low_load_zone_sec'])}"
+                f"накоплено с прожига: малая нагрузка {_fmt_duration(cr['low_load_zone_sec'])}, "
+                f"холостой ход {_fmt_duration(cr['idle_low_rpm_sec'])}, "
+                f"ОЖ<60°C {_fmt_duration(cr['coolant_below_60_sec'])}"
             )
-            a(f"| Закоксование | {_RISK_EMOJI.get(cr_lvl, '')} {cr_lvl} | {details} |")
+            a(f"| Риск нагара | {_RISK_EMOJI.get(cr_lvl, '')} {cr_lvl} | {details} |")
         if tr_lvl != "GREEN":
             details = f"ELEVATED зона: {_fmt_duration(tr['elevated_zone_sec'])}"
             a(f"| Тепловой | {_RISK_EMOJI.get(tr_lvl, '')} {tr_lvl} | {details} |")

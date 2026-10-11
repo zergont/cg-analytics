@@ -31,7 +31,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from analytics.contract import CokingRisk
+from analytics.contract import CokingRisk, STATE_SCENARIOS
 from online import db as online_db
 
 logger = logging.getLogger(__name__)
@@ -180,7 +180,8 @@ def _live_new_episodes(segments: list, eps: list[dict], live_keys: set[str],
             for d in sub.detections:
                 dd = d.to_dict()
                 key = _alert_key(dd)
-                if key not in live_keys or key in have or key in out:
+                if (key not in live_keys or key in have or key in out
+                        or dd.get("scenario") in STATE_SCENARIOS):
                     continue
                 v = dd.get("values") or {}
                 try:
@@ -345,26 +346,41 @@ def _slice_gate_state(state: dict, t_from, t_to=None) -> dict:
     return out
 
 
-def _coking_from_json(d) -> CokingRisk:
-    """Десериализовать CokingRisk из dict или JSON-строки (asyncpg отдаёт JSONB как str)."""
+def _coking_or_none(d) -> CokingRisk | None:
+    """CokingRisk из dict/JSON-строки; None — записи нет или она битая."""
     if not d:
-        return CokingRisk()
+        return None
     if isinstance(d, str):
         try:
             import json as _json
             d = _json.loads(d)
         except Exception:
-            logger.warning("Битый coking_risk_json, риск сброшен в GREEN")
-            return CokingRisk()
+            logger.warning("Битый coking_risk_json")
+            return None
     if not isinstance(d, dict):
+        return None
+    return CokingRisk.from_dict(d)
+
+
+def _coking_from_json(d) -> CokingRisk:
+    """Десериализовать CokingRisk из dict или JSON-строки (asyncpg отдаёт JSONB как str)."""
+    return _coking_or_none(d) or CokingRisk()
+
+
+async def _coking_before(router_sn: str, equip_type: str, panel_id: int,
+                         ts: datetime) -> CokingRisk:
+    """Накопленный риск нагара на момент ts — из последнего сегмента до него.
+
+    Риск — долг до прожига, переживает стоп и перезапуски. Обнулять его на
+    техническом событии (ручной ПУСК с более ранней даты, битая запись) — значит
+    молча стереть недогруз (v5.1.3). Неизвестная история (первый старт) — ноль.
+    """
+    try:
+        prev = await online_db.get_segment_ended_before(router_sn, equip_type, panel_id, ts)
+    except Exception:
+        logger.warning("Не удалось прочитать сегмент до %s для риска нагара", ts, exc_info=True)
         return CokingRisk()
-    return CokingRisk(
-        idle_low_rpm_sec=float(d.get("idle_low_rpm_sec", 0.0)),
-        coolant_below_60_sec=float(d.get("coolant_below_60_sec", 0.0)),
-        low_load_zone_sec=float(d.get("low_load_zone_sec", 0.0)),
-        risk_level=d.get("risk_level", "GREEN"),
-        last_purge_ts=d.get("last_purge_ts"),
-    )
+    return _coking_from_json(prev.get("coking_risk_json")) if prev else CokingRisk()
 
 
 def _load_rs_sec_from_ff(ff: dict | None) -> dict[int, float]:
@@ -1019,7 +1035,7 @@ async def _collect_and_enrich_detections(
             logger.warning("Не удалось проверить существующие эпизоды", exc_info=True)
             _already = set()
         for k, info in seen.items():
-            if k in open_keys:
+            if k in open_keys or info["scenario"] in STATE_SCENARIOS:
                 continue
             if (k, info.get("t_open")) in _already:
                 continue
@@ -1220,7 +1236,8 @@ class OnlinePollEngine:
                 # Ручной Пуск с датой раньше последнего сегмента →
                 # запускаемся с неё, batch-добор заполнит пропуск.
                 self.cursor_ts = requested
-                self.inherited_coking_risk = CokingRisk()
+                self.inherited_coking_risk = await _coking_before(
+                    self.router_sn, self.equip_type, self.panel_id, requested)
                 self.inherited_run_state_sec = {}
                 self.forward_fill_memory = None
                 self.continued_from_id = None
@@ -1231,7 +1248,12 @@ class OnlinePollEngine:
             else:
                 # Обычное возобновление с конца последнего сегмента
                 self.cursor_ts = last_end
-                self.inherited_coking_risk = _coking_from_json(last.get("coking_risk_json"))
+                _cr = _coking_or_none(last.get("coking_risk_json"))
+                if _cr is None and last.get("coking_risk_json"):
+                    # Битая запись — накопленное берём у сегмента перед ней
+                    _cr = await _coking_before(self.router_sn, self.equip_type,
+                                               self.panel_id, _tz_utc(last["t_start"]))
+                self.inherited_coking_risk = _cr or CokingRisk()
                 self._prev_seg_hint = _make_seg_hint(last)
                 if last.get("cause_close") == "DAILY_BOUNDARY":
                     ff = last.get("forward_fill_json")
@@ -1417,7 +1439,9 @@ class OnlinePollEngine:
         """
         debounce = int(self.cfg.det("ALARM_EPISODES", "close_debounce_cycles", default=3) or 3)
         now_ts = _tz_utc(t_to)
-        curr_map = {_alert_key(d): d for d in curr_dets if d.get("scenario")}
+        # Сценарии-состояния (риск нагара) — не тревоги: эпизодов у них нет
+        curr_map = {_alert_key(d): d for d in curr_dets
+                    if d.get("scenario") and d.get("scenario") not in STATE_SCENARIOS}
 
         # База — конец окна, а не последние данные (как было): иначе при
         # обрыве она замирала бы и воздействие переставало идти.
@@ -2100,6 +2124,10 @@ class OnlinePollEngine:
             self.last_processed_to = seg_t_end
             self._prev_seg_hint = seg
             last_committed_t_end = seg_t_end
+            # Риск нагара — вместе с курсором: если суточную границу в переходном
+            # режиме пропустят (break ниже), следующее окно начнётся с конца этого
+            # сегмента — и с его накопленным долгом, а не с начала окна
+            self.inherited_coking_risk = coking_risk
 
             if is_last:
                 last_saved_id = db_id
@@ -2566,8 +2594,12 @@ class OnlinePollEngine:
         coking_risk = _extract_coking_risk_from_segments(segments)
 
         # Диффузия живых тревог: вычисляем diff до upsert; segment_id подставим после
+        # Риск нагара — состояние, не тревога: в журнал и живые тревоги не идёт
+        # (иначе «тревога» мигала бы с каждым подсегментом без недогруза)
         active_detections, _alert_events = _diff_alerts(
-            self._active_alerts, _curr_dets, ts=_tz_utc(t_to), segment_id=None
+            self._active_alerts,
+            [d for d in _curr_dets if d.get("scenario") not in STATE_SCENARIOS],
+            ts=_tz_utc(t_to), segment_id=None,
         )
         self._active_alerts = {_alert_key(d): d for d in active_detections}
 

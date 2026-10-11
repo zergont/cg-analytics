@@ -97,6 +97,10 @@ def reset_accumulators_on_purge(
 
 # ── Coking Risk ──────────────────────────────────────────────────────────────
 
+# Холостой ход: прогрев и охлаждение на х.х. (RUN_STATE=6 — переход в единицы
+# секунд, не длительный х.х.)
+IDLE_RUN_STATES = frozenset({2, 5})
+
 def _update_coking(
     cr: CokingRisk,
     by_addr: dict[int, list[dict[str, Any]]],
@@ -108,22 +112,72 @@ def _update_coking(
     cfg: AnalyticsConfig,
     gaps: list[dict] | None = None,
 ) -> None:
+    """Риск нагара — долг до прожига (v5.1.3, решения 11.10.2026).
+
+    Копится при недогрузе: холостой ход (RUN_STATE 2/5) — с весом
+    debt_weight_idle (х.х. вреднее: MAN — без нагрузки ≤1 ч против ~200 ч при
+    17 %), работа с холодной ОЖ, работа ниже purge_min_load_pct по ФАКТИЧЕСКОЙ
+    нагрузке LOAD_PCT (не по зоне — гистерезис держит NORMAL и при 25 %).
+    Стоп ничего не меняет: отложения остаются до прожига.
+
+    Прожиг — пропорциональный зачёт: минута под нагрузкой ≥ purge_min_load_pct
+    гасит purge_rate_low минут долга (Cat: 30 мин на каждые 4 ч недогруза),
+    ≥ purge_high_load_pct — purge_rate_high (MAN). Засчитываются только
+    непрерывные отрезки от purge_min_duration_sec (15 мин; источники не
+    засчитывают меньше): до этой длины зачёт копится в ожидании и сгорает при
+    обрыве. Отрезок идёт сквозь границы подсегментов, обрывается сменой
+    режима, разрывом связи, малой нагрузкой и холодной ОЖ. Гасится долг
+    пропорционально по всем счётчикам; погашен целиком — полный прожиг.
+    """
     gaps = gaps or []
     t_start = _tz(seg_start)
     t_end = _tz(seg_end)
 
-    # 1. Idle на малых оборотах (RUN_STATE = 2, 5 — Warmup/Cooldown at Idle)
-    # RUN_STATE=6 «Rated to Idle Transition Delay» — короткий переходный период (единицы секунд),
-    # не накапливаем idle-риск: это не длительный холостой ход, а переход между режимами.
-    idle_states = {2, 5}
-    if run_state in idle_states:
-        cr.idle_low_rpm_sec += duration_sec
-
-    # 2. Т ОЖ < порога (wet stacking risk)
-    # Только при работающем двигателе (run_state != 0): на остановленной машине
-    # холодная ОЖ — норма, риска закоксовки нет.
-    cool_addr = cfg.role_to_addr("COOLANT_TEMP")
+    w_idle = float(cfg.det("COKING_RISK", "debt_weight_idle", default=2.0))
+    w_cold = float(cfg.det("COKING_RISK", "debt_weight_cold", default=1.0))
+    low_pct = float(cfg.thr("engine_operation", "tunable", "purge_min_load_pct", default=30.0))
+    high_pct = float(cfg.det("COKING_RISK", "purge_high_load_pct", default=70.0))
+    rate_low = float(cfg.det("COKING_RISK", "purge_rate_low", default=8.0))
+    rate_high = float(cfg.det("COKING_RISK", "purge_rate_high", default=16.0))
+    min_block = float(cfg.thr("engine_operation", "tunable", "purge_min_duration_sec", default=900.0))
+    purge_cool = float(cfg.det("COKING_RISK", "purge_min_coolant_c", default=60.0))
     below_c = float(cfg.thr("coolant_temperature", "tunable", "below_60_risk_threshold_c", default=60.0))
+
+    added = 0.0
+    last_acc: datetime | None = None
+
+    def debt() -> float:
+        return cr.low_load_zone_sec + w_idle * cr.idle_low_rpm_sec + w_cold * cr.coolant_below_60_sec
+
+    def pay(credit: float, ts: datetime) -> None:
+        d = debt()
+        if credit <= 0 or d <= 0:
+            return
+        k = max(0.0, 1.0 - credit / d)
+        cr.debt_paid_total_sec += min(credit, d)
+        cr.low_load_zone_sec *= k
+        cr.idle_low_rpm_sec *= k
+        cr.coolant_below_60_sec *= k
+        if debt() < 1.0:
+            cr.low_load_zone_sec = cr.idle_low_rpm_sec = cr.coolant_below_60_sec = 0.0
+            cr.last_purge_ts = ts.isoformat()
+
+    def break_run() -> None:
+        cr.purge_run_sec = 0.0
+        cr.purge_pending_sec = 0.0
+
+    # 1. Холостой ход: суммарно — в долг, непрерывный отрезок — для замечания
+    if run_state in IDLE_RUN_STATES:
+        cr.idle_low_rpm_sec += duration_sec
+        cr.idle_run_sec += duration_sec
+        added += w_idle * duration_sec
+        if duration_sec > 0:
+            last_acc = t_end
+    else:
+        cr.idle_run_sec = 0.0
+
+    # 2. Холодная ОЖ — только при работающем двигателе (на стоящем — норма)
+    cool_addr = cfg.role_to_addr("COOLANT_TEMP")
     if run_state != 0 and cool_addr and cool_addr in by_addr:
         rows = [r for r in by_addr[cool_addr]
                 if t_start <= _tz(r["ts"]) < t_end and r.get("value") is not None]
@@ -132,43 +186,96 @@ def _update_coking(
             if v is not None and v < below_c:
                 if _pair_spans_gap(r["ts"], rows[i + 1]["ts"], gaps):
                     continue  # dt через дыру связи — не знаем, что было
-                dt = (_tz(rows[i + 1]["ts"]) - _tz(r["ts"])).total_seconds()
-                cr.coolant_below_60_sec += max(0, dt)
+                dt = max(0.0, (_tz(rows[i + 1]["ts"]) - _tz(r["ts"])).total_seconds())
+                cr.coolant_below_60_sec += dt
+                added += w_cold * dt
+                if dt > 0:
+                    last_acc = _tz(rows[i + 1]["ts"])
 
-    # 3. Зона LOW под нагрузкой (run_state = 3)
-    if run_state == 3 and load_zone == "LOW":
-        cr.low_load_zone_sec += duration_sec
+    # 3. Нагрузка под работой: построчно — малая копит долг, достаточная гасит
+    load_addr = cfg.role_to_addr("LOAD_PCT")
+    if run_state != 3:
+        break_run()
+    elif load_addr and load_addr in by_addr:
+        # ОЖ по строкам — последняя известная к моменту строки нагрузки. Прожиг
+        # не засчитывается только при ИЗВЕСТНОЙ холодной ОЖ: нет датчика или
+        # строки (ОЖ пишется по изменению) — по одной нагрузке
+        cool_rows = sorted(
+            ((_tz(r["ts"]), _fv(r)) for r in (by_addr.get(cool_addr) or [] if cool_addr else [])
+             if _fv(r) is not None and _tz(r["ts"]) < t_end),
+            key=lambda x: x[0])
+        ci, cool_now = 0, None
+        rows = sorted((r for r in by_addr[load_addr]
+                       if t_start <= _tz(r["ts"]) < t_end and _fv(r) is not None),
+                      key=lambda r: _tz(r["ts"]))
+        for i, r in enumerate(rows):
+            ts = _tz(r["ts"])
+            while ci < len(cool_rows) and cool_rows[ci][0] <= ts:
+                cool_now = cool_rows[ci][1]
+                ci += 1
+            nxt = _tz(rows[i + 1]["ts"]) if i + 1 < len(rows) else t_end
+            if i + 1 < len(rows) and _pair_spans_gap(r["ts"], rows[i + 1]["ts"], gaps):
+                break_run()       # не знаем, что было в дыре
+                continue
+            if i + 1 == len(rows) and _gap_overlap_sec(gaps, ts, nxt) > 0:
+                break_run()
+                continue
+            dt = max(0.0, (nxt - ts).total_seconds())
+            if dt <= 0:
+                continue          # дубль метки — не интервал
+            warm = cool_now is None or cool_now >= purge_cool
+            v = _fv(r)
+            if v < low_pct:
+                cr.low_load_zone_sec += dt
+                added += dt
+                if dt > 0:
+                    last_acc = nxt
+                break_run()
+            elif not warm:
+                break_run()       # нагрузка есть, но мотор холодный — не прожиг
+            else:
+                credit = dt * (rate_high if v >= high_pct else rate_low)
+                cr.purge_run_sec += dt
+                if cr.purge_run_sec - dt >= min_block:
+                    pay(credit, nxt)
+                else:
+                    cr.purge_pending_sec += credit
+                    if cr.purge_run_sec >= min_block:
+                        pay(cr.purge_pending_sec, nxt)
+                        cr.purge_pending_sec = 0.0
+    # RS 3 без строк нагрузки (короткий подсегмент) — «нет сведений»: отрезок
+    # не обрывается и не растёт
 
-    # 4. Проверить прожиг: run_state=3, зона NORMAL+, Т ОЖ >= below_c, длительность >= порога
-    purge_load_pct = float(cfg.thr("engine_operation", "tunable", "purge_min_load_pct", default=30.0))
-    purge_dur_sec = float(cfg.thr("engine_operation", "tunable", "purge_min_duration_sec", default=300.0))
-    purge_coolant_c = float(cfg.det("COKING_RISK", "purge_min_coolant_c", default=60.0))
+    cr.last_added_sec = added
+    cr.debt_added_total_sec += added
+    if last_acc is not None:
+        cr.last_accum_ts = last_acc.isoformat()
 
-    if (run_state == 3
-            and load_zone not in ("LOW", "NA")
-            and duration_sec >= purge_dur_sec):
-        # Проверяем, что ОЖ была прогрета
-        avg_cool = _avg_in_window(by_addr, cfg.role_to_addr("COOLANT_TEMP"), t_start, t_end)
-        if avg_cool is not None and avg_cool >= purge_coolant_c:
-            # Прожиг подтверждён — сброс
-            cr.idle_low_rpm_sec = 0.0
-            cr.coolant_below_60_sec = 0.0
-            cr.low_load_zone_sec = 0.0
-            cr.last_purge_ts = t_end.isoformat()
-
-    # 5. Обновить уровень риска
-    yellow_idle = float(cfg.det("COKING_RISK", "risk_yellow_idle_sec", default=600))
-    red_idle = float(cfg.det("COKING_RISK", "risk_red_idle_sec", default=1800))
-    yellow_low = float(cfg.det("COKING_RISK", "risk_yellow_low_load_sec", default=3600))
-    red_low = float(cfg.det("COKING_RISK", "risk_red_low_load_sec", default=7200))
-
-    if (cr.idle_low_rpm_sec >= red_idle or cr.low_load_zone_sec >= red_low
-            or cr.coolant_below_60_sec >= red_idle * 3):
+    # 4. Уровень — по каждому счётчику (решения 11.10): малая нагрузка 2/4 ч
+    # (Cat, Fort Calhoun, EMD), х.х. суммарно 1/3 ч, холодная ОЖ 1/3 ч
+    y_low = float(cfg.det("COKING_RISK", "risk_yellow_low_load_sec", default=7200))
+    r_low = float(cfg.det("COKING_RISK", "risk_red_low_load_sec", default=14400))
+    y_idle = float(cfg.det("COKING_RISK", "risk_yellow_idle_sec", default=3600))
+    r_idle = float(cfg.det("COKING_RISK", "risk_red_idle_sec", default=10800))
+    y_cold = float(cfg.det("COKING_RISK", "risk_yellow_cold_sec", default=3600))
+    r_cold = float(cfg.det("COKING_RISK", "risk_red_cold_sec", default=10800))
+    if (cr.low_load_zone_sec >= r_low or cr.idle_low_rpm_sec >= r_idle
+            or cr.coolant_below_60_sec >= r_cold):
         cr.risk_level = "RED"
-    elif (cr.idle_low_rpm_sec >= yellow_idle or cr.low_load_zone_sec >= yellow_low):
+    elif (cr.low_load_zone_sec >= y_low or cr.idle_low_rpm_sec >= y_idle
+            or cr.coolant_below_60_sec >= y_cold):
         cr.risk_level = "YELLOW"
     else:
         cr.risk_level = "GREEN"
+
+    # Для показа: долг и сколько прожига до сброса (отрезок не короче минимума)
+    cr.purge_low_pct, cr.purge_high_pct = low_pct, high_pct
+    cr.debt_sec = debt()
+    if cr.debt_sec >= 1.0:
+        cr.purge_left_low_min = round(max(min_block, cr.debt_sec / rate_low) / 60.0, 1)
+        cr.purge_left_high_min = round(max(min_block, cr.debt_sec / rate_high) / 60.0, 1)
+    else:
+        cr.purge_left_low_min = cr.purge_left_high_min = None
 
 
 # ── Thermal Risk ─────────────────────────────────────────────────────────────

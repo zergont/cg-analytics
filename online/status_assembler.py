@@ -182,6 +182,8 @@ def is_analytics_suppressed(seg_row: dict, active_dets: list[dict]) -> bool:
     suppressed = seg_row.get("gate_suppressed_hash")
     if not suppressed:
         return False
+    # Риск нагара в составе гейта не участвует (v5.1.3) — и в сверке хеша тоже
+    active_dets = _without_state(active_dets)
     # Вердикт, поставленный до правила (или на составе, совпавшем по хешу), не
     # гасит несимметрию
     if has_uncancellable(active_dets):
@@ -190,6 +192,26 @@ def is_analytics_suppressed(seg_row: dict, active_dets: list[dict]) -> bool:
         isinstance(d, dict) and d.get("scenario") != "CONTROLLER_FAULT" for d in active_dets
     )
     return has_analytics and compute_analytics_hash(active_dets) == suppressed
+
+
+def _without_state(dets: list[dict]) -> list[dict]:
+    """Без сценариев-состояний (риск нагара): это не тревога, гейт их не разбирает."""
+    from analytics.contract import STATE_SCENARIOS
+    return [d for d in dets or [] if not (isinstance(d, dict) and d.get("scenario") in STATE_SCENARIOS)]
+
+
+_COKING_LEVEL_RU = {"GREEN": "низкий", "YELLOW": "повышенный", "RED": "высокий"}
+
+
+def _coking_state(seg_row: dict) -> dict | None:
+    """Накопленный риск нагара из coking_risk_json — для строки «Состояние»."""
+    raw = _parse_json(seg_row.get("coking_risk_json"))
+    if not isinstance(raw, dict):
+        return None
+    return {k: raw.get(k) for k in (
+        "risk_level", "low_load_zone_sec", "idle_low_rpm_sec", "coolant_below_60_sec",
+        "debt_sec", "last_purge_ts", "last_accum_ts", "purge_left_low_min",
+        "purge_left_high_min", "purge_low_pct", "purge_high_pct")}
 
 
 def build_structural_status(
@@ -222,7 +244,9 @@ def build_structural_status(
                   or _RUN_STATE_LABELS.get(run_state, f"RUN_STATE={run_state}"))
 
     current_vals = _parse_json(seg_row.get("current_values_json")) or {}
-    active_dets  = _parse_json(seg_row.get("active_detections_json")) or []
+    # Риск нагара — накопленное состояние, а не тревога (v5.1.3): в уровень,
+    # состав гейта и тревоги не идёт, у него своя часть строки «Состояние»
+    active_dets  = _without_state(_parse_json(seg_row.get("active_detections_json")) or [])
     values: dict = current_vals.get("values") or {}
 
     # ── Нагрузка ──
@@ -357,6 +381,7 @@ def build_structural_status(
         "stop_kind":          _stop_kind,
         "emergency_text":     (_emergency_text(panel_alarms, values, fault_ref)
                                if _stop_kind == "EMERGENCY" else None),
+        "coking":             _coking_state(seg_row),
     }
 
 
@@ -437,9 +462,33 @@ def format_status_text(s: dict) -> str:
         # Ненавязчивый след гейта: срабатывание было, ИИ проверил и отменил
         parts.append("✓ аналитика: срабатывание проверено ИИ, угрозы нет")
 
+    coking = _coking_status_part(s.get("coking"), s.get("run_state"))
+    if coking:
+        parts.append(coking)
+
     if parts:
         return f"{base} — {' | '.join(parts)}."
     return f"{base} — параметры в норме."
+
+
+def _coking_status_part(ck: dict | None, run_state) -> str | None:
+    """Риск нагара для строки «Состояние»: перед пуском — на стоящей машине.
+
+    Накопленный недогруз опасен при пуске и первых минутах под нагрузкой, поэтому
+    знать о нём нужно до пуска (решение 11.10.2026).
+    """
+    if not ck or ck.get("risk_level") in (None, "GREEN"):
+        return None
+    lvl = _COKING_LEVEL_RU.get(ck["risk_level"], ck["risk_level"])
+    left = ck.get("purge_left_low_min")
+    pct = ck.get("purge_low_pct")
+    tail = (f"до сброса ~{left:.0f} мин под нагрузкой ≥{pct:.0f} %"
+            if left and pct else "")
+    if run_state == 0:
+        since = (f"накоплен с прожига {ck['last_purge_ts'][8:10]}.{ck['last_purge_ts'][5:7]}"
+                 if ck.get("last_purge_ts") else "накоплен при прошлой работе")
+        return f"⚠ перед пуском: риск нагара {lvl} — {since}" + (f"; {tail}" if tail else "")
+    return f"🟡 риск нагара {lvl}" + (f" — {tail}" if tail else "")
 
 
 def extract_alarm_text(s: dict) -> str | None:

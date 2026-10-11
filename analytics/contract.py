@@ -123,11 +123,30 @@ class DerivedMetrics:
 
 @dataclass
 class CokingRisk:
-    idle_low_rpm_sec: float = 0.0
-    coolant_below_60_sec: float = 0.0
-    low_load_zone_sec: float = 0.0
+    """Риск нагара (wet stacking) — накопленное СОСТОЯНИЕ машины, долг до прожига.
+
+    Копится при недогрузе (малая нагрузка, холостой ход, холодная ОЖ), стоп его
+    не снимает, снимает только работа под нагрузкой — пропорционально (v5.1.3,
+    решения 11.10.2026; docs/plans/research_coking_wet_stacking.md). Счётчики —
+    непогашенный остаток с последнего полного прожига.
+    """
+    idle_low_rpm_sec: float = 0.0       # холостой ход (RUN_STATE 2/5), суммарно
+    coolant_below_60_sec: float = 0.0   # работа с ОЖ ниже порога
+    low_load_zone_sec: float = 0.0      # работа ниже порога нагрузки (по LOAD_PCT)
     risk_level: str = "GREEN"           # GREEN / YELLOW / RED
-    last_purge_ts: Optional[str] = None
+    last_purge_ts: Optional[str] = None  # последний ПОЛНЫЙ прожиг (долг погашен)
+    last_accum_ts: Optional[str] = None  # последний момент, когда долг рос
+    debt_sec: float = 0.0               # долг в «секундах малой нагрузки» (с весами)
+    debt_added_total_sec: float = 0.0   # монотонно: всего начислено (прирост за период = разность)
+    debt_paid_total_sec: float = 0.0    # монотонно: всего погашено прожигом
+    last_added_sec: float = 0.0         # прирост долга в последнем подсегменте
+    purge_run_sec: float = 0.0          # текущий непрерывный отрезок под нагрузкой ≥ порога
+    purge_pending_sec: float = 0.0      # зачёт отрезка, ждущий минимальной длины
+    idle_run_sec: float = 0.0           # текущий непрерывный холостой ход
+    purge_left_low_min: Optional[float] = None   # до сброса — минут при ≥ порога
+    purge_left_high_min: Optional[float] = None  # то же при высокой нагрузке
+    purge_low_pct: Optional[float] = None    # пороги прожига (для подписей без cfg)
+    purge_high_pct: Optional[float] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -136,7 +155,54 @@ class CokingRisk:
             "low_load_zone_sec": self.low_load_zone_sec,
             "risk_level": self.risk_level,
             "last_purge_ts": self.last_purge_ts,
+            "last_accum_ts": self.last_accum_ts,
+            "debt_sec": self.debt_sec,
+            "debt_added_total_sec": self.debt_added_total_sec,
+            "debt_paid_total_sec": self.debt_paid_total_sec,
+            "last_added_sec": self.last_added_sec,
+            "purge_run_sec": self.purge_run_sec,
+            "purge_pending_sec": self.purge_pending_sec,
+            "idle_run_sec": self.idle_run_sec,
+            "purge_left_low_min": self.purge_left_low_min,
+            "purge_left_high_min": self.purge_left_high_min,
+            "purge_low_pct": self.purge_low_pct,
+            "purge_high_pct": self.purge_high_pct,
         }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "CokingRisk":
+        """Из coking_risk_json; поля, которых нет в старых записях, — по умолчанию."""
+        def f(k: str) -> float:
+            try:
+                return float(d.get(k) or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        def o(k: str) -> Optional[float]:
+            v = d.get(k)
+            try:
+                return float(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+        return cls(
+            idle_low_rpm_sec=f("idle_low_rpm_sec"),
+            coolant_below_60_sec=f("coolant_below_60_sec"),
+            low_load_zone_sec=f("low_load_zone_sec"),
+            risk_level=d.get("risk_level") or "GREEN",
+            last_purge_ts=d.get("last_purge_ts"),
+            last_accum_ts=d.get("last_accum_ts"),
+            debt_sec=f("debt_sec"),
+            debt_added_total_sec=f("debt_added_total_sec"),
+            debt_paid_total_sec=f("debt_paid_total_sec"),
+            last_added_sec=f("last_added_sec"),
+            purge_run_sec=f("purge_run_sec"),
+            purge_pending_sec=f("purge_pending_sec"),
+            idle_run_sec=f("idle_run_sec"),
+            purge_left_low_min=o("purge_left_low_min"),
+            purge_left_high_min=o("purge_left_high_min"),
+            purge_low_pct=o("purge_low_pct"),
+            purge_high_pct=o("purge_high_pct"),
+        )
 
 
 @dataclass
@@ -173,6 +239,11 @@ class RiskAccumulators:
 
 
 # ── 3.7 DETECTION ───────────────────────────────────────────────────────────
+
+# Сценарии-состояния: накопленное состояние машины, а не событие сегмента.
+# Эпизодов тревог, разбора гейтом и журнала тревог у них нет — история в
+# цепочке coking_risk_json по сегментам, в сводке своя часть (v5.1.3).
+STATE_SCENARIOS = frozenset({"COKING_RISK"})
 
 @dataclass
 class Detection:
@@ -268,6 +339,9 @@ class Segment:
     # Shutdown, v4.9.94), 'SIMPLE' — обычный. None у всех остальных
     # режимов и у сегментов, нарезанных до появления модели (v4.9.67).
     stop_kind: Optional[str] = None
+    # Риск нагара на начало сегмента (CokingRisk.to_dict) — для прироста и
+    # погашения за сегмент в сводке (v5.1.3)
+    coking_start: Optional[dict[str, Any]] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -290,4 +364,5 @@ class Segment:
             "sequence_checks": self.sequence_checks,
             "events": self.events,
             "stop_kind": self.stop_kind,
+            "coking_start": self.coking_start,
         }

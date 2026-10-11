@@ -43,7 +43,7 @@ def seg(rs=3, stop_kind=None, cc=None):
               cause_open="DAILY_BOUNDARY", subsegments=[sub])
 
 
-def ep(source="analytics", sev="CAUTION", supp=False, closed=False, before=False, sc="COKING_RISK"):
+def ep(source="analytics", sev="CAUTION", supp=False, closed=False, before=False, sc="OIL_DILUTION"):
     return {"source": source, "severity": sev, "gate_suppressed": supp,
             "scenario": sc if source == "analytics" else "CONTROLLER_FAULT", "addr": 40407, "bit": 5,
             "t_open": T0 - timedelta(hours=400) if before else T0 + timedelta(hours=1),
@@ -51,7 +51,7 @@ def ep(source="analytics", sev="CAUTION", supp=False, closed=False, before=False
             "active_sec": 3600.0, "blind_sec": 0.0, "open_values_json": {"fault_name": "Кнопка"}}
 
 
-# 1. #35739: стоп, риск нагара снят ИИ — НОРМА везде
+# 1. Стоп, замечание аналитики снято ИИ — НОРМА везде
 p = build_summary_parts([seg(rs=0, stop_kind="SIMPLE")], [ep(supp=True, before=True)])
 check(p["verdict"]["level"] == "НОРМА" and p["verdict"]["suppressed_n"] == 1, f"1: вердикт НОРМА: {p['verdict']}")
 check(p["end_level"] == "НОРМА", "1б: на конец — норма (снятое не считается)")

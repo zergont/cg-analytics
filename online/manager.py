@@ -445,6 +445,7 @@ class OnlineManager:
                         "time_in_mode_sec":     struct.get("time_in_mode_sec"),
                         "alarm_text":           extract_alarm_text(struct),
                         "analytics_suppressed": struct.get("analytics_suppressed", False),
+                        "coking":               struct.get("coking"),
                     },
                 )
 

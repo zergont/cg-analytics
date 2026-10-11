@@ -121,7 +121,7 @@ check(calls["close"] == [(78, T("09:04:07"))], f"3б: без времени па
 # 4. Новый эпизод уже снятого гейтом состава наследует снятие (v5.1.0)
 from online.status_assembler import compute_analytics_hash  # noqa: E402
 
-LOW = {"scenario": "COKING_RISK", "severity": "CAUTION", "fault_codes": [], "values": {},
+LOW = {"scenario": "OIL_DILUTION", "severity": "CAUTION", "fault_codes": [], "values": {},
        "t_detected": "2026-10-06T09:10:00+00:00"}
 marked: list = []
 
@@ -143,13 +143,14 @@ async def _noop2(*a, **k):
 
 
 eng.online_db.open_episode = _open
+eng.online_db.find_episode_by_onset = _noop2   # онсет не встречался — новый эпизод
 eng.online_db.get_open_segment = _row
 eng.online_db.set_episodes_gate_suppressed = _mark
 e._attach_trip_context = _noop2
 e._episodes, e._last_open_seg_id = {}, 5
 e._episode_accrual_ts = T("09:09:00")
 asyncio.run(e._process_episodes([LOW], T("09:10:30"), []))
-check(marked == [["COKING_RISK"]], f"4: снятие перенесено на новый эпизод: {marked}")
+check(marked == [["OIL_DILUTION"]], f"4: снятие перенесено на новый эпизод: {marked}")
 
 # 4б. Цикл смены режима: открытая строка уже удалена — проверка откладывается
 marked.clear()
@@ -163,12 +164,12 @@ eng.online_db.get_open_segment = _no_row
 e._episodes, e._supp_recheck = {}, None
 e._episode_accrual_ts = T("09:09:00")
 asyncio.run(e._process_episodes([LOW], T("09:10:30"), []))
-check(marked == [] and e._supp_recheck == (["COKING_RISK"], [LOW]),
+check(marked == [] and e._supp_recheck == (["OIL_DILUTION"], [LOW]),
       f"4б: строки нет — проверка отложена: {marked}, {e._supp_recheck}")
 eng.online_db.get_open_segment = _row      # upsert записал строку с хвостом гейта
 _sc, _dets = e._supp_recheck
 asyncio.run(e._inherit_gate_suppression(_sc, _dets))
-check(marked == [["COKING_RISK"]], f"4в: после upsert снятие перенесено: {marked}")
+check(marked == [["OIL_DILUTION"]], f"4в: после upsert снятие перенесено: {marked}")
 
 if _errors:
     print(f"FAIL — {len(_errors)} расхождений:")

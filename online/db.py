@@ -464,6 +464,24 @@ async def close_open_as_operator_stop(
         await conn.close()
 
 
+async def get_segment_ended_before(
+    router_sn: str, equip_type: str, panel_id: int, ts: datetime,
+) -> dict[str, Any] | None:
+    """Последний закрытый сегмент, закончившийся не позже ts (состояние на момент ts)."""
+    conn = await _connect()
+    try:
+        row = await conn.fetchrow("""
+            SELECT * FROM auto_segments
+            WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
+              AND t_end IS NOT NULL AND t_end <= $4
+            ORDER BY t_end DESC
+            LIMIT 1
+        """, router_sn, equip_type, panel_id, ts)
+        return dict(row) if row else None
+    finally:
+        await conn.close()
+
+
 async def get_segment_before(
     router_sn: str, equip_type: str, panel_id: int,
     before_t_start: datetime,

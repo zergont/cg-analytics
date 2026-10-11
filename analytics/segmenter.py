@@ -1439,6 +1439,8 @@ def segment(
 
         run_state: int = int(period["value"])
         run_state_label: str = period.get("label") or str(run_state)
+        # Риск нагара на начало сегмента — для прироста/погашения в сводке
+        coking_start = accumulators.coking_risk.to_dict()
 
         # Формируем строки by_addr для сегмента (включая преамбулу)
         preamble_by_addr, preamble_t_start = _collect_preamble(
@@ -1573,6 +1575,7 @@ def segment(
             sequence_checks=seq_checks,
             events=events,
             stop_kind=stop_kind,
+            coking_start=coking_start,
         )
         segments.append(seg)
 

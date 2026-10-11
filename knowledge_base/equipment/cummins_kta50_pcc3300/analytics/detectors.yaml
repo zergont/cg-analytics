@@ -191,26 +191,45 @@ OIL_DILUTION:
   severity_default: CAUTION
   _source: TUNABLE
 
-# ─── COKING_RISK: Закоксовка / wet stacking ─────────────────────────────────
+# ─── COKING_RISK: риск нагара / wet stacking — НАКОПЛЕННОЕ СОСТОЯНИЕ ────────
+# Долг до прожига (v5.1.3, решения владельца 11.10.2026; основание —
+# docs/plans/research_coking_wet_stacking.md). Копится при недогрузе, стоп его
+# не снимает, снимает только работа под нагрузкой. В стопе не «обнаруживается»:
+# в сводке — «перед пуском» с датами накопления. Порог малой нагрузки и
+# минимальный отрезок прожига — thresholds.yaml engine_operation.tunable
+# (purge_min_load_pct = 30 % standby — Cummins PT #7007, NFPA 110;
+# purge_min_duration_sec = 900 — источники не засчитывают прожиг короче).
 COKING_RISK:
   enabled: true
-  # Порог по холостому ходу (idle_duration — сквозной аккумулятор)
-  idle_duration_warning_sec: 600       # > 10 мин на х.х. → WARNING (K38-50_РЭ_и_ТО)
-  # Порог по Т ОЖ < 60°C (из thresholds.yaml, coolant.tunable.below_60_risk_threshold_c)
-  coolant_below_60_warning_sec: 1800   # > 30 мин с Т < 60°C → WARNING
-  # Порог по зоне LOW
-  low_load_zone_warning_sec: 3600      # > 60 мин в зоне LOW → WARNING
-  # Параметры «прожига» (сброс риска): работа ≥30% при прогретом двигателе
-  purge_min_load_pct: 30               # из thresholds.yaml, engine_operation.tunable.purge_min_load_pct
-  purge_min_duration_sec: 300          # и не менее 5 мин непрерывно
-  purge_min_coolant_c: 60             # двигатель должен быть прогрет (ОЖ ≥ 60°C)
-  # Уровни риска (GREEN/YELLOW/RED)
-  risk_yellow_idle_sec: 600
-  risk_red_idle_sec: 1800
-  risk_yellow_low_load_sec: 3600
-  risk_red_low_load_sec: 7200
+  # Уровни — по непогашенному остатку каждого счётчика с последнего полного прожига
+  risk_yellow_low_load_sec: 7200     # 2 ч малой нагрузки
+  risk_red_low_load_sec: 14400       # 4 ч — Cat LEXE0832 (30 мин на 4 ч), Fort Calhoun, EMD (3 ч)
+  risk_yellow_idle_sec: 3600         # 1 ч х.х. суммарно (после часа х.х. — прожиг)
+  risk_red_idle_sec: 10800           # 3 ч — инструкция машинисту CN, форма 8960
+  risk_yellow_cold_sec: 3600         # 1 ч работы с ОЖ < 60 °C
+  risk_red_cold_sec: 10800           # 3 ч (Cummins O&M: при ОЖ ≤60 °C топливо смывает масло)
+  # Долг — в «минутах малой нагрузки»: х.х. вреднее (MAN: без нагрузки ≤1 ч против ~200 ч при 17 %)
+  debt_weight_idle: 2.0
+  debt_weight_cold: 1.0
+  # Прожиг — пропорциональный зачёт: минута при ≥ purge_min_load_pct гасит
+  # purge_rate_low минут долга (Cat: 30 мин на 4 ч ≈ 1:8), при ≥ purge_high_load_pct —
+  # purge_rate_high (MAN: ~1,2 ч при >70 % после 19 ч при 10 %)
+  purge_rate_low: 8.0
+  purge_high_load_pct: 70
+  purge_rate_high: 16.0
+  purge_min_coolant_c: 60            # прожиг засчитывается при прогретой ОЖ
   severity_default: CAUTION
-  _source: PASSPORT_РЭ  # idle 600 сек — K38-50_РЭ_и_ТО
+  _source: PASSPORT_РЭ + отраслевые нормы (research_coking_wet_stacking.md)
+
+# ─── IDLE_TOO_LONG: непрерывный холостой ход дольше нормы РЭ ────────────────
+# Замечание сегмента (v5.1.3). Норма — один отрезок х.х.: K38-50 РЭ, Cummins
+# O&M — не более 10 мин (код панели 2342 Max Idle Time — тоже непрерывный).
+# Суммарный х.х. идёт в долг риска нагара (COKING_RISK), а не сюда.
+IDLE_TOO_LONG:
+  enabled: true
+  max_continuous_sec: 600
+  severity_default: CAUTION
+  _source: PASSPORT_РЭ  # K38-50_РЭ_и_ТО, Cummins O&M
 
 # ─── WARMUP_VIOLATION: Нарушение прогрева ───────────────────────────────────
 WARMUP_VIOLATION:
