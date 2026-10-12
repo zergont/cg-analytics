@@ -3,6 +3,11 @@
 # Источник: ТЗ аналитики, раздел 2.3
 # Изменение: только через веб-морду (раздел 9 ТЗ)
 
+# Имя контроллера для текстов (разбор аварии: поиск шлюза находит руководства по
+# марке и коду, v5.1.14)
+controller:
+  name: Cummins PowerCommand PCC3300
+
 registers:
 
   # ═══════════════════════════════════════════════════════════════
@@ -415,6 +420,9 @@ registers:
   43560:
     role: GENSET_CB_CLOSE_CMD
     domain: CONTROLLER
+    # Во вход разбора аварии — состояние на момент останова, даже если в окне
+    # не менялось (в ленту акта попадают только смены), v5.1.14
+    incident_state: true
     group: STATE
     unit: ~
     kind: enum
@@ -424,6 +432,7 @@ registers:
   43562:
     role: GENSET_CB_POS
     domain: CONTROLLER
+    incident_state: true
     group: STATE
     unit: ~
     kind: enum

@@ -198,20 +198,51 @@ def _format_cycle_params(
     return out
 
 
+def _fault_codes_line(incident: dict[str, Any]) -> str | None:
+    """Числовые коды неисправности панели в акте (40012) с названием (v5.1.14):
+    по марке и коду поиск шлюза находит руководство — по одному названию нет."""
+    seen: dict[int, str] = {}
+    for e in incident.get("chronology") or []:
+        if e.get("role") != "LAST_FAULT_CODE" or e.get("value") in (None, 0):
+            continue
+        try:
+            code = int(e["value"])
+        except (TypeError, ValueError):
+            continue
+        if code > 0 and code not in seen:
+            seen[code] = e.get("label") or ""
+    if not seen:
+        return None
+    return "Коды неисправностей панели в акте (40012): " + "; ".join(
+        f"{c} — {n}" if n else str(c) for c, n in seen.items())
+
+
 def build_incident_prompt(
     incident: dict[str, Any], seg_row: dict[str, Any] | None = None,
     cycle_segments: list[dict[str, Any]] | None = None,
+    context: dict[str, Any] | None = None,
 ) -> str:
     """Промпт разбора аварии из акта.
 
-    Порядок продуман под чтение моделью: сперва что машина уже везла на себе
-    к моменту падения, потом сам останов, потом лента. Вопрос в конце —
-    иначе модель отвечает на первое, что увидела.
+    Порядок продуман под чтение моделью: сперва что за машина и что она уже
+    везла на себе к моменту падения, потом сам останов, потом лента. Вопрос в
+    конце — иначе модель отвечает на первое, что увидела. context — оборудование
+    из реестра и состояние на момент останова (_context, v5.1.14).
     """
     ch = incident.get("character") or {}
     win = incident.get("window") or {}
-    out: list[str] = [
-        "Разбери аварийный останов дизель-генераторной установки.",
+    eq = (context or {}).get("equipment") or {}
+    out: list[str] = ["Разбери аварийный останов дизель-генераторной установки."]
+    if eq:
+        out += ["", "Оборудование (реестр):"]
+        if eq.get("name"):
+            out.append(f"  - Установка: {eq['name']}")
+        if eq.get("engine"):
+            out.append(f"  - Двигатель: {eq['engine']}"
+                       + (f", s/n {eq['engine_sn']}" if eq.get("engine_sn") else ""))
+        if eq.get("controller"):
+            out.append(f"  - Контроллер (панель управления): {eq['controller']}")
+    out += [
         "",
         f"Останов: {incident.get('stop_ts') or '—'}",
         f"Характер по детерминированному гейту: {ch.get('character', '?')} "
@@ -225,6 +256,23 @@ def build_incident_prompt(
                    "окно взято по последним сегментам.")
     elif win.get("from"):
         out.append(f"Окно разбора от последнего штатного останова: {win['from']}")
+    codes = _fault_codes_line(incident)
+    if codes:
+        out.append(codes)
+
+    states = (context or {}).get("states") or []
+    if states:
+        out += ["", "Состояние на момент останова (не обязательно менялось в окне — "
+                    "в ленту попадают только смены):"]
+        stop_day = str(incident.get("stop_ts") or "")[:10]
+        for s in states:
+            since = ""
+            if s.get("since"):
+                raw = str(s["since"])
+                # Давнее состояние — с датой: «с 29.09 13:10 UTC», а не «с 13:10:22»
+                since = (f" (с {_ts(raw)})" if raw[:10] == stop_day
+                         else f" (с {raw[8:10]}.{raw[5:7]} {raw[11:16]} UTC)")
+            out.append(f"  - {s['addr']} {s['name']} = {s['label']}{since}")
 
     standing = incident.get("standing") or []
     if standing:
@@ -521,6 +569,66 @@ async def _state(router_sn: str, equip_type: str, panel_id: int,
         return {"analysed": False, "terminal": None, "ordered": 0}
 
 
+async def _context(router_sn: str, equip_type: str, panel_id: int,
+                   stop_ts: datetime) -> dict[str, Any]:
+    """Оборудование из реестра и состояние регистров на момент останова (v5.1.14).
+
+    Состояние — по пометке incident_state в KB (у PCC3300 — команда на включение и
+    положение автомата): если в окне не менялось, в ленту акта оно не попадает,
+    а для причины важно. Сбой любого шага — без этого блока (fail-open).
+    """
+    ctx: dict[str, Any] = {}
+    eq = None
+    try:
+        from db.analytics import get_equipment
+        eq = await get_equipment(router_sn, equip_type, panel_id)
+    except Exception:
+        logger.warning("IncidentGate: оборудование из реестра не прочитано", exc_info=True)
+    if not eq:
+        return ctx
+    cfg = None
+    try:
+        from analytics import binding
+        from config import settings as app_settings
+        cfg = binding.build_config(app_settings.knowledge_base_path,
+                                   controller_id=eq.get("controller_id"),
+                                   engine_id=eq.get("engine_id"), kb_path=eq.get("kb_path"))
+    except Exception:
+        logger.warning("IncidentGate: конфиг оборудования не собран", exc_info=True)
+    try:
+        ctx["equipment"] = {
+            "name": eq.get("name"),
+            "engine": " ".join(str(x) for x in (eq.get("manufacturer"), eq.get("model")) if x) or None,
+            "engine_sn": eq.get("engine_sn"),
+            "controller": (cfg.controller_label if cfg else None) or eq.get("controller_id"),
+        }
+        regs = cfg.incident_state_registers if cfg else []
+    except Exception:
+        logger.warning("IncidentGate: оборудование для разбора не собрано", exc_info=True)
+        regs = []
+    if regs:
+        try:
+            from analytics import source as _src
+            names = dict(regs)
+            periods = await _src.get_enum_periods(
+                router_sn, equip_type, panel_id,
+                stop_ts - timedelta(seconds=1), stop_ts, addrs=list(names))
+            last: dict[int, dict] = {}
+            for p in periods:
+                last[p["addr"]] = p          # по возрастанию state_start — последний
+            ctx["states"] = [
+                {"addr": a, "name": names[a],
+                 # 65535 — «нет данных» декодера (u16 NA), не значение
+                 "label": ("нет данных" if p.get("value") == 65535
+                           else p.get("label") or p.get("value")),
+                 "since": p["state_start"].isoformat() if p.get("state_start") else None}
+                for a, p in sorted(last.items())]
+        except Exception:
+            logger.warning("IncidentGate: состояние на момент останова не прочитано",
+                           exc_info=True)
+    return ctx
+
+
 async def _material(router_sn: str, equip_type: str, panel_id: int,
                     incident: dict[str, Any], stop_ts: datetime,
                     segment_id: int | None) -> str:
@@ -542,7 +650,13 @@ async def _material(router_sn: str, equip_type: str, panel_id: int,
     except Exception:
         logger.warning("IncidentGate: сегменты цикла не прочитаны — разбор "
                        "без расчётных параметров", exc_info=True)
-    return build_incident_prompt(incident, seg_row, cycle_segments)
+    try:
+        context = await _context(router_sn, equip_type, panel_id, stop_ts)
+    except Exception:
+        # Блок оборудования — дополнение: его сбой не мешает разбору
+        logger.warning("IncidentGate: контекст оборудования не собран", exc_info=True)
+        context = {}
+    return build_incident_prompt(incident, seg_row, cycle_segments, context)
 
 
 async def _save(router_sn: str, equip_type: str, panel_id: int, stop_ts: datetime,

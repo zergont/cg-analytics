@@ -95,6 +95,13 @@ odb.get_segment_by_id = _seg
 odb.get_segments_between = _between
 odb.get_incident_acts_since = _acts
 
+
+async def _no_context(*a, **k):
+    return {}
+
+
+ig._context = _no_context      # оборудование и состояние на момент останова — без БД (v5.1.14)
+
 # ── Фальшивая модель ─────────────────────────────────────────────────────────
 ASK: dict = {}
 

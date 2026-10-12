@@ -140,6 +140,23 @@ class AnalyticsConfig:
                 return f"{head.capitalize()} {rest.replace('_', ' ').upper()}".strip()
         return None
 
+    @property
+    def controller_label(self) -> str | None:
+        """«Cummins PowerCommand PCC3300» — из mapping.yaml слоя контроллера.
+        Правка KB в веб-морде проверяет только синтаксис YAML: «controller: X»
+        строкой — тоже имя, не падение (ревью v5.1.14)."""
+        c = self.mapping.get("controller")
+        name = c.get("name") if isinstance(c, dict) else c
+        return str(name).strip() or None if name else None
+
+    @property
+    def incident_state_registers(self) -> list[tuple[int, str]]:
+        """Регистры «состояние на момент останова» для разбора аварии (v5.1.14):
+        [(addr, описание)] — пометка incident_state: true в mapping.yaml."""
+        return [(addr, meta.get("description") or meta.get("role") or f"reg_{addr}")
+                for addr, meta in sorted(self._register_map.items())
+                if meta.get("incident_state")]
+
     def set_sensor_step(self, role: str, step: float, source: str = "history") -> None:
         """Шаг показаний датчика роли у этой машины (оценка по истории)."""
         self._sensor_steps[role] = (float(step), source)
