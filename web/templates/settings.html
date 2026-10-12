@@ -53,9 +53,9 @@
                                    onchange="this.form.submit()">
                             <label class="form-check-label" for="corpusAutoSwitch">
                                 {% if corpus_auto_analyze %}
-                                    <span class="text-success fw-semibold">Авто-анализ Claude — включён</span>
+                                    <span class="text-success fw-semibold">Авто-заключения по сегментам — включены</span>
                                 {% else %}
-                                    <span class="text-muted">Авто-анализ Claude — выключен</span>
+                                    <span class="text-muted">Авто-заключения по сегментам — выключены</span>
                                 {% endif %}
                             </label>
                         </div>
@@ -68,9 +68,9 @@
                                    onchange="this.form.submit()">
                             <label class="form-check-label" for="qwenAutoSwitch">
                                 {% if qwen_auto_analyze %}
-                                    <span class="text-success fw-semibold">Авто-анализ LLM — включён</span>
+                                    <span class="text-success fw-semibold">Авто-пересказ для оператора — включён</span>
                                 {% else %}
-                                    <span class="text-muted">Авто-анализ LLM — выключен</span>
+                                    <span class="text-muted">Авто-пересказ для оператора — выключен</span>
                                 {% endif %}
                             </label>
                         </div>
@@ -157,9 +157,9 @@
     <!-- ─── Правая колонка ─────────────────────────────────────────────── -->
     <div class="col-md-6">
 
-        <!-- LLM — локальная модель (Ollama / LM Studio) -->
+        <!-- Общее подключение LLM: шлюз «Горыныч» (или прямой сервер) -->
         <div class="card mb-3">
-            <div class="card-header fw-semibold">🤖 LLM — локальная модель</div>
+            <div class="card-header fw-semibold">🐉 Подключение «Горыныч» (общее)</div>
             <div class="card-body">
                 <form method="post" action="/settings/llm">
                     <div class="row g-2 mb-2">
@@ -193,7 +193,7 @@
                         document.getElementById("llm_url_hint").textContent = {
                             lmstudio: "LM Studio: обычно http://localhost:1234",
                             gorynych: "Горыныч: http://192.168.0.79:4000/src/analytics (без /v1). Модель — fast; "
-                                      + "модель, рассуждение и приоритет по виду разбора — в карточке «Градация разбора»",
+                                      + "модель, рассуждение и приоритет по виду работы — в таблице «Кто и как разбирает»",
                         }[p] || "Ollama: обычно http://localhost:11434";
                         document.getElementById("llm_ctx_hint").textContent =
                             p === "lmstudio" ? "(игнорируется — задаётся при загрузке модели в LM Studio)"
@@ -233,7 +233,7 @@
 
         <!-- ИИ-аналитика (Claude API) -->
         <div class="card">
-            <div class="card-header fw-semibold">✨ ИИ-аналитика (Claude API)</div>
+            <div class="card-header fw-semibold">✨ Claude API (облако)</div>
             <div class="card-body">
                 <form method="post" action="/settings/claude">
                     <div class="row g-2 mb-2">
@@ -242,9 +242,10 @@
                             <input type="text" name="claude_model" class="form-control form-control-sm"
                                    value="{{ claude.model }}" list="claude-models-list" required>
                             <datalist id="claude-models-list">
-                                <option value="claude-opus-4-8">
-                                <option value="claude-sonnet-4-6">
-                                <option value="claude-haiku-4-5-20251001">
+                                <option value="claude-sonnet-5-5">
+                                <option value="claude-opus-5-5">
+                                <option value="claude-haiku-5-5">
+                                <option value="claude-sonnet-5">
                             </datalist>
                         </div>
                         <div class="col-4">
@@ -265,6 +266,10 @@
                             <input type="number" name="claude_max_tokens" class="form-control form-control-sm"
                                    value="{{ claude.max_tokens }}" min="256" max="32000" required>
                         </div>
+                    </div>
+                    <div class="text-muted small mb-2">
+                        Модель — для строк таблицы «Кто и как разбирает» с пустым полем «Модель Claude»
+                        и для запасного Claude в заключениях.
                     </div>
                     <button type="submit" class="btn btn-sm btn-primary">Сохранить</button>
                     <span class="text-muted small ms-2">Вступает в силу немедленно, без перезапуска.</span>
@@ -421,7 +426,7 @@
                         <input type="hidden" name="type" id="reg_type" value="llm">
                         <button type="submit" class="btn btn-sm btn-primary">Сохранить подключение</button>
                         <button type="button" class="btn btn-sm btn-outline-secondary" onclick="llmRegReset()">Очистить форму</button>
-                        <span class="text-muted small ms-2">Claude идёт агентским пайплайном (модель — из карточки «ИИ-аналитика»).</span>
+                        <span class="text-muted small ms-2">Claude идёт агентским пайплайном (модель — из строки таблицы «Кто и как разбирает» или карточки «Claude API (облако)»).</span>
                     </form>
                 </details>
 
@@ -436,8 +441,8 @@
                         deepseek:  "DeepSeek: https://api.deepseek.com",
                         anthropic: "Не используется — подключение через SDK",
                         gorynych:  "Шлюз: http://192.168.0.79:4000/src/analytics (без /v1). Модели: fast, flashnext, gemma; "
-                                   + "smart + xhigh — совет на 15–30 мин, не для цепочек. Модель, рассуждение и приоритет "
-                                   + "по виду разбора задаёт «Градация разбора»; параллельно — не больше 3; "
+                                   + "smart + xhigh — совет на 15–30 мин, не для цепочек. Кто, модель, рассуждение и приоритет "
+                                   + "по виду работы задаёт таблица «Кто и как разбирает»; параллельно — не больше 3; "
                                    + "температуру выбирает шлюз — поле Temp. не действует",
                     }[p] || "";
                     const ctx = document.getElementById("reg_max_ctx");
@@ -521,13 +526,15 @@
 
         <!-- Цепочки приоритетов моделей -->
         <div class="card mb-3">
-            <div class="card-header fw-semibold">⛓️ Цепочки приоритетов — анализ сегментов</div>
+            <div class="card-header fw-semibold">⛓️ Запасные — заключения по сегментам</div>
             <div class="card-body">
                 <div class="text-muted small mb-3">
-                    Порядок моделей для обработки сегмента. Роутер оценивает размер отчёта и берёт
-                    первую модель, в чей лимит контекста он влезает; при ошибке — переходит к следующей.
-                    Непустая цепочка имеет приоритет над выбором провайдера в «Маршрутизации AI» ниже.
-                    Пустая цепочка — работает как раньше (одиночный провайдер задачи).
+                    Основной исполнитель заключения — строка таблицы «Кто и как разбирает» ниже (по уровню
+                    сегмента). Запасные — по порядку, если основной не ответил или отчёт не влез в его окно.
+                    Запись того же подключения, что и основной (Claude API у строки с Claude), пропускается:
+                    дважды не спрашиваем. Пусто — при отказе основного заключение не пишется (повтор — вручную).
+                    Запись шлюза «Горыныч» здесь не показывается и формой не меняется: она хранится первой ради
+                    отката на v5.1.10 и служит запасной у строк, где основной — Claude.
                 </div>
                 <form method="post" action="/settings/ai-chains">
                     {% for task_id in chain_tasks %}
@@ -550,28 +557,34 @@
                                value="{{ ai_chains[task_id] | join(',') }}">
                     </div>
                     {% endfor %}
-                    <button type="submit" class="btn btn-sm btn-primary">Сохранить цепочки</button>
+                    <button type="submit" class="btn btn-sm btn-primary">Сохранить запасные</button>
                     <span class="text-muted small ms-2">Вступает в силу немедленно, без перезапуска.</span>
                 </form>
 
                 <script>
-                {% set _reg_names = {} %}
-                {% for e in llm_registry %}{% set _ = _reg_names.update({e.id: e.name}) %}{% endfor %}
+                {% set _reg_names = {} %}{% set _reg_prov = {} %}
+                {% for e in llm_registry %}{% set _ = _reg_names.update({e.id: e.name}) %}{% set _ = _reg_prov.update({e.id: e.provider}) %}{% endfor %}
                 const LLM_REG_NAMES = {{ _reg_names | tojson }};
+                const LLM_REG_PROV  = {{ _reg_prov | tojson }};
+                const CHAIN_SKIP_NOTE = {anthropic: "пропускается, если основной — Claude"};
+                // Записи шлюза — якорь отката (хранятся первыми, в карточке не видны)
+                function chainIsAnchor(id) { return LLM_REG_PROV[id] === "gorynych"; }
                 function chainRender(taskId) {
-                    const val  = document.getElementById("chain-value-" + taskId).value;
                     const list = document.getElementById("chain-list-" + taskId);
-                    const ids  = val ? val.split(",").filter(Boolean) : [];
+                    const ids  = chainIds(taskId);
                     list.innerHTML = "";
                     if (!ids.length) {
-                        list.innerHTML = '<li class="list-group-item text-muted small">цепочка пуста — используется одиночный провайдер задачи</li>';
+                        list.innerHTML = '<li class="list-group-item text-muted small">запасных нет — работает только основной из таблицы</li>';
                         return;
                     }
                     ids.forEach((id, i) => {
                         const li = document.createElement("li");
                         li.className = "list-group-item d-flex justify-content-between align-items-center py-1";
                         const name = LLM_REG_NAMES[id] || (id + " (удалено из реестра)");
-                        li.innerHTML = '<span class="small">' + name + '</span>' +
+                        const note = CHAIN_SKIP_NOTE[LLM_REG_PROV[id]] || "";
+                        li.innerHTML = '<span class="small">' + name +
+                            (note ? ' <span class="text-muted" style="font-size:0.72rem">— ' + note + '</span>' : '') +
+                            '</span>' +
                             '<span class="btn-group">' +
                             '<button type="button" class="btn btn-sm btn-outline-secondary py-0" onclick="chainMove(\'' + taskId + '\',' + i + ',-1)">↑</button>' +
                             '<button type="button" class="btn btn-sm btn-outline-secondary py-0" onclick="chainMove(\'' + taskId + '\',' + i + ',1)">↓</button>' +
@@ -580,12 +593,14 @@
                         list.appendChild(li);
                     });
                 }
-                function chainIds(taskId) {
+                function chainAll(taskId) {
                     const v = document.getElementById("chain-value-" + taskId).value;
                     return v ? v.split(",").filter(Boolean) : [];
                 }
+                function chainIds(taskId) { return chainAll(taskId).filter(id => !chainIsAnchor(id)); }
                 function chainSet(taskId, ids) {
-                    document.getElementById("chain-value-" + taskId).value = ids.join(",");
+                    const anchors = chainAll(taskId).filter(chainIsAnchor);
+                    document.getElementById("chain-value-" + taskId).value = anchors.concat(ids).join(",");
                     chainRender(taskId);
                     chainSyncSelect(taskId);
                 }
@@ -593,7 +608,7 @@
                     const sel = document.getElementById("chain-add-" + taskId);
                     const ids = chainIds(taskId);
                     if (!sel.value || ids.includes(sel.value)) {
-                        alert("Все подключения из реестра уже в цепочке.");
+                        alert("Все подключения из реестра уже в запасных (шлюз «Горыныч» — основной, в таблице).");
                         return;
                     }
                     ids.push(sel.value);
@@ -605,10 +620,10 @@
                     const ids = chainIds(taskId);
                     let firstFree = null;
                     for (const opt of sel.options) {
-                        opt.hidden = ids.includes(opt.value);
+                        opt.hidden = ids.includes(opt.value) || chainIsAnchor(opt.value);
                         if (!opt.hidden && firstFree === null) firstFree = opt.value;
                     }
-                    if (ids.includes(sel.value)) sel.value = firstFree ?? "";
+                    if (ids.includes(sel.value) || chainIsAnchor(sel.value)) sel.value = firstFree ?? "";
                 }
                 function chainMove(taskId, i, d) {
                     const ids = chainIds(taskId);
@@ -635,39 +650,17 @@
 <div class="row g-3 mt-0" id="ai-routing">
     <div class="col-12">
         <div class="card mb-3">
-            <div class="card-header fw-semibold">🔀 Маршрутизация AI — провайдер и промпт для каждой задачи</div>
+            <div class="card-header fw-semibold">📝 Системные промпты</div>
             <div class="card-body">
+                <div class="text-muted small mb-3">
+                    Кто разбирает — таблица «Кто и как разбирает» ниже. Здесь — только текст установки
+                    для модели. Очистить поле — вернуть промпт по умолчанию.
+                </div>
                 <form method="post" action="/settings/ai-routing">
                 {% for task_id, meta in ai_task_meta.items() %}
                 {% set r = ai_routing[task_id] %}
                 <div class="border rounded p-3 mb-3">
-                    <div class="d-flex align-items-center gap-3 mb-1">
-                        <span class="fw-semibold" style="min-width:260px">{{ meta.label }}</span>
-                        {% if task_id == 'warning_claude' %}
-                        <span class="text-muted small">Провайдер/модель — по уровню серьёзности, карточка ниже ↓</span>
-                        {% elif task_id in chain_tasks and ai_chains[task_id] %}
-                        <span class="text-warning small">⛓️ Работает цепочка приоритетов (карточка выше) — выбор провайдера здесь не действует</span>
-                        {% else %}
-                        <div class="d-flex gap-3">
-                            <div class="form-check form-check-inline">
-                                <input class="form-check-input" type="radio"
-                                       name="ai_{{ task_id }}_provider" id="ai_{{ task_id }}_api"
-                                       value="api" {% if r.provider == 'api' %}checked{% endif %}>
-                                <label class="form-check-label small" for="ai_{{ task_id }}_api">
-                                    ✨ Claude API
-                                </label>
-                            </div>
-                            <div class="form-check form-check-inline">
-                                <input class="form-check-input" type="radio"
-                                       name="ai_{{ task_id }}_provider" id="ai_{{ task_id }}_llm"
-                                       value="llm" {% if r.provider == 'llm' %}checked{% endif %}>
-                                <label class="form-check-label small" for="ai_{{ task_id }}_llm">
-                                    🤖 LLM (Ollama)
-                                </label>
-                            </div>
-                        </div>
-                        {% endif %}
-                    </div>
+                    <div class="fw-semibold mb-1">{{ meta.label }}</div>
                     {% if meta.hint %}
                     <div class="text-muted small mb-2">{{ meta.hint }}</div>
                     {% endif %}
@@ -680,7 +673,7 @@
                     </details>
                 </div>
                 {% endfor %}
-                <button type="submit" class="btn btn-sm btn-primary">Сохранить маршрутизацию</button>
+                <button type="submit" class="btn btn-sm btn-primary">Сохранить промпты</button>
                 <span class="text-muted small ms-2">Вступает в силу немедленно, без перезапуска.</span>
                 </form>
             </div>
@@ -688,112 +681,94 @@
     </div>
 </div>
 
-<!-- ─── Гейт предупреждений: провайдер/модель по уровню серьёзности ──── -->
-<div class="row g-3 mt-0">
-    <div class="col-12">
-        <div class="card mb-3">
-            <div class="card-header fw-semibold">🚦 Гейт предупреждений — модель по уровню серьёзности</div>
-            <div class="card-body">
-                <div class="text-muted small mb-3">
-                    Системный промпт один для всех уровней (карточка «Гейт предупреждений» выше).
-                    Здесь — какой провайдер/модель разбирает срабатывание на каждом уровне:
-                    «предупреждение» срабатывает чаще всего и не критично к ошибке (fail-open,
-                    подавление легко отменяется) — кандидат на дешёвую модель; «внимание»/«авария»
-                    реже и решение гейта там уже ни на что не влияет (сигнал панели важнее), но
-                    текст разбора видит оператор.
-                </div>
-                <form method="post" action="/settings/warning-gate-routing">
-                {% for wl in warning_gate_levels %}
-                <div class="border rounded p-3 mb-3">
-                    <div class="d-flex align-items-center gap-3 flex-wrap">
-                        <span class="fw-semibold" style="min-width:300px">{{ wl.label }}</span>
-                        <div class="d-flex gap-3">
-                            <div class="form-check form-check-inline">
-                                <input class="form-check-input" type="radio"
-                                       name="wl_{{ wl.slug }}_provider" id="wl_{{ wl.slug }}_api"
-                                       value="api" {% if wl.route.provider == 'api' %}checked{% endif %}>
-                                <label class="form-check-label small" for="wl_{{ wl.slug }}_api">
-                                    ✨ Claude API
-                                </label>
-                            </div>
-                            <div class="form-check form-check-inline">
-                                <input class="form-check-input" type="radio"
-                                       name="wl_{{ wl.slug }}_provider" id="wl_{{ wl.slug }}_llm"
-                                       value="llm" {% if wl.route.provider == 'llm' %}checked{% endif %}>
-                                <label class="form-check-label small" for="wl_{{ wl.slug }}_llm">
-                                    🤖 Локальная LLM
-                                </label>
-                            </div>
-                        </div>
-                        <input type="text" name="wl_{{ wl.slug }}_model"
-                               class="form-control form-control-sm" style="max-width:280px"
-                               value="{{ wl.route.model }}"
-                               placeholder="claude-haiku-4-5 / claude-sonnet-5 / qwen2.5:14b">
-                    </div>
-                </div>
-                {% endfor %}
-                <button type="submit" class="btn btn-sm btn-primary">Сохранить маршрутизацию гейта</button>
-                <span class="text-muted small ms-2">Вступает в силу немедленно, без перезапуска.</span>
-                </form>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- ─── Градация разбора (шлюз «Горыныч») ────────────────────────────── -->
+<!-- ─── Кто и как разбирает (v5.1.11) ────────────────────────────────── -->
 <div class="row g-3 mt-0" id="ai-depth">
     <div class="col-12">
         <div class="card mb-3">
-            <div class="card-header fw-semibold">🎚 Градация разбора — глубина по виду события (шлюз «Горыныч»)</div>
+            <div class="card-header fw-semibold">🧭 Кто и как разбирает</div>
             <div class="card-body">
                 <div class="text-muted small mb-3">
-                    Сколько думать над событием, решает вид события, а не выбор сервера: сегмент без
-                    происшествий — простой, ему хватит быстрой модели; авария заслуживает глубокой.
-                    Действует только на подключения шлюза «Горыныч» (общие настройки модели или запись
-                    реестра с провайдером «Горыныч») — прямые серверы работают как раньше.
-                    {% if not gorynych_in_use %}<br><strong>Сейчас шлюз не подключён — настройки сохранятся,
-                    но применятся после подключения.</strong>{% endif %}
-                    <br>Модель: <code>fast</code> (Qwen 27B, шлюз сам выбирает видеокарту),
-                    <code>flashnext</code> (Flash-Next 125B), <code>gemma</code> (огромные отчёты),
-                    <code>smart</code> (+ <code>xhigh</code> — совет на 15–30 мин, не для потока); пусто — модель подключения.
-                    Рассуждение «по умолчанию» — решает шлюз (у <code>fast</code> это без рассуждений).
-                    Приоритет: <code>interactive</code> — ждёт человек, <code>background</code> — никогда не
-                    переключает видеокарту (ответит запасная модель).
-                    <br>Модель из градации действует на <em>все</em> записи «Горыныча» в цепочке, поэтому
-                    шлюзу в цепочке хватит одной записи: запасные модели он подставляет сам; следом — Claude.
+                    Одна строка — один вид работы: кто его делает и насколько глубоко. Сколько думать, решает
+                    вид события: сегмент без происшествий — быстрая модель, авария — совет.
+                    <br><strong>Горыныч</strong> — общее подключение (карточка «Подключение „Горыныч“»).
+                    {% if not gorynych_in_use %}<br><strong class="text-danger">Общее подключение сейчас не шлюз
+                    ({{ llm.provider }}: {{ llm.model }}) — строки «Горыныч» уходят туда, а модель, рассуждение и
+                    приоритет строк не действуют (только у записи шлюза в запасных).</strong><br>{% endif %}
+                    Модель: <code>fast</code> (Qwen 27B), <code>flashnext</code> (Flash-Next 125B),
+                    <code>gemma</code> (огромные отчёты), <code>smart</code>; пусто — модель подключения.
+                    <code>smart</code> без <code>xhigh</code> отвечает flashnext; <strong>совет — только
+                    <code>smart</code> + <code>xhigh</code></strong> (15–40 мин, не для потока).
+                    Рассуждение «по умолчанию» — решает шлюз. Приоритет: <code>interactive</code> — ждёт человек,
+                    <code>batch</code> — очередь, <code>background</code> — никогда не переключает видеокарту.
+                    <br><strong>Claude API</strong> — облако; пустая модель — из карточки Claude API
+                    (сейчас <code>{{ claude.model }}</code>).
+                    <br>При отказе: заключения — запасные (карточка «Запасные»); гейт пропускает тревогу как есть;
+                    разбор аварии ждёт ответа сутки, при сбое — один повтор через 15 мин.
                 </div>
                 <form method="post" action="/settings/ai-depth">
                 <datalist id="gorynych_models">
                     <option value="fast"><option value="flashnext"><option value="gemma">
                     <option value="smart"><option value="q27-3090"><option value="q27-5090">
                 </datalist>
+                <datalist id="claude-route-models">
+                    <option value="claude-sonnet-5-5"><option value="claude-opus-5-5">
+                    <option value="claude-haiku-5-5"><option value="claude-sonnet-5">
+                </datalist>
+                <style>
+                    .route-row[data-provider="api"] .route-gw { visibility: hidden; }
+                    .route-row[data-provider="llm"] .route-claude { visibility: hidden; }
+                </style>
+                <div class="table-responsive">
                 <table class="table table-sm align-middle mb-3">
                     <thead class="table-light">
-                        <tr><th>Вид разбора</th><th style="width:170px">Модель</th>
-                            <th style="width:150px">Рассуждение</th><th style="width:150px">Приоритет</th></tr>
+                        <tr><th>Вид работы</th><th style="width:150px">Кто</th>
+                            <th style="width:140px">Модель шлюза</th>
+                            <th style="width:130px">Рассуждение</th><th style="width:130px">Приоритет</th>
+                            <th style="width:190px">Модель Claude</th></tr>
                     </thead>
                     <tbody>
                     {% for d in ai_depth %}
-                    <tr>
+                    {% set prov = 'llm' if d.kind == 'manual' else (d.provider or 'llm') %}
+                    <tr class="route-row" data-provider="{{ prov }}">
                         <td><div class="fw-semibold small">{{ d.label }}</div>
                             <div class="text-muted" style="font-size:0.72rem">{{ d.hint }}</div></td>
-                        <td><input type="text" name="depth_{{ d.kind }}_model" list="gorynych_models"
+                        <td>
+                            {% if d.kind == 'manual' %}
+                            <span class="small">{{ 'Горыныч' if gorynych_in_use else 'LLM (' ~ llm.provider ~ ')' }}</span>
+                            <div class="text-muted" style="font-size:0.7rem">фиксировано</div>
+                            {% else %}
+                            <select name="route_{{ d.kind }}_provider" class="form-select form-select-sm"
+                                    onchange="this.closest('tr').dataset.provider = this.value">
+                                <option value="llm" {% if prov == 'llm' %}selected{% endif %}>{{ 'Горыныч' if gorynych_in_use else 'LLM (' ~ llm.provider ~ ')' }}</option>
+                                <option value="api" {% if prov == 'api' %}selected{% endif %}>Claude API</option>
+                            </select>
+                            {% endif %}
+                        </td>
+                        <td class="route-gw"><input type="text" name="depth_{{ d.kind }}_model" list="gorynych_models"
                                    class="form-control form-control-sm" value="{{ d.model }}" placeholder="модель подключения"></td>
-                        <td><select name="depth_{{ d.kind }}_reasoning" class="form-select form-select-sm">
+                        <td class="route-gw"><select name="depth_{{ d.kind }}_reasoning" class="form-select form-select-sm">
                             {% for r in ai_depth_reasoning %}
                             <option value="{{ r }}" {% if d.reasoning == r %}selected{% endif %}>{{ 'по умолчанию' if r == 'default' else ('выкл' if r == 'off' else r) }}</option>
                             {% endfor %}
                         </select></td>
-                        <td><select name="depth_{{ d.kind }}_priority" class="form-select form-select-sm">
+                        <td class="route-gw"><select name="depth_{{ d.kind }}_priority" class="form-select form-select-sm">
                             {% for pr in ai_depth_priorities %}
                             <option value="{{ pr }}" {% if d.priority == pr %}selected{% endif %}>{{ pr }}</option>
                             {% endfor %}
                         </select></td>
+                        <td class="route-claude">
+                            {% if d.kind != 'manual' %}
+                            <input type="text" name="route_{{ d.kind }}_claude_model" list="claude-route-models"
+                                   class="form-control form-control-sm" value="{{ d.claude_model }}"
+                                   placeholder="из карточки: {{ claude.model }}">
+                            {% endif %}
+                        </td>
                     </tr>
                     {% endfor %}
                     </tbody>
                 </table>
-                <button type="submit" class="btn btn-sm btn-primary">Сохранить градацию</button>
+                </div>
+                <button type="submit" class="btn btn-sm btn-primary">Сохранить</button>
                 <span class="text-muted small ms-2">Вступает в силу немедленно, без перезапуска.</span>
                 </form>
             </div>

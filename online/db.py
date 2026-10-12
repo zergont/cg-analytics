@@ -858,7 +858,7 @@ async def save_segment_warning(
         )
         if seg_id is None:
             return False
-        await conn.execute("""
+        status = await conn.execute("""
             UPDATE auto_segments
             SET warning_analysis_md   = $2,
                 warning_analyzed_hash = $3,
@@ -866,7 +866,9 @@ async def save_segment_warning(
                 updated_at            = now()
             WHERE id = $1
         """, seg_id, analysis_md, fault_hash, entry)
-        return True
+        # Строку удалили между поиском и записью (цикл закрытия) — не записано:
+        # вызывающий повторит и найдёт закрытый сегмент по ts
+        return status != "UPDATE 0"
     finally:
         await conn.close()
 
@@ -887,13 +889,71 @@ async def append_segment_gate_event(
         )
         if seg_id is None:
             return False
-        await conn.execute("""
+        status = await conn.execute("""
             UPDATE auto_segments
             SET gate_log   = COALESCE(gate_log, '[]'::jsonb) || $2::jsonb,
                 updated_at = now()
             WHERE id = $1
         """, seg_id, _json.dumps([event], ensure_ascii=False))
-        return True
+        return status != "UPDATE 0"
+    finally:
+        await conn.close()
+
+
+async def get_incident_analysis_state(
+    router_sn: str, equip_type: str, panel_id: int,
+    fault_hash: str, stop_ts: datetime,
+) -> dict[str, Any]:
+    """Состояние разбора аварии по сегментам машины в окне ±2 сут от останова.
+
+    analysed — разбор с этим ключом уже в warning_analyses (запись могла
+    уехать на соседнюю строку, пока открытая не закрыта); ordered — сколько
+    раз заказывали (отметки kind=incident в gate_log); terminal — последняя
+    терминальная отметка (failed / removed / save_failed) или None.
+    """
+    import json as _json
+    conn = await _connect()
+    try:
+        row = await conn.fetchrow("""
+            WITH s AS (
+                SELECT warning_analyses, gate_log FROM auto_segments
+                WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+                  AND t_start >= $4::timestamptz - interval '2 days'
+                  AND t_start <= $4::timestamptz + interval '2 days'
+            ), ev AS (
+                SELECT e->>'decision' AS decision, e->>'at' AS at
+                FROM s, jsonb_array_elements(
+                    CASE WHEN jsonb_typeof(s.gate_log) = 'array' THEN s.gate_log
+                         ELSE '[]'::jsonb END) e
+                WHERE e->>'kind' = 'incident' AND e->>'fault_hash' = $5
+            )
+            SELECT
+                EXISTS (SELECT 1 FROM s
+                        WHERE jsonb_typeof(s.warning_analyses) = 'array'
+                          AND s.warning_analyses @> $6::jsonb) AS analysed,
+                (SELECT count(*) FROM ev WHERE decision = 'ordered') AS ordered,
+                (SELECT decision FROM ev
+                 WHERE decision IN ('failed', 'removed', 'save_failed')
+                 ORDER BY at DESC NULLS LAST LIMIT 1) AS terminal
+        """, router_sn, equip_type, panel_id, stop_ts, fault_hash,
+             _json.dumps([{"fault_hash": fault_hash}], ensure_ascii=False))
+        return {"analysed": bool(row["analysed"]), "ordered": int(row["ordered"] or 0),
+                "terminal": row["terminal"]}
+    finally:
+        await conn.close()
+
+
+async def get_incident_acts_since(since: datetime) -> list[dict[str, Any]]:
+    """Сегменты с актом аварийного останова (голова стопа), начавшиеся не раньше since."""
+    conn = await _connect()
+    try:
+        rows = await conn.fetch("""
+            SELECT id, router_sn, equip_type, panel_id, t_start, incident_json
+            FROM auto_segments
+            WHERE incident_json IS NOT NULL AND t_start >= $1
+            ORDER BY t_start DESC
+        """, since)
+        return [dict(r) for r in rows]
     finally:
         await conn.close()
 

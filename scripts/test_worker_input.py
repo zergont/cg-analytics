@@ -70,9 +70,11 @@ dbg = res["debug_json"]
 check(dbg["input_length"] == len(inp) and dbg["est_prompt_tokens"] == int((len("СИСТЕМНЫЙ") + len(inp)) / 1.7) + 4000,
       f"1д: размер — по полному входу: {dbg}")
 
-# 2. Одиночная LLM
-res = asyncio.run(worker._analyse_segment_llm(ROW, "СИСТЕМНЫЙ", depth="seg_caution"))
-check(seen[-1] == inp and res["alarm_level"] == "CAUTION", "2: одиночная LLM — тот же вход и вердикт")
+# 2. Основной из таблицы (общее подключение) — тот же вход
+res = asyncio.run(worker._analyse_segment_chain(ROW, None, "СИСТЕМНЫЙ",
+                                                [worker._route_head("seg_caution")],
+                                                depth="seg_caution"))
+check(seen[-1] == inp and res["alarm_level"] == "CAUTION", "2: основной из таблицы — тот же вход и вердикт")
 
 # 3. Вход не собрался — отчёт, а не падение
 _orig = prep.build_claude_input

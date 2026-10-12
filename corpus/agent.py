@@ -30,10 +30,12 @@ async def analyse_segment(
     segment_row: dict,
     kb_path: str | None,
     system_prompt: str | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """Прогнать сегмент через Claude API.
 
     system_prompt — если передан, используется вместо промпта из corpus/settings.
+    model — модель строки таблицы «Кто и как разбирает»; None — из карточки Claude.
     Returns dict со всеми полями для corpus/db.upsert_analysis():
         conclusion_md, verdict, alarm_level, claude_model,
         tokens_used, tool_calls_count, loops_count,
@@ -75,7 +77,7 @@ async def analyse_segment(
         tool_calls_count = 0
         loops_count = 0
         final_text = ""
-        _model          = claude_cfg["model"]
+        _model          = model or claude_cfg["model"]
         _max_tool_calls = claude_cfg["max_tool_calls"]
         _max_tokens     = claude_cfg["max_tokens"]
         from llm.router import get_prompt as _router_prompt
@@ -204,7 +206,7 @@ async def analyse_segment(
             "conclusion_md":      None,
             "verdict":            verdict,
             "alarm_level":        alarm_level,
-            "claude_model":       claude_cfg["model"],
+            "claude_model":       model or claude_cfg["model"],
             "tokens_used":        debug["total_tokens"],
             "tool_calls_count":   0,
             "loops_count":        loops_count if "loops_count" in dir() else 0,

@@ -1431,7 +1431,7 @@ class OnlinePollEngine:
     def _order_incident_analysis(
         self, incident: dict, stop_ts: datetime, segment_id: int | None = None,
     ) -> None:
-        """Заказать разбор аварии у Клауда. Повод — готовый акт.
+        """Заказать разбор аварии. Повод — готовый акт.
 
         Гейт предупреждений для аварии не годился: он ждёт 60 секунд
         стабилизации состава, а у трети аварий маску снимали раньше, состав
@@ -1439,16 +1439,15 @@ class OnlinePollEngine:
         Акт же строится у каждой аварии по построению и несёт материал
         богаче снимка состояния.
 
-        Фоновая задача: разбор — мнение поверх фактов, цикл движка его не ждёт.
+        Учтённая фоновая задача (online.incident_gate, v5.1.11): цикл движка
+        её не ждёт; дубль отбрасывается, срок — сутки, один повтор.
         """
         try:
-            from online.incident_gate import analyze_incident
-            asyncio.create_task(analyze_incident(
-                self.router_sn, self.equip_type, self.panel_id,
-                incident, stop_ts, segment_id,
-            ))
-            logger.info("OnlineEngine[%s]: заказан разбор аварии на %s",
-                        self.key, stop_ts.isoformat())
+            from online.incident_gate import order_incident_analysis
+            if order_incident_analysis(self.router_sn, self.equip_type, self.panel_id,
+                                       incident, stop_ts, segment_id):
+                logger.info("OnlineEngine[%s]: заказан разбор аварии на %s",
+                            self.key, stop_ts.isoformat())
         except Exception:
             logger.warning("OnlineEngine[%s]: разбор аварии не заказан",
                            self.key, exc_info=True)

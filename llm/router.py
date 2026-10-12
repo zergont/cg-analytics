@@ -15,8 +15,6 @@ from __future__ import annotations
 
 import logging
 
-from config import settings as _app_cfg
-
 logger = logging.getLogger(__name__)
 
 # ── Дефолтные промпты ────────────────────────────────────────────────────────
@@ -91,6 +89,28 @@ _WARNING_GATE_PROMPT = """\
 чем скрыть реальную проблему.\
 """
 
+_INCIDENT_PROMPT = """\
+Ты — инженер по дизель-генераторным установкам и разбираешь аварийный останов.
+
+Это НЕ проверка ложного срабатывания: останов уже произошёл, его факт и вид \
+установлены детерминированным актом. Твоя задача — объяснить, что к нему привело.
+
+ВХОД: акт аварийного останова — окно от последнего штатного останова: что висело \
+на машине к моменту падения, события панели по времени, расчётные параметры цикла.
+
+ПРАВИЛА:
+- Только факты из входа. Не выдумывай коды, уставки и события, которых нет.
+- Описания кодов — по справочнику во входе; если кода в справочнике нет, так и скажи.
+- Отделяй установленное по данным от предположений.
+- Не повторяй акт целиком — выдели то, что относится к причине.
+
+ФОРМАТ ОТВЕТА:
+## Условия перед аварией
+## Вероятная причина
+## Что относится к делу, а что нет
+## Чего не хватает для полной картины\
+"""
+
 # ── Таблица задач: id → (метка UI, провайдер по умолчанию, промпт по умолчанию) ─
 
 TASKS: dict[str, tuple[str, str, str]] = {
@@ -100,6 +120,7 @@ TASKS: dict[str, tuple[str, str, str]] = {
     "human_manual":  ("Ручная хуманизация",       "llm", _HUMANIZER_PROMPT),
     "analyze_page":  ("Страница «Ручной анализ»", "llm", _ANALYZE_PAGE_PROMPT),
     "warning_claude": ("Гейт предупреждений (онлайн)", "api", _WARNING_GATE_PROMPT),
+    "incident":      ("Разбор аварийного останова", "llm", _INCIDENT_PROMPT),
 }
 
 # Когда срабатывает каждая задача — подсказки для страницы настроек
@@ -110,49 +131,11 @@ TASK_HINTS: dict[str, str] = {
     "human_manual":  "Кнопка «Хуманизировать» на странице сегмента.",
     "analyze_page":  "Страница «Ручной анализ»: заключение по MD-пакету телеметрии.",
     "warning_claude": "Онлайн-гейт: предупреждение стабильно 60 с → анализ и вердикт cancel/pass; "
-                      "cancel подавляет аналитику до смены состава детекций. Промпт общий для всех "
-                      "уровней; провайдер и модель — по уровню серьёзности, см. карточку ниже.",
+                      "cancel подавляет аналитику до смены состава детекций. Промпт общий для гейта "
+                      "аналитики и гейта панели; кто разбирает — в таблице «Кто и как разбирает».",
+    "incident":      "Акт аварийного останова готов — разбор причины по циклу от штатного останова. "
+                     "Свой промпт (v5.1.11): раньше шёл промпт гейта «фильтр ложных срабатываний».",
 }
-
-# ── Гейт предупреждений: провайдер и модель ПО УРОВНЮ серьёзности ──────────────
-# Промпт задачи "warning_claude" общий для всех уровней (см. выше) — здесь только
-# провайдер/модель, отдельно на каждое значение status_assembler.compute_severity_level().
-
-WARNING_LEVELS: tuple[str, ...] = ("предупреждение", "внимание", "авария")
-
-WARNING_LEVEL_SLUGS: dict[str, str] = {
-    "предупреждение": "caution",
-    "внимание":       "warning",
-    "авария":         "shutdown",
-}
-
-WARNING_LEVEL_LABELS: dict[str, str] = {
-    "предупреждение": "🟡 Предупреждение — аналитика, панель молчит",
-    "внимание":       "🟠 Внимание — сигналит панель",
-    "авария":         "🔴 Авария — аварийный останов",
-}
-
-_warning_level_routing: dict[str, dict[str, str]] = {
-    level: {"provider": "api", "model": _app_cfg.anthropic_model}
-    for level in WARNING_LEVELS
-}
-
-
-def get_warning_level_route(level: str) -> dict[str, str]:
-    """Провайдер+модель гейта для уровня серьёзности (неизвестный уровень → «предупреждение»)."""
-    return dict(_warning_level_routing.get(level, _warning_level_routing[WARNING_LEVELS[0]]))
-
-
-def apply_warning_level_route(level: str, provider: str, model: str) -> None:
-    if level not in WARNING_LEVELS:
-        raise ValueError(f"Неизвестный уровень гейта: {level}")
-    _warning_level_routing[level] = {"provider": provider.strip(), "model": model.strip()}
-    logger.debug("ai_router: гейт[%s] → provider=%s model=%s", level, provider, model)
-
-
-def get_all_warning_level_routes() -> dict[str, dict[str, str]]:
-    return {k: dict(v) for k, v in _warning_level_routing.items()}
-
 
 # ── Градация разбора: модель, рассуждение и приоритет по виду разбора ─────────
 # Действует на подключения шлюза «Горыныч» (provider gorynych): шлюз держит
@@ -210,9 +193,17 @@ _DEPTH_DEFAULT_PRIORITY: dict[str, str] = {
 }
 
 
+# Кто разбирает (v5.1.11): «llm» — общее подключение «Горыныч» (карточка
+# подключения, llm.client._cfg) с моделью/рассуждением/приоритетом строки; «api» —
+# Claude API, модель строки или (пусто) из карточки Claude. Одна таблица вместо
+# двух: раньше провайдера решала карточка «по уровню», а глубину — градация
+ROUTE_PROVIDERS: tuple[str, ...] = ("llm", "api")
+
+
 def _default_depth(kind: str) -> dict[str, str]:
     return {"model": "fast", "reasoning": "default",
-            "priority": _DEPTH_DEFAULT_PRIORITY.get(kind, "normal")}
+            "priority": _DEPTH_DEFAULT_PRIORITY.get(kind, "normal"),
+            "provider": "llm", "claude_model": ""}
 
 
 _depth: dict[str, dict[str, str]] = {k: _default_depth(k) for k in DEPTH_KINDS}
@@ -223,13 +214,20 @@ def get_depth(kind: str) -> dict[str, str]:
     return dict(_depth.get(kind) or _default_depth(kind))
 
 
-def apply_depth(kind: str, model: str, reasoning: str, priority: str) -> None:
+def apply_depth(kind: str, model: str, reasoning: str, priority: str, *,
+                provider: str | None = None, claude_model: str | None = None) -> None:
+    """Строка таблицы. provider/claude_model не переданы — остаются прежними."""
     if kind not in DEPTH_KINDS:
         raise ValueError(f"Неизвестный вид разбора: {kind}")
+    cur = _depth.get(kind) or _default_depth(kind)
+    prov = cur.get("provider", "llm") if provider is None else str(provider).strip()
     _depth[kind] = {
         "model":     str(model or "").strip(),
         "reasoning": reasoning if reasoning in DEPTH_REASONING else "default",
         "priority":  priority if priority in DEPTH_PRIORITIES else _DEPTH_DEFAULT_PRIORITY[kind],
+        "provider":  prov if prov in ROUTE_PROVIDERS else "llm",
+        "claude_model": (cur.get("claude_model", "") if claude_model is None
+                         else str(claude_model).strip()),
     }
 
 
@@ -248,8 +246,10 @@ def load_depth(json_str: str) -> None:
     for kind in DEPTH_KINDS:
         prof = raw.get(kind) if isinstance(raw, dict) else None
         if isinstance(prof, dict):
+            _depth[kind] = _default_depth(kind)
             apply_depth(kind, prof.get("model", ""), prof.get("reasoning", "default"),
-                        prof.get("priority", ""))
+                        prof.get("priority", ""), provider=prof.get("provider", "llm"),
+                        claude_model=prof.get("claude_model", ""))
         else:
             _depth[kind] = _default_depth(kind)
 
@@ -257,6 +257,120 @@ def load_depth(json_str: str) -> None:
 def serialize_depth() -> str:
     import json
     return json.dumps(_depth, ensure_ascii=False)
+
+
+def get_route(kind: str) -> dict[str, str]:
+    """Кто и как разбирает вид работы — единственный источник правды (v5.1.11)."""
+    return get_depth(kind)
+
+
+def claude_model_for(kind: str) -> str:
+    """Модель Claude строки; пусто — из карточки Claude API."""
+    m = (get_depth(kind).get("claude_model") or "").strip()
+    if m:
+        return m
+    try:
+        from corpus.settings import get_claude_settings
+        return get_claude_settings().get("model") or ""
+    except Exception:
+        return ""
+
+
+def route_label(kind: str) -> str:
+    """«Горыныч: smart (xhigh)» / «Claude: claude-sonnet-5» — для журнала и подписи.
+
+    Строка «Горыныч» идёт через общее подключение; если оно не шлюз, модель и
+    рассуждение строки не действуют (resolve_depth) — подписываем тем, что есть.
+    """
+    r = get_depth(kind)
+    if r.get("provider") == "api":
+        return f"Claude: {claude_model_for(kind)}"
+    try:
+        from llm.client import get_llm_settings
+        cfg = get_llm_settings()
+    except Exception:
+        cfg = {}
+    prov = cfg.get("provider") or "gorynych"
+    if prov != "gorynych":
+        return f"LLM ({prov}): {cfg.get('model') or 'модель подключения'}"
+    m = r.get("model") or "модель подключения"
+    lvl = r.get("reasoning")
+    return f"Горыныч: {m}" + (f" ({lvl})" if lvl and lvl != "default" else "")
+
+
+def apply_route_form(form) -> None:
+    """Таблица «Кто и как разбирает» из формы настроек (/settings/ai-depth).
+
+    Поля нет — текущее значение: вкладка, открытая до деплоя, не сбрасывает ни
+    провайдера, ни параметры шлюза. «Ручные запросы» — всегда шлюз.
+    """
+    def _txt(name: str, cur: str) -> str:
+        v = form.get(name)
+        return cur if v is None else str(v).strip()
+
+    for kind in DEPTH_KINDS:
+        cur = get_depth(kind)
+        provider = form.get(f"route_{kind}_provider")
+        claude_model = form.get(f"route_{kind}_claude_model")
+        apply_depth(
+            kind,
+            _txt(f"depth_{kind}_model", cur.get("model", "")),
+            _txt(f"depth_{kind}_reasoning", cur.get("reasoning", "default")),
+            _txt(f"depth_{kind}_priority", cur.get("priority", "")),
+            provider="llm" if kind == "manual" else (
+                None if provider is None else str(provider).strip()),
+            claude_model=None if claude_model is None else str(claude_model).strip(),
+        )
+
+
+def migrate_routes(raw_json: str, legacy: dict[str, str]) -> tuple[str | None, list[str]]:
+    """Разовый перенос настроек в таблицу (v5.1.11): провайдер в строки, где его нет.
+
+    legacy — старые ключи app_settings: ai_warning_level_<уровень>_provider/_model
+    (карточка «по уровню»), ai_task_<задача>_provider, seg_chain_head_provider
+    (провайдер первой записи цепочки заключений: gorynych → llm, anthropic → api).
+    Разбор аварии — всегда шлюз (решение владельца 12.10). Битый JSON — None: ключ
+    не трогаем, чтобы не потерять градацию. Строки с провайдером — без изменений.
+    """
+    import json
+    try:
+        raw = json.loads(raw_json) if raw_json else {}
+    except json.JSONDecodeError:
+        return None, ["битый JSON градации — перенос пропущен"]
+    if not isinstance(raw, dict):
+        return None, ["градация не словарь — перенос пропущен"]
+
+    def _p(v: str | None) -> str:
+        return "api" if (v or "").strip() in ("api", "anthropic") else "llm"
+
+    seg_head = legacy.get("seg_chain_head_provider") or legacy.get("ai_task_seg_auto_provider")
+    plan: dict[str, tuple[str, str]] = {}
+    for k in ("seg_norma", "seg_caution", "seg_warning", "seg_shutdown"):
+        plan[k] = (_p(seg_head), "")
+    for kind, level in (("gate_caution", "предупреждение"), ("gate_warning", "внимание")):
+        prov = _p(legacy.get(f"ai_warning_level_{level}_provider"))
+        model = legacy.get(f"ai_warning_level_{level}_model") or ""
+        plan[kind] = (prov, model if prov == "api" else "")   # путь к gguf шлюзу не доходил
+    plan["incident"] = ("llm", "")                            # решение 12.10: шлюз
+    plan["humanize"] = (_p(legacy.get("ai_task_human_auto_provider")), "")
+    plan["manual"] = ("llm", "")                              # «Ручной анализ» всегда шлюз
+    changes: list[str] = []
+    for kind in DEPTH_KINDS:
+        prof = raw.get(kind)
+        if not isinstance(prof, dict):
+            prof = dict(_default_depth(kind))
+            prof.pop("provider", None)
+            prof.pop("claude_model", None)
+            raw[kind] = prof
+        if prof.get("provider") in ROUTE_PROVIDERS:
+            continue
+        prov, cm = plan.get(kind, ("llm", ""))
+        prof["provider"] = prov
+        prof["claude_model"] = prof.get("claude_model") or cm
+        changes.append(f"{kind}: {'Горыныч' if prov == 'llm' else 'Claude ' + (cm or '(карточка)')}")
+    if not changes:
+        return None, []
+    return json.dumps(raw, ensure_ascii=False), changes
 
 
 _SEG_DEPTH_BY_LEVEL: dict[str, str] = {
@@ -299,6 +413,22 @@ def apply_chain(task_id: str, entry_ids: list[str]) -> None:
     logger.debug("ai_router: цепочка %s → %s", task_id, _task_chains[task_id])
 
 
+def merge_fallbacks(current: list[str], posted: list[str], is_anchor) -> list[str]:
+    """«Запасные» из формы (v5.1.11): записи-якоря (шлюз) из текущей цепочки —
+    первыми и без изменений, из формы — только прочие, без повторов.
+
+    Якорь держит откат на v5.1.10 (там основного выбирает голова цепочки) и
+    запасной шлюз у строк с Claude; в карточке он не показывается, и форма —
+    даже из вкладки, открытой до деплоя, — его не снимает и не переставляет.
+    """
+    anchors = [e for e in current if is_anchor(e)]
+    out = list(anchors)
+    for e in posted:
+        if not is_anchor(e) and e not in out:
+            out.append(e)
+    return out
+
+
 def get_all_chains() -> dict[str, list[str]]:
     return {k: list(v) for k, v in _task_chains.items()}
 
@@ -316,7 +446,8 @@ def get_provider(task_id: str) -> str:
 
 
 def get_prompt(task_id: str) -> str:
-    return _routing[task_id]["prompt"]
+    """Промпт задачи; пустой (поле очищено в форме) — промпт по умолчанию."""
+    return _routing[task_id]["prompt"] or TASKS[task_id][2]
 
 
 def apply_task(task_id: str, provider: str, prompt: str) -> None:
@@ -326,9 +457,26 @@ def apply_task(task_id: str, provider: str, prompt: str) -> None:
     logger.debug("ai_router: задача %s → provider=%s", task_id, provider)
 
 
+def apply_prompts_form(form) -> dict[str, str]:
+    """Системные промпты из формы (/settings/ai-routing): {задача: промпт} принятых.
+
+    Поля нет — промпт не трогаем; пустое — промпт по умолчанию (get_prompt).
+    Провайдер задачи больше не выбирается: кто разбирает — таблица (v5.1.11).
+    """
+    out: dict[str, str] = {}
+    for task_id in TASKS:
+        v = form.get(f"ai_{task_id}_prompt")
+        if v is None:
+            continue
+        prompt = str(v).strip()
+        apply_task(task_id, _routing[task_id]["provider"], prompt)
+        out[task_id] = prompt
+    return out
+
+
 def get_all() -> dict[str, dict[str, str]]:
-    """Полная таблица маршрутизации (копия)."""
-    return {k: dict(v) for k, v in _routing.items()}
+    """Полная таблица маршрутизации (копия); пустой промпт — показываем действующий."""
+    return {k: {**v, "prompt": v["prompt"] or TASKS[k][2]} for k, v in _routing.items()}
 
 
 def get_default_prompt(task_id: str) -> str:

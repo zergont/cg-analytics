@@ -134,12 +134,12 @@ async def _process_segment(
 ) -> None:
     """Полный цикл обработки: анализ → сохранение в БД.
 
-    Провайдер и промпт берутся из llm.router по task_id.
+    Промпт — из llm.router по task_id; кто пишет — строка таблицы «Кто и как
+    разбирает» по виду разбора, при отказе — запасные (цепочка реестра).
     force=True — разрешить анализ открытого сегмента (ручной запуск).
     """
     import corpus.db as corpus_db
-    from llm.router import get_provider, get_prompt, get_chain
-    from llm.registry import get_entry
+    from llm.router import get_prompt
 
     try:
         from analytics.runner import ANALYTICS_VERSION
@@ -168,19 +168,13 @@ async def _process_segment(
     prompt = get_prompt(task_id)
     depth = _segment_depth(seg_row, task_id)
 
-    # Цепочка приоритетов моделей (реестр) имеет приоритет над одиночным провайдером
-    chain_entries = [e for e in (get_entry(eid) for eid in get_chain(task_id)) if e]
-    if chain_entries:
-        provider = "chain"
-        result = await _analyse_segment_chain(seg_row, kb_path, prompt, chain_entries,
-                                              depth=depth)
-    elif get_provider(task_id) == "api":
-        provider = "api"
-        from corpus.agent import analyse_segment
-        result = await analyse_segment(seg_row, kb_path, system_prompt=prompt)
-    else:
-        provider = "llm"
-        result = await _analyse_segment_llm(seg_row, prompt, depth=depth)
+    # Основной — строка таблицы (v5.1.11); цепочка реестра — запасные при отказе.
+    # До v5.1.11 основного выбирала голова цепочки, а модель шлюза — градация:
+    # две настройки на одно решение. Запись, совпадающая с основным, пропускается —
+    # шлюз дважды не зовём (она остаётся в цепочке ради отката на v5.1.10)
+    entries = _route_entries(task_id, depth)
+    provider = entries[0]["name"] + (f" +{len(entries) - 1} запасн." if len(entries) > 1 else "")
+    result = await _analyse_segment_chain(seg_row, kb_path, prompt, entries, depth=depth)
 
     if result["error"]:
         logger.error("corpus ERROR #%d | %s", seg_id, result["error"])
@@ -230,6 +224,52 @@ def _segment_depth(seg_row: dict, task_id: str) -> str:
     except Exception:
         level = None
     return depth_for_segment(level)
+
+
+def _route_head(depth: str) -> dict[str, Any]:
+    """Основной исполнитель заключения — строка таблицы «Кто и как разбирает».
+
+    api — Claude-агент с моделью строки (пусто — модель карточки Claude); llm —
+    общее подключение (карточка «Горыныч», llm.client._cfg): модель, рассуждение
+    и приоритет шлюзу задаёт та же строка через depth (resolve_depth).
+    Запись в формате реестра — чтобы цепочка обрабатывала её как любую другую.
+    """
+    from llm.client import get_llm_settings
+    from llm.registry import DEFAULT_MAX_CTX
+    from llm.router import claude_model_for, get_route
+    if get_route(depth).get("provider") == "api":
+        return {"id": "route:api", "name": "Claude API", "type": "api",
+                "provider": "anthropic", "model": claude_model_for(depth),
+                "max_ctx_tokens": DEFAULT_MAX_CTX["anthropic"], "_route": True}
+    cfg = get_llm_settings()
+    prov = cfg.get("provider") or "ollama"
+    max_ctx = (int(cfg.get("num_ctx") or 16384) if prov == "ollama"
+               else DEFAULT_MAX_CTX.get(prov, 32768))
+    return {"id": "route:llm", "name": "Горыныч" if prov == "gorynych" else "LLM",
+            "type": "llm", "provider": prov, "base_url": cfg.get("base_url", ""),
+            "model": cfg.get("model", ""), "max_ctx_tokens": max_ctx,
+            "stream": True if prov == "gorynych" else cfg.get("stream", True),
+            "_global": True}
+
+
+def _same_as_head(entry: dict, head: dict) -> bool:
+    """Запасная совпадает с основным: шлюз и Claude — по провайдеру (у каждого
+    одно подключение), прочие серверы — по адресу и модели."""
+    if entry.get("provider") != head.get("provider"):
+        return False
+    if head.get("provider") in ("gorynych", "anthropic"):
+        return True
+    return ((entry.get("base_url") or "").rstrip("/") == (head.get("base_url") or "").rstrip("/")
+            and entry.get("model") == head.get("model"))
+
+
+def _route_entries(task_id: str, depth: str) -> list[dict[str, Any]]:
+    """[основной из таблицы] + запасные цепочки задачи без совпадающих с основным."""
+    from llm.registry import get_entry
+    from llm.router import get_chain
+    head = _route_head(depth)
+    return [head] + [e for e in (get_entry(eid) for eid in get_chain(task_id))
+                     if e and not _same_as_head(e, head)]
 
 
 def _llm_result_fields(meta: dict, fallback_model: str) -> dict[str, Any]:
@@ -303,49 +343,6 @@ def _verdict_fields(seg_row: dict) -> tuple[str | None, str | None]:
         return None, None
 
 
-async def _analyse_segment_llm(seg_row: dict, system_prompt: str,
-                               depth: str | None = None) -> dict[str, Any]:
-    """Анализ сегмента через локальную LLM (без инструментов, простой вызов)."""
-    import time
-    from llm.client import _cfg, chat
-    from llm.router import format_ai_signature
-
-    t0 = time.monotonic()
-    user_input = _model_input(seg_row)
-    verdict, alarm_level = _verdict_fields(seg_row)
-    meta: dict = {}
-
-    try:
-        # chat() сам ретраит сеть/429/5xx и знает текущего провайдера
-        content = await chat(system_prompt, user_input, depth=depth, meta=meta)
-        if not content:
-            raise EmptyLLMResponse("модель вернула пустой ответ")
-        f = _llm_result_fields(meta, _cfg["model"])
-        content += format_ai_signature(f["label"])
-
-        return {
-            "verdict":            verdict,
-            "alarm_level":        alarm_level,
-            "conclusion_md":      content,
-            "error":              None,
-            "tokens_used":        f["tokens_used"],
-            "tool_calls_count":   0,
-            "loops_count":        0,
-            "generation_time_sec": round(time.monotonic() - t0, 1),
-            "debug_json":         {"provider": "llm", "model": _cfg["model"],
-                                   "depth": depth, "input_length": len(user_input),
-                                   **f["debug"]},
-            "claude_model":       f["claude_model"] or _cfg["model"],
-        }
-    except Exception as exc:
-        return {
-            "verdict": None, "alarm_level": None, "conclusion_md": "",
-            "error": repr(exc), "tokens_used": 0, "tool_calls_count": 0,
-            "loops_count": 0, "generation_time_sec": 0, "debug_json": {},
-            "claude_model": None,
-        }
-
-
 # ── Цепочка приоритетов моделей ───────────────────────────────────────────────
 
 # Оценка размера промпта: по ответам шлюза русский текст с markdown-таблицами —
@@ -365,10 +362,11 @@ async def _analyse_segment_chain(
 ) -> dict[str, Any]:
     """Анализ по цепочке приоритетов: проактивный отбор по размеру + fallback по ошибкам.
 
-    Для каждой записи цепочки по порядку:
+    Для каждой записи цепочки по порядку (первая — основной из таблицы, _route_head):
       1. промпт не влезает в max_ctx_tokens → пропуск без запроса;
-      2. type="api"  → Claude-агент с инструментами;
-         type="llm"  → plain chat через запись реестра (стрим по настройке записи);
+      2. type="api"  → Claude-агент с инструментами (у основного — модель строки);
+         type="llm"  → plain chat через запись реестра (стрим по настройке записи),
+                       у основного — через общее подключение;
       3. ошибка запроса (сеть после ретраев, 4xx сразу) → следующая запись;
          пустой ответ — тоже ошибка: сохранять пустое заключение как готовое
          нельзя, повторно его уже никто не возьмёт.
@@ -397,7 +395,9 @@ async def _analyse_segment_chain(
         try:
             if entry["type"] == "api":
                 from corpus.agent import analyse_segment
-                result = await analyse_segment(seg_row, kb_path, system_prompt=system_prompt)
+                result = await analyse_segment(
+                    seg_row, kb_path, system_prompt=system_prompt,
+                    model=entry.get("model") if entry.get("_route") else None)
                 if result.get("error"):
                     trace.append({"entry": entry["id"], "action": "error",
                                   "detail": str(result["error"])[:300]})
@@ -406,7 +406,8 @@ async def _analyse_segment_chain(
                 from llm.router import format_ai_signature
                 meta: dict = {}
                 content = await chat(system_prompt, user_input,
-                                     entry=entry, stream=entry.get("stream", True),
+                                     entry=None if entry.get("_global") else entry,
+                                     stream=entry.get("stream", True),
                                      depth=depth, meta=meta)
                 if not content:
                     raise EmptyLLMResponse("модель вернула пустой ответ")

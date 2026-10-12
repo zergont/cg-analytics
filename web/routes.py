@@ -828,15 +828,12 @@ async def settings_page(request: Request):
     )
     from llm.router import (
         get_all as _get_router, TASKS as _TASKS, TASK_HINTS as _HINTS,
-        WARNING_LEVELS as _WL, WARNING_LEVEL_LABELS as _WL_LABELS,
-        WARNING_LEVEL_SLUGS as _WL_SLUGS, get_all_warning_level_routes as _get_wl_routes,
         CHAIN_TASKS as _CHAIN_TASKS, get_all_chains as _get_chains,
         DEPTH_KINDS as _DEPTH_KINDS, DEPTH_HINTS as _DEPTH_HINTS,
         DEPTH_PRIORITIES as _DEPTH_PRIOS, DEPTH_REASONING as _DEPTH_REAS,
         get_all_depth as _get_depth,
     )
     from llm.registry import get_entries as _get_llm_entries
-    _wl_routes = _get_wl_routes()
     _llm_entries = _get_llm_entries()
     for _e in _llm_entries:   # ключи API в шаблон не отдаём — только признак наличия
         _e["has_api_key"] = bool(_e.pop("api_key", ""))
@@ -858,10 +855,6 @@ async def settings_page(request: Request):
         "data_stale_threshold_sec":  data_stale_threshold_sec,
         "ai_routing":   _get_router(),
         "ai_task_meta": {k: {"label": v[0], "hint": _HINTS.get(k, "")} for k, v in _TASKS.items()},
-        "warning_gate_levels": [
-            {"level": lvl, "slug": _WL_SLUGS[lvl], "label": _WL_LABELS[lvl], "route": _wl_routes[lvl]}
-            for lvl in _WL
-        ],
         "llm_registry": _llm_entries,
         "ai_chains":    _get_chains(),
         "chain_tasks":  list(_CHAIN_TASKS),
@@ -872,8 +865,8 @@ async def settings_page(request: Request):
         ],
         "ai_depth_priorities": list(_DEPTH_PRIOS),
         "ai_depth_reasoning":  list(_DEPTH_REAS),
-        "gorynych_in_use": (get_llm_settings().get("provider") == "gorynych"
-                            or any(e.get("provider") == "gorynych" for e in _llm_entries)),
+        # Строки «Горыныч» идут через общее подключение — шлюз ли оно, решает только оно
+        "gorynych_in_use": get_llm_settings().get("provider") == "gorynych",
     })
 
 
@@ -960,6 +953,10 @@ async def llm_registry_delete(entry_id: str = Form(...)):
     import json as _json
     from llm import registry as llm_registry
     from llm.router import CHAIN_TASKS, get_chain, apply_chain
+    _gone = llm_registry.get_entry(entry_id) or {}
+    if _gone.get("provider") == "gorynych" and entry_id in get_chain("seg_auto"):
+        logger.warning("Реестр моделей: удаляется запись шлюза %s из «Запасных» заключений — "
+                       "откат на v5.1.10 отправит заключения следующей записи цепочки", entry_id)
     llm_registry.delete_entry(entry_id)
     await analytics.set_app_setting(llm_registry.REGISTRY_SETTING_KEY, llm_registry.serialize())
     for task_id in CHAIN_TASKS:
@@ -1014,13 +1011,25 @@ async def llm_registry_models(request: Request):
 
 @router.post("/settings/ai-chains")
 async def update_ai_chains(request: Request):
-    """Сохранить цепочки приоритетов моделей для corpus-задач."""
+    """Сохранить «Запасные» для заключений по сегментам.
+
+    Записи шлюза в карточке не показываются (основной «Горыныч» — строка
+    таблицы), но в ключе остаются первыми: на них держится откат на v5.1.10
+    (там основного выбирает голова цепочки) и запасной шлюз у строк с Claude.
+    Форма их не меняет — даже устаревшая вкладка (решение 12.10).
+    """
     import json as _json
-    from llm.router import CHAIN_TASKS, apply_chain
+    from llm import registry as llm_registry
+    from llm.router import CHAIN_TASKS, apply_chain, get_chain, merge_fallbacks
+
+    def _gw(eid: str) -> bool:
+        return (llm_registry.get_entry(eid) or {}).get("provider") == "gorynych"
+
     form = await request.form()
     for task_id in CHAIN_TASKS:
         raw = str(form.get(f"chain_{task_id}", "")).strip()
-        chain = [e for e in raw.split(",") if e.strip()] if raw else []
+        posted = [e.strip() for e in raw.split(",") if e.strip()] if raw else []
+        chain = merge_fallbacks(get_chain(task_id), posted, _gw)
         apply_chain(task_id, chain)
         await analytics.set_app_setting(f"ai_task_{task_id}_chain", _json.dumps(chain))
     logger.info("Цепочки моделей сохранены: %s",
@@ -1030,58 +1039,45 @@ async def update_ai_chains(request: Request):
 
 @router.post("/settings/ai-routing")
 async def update_ai_routing(request: Request):
-    """Сохранить маршрутизацию AI-задач (провайдер + промпт для каждой задачи).
+    """Системные промпты задач. Кто разбирает — таблица «Кто и как разбирает»
+    (v5.1.11), провайдер задачи здесь больше не выбирается.
 
-    Провайдер для warning_claude в форме не отображается (см. отдельную карточку
-    «Гейт предупреждений — по уровню серьёзности») — дефолт берёт текущее
-    значение, чтобы отсутствующее в форме поле не затирало его на "llm".
+    Поля промпта нет в форме — промпт не трогаем; поле пустое — промпт по
+    умолчанию (llm.router.get_prompt).
     """
-    from llm.router import apply_task, get_provider, TASKS as _TASKS
+    from llm.router import apply_prompts_form
     form = await request.form()
-    for task_id in _TASKS:
-        provider = str(form.get(f"ai_{task_id}_provider", get_provider(task_id))).strip()
-        prompt   = str(form.get(f"ai_{task_id}_prompt",   "")).strip()
-        apply_task(task_id, provider, prompt)
-        await analytics.set_app_setting(f"ai_task_{task_id}_provider", provider)
-        await analytics.set_app_setting(f"ai_task_{task_id}_prompt",   prompt)
-    logger.info("AI routing сохранён (%d задач)", len(_TASKS))
+    accepted = apply_prompts_form(form)
+    for task_id, prompt in accepted.items():
+        await analytics.set_app_setting(f"ai_task_{task_id}_prompt", prompt)
+    logger.info("Системные промпты сохранены (%d задач)", len(accepted))
     return RedirectResponse(url="/settings#ai-routing", status_code=303)
 
 
 @router.post("/settings/ai-depth")
 async def update_ai_depth(request: Request):
-    """Градация разбора: модель, рассуждение и приоритет шлюза по виду разбора."""
-    from llm.router import (
-        DEPTH_KINDS as _KINDS, DEPTH_SETTING_KEY as _KEY,
-        apply_depth, serialize_depth,
-    )
+    """Таблица «Кто и как разбирает»: кто (Горыныч / Claude API), модель,
+    рассуждение и приоритет шлюза, модель Claude — по виду работы (v5.1.11).
+
+    Отсутствующее поле оставляет текущее значение: вкладка, открытая до
+    деплоя, не сбрасывает ни провайдера, ни параметры шлюза.
+    """
+    from llm.router import DEPTH_SETTING_KEY as _KEY, apply_route_form, serialize_depth
     form = await request.form()
-    for kind in _KINDS:
-        apply_depth(
-            kind,
-            str(form.get(f"depth_{kind}_model", "")).strip(),
-            str(form.get(f"depth_{kind}_reasoning", "default")).strip(),
-            str(form.get(f"depth_{kind}_priority", "")).strip(),
-        )
+    apply_route_form(form)
     await analytics.set_app_setting(_KEY, serialize_depth())
-    logger.info("Градация разбора сохранена: %s", serialize_depth())
+    logger.info("«Кто и как разбирает» сохранено: %s", serialize_depth())
     return RedirectResponse(url="/settings#ai-depth", status_code=303)
 
 
 @router.post("/settings/warning-gate-routing")
 async def update_warning_gate_routing(request: Request):
-    """Гейт предупреждений: провайдер + модель отдельно по уровню серьёзности."""
-    from llm.router import apply_warning_level_route, WARNING_LEVELS as _LEVELS, WARNING_LEVEL_SLUGS as _SLUGS
-    form = await request.form()
-    for level in _LEVELS:
-        slug     = _SLUGS[level]
-        provider = str(form.get(f"wl_{slug}_provider", "api")).strip()
-        model    = str(form.get(f"wl_{slug}_model",    "")).strip()
-        apply_warning_level_route(level, provider, model)
-        await analytics.set_app_setting(f"ai_warning_level_{level}_provider", provider)
-        await analytics.set_app_setting(f"ai_warning_level_{level}_model",    model)
-    logger.info("Гейт предупреждений: маршрутизация по уровням сохранена")
-    return RedirectResponse(url="/settings#ai-routing", status_code=303)
+    """Карточки «Гейт — модель по уровню» больше нет (v5.1.11): кто разбирает
+    гейт — строки таблицы «Кто и как разбирает». Вкладка, открытая до деплоя,
+    ничего не меняет."""
+    logger.warning("Сохранение старой карточки «Гейт — модель по уровню» проигнорировано: "
+                   "настройки гейта — в таблице «Кто и как разбирает»")
+    return RedirectResponse(url="/settings#ai-depth", status_code=303)
 
 
 @router.get("/ai-playground", response_class=HTMLResponse)
@@ -2250,6 +2246,8 @@ async def api_machines():
             status_struct = ss if isinstance(ss, dict) else {}
             gl = _parse_json(seg.get("gate_log"), ctx="gate_log")
             if isinstance(gl, list):
+                # Отметки разбора аварии (kind=incident, v5.1.11) — не вердикты гейта
+                gl = [e for e in gl if not (isinstance(e, dict) and e.get("kind") == "incident")]
                 gate_events_count    = len(gl)
                 gate_cancelled_count = sum(
                     1 for e in gl if isinstance(e, dict) and e.get("decision_applied")

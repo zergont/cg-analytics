@@ -322,7 +322,8 @@ check(worker._segment_depth({"characteristics_json": {"stop_kind": "EMERGENCY"}}
 check(worker._segment_depth({"characteristics_json": {}}, "seg_manual") == "manual", "6в: ручной запуск")
 router.load_depth(json.dumps({"seg_norma": {"model": "gemma", "reasoning": "nonsense", "priority": "urgent"}}))
 p = router.get_depth("seg_norma")
-check(p == {"model": "gemma", "reasoning": "default", "priority": "batch"},
+check(p == {"model": "gemma", "reasoning": "default", "priority": "batch",
+           "provider": "llm", "claude_model": ""},
       f"6г: неизвестные значения из настроек заменяются умолчаниями: {p}")
 check(router.get_depth("gate_caution")["model"] == "fast", "6д: виды без настроек — по умолчанию fast")
 check(all(v["model"] == "fast" for k, v in json.loads(router.serialize_depth()).items() if k != "seg_norma"),

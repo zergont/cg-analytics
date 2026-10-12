@@ -26,8 +26,10 @@
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -209,7 +211,7 @@ def build_incident_prompt(
     ch = incident.get("character") or {}
     win = incident.get("window") or {}
     out: list[str] = [
-        "Разбери аварийный останов газопоршневой установки.",
+        "Разбери аварийный останов дизель-генераторной установки.",
         "",
         f"Останов: {incident.get('stop_ts') or '—'}",
         f"Характер по детерминированному гейту: {ch.get('character', '?')} "
@@ -305,7 +307,7 @@ async def _ask_claude(user_prompt: str, model: str) -> str:
         response = await client.messages.create(
             model=model or cfg["model"],
             max_tokens=cfg["max_tokens"],
-            system=get_prompt("warning_claude"),
+            system=get_prompt("incident"),
             messages=[{"role": "user", "content": user_prompt}],
         )
         if response.stop_reason == "max_tokens":
@@ -317,27 +319,212 @@ async def _ask_claude(user_prompt: str, model: str) -> str:
             await http_client.aclose()
 
 
-async def analyze_incident(
+# ── Жизненный цикл разбора (v5.1.11) ───────────────────────────────────────────
+#
+# Разбор идёт на совете шлюза (smart + xhigh): десятки минут, в очереди batch —
+# дольше. Диспетчер к этому времени уже получил предварительные выводы из
+# заключения по сегменту, разбор аварии — дополнение (решение владельца 12.10),
+# поэтому ждём долго, но учитываем: дубль заказа отбрасывается, на каждую
+# попытку — отметка в журнале гейта, в конце — терминальная отметка, после
+# рестарта недоразобранное заказывается снова.
+
+# Срок ожидания ответа — сутки; нет ответа → перезаказ один раз → «не получен»
+# с причиной (решение 10.10, подтверждено 12.10)
+INCIDENT_DEADLINE_SEC = 24 * 3600
+INCIDENT_ATTEMPTS = 2
+INCIDENT_RETRY_AFTER_SEC = 15 * 60
+# Совет на шлюзе без соединения живёт дальше (отмены задачи шлюза в версии нет):
+# заказов на одну аварию за всю её жизнь — не больше трёх, включая рестарты
+INCIDENT_MAX_ORDERS = 3
+# Текст получен, а сегмента нет (СТОП/ПУСК с перечиткой удалил строку): держим
+# текст и пробуем записать раз в минуту до 15 мин — второй совет не заказываем
+INCIDENT_SAVE_RETRY_SEC = 60
+INCIDENT_SAVE_WINDOW_SEC = 15 * 60
+# Отметка в журнал: окно цикла закрытия (открытая строка удалена, закрытая ещё
+# не вставлена) — несколько секунд
+_MARK_RETRIES = 3
+_MARK_RETRY_SEC = 5.0
+# Восстановление после рестарта: аварии не старше 48 ч, не больше 3 заказов за старт
+RECOVER_HOURS = 48
+RECOVER_MAX = 3
+RECOVER_DELAY_SEC = 120
+
+# Итоги отметок журнала гейта (kind="incident")
+INC_ORDERED, INC_FAILED, INC_REMOVED, INC_SAVE_FAILED = (
+    "ordered", "failed", "removed", "save_failed")
+INC_TERMINAL = (INC_FAILED, INC_REMOVED, INC_SAVE_FAILED)
+
+_inflight: dict[tuple[str, str, int, str], asyncio.Task] = {}
+_closing = False
+_recover_task: asyncio.Task | None = None
+
+
+class EmptyIncidentAnswer(Exception):
+    """Модель вернула пустой текст — сбой, а не разбор."""
+
+
+def _utc(ts: datetime) -> datetime:
+    return ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts.astimezone(timezone.utc)
+
+
+def incident_hash(stop_ts: datetime) -> str:
+    """Ключ разбора аварии в warning_analyses и журнале гейта."""
+    return f"incident:{_utc(stop_ts).isoformat()}"
+
+
+def order_incident_analysis(
     router_sn: str, equip_type: str, panel_id: int,
     incident: dict[str, Any], stop_ts: datetime,
     segment_id: int | None = None,
-) -> None:
-    """Заказать разбор аварии и сохранить его рядом с разборами гейта.
+) -> bool:
+    """Заказать разбор аварии отдельной учтённой задачей. False — не заказан.
 
-    Fail-open во всём: разбор — это мнение поверх фактов, и его отсутствие не
-    должно ломать ни цикл движка, ни сам акт, который уже записан.
+    Цикл движка разбор не ждёт. Повторный заказ того же останова, пока разбор
+    в работе, отбрасывается: учёт модульный, поэтому и перезапуск движка
+    (СТОП/ПУСК с перечиткой) второй совет не закажет.
     """
-    from llm.router import get_warning_level_route, get_prompt
+    if _closing:
+        logger.info("IncidentGate: сервис останавливается — разбор аварии %s/%s/%s на %s "
+                    "не заказан (закажет восстановление после старта)",
+                    router_sn, equip_type, panel_id, _utc(stop_ts).isoformat())
+        return False
+    key = (router_sn, equip_type, int(panel_id), incident_hash(stop_ts))
+    cur = _inflight.get(key)
+    if cur is not None and not cur.done():
+        logger.info("IncidentGate: разбор аварии %s/%s/%s на %s уже в работе — дубль отброшен",
+                    router_sn, equip_type, panel_id, _utc(stop_ts).isoformat())
+        return False
+    task = asyncio.create_task(
+        _run_incident(router_sn, equip_type, int(panel_id), incident, _utc(stop_ts), segment_id),
+        name=f"incident:{router_sn}/{equip_type}/{panel_id}",
+    )
+    _inflight[key] = task
+    task.add_done_callback(lambda t, k=key: _task_done(k, t))
+    return True
+
+
+def _task_done(key: tuple, task: asyncio.Task) -> None:
+    if _inflight.get(key) is task:
+        _inflight.pop(key, None)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("IncidentGate: разбор %s упал", key[3], exc_info=exc)
+
+
+def inflight_count() -> int:
+    return sum(1 for t in _inflight.values() if not t.done())
+
+
+async def cancel_all(timeout: float = 10.0) -> int:
+    """Снять разборы при остановке сервиса. Зовётся ПОСЛЕ остановки движков —
+    иначе ещё работающий движок закажет новый. Задача шлюза остаётся жить
+    (её task_id — в журнале); после старта аварию закажет восстановление."""
+    global _closing
+    _closing = True
+    tasks = [t for t in _inflight.values() if not t.done()]
+    if _recover_task is not None and not _recover_task.done():
+        tasks.append(_recover_task)
+    for t in tasks:
+        t.cancel()
+    if tasks:
+        await asyncio.wait(tasks, timeout=timeout)
+    _inflight.clear()
+    return len(tasks)
+
+
+def _outcome_for_error(exc: BaseException) -> str:
+    """Снята на шлюзе намеренно (оператор, отмена совета) — removed, без повтора;
+    остановка шлюза и прочие ошибки — failed, один повтор."""
+    from llm.client import LLMError, _is_gateway_stop
+    if (isinstance(exc, LLMError) and exc.gateway
+            and exc.code in ("stopped", "council_cancelled")
+            and not _is_gateway_stop(exc)):
+        return INC_REMOVED
+    return INC_FAILED
+
+
+def _route() -> tuple[str, str]:
+    """(провайдер, подпись маршрута) строки «Разбор аварии» таблицы."""
+    from llm.router import get_route, route_label
+    return get_route("incident").get("provider", "llm"), route_label("incident")
+
+
+async def _ask(prompt: str, meta: dict) -> str:
+    """Спросить модель строки «Разбор аварии». Текст с подписью; пустой — ошибка."""
+    from llm.router import claude_model_for, format_ai_signature, get_prompt
+    provider, label = _route()
+    if provider == "llm":
+        from llm.client import chat, gateway_label
+        # Модель, рассуждение и приоритет — строка таблицы (depth="incident")
+        # Совет, принятый шлюзом, не пересылаем после обрыва: он живёт на шлюзе
+        # и без соединения — перезаказ решает и учитывает _run_incident
+        text = (await chat(get_prompt("incident"), prompt, depth="incident",
+                           meta=meta, resend_accepted=False)).strip()
+        label = gateway_label(meta, label)
+    else:
+        model = claude_model_for("incident")
+        text = (await _ask_claude(prompt, model)).strip()
+        label = model or "Claude API"
+    if not text:
+        raise EmptyIncidentAnswer("модель вернула пустой ответ")
+    try:
+        text += format_ai_signature(label)
+    except Exception:
+        logger.warning("IncidentGate: подпись модели не добавлена", exc_info=True)
+    return text
+
+
+def _task_id(meta: dict, exc: BaseException | None = None) -> str | None:
+    """task_id задачи шлюза: клиент кладёт его в meta["task_id"] сразу при приёме
+    (meta["gorynych"] — только с ответом); у ошибки шлюза — в самой ошибке."""
+    m = meta or {}
+    return (getattr(exc, "task_id", None) or m.get("task_id")
+            or (m.get("gorynych") or {}).get("task_id"))
+
+
+async def _mark(router_sn: str, equip_type: str, panel_id: int, stop_ts: datetime,
+                segment_id: int | None, decision: str, **extra: Any) -> bool:
+    """Отметка в журнале гейта. ts — момент останова ВНУТРИ события: по нему
+    _slice_gate_state переносит запись при закрытии строки, иначе отметка
+    пропала бы, и восстановление заказало бы совет снова."""
     from online import db as online_db
+    event = {"kind": "incident", "fault_hash": incident_hash(stop_ts), "decision": decision,
+             "ts": stop_ts.isoformat(), "at": datetime.now(timezone.utc).isoformat(),
+             **{k: v for k, v in extra.items() if v is not None}}
+    for i in range(_MARK_RETRIES + 1):
+        try:
+            if await online_db.append_segment_gate_event(
+                    router_sn, equip_type, panel_id, event,
+                    segment_id=segment_id, ts=stop_ts):
+                return True
+        except Exception:
+            logger.warning("IncidentGate: отметка %s не записана", decision, exc_info=True)
+        if i < _MARK_RETRIES:
+            await asyncio.sleep(_MARK_RETRY_SEC)
+    logger.warning("IncidentGate: отметка %s для %s не записана — сегмент не найден",
+                   decision, event["fault_hash"])
+    return False
 
-    route = get_warning_level_route("авария")
-    provider = route.get("provider", "api")
-    model = route.get("model", "")
-    fault_hash = f"incident:{stop_ts.isoformat()}"
 
-    logger.info("IncidentGate: разбор аварии %s/%s/%s на %s (provider=%s, model=%s)",
-                router_sn, equip_type, panel_id, stop_ts.isoformat(), provider, model)
+async def _state(router_sn: str, equip_type: str, panel_id: int,
+                 stop_ts: datetime) -> dict[str, Any]:
+    """Разобрана ли авария, есть ли терминальная отметка, сколько было заказов.
+    Сбой чтения — «ничего не известно»: разбор лучше заказать, чем потерять."""
+    from online import db as online_db
+    try:
+        return await online_db.get_incident_analysis_state(
+            router_sn, equip_type, panel_id, incident_hash(stop_ts), stop_ts)
+    except Exception:
+        logger.warning("IncidentGate: состояние разбора не прочитано", exc_info=True)
+        return {"analysed": False, "terminal": None, "ordered": 0}
 
+
+async def _material(router_sn: str, equip_type: str, panel_id: int,
+                    incident: dict[str, Any], stop_ts: datetime,
+                    segment_id: int | None) -> str:
+    from online import db as online_db
     seg_row = None
     try:
         seg_row = await online_db.get_segment_by_id(segment_id) if segment_id else None
@@ -355,57 +542,161 @@ async def analyze_incident(
     except Exception:
         logger.warning("IncidentGate: сегменты цикла не прочитаны — разбор "
                        "без расчётных параметров", exc_info=True)
+    return build_incident_prompt(incident, seg_row, cycle_segments)
 
-    prompt = build_incident_prompt(incident, seg_row, cycle_segments)
 
-    _meta: dict = {}
+async def _save(router_sn: str, equip_type: str, panel_id: int, stop_ts: datetime,
+                segment_id: int | None, analysis: str) -> bool:
+    """Записать разбор рядом с разборами гейта; сегмента нет — повтор раз в
+    минуту до 15 мин. Модель повторно не спрашиваем."""
+    from online import db as online_db
+    tries = max(1, INCIDENT_SAVE_WINDOW_SEC // max(1, INCIDENT_SAVE_RETRY_SEC)) + 1
+    for i in range(tries):
+        try:
+            if await online_db.save_segment_warning(
+                    router_sn, equip_type, panel_id,
+                    analysis_md=analysis, fault_hash=incident_hash(stop_ts),
+                    alarm_text="Аварийный останов", segment_id=segment_id, ts=stop_ts):
+                logger.info("IncidentGate: разбор аварии сохранён (%d симв.)", len(analysis))
+                return True
+            logger.warning("IncidentGate: сегмент на %s не найден — разбор держу, повтор "
+                           "записи через %d с", stop_ts.isoformat(), INCIDENT_SAVE_RETRY_SEC)
+        except Exception:
+            logger.warning("IncidentGate: не удалось сохранить разбор", exc_info=True)
+        if i < tries - 1:
+            await asyncio.sleep(INCIDENT_SAVE_RETRY_SEC)
+    return False
+
+
+async def _run_incident(
+    router_sn: str, equip_type: str, panel_id: int,
+    incident: dict[str, Any], stop_ts: datetime,
+    segment_id: int | None = None,
+) -> str:
+    """Разбор аварии с учётом попыток. Итог: ok / analysed / removed / failed /
+    save_failed. Fail-open: разбор — мнение поверх фактов, его отсутствие не
+    ломает ни цикл движка, ни акт, который уже записан."""
+    fh = incident_hash(stop_ts)
+    _, label = _route()
+    logger.info("IncidentGate: разбор аварии %s/%s/%s на %s (разбирает %s)",
+                router_sn, equip_type, panel_id, stop_ts.isoformat(), label)
+    prompt = await _material(router_sn, equip_type, panel_id, incident, stop_ts, segment_id)
+
+    attempt = 0
+    prev_tid: str | None = None       # задача шлюза прошлой попытки (осталась жить на шлюзе)
+    while True:
+        st = await _state(router_sn, equip_type, panel_id, stop_ts)
+        if st.get("analysed"):
+            logger.info("IncidentGate: %s уже разобрана — совет не заказываю", fh)
+            return "analysed"
+        if st.get("terminal"):
+            logger.info("IncidentGate: %s закрыта отметкой «%s» — не заказываю",
+                        fh, st["terminal"])
+            return str(st["terminal"])
+        ordered = int(st.get("ordered") or 0)
+        if ordered >= INCIDENT_MAX_ORDERS:
+            await _mark(router_sn, equip_type, panel_id, stop_ts, segment_id, INC_FAILED,
+                        reason=f"исчерпано заказов: {ordered}", model=label)
+            logger.warning("IncidentGate: %s — исчерпано %d заказов, разбор не получен",
+                           fh, ordered)
+            return INC_FAILED
+        attempt += 1
+        await _mark(router_sn, equip_type, panel_id, stop_ts, segment_id, INC_ORDERED,
+                    attempt=ordered + 1, model=label, prev_task_id=prev_tid)
+        meta: dict = {}
+        reason = ""
+        err: BaseException | None = None
+        try:
+            analysis = await asyncio.wait_for(_ask(prompt, meta), INCIDENT_DEADLINE_SEC)
+            outcome = "ok"
+        except asyncio.TimeoutError:
+            outcome, reason = INC_FAILED, f"нет ответа за {INCIDENT_DEADLINE_SEC // 3600} ч"
+        except asyncio.CancelledError:
+            logger.warning("IncidentGate: разбор %s снят (остановка сервиса); задача шлюза %s "
+                           "остаётся на шлюзе", fh, _task_id(meta) or "—")
+            raise
+        except Exception as exc:
+            err = exc
+            outcome, reason = _outcome_for_error(exc), repr(exc)[:300]
+
+        # Совет, принятый шлюзом и оборванный/просроченный, живёт на шлюзе дальше
+        # (отмены задачи в версии нет): его task_id — в журнал и в отметки, чтобы
+        # снять вручную
+        tid = _task_id(meta, err)
+        if outcome != "ok":
+            if tid and tid not in reason:
+                reason = f"{reason}; задача шлюза {tid}"
+            logger.warning("IncidentGate: разбор %s не получен (%s): %s", fh, outcome, reason)
+
+        if outcome == "ok":
+            try:
+                saved = await _save(router_sn, equip_type, panel_id, stop_ts, segment_id, analysis)
+            except asyncio.CancelledError:
+                # Остановка сервиса посреди повторов записи: текст уже получен —
+                # хотя бы в журнал сервиса. Отметки нет: восстановление закажет снова
+                logger.error("IncidentGate: разбор %s не сохранён — остановка сервиса; "
+                             "задача шлюза %s; текст:\n%s", fh, _task_id(meta) or "—", analysis)
+                raise
+            if saved:
+                return "ok"
+            # Текст — в журнал сервиса: в БД его положить некуда
+            logger.error("IncidentGate: разбор %s НЕ СОХРАНЁН за %d мин — текст:\n%s",
+                         fh, INCIDENT_SAVE_WINDOW_SEC // 60, analysis)
+            await _mark(router_sn, equip_type, panel_id, stop_ts, segment_id, INC_SAVE_FAILED,
+                        reason="сегмент не найден", task_id=_task_id(meta), model=label)
+            return INC_SAVE_FAILED
+        if outcome == INC_REMOVED or attempt >= INCIDENT_ATTEMPTS:
+            await _mark(router_sn, equip_type, panel_id, stop_ts, segment_id, outcome,
+                        reason=reason, task_id=tid, model=label)
+            logger.warning("IncidentGate: разбор %s не получен — %s (%s)", fh, outcome, reason)
+            return outcome
+        logger.info("IncidentGate: повтор разбора %s через %d мин (задача шлюза %s остаётся "
+                    "на шлюзе)", fh, INCIDENT_RETRY_AFTER_SEC // 60, tid or "—")
+        prev_tid = tid
+        await asyncio.sleep(INCIDENT_RETRY_AFTER_SEC)
+
+
+async def recover_pending(delay: float = RECOVER_DELAY_SEC) -> int:
+    """После старта: заказать разбор аварий, оставшихся без него (рестарт посреди
+    совета, деплой). Не старше 48 ч, не больше 3 за старт; только через
+    order_incident_analysis — чтобы сработал отбор дублей."""
+    from online import db as online_db
+    if delay:
+        await asyncio.sleep(delay)
     try:
-        if provider == "llm":
-            from llm.client import chat
-            # У шлюза «Горыныч» модель, рассуждение и приоритет — по градации
-            # («разбор аварийного останова»), а не имя модели маршрута уровня
-            analysis = (await chat(get_prompt("warning_claude"), prompt,
-                                   model=model or None, depth="incident",
-                                   meta=_meta)).strip()
-        else:
-            analysis = (await _ask_claude(prompt, model)).strip()
+        since = datetime.now(timezone.utc) - timedelta(hours=RECOVER_HOURS)
+        rows = await online_db.get_incident_acts_since(since)
     except Exception:
-        logger.warning("IncidentGate: провайдер не ответил — авария остаётся "
-                       "с актом, но без разбора", exc_info=True)
-        return
+        logger.warning("IncidentGate: восстановление — акты не прочитаны", exc_info=True)
+        return 0
+    n = 0
+    for row in rows:
+        if n >= RECOVER_MAX:
+            logger.info("IncidentGate: восстановление — лимит %d за старт, остальные "
+                        "закажет следующий старт", RECOVER_MAX)
+            break
+        stop_ts = _utc(row["t_start"])
+        st = await _state(row["router_sn"], row["equip_type"], row["panel_id"], stop_ts)
+        if st.get("analysed") or st.get("terminal"):
+            continue
+        raw = row.get("incident_json")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except ValueError:
+                raw = None
+        if not isinstance(raw, dict):
+            continue
+        if order_incident_analysis(row["router_sn"], row["equip_type"], row["panel_id"],
+                                   raw, stop_ts, row.get("id")):
+            n += 1
+            logger.info("IncidentGate: восстановление — заказан разбор аварии %s/%s/%s на %s "
+                        "(заказов было %d)", row["router_sn"], row["equip_type"],
+                        row["panel_id"], stop_ts.isoformat(), int(st.get("ordered") or 0))
+    return n
 
-    if not analysis:
-        logger.warning("IncidentGate: пустой ответ провайдера, разбор не сохранён")
-        return
 
-    # Подпись модели — как у разборов гейта: по реально ответившей (у шлюза —
-    # голова), у Claude API — имя модели. Без неё по разбору аварии 12.10 не
-    # понять, писал Claude или шлюз (v5.1.10)
-    try:
-        from llm.client import gateway_label
-        from llm.router import format_ai_signature
-        if provider == "llm":
-            label = gateway_label(_meta, model)
-        else:
-            from corpus.settings import get_claude_settings
-            label = model or get_claude_settings().get("model") or "Claude API"
-        analysis = analysis + format_ai_signature(label)
-    except Exception:
-        logger.warning("IncidentGate: подпись модели не добавлена", exc_info=True)
-
-    try:
-        saved = await online_db.save_segment_warning(
-            router_sn, equip_type, panel_id,
-            analysis_md=analysis,
-            fault_hash=fault_hash,
-            alarm_text="Аварийный останов",
-            segment_id=segment_id,
-            ts=stop_ts,
-        )
-        if not saved:
-            logger.warning("IncidentGate: разбор НЕ СОХРАНЁН — сегмент на %s не найден",
-                           stop_ts.isoformat())
-        else:
-            logger.info("IncidentGate: разбор аварии сохранён (%d симв.)", len(analysis))
-    except Exception:
-        logger.warning("IncidentGate: не удалось сохранить разбор", exc_info=True)
+def start_recovery(delay: float = RECOVER_DELAY_SEC) -> None:
+    """Запустить восстановление фоном (main.py, после старта движков)."""
+    global _recover_task
+    _recover_task = asyncio.create_task(recover_pending(delay), name="incident:recover")

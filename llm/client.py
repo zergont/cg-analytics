@@ -406,6 +406,7 @@ async def chat_stream(
     priority: str | None = None,
     depth: str | None = None,
     meta: dict | None = None,
+    resend_accepted: bool = True,
 ) -> AsyncIterator[str]:
     """Ответ LLM токен за токеном (или одним блоком при stream=False).
 
@@ -422,6 +423,10 @@ async def chat_stream(
     meta — словарь, который клиент заполняет полями ответа: gorynych (какая
     голова реально ответила, task_id, note), usage, model. Чистится на каждой
     попытке, чтобы не отдать данные неудачной.
+    resend_accepted=False — задачу, которую шлюз уже принял (есть task_id),
+    после обрыва потока не пересылать: на шлюзе она живёт и без соединения,
+    повтор запустил бы второй совет. Ошибка уходит вызывающему — он сам решает
+    о перезаказе и учитывает его (разбор аварии, v5.1.11).
     """
     cfg = entry if entry is not None else _cfg
     gateway = cfg.get("provider") == "gorynych"
@@ -449,6 +454,7 @@ async def chat_stream(
         gateway_restart = False
         for attempt in range(1, _RETRY_ATTEMPTS + 1):
             yielded = False
+            accepted = False
             if meta is not None:
                 meta.clear()
                 if gateway:
@@ -462,6 +468,7 @@ async def chat_stream(
                             await _raise_for_status(response, stream_mode=True, gateway=gateway)
                             if gateway:
                                 _note_gateway_task(response, meta)
+                                accepted = bool(response.headers.get("x-gorynych-task-id"))
                             it = (_iter_openai_stream(response, meta, gateway=gateway)
                                   if cfg.get("provider") in _OPENAI_COMPAT
                                   else _iter_ollama_stream(response))
@@ -484,6 +491,9 @@ async def chat_stream(
                     return
             except Exception as exc:
                 if yielded or attempt == _RETRY_ATTEMPTS or not retriable_llm_error(exc):
+                    raise
+                # Остановка шлюза снимает и задачу — её можно слать заново
+                if accepted and not resend_accepted and not _is_gateway_stop(exc):
                     raise
                 gateway_restart = gateway_restart or _is_gateway_stop(exc)
                 delay = _retry_delay(exc, attempt, gateway_restart)
@@ -539,8 +549,9 @@ async def chat(
     entry: dict | None = None, stream: bool | None = None,
     reasoning: str | None = None, priority: str | None = None,
     depth: str | None = None, meta: dict | None = None,
+    resend_accepted: bool = True,
 ) -> str:
-    """Ответ LLM одной строкой (с ретраями).
+    """Ответ LLM одной строкой (с ретраями; resend_accepted — см. chat_stream).
 
     stream=None — без потока (у шлюза — всегда поток, см. chat_stream); для
     цепочек corpus передаётся stream=True: поток токенов служит признаком
@@ -550,7 +561,8 @@ async def chat(
     parts = [t async for t in chat_stream(system, user, model=model,
                                           stream=use_stream, entry=entry,
                                           reasoning=reasoning, priority=priority,
-                                          depth=depth, meta=meta)]
+                                          depth=depth, meta=meta,
+                                          resend_accepted=resend_accepted)]
     return strip_think("".join(parts)).strip()
 
 

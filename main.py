@@ -21,8 +21,6 @@ from analytics.source import init_source_pool, close_source_pool
 from llm.client import apply_llm_settings, get_llm_settings
 from llm.router import (
     apply_task, TASKS as _ROUTER_TASKS,
-    apply_warning_level_route, WARNING_LEVELS as _WARNING_LEVELS,
-    get_all_warning_level_routes as _get_warning_level_routes,
     set_signature_enabled,
 )
 from corpus.settings import apply_claude_settings, get_claude_settings
@@ -120,16 +118,50 @@ async def lifespan(app: FastAPI):
         _apply_chain(_task_id, _chain if isinstance(_chain, list) else [])
     logger.info("Цепочки моделей загружены: %s",
                 {t: len(c) for t, c in _get_all_chains().items()})
-    # Градация разбора (шлюз «Горыныч»): модель/рассуждение/приоритет по виду разбора
-    from llm.router import load_depth as _load_depth, DEPTH_SETTING_KEY as _DEPTH_KEY
+    # «Кто и как разбирает» — одна таблица (v5.1.11): строки по видам работы,
+    # провайдер и параметры в строке. Разовый перенос старых настроек: карточки
+    # «Гейт — модель по уровню» и провайдеров задач; старые ключи не читаются
+    # (остаются в БД до зачистки в v5.2.5 — откат на v5.1.10 безопасен)
+    from llm.router import (
+        load_depth as _load_depth, DEPTH_SETTING_KEY as _DEPTH_KEY,
+        migrate_routes as _migrate_routes,
+    )
+    if await get_app_setting("ai_routes_version", "") != "5.1.11":
+        _legacy = {k: await get_app_setting(k, "") for k in (
+            "ai_warning_level_предупреждение_provider", "ai_warning_level_предупреждение_model",
+            "ai_warning_level_внимание_provider", "ai_warning_level_внимание_model",
+            "ai_task_human_auto_provider", "ai_task_seg_auto_provider",
+        )}
+        _seg_chain = _get_all_chains().get("seg_auto") or []
+        _head = _llm_registry.get_entry(_seg_chain[0]) if _seg_chain else None
+        if _head:
+            _legacy["seg_chain_head_provider"] = (
+                "api" if _head.get("provider") == "anthropic" else "llm")
+        _new_depth, _route_changes = _migrate_routes(await get_app_setting(_DEPTH_KEY, ""), _legacy)
+        if _new_depth is not None:
+            await set_app_setting(_DEPTH_KEY, _new_depth)
+        # Запасные заключений: шлюз основной, при сбое — облако (решение 12.10). Запись
+        # шлюза остаётся первой ради безопасного отката (новая версия её пропускает)
+        _keep = [e for e in _seg_chain
+                 if (_llm_registry.get_entry(e) or {}).get("provider") in ("gorynych", "anthropic")]
+        if _keep != _seg_chain:
+            _apply_chain("seg_auto", _keep)
+            await set_app_setting("ai_task_seg_auto_chain", _json.dumps(_keep))
+            _route_changes.append(f"запасные заключений: {_seg_chain} → {_keep}")
+        if _new_depth is None and _route_changes:
+            # Битый JSON градации: ключ не трогаем (ручное восстановление), перенос
+            # повторится при следующем старте
+            logger.warning("Перенос настроек ИИ в таблицу не выполнен: %s", "; ".join(_route_changes))
+        else:
+            await set_app_setting("ai_routes_version", "5.1.11")
+            logger.info("Настройки ИИ перенесены в таблицу «Кто и как разбирает»: %s",
+                        "; ".join(_route_changes) or "без изменений")
     _load_depth(await get_app_setting(_DEPTH_KEY, ""))
-    # Загружаем маршрутизацию гейта предупреждений по уровням серьёзности
-    _wl_defaults = _get_warning_level_routes()
-    for _level in _WARNING_LEVELS:
-        _wl_provider = await get_app_setting(f"ai_warning_level_{_level}_provider", _wl_defaults[_level]["provider"])
-        _wl_model    = await get_app_setting(f"ai_warning_level_{_level}_model",    _wl_defaults[_level]["model"])
-        apply_warning_level_route(_level, _wl_provider, _wl_model)
-    logger.info("Гейт предупреждений: маршрутизация по уровням загружена (%d уровня)", len(_WARNING_LEVELS))
+    # Сироты: status_auto (задачи нет с v4.x), llm_system_prompt (не читается)
+    for _orph in ("ai_task_status_auto_", "llm_system_prompt"):
+        _n = await _del_settings(_orph)
+        if _n:
+            logger.info("Удалены осиротевшие настройки %s* (%d шт.)", _orph, _n)
     # Загружаем настройку подписи модели в разборах (corpus/humanizer/гейт)
     set_signature_enabled(await get_app_setting("ai_signature_enabled", "true") == "true")
     # Загрузить режим источника телеметрии
@@ -139,6 +171,9 @@ async def lifespan(app: FastAPI):
     # Запустить онлайн-мониторинг (Этап 1.5)
     mgr = _online_mgr.init_manager()
     await mgr.start_all_running()
+    # Разборы аварий, оставшиеся без ответа (рестарт посреди совета) — через 2 мин
+    from online.incident_gate import start_recovery as _start_incident_recovery
+    _start_incident_recovery()
     # Запустить Claude-конвейер (Этап 2)
     import asyncio as _asyncio
     from corpus.worker import init_worker as _init_worker
@@ -165,6 +200,11 @@ async def lifespan(app: FastAPI):
     yield
     stop_scheduler()
     await _online_mgr.stop_manager()
+    # После движков: иначе ещё работающий движок закажет новый разбор
+    from online.incident_gate import cancel_all as _cancel_incidents
+    _n_inc = await _cancel_incidents()
+    if _n_inc:
+        logger.info("Сняты разборы аварий в работе: %d (закажет восстановление)", _n_inc)
     await _corpus_worker.stop()
     await _qwen_worker.stop()
     await close_source_pool()

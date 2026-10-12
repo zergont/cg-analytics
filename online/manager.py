@@ -860,8 +860,8 @@ async def _analyze_warning_claude(
 ) -> str:
     """Гейт предупреждений: анализирует сигнал и выносит вердикт cancel/pass.
 
-    Провайдер и модель настраиваются ПО УРОВНЮ серьёзности (см. llm.router
-    get_warning_level_route) — системный промпт единый для всех уровней.
+    Кто разбирает — строка таблицы «Кто и как разбирает» (llm.router.get_route:
+    gate_caution / gate_warning по уровню, v5.1.11); системный промпт единый.
     cancel (только для чисто аналитических предупреждений) — подавляет
     аналитику до изменения состава детекций или закрытия сегмента; pass —
     предупреждение идёт дальше. Любой исход логируется в gate_log сегмента.
@@ -873,20 +873,19 @@ async def _analyze_warning_claude(
     паузы.
     """
     from corpus.settings import get_claude_settings
-    from llm.router import get_warning_level_route
+    from llm.router import claude_model_for, depth_for_gate, get_route, route_label
     from online.status_assembler import (
         build_warning_prompt, compute_analytics_hash, extract_alarm_text,
     )
     from online import db as online_db
 
     level    = struct.get("severity_level", "")
-    route    = get_warning_level_route(level)
-    provider = route.get("provider", "api")
-    model    = route.get("model", "")
+    kind     = depth_for_gate(level)
+    provider = get_route(kind).get("provider", "llm")
+    model    = route_label(kind)
 
-    logger.info("WarningGate: анализ для %s/%s/%s (hash=%s, уровень=%s, provider=%s, model=%s)",
-                router_sn, equip_type, panel_id, fault_hash, level, provider,
-                _gate_model_shown(provider, model, level))
+    logger.info("WarningGate: анализ для %s/%s/%s (hash=%s, уровень=%s, разбирает %s)",
+                router_sn, equip_type, panel_id, fault_hash, level, model)
     _gw_meta: dict = {}
     try:
         claude_cfg  = get_claude_settings()
@@ -980,13 +979,13 @@ async def _analyze_warning_claude(
         can_cancel  = gate_can_cancel(struct)
 
         if provider == "llm":
-            from llm.router import depth_for_gate
+            # Модель, рассуждение и приоритет — строка таблицы (resolve_depth по виду)
             analysis, decision, reason, tokens_in, tokens_out = await _run_warning_gate_llm(
-                user_prompt, model, depth=depth_for_gate(level), meta=_gw_meta,
+                user_prompt, None, depth=kind, meta=_gw_meta,
             )
         else:
             analysis, decision, reason, tokens_in, tokens_out = await _run_warning_gate_api(
-                user_prompt, model, claude_cfg,
+                user_prompt, claude_model_for(kind), claude_cfg,
             )
         # Подпись и журнал — по реально ответившей модели (у шлюза это голова,
         # а не имя из маршрута уровня)
@@ -1164,18 +1163,3 @@ async def _analyze_warning_claude(
         return GATE_FAILED
 
 
-def _gate_model_shown(provider: str, model: str, level: str) -> str:
-    """Модель гейта для журнала: у шлюза — из градации разбора, а не из маршрута
-    уровня (там путь к gguf прямого сервера, шлюзу он не уходит)."""
-    if provider != "llm":
-        return model
-    try:
-        from llm.client import get_llm_settings, resolve_depth
-        from llm.router import depth_for_gate
-        cfg = get_llm_settings()
-        if cfg.get("provider") != "gorynych":
-            return model
-        m, r, _ = resolve_depth(cfg, depth_for_gate(level), model, None, None)
-        return f"Горыныч: {m or cfg.get('model') or '?'}" + (f" ({r})" if r else "")
-    except Exception:
-        return model
