@@ -318,6 +318,30 @@ async def get_timeline_periods(
     return enum_periods, fault_periods
 
 
+async def get_last_value_before(
+    router_sn: str, equip_type: str, panel_id: int, addr: int,
+    ts_before: datetime, max_age_sec: float,
+) -> dict[str, Any] | None:
+    """Последний замер регистра до ts_before, не старше max_age_sec (ts, value).
+
+    Ряд пишется по изменению (при постоянном значении — «пульс» ~15 мин):
+    значение держится до следующего замера, и без этого замера окно не знает,
+    что было на его начале (v5.1.10, нагрузка перед остановом)."""
+    from datetime import timedelta as _TD
+    async with _get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT ts, value FROM history_rich
+            WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3 AND addr = $4
+              AND ts < $5 AND ts >= $6 AND value IS NOT NULL
+            ORDER BY ts DESC LIMIT 1
+            """,
+            router_sn, equip_type, panel_id, addr, ts_before,
+            ts_before - _TD(seconds=max_age_sec),
+        )
+    return dict(row) if row else None
+
+
 async def get_data_gaps(
     router_sn: str,
     equip_type: str,

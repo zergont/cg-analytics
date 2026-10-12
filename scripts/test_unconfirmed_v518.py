@@ -133,10 +133,13 @@ check(grp(p, "WARMUP_VIOLATION")["unconfirmed"] == 0, "6в: «пуск без п
 # 7. «Без охлаждения» — только на первом стопе после работы
 cfg = binding.build_config(ROOT / "knowledge_base", controller_id="pcc3300", engine_id="cummins_kta50")
 run = seg([sub(1, [], zone="ELEVATED")], rs=3, hours=1)
+run.subsegments[0].characteristics["LOAD_PCT"] = {"max": 80.0}
 st1 = seg([sub(2, [])], rs=0, t0=T0 + timedelta(hours=1), hours=1, cause_open="RUN_STATE_CHANGE")
 st2 = seg([sub(3, [])], rs=0, t0=T0 + timedelta(hours=2), hours=1, cause_open="SHUTDOWN_CLEARED")
-_check_cooldown_transition(st1, [run], cfg, Detection)
-_check_cooldown_transition(st2, [run, st1], cfg, Detection)
+_la = cfg.role_to_addr("LOAD_PCT")
+_rows = {_la: [{"ts": T0 + timedelta(hours=1) - timedelta(seconds=s), "value": 80.0} for s in (200, 100, 10)]}
+_check_cooldown_transition(st1, [run], cfg, Detection, _rows)
+_check_cooldown_transition(st2, [run, st1], cfg, Detection, _rows)
 n1 = sum(d.scenario == "COOLDOWN_VIOLATION" for d in st1.subsegments[0].detections)
 n2 = sum(d.scenario == "COOLDOWN_VIOLATION" for d in st2.subsegments[0].detections)
 check(n1 == 1 and n2 == 0 and not st2.sequence_checks, f"7: один раз на останов: {n1}/{n2}")

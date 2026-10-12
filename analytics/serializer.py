@@ -520,8 +520,13 @@ def build_summary_parts(
     # Риск нагара — состояние, у него своя часть (старые эпизоды до v5.1.3 не в счёт)
     from .contract import STATE_SCENARIOS
     # Старые эпизоды аналитики с WARNING (до v5.1.7) читаются по догме — CAUTION
+    from .contract import EVENT_CHECKS, EVENT_SCENARIOS
     episodes = [dict(e, severity=cap_severity(e.get("scenario"), e.get("severity")))
                 for e in (episodes or []) if e.get("scenario") not in STATE_SCENARIOS]
+    # Разовые события перехода — отдельно: замечание строится из детекции сегмента,
+    # эпизод (точечный) — только запасной источник (v5.1.10)
+    event_eps = [e for e in episodes if e.get("scenario") in EVENT_SCENARIOS]
+    episodes = [e for e in episodes if e.get("scenario") not in EVENT_SCENARIOS]
     failed_checks = [
         c for s in segments for c in (getattr(s, "sequence_checks", None) or [])
         if isinstance(c, dict) and not c.get("passed", True)
@@ -691,8 +696,7 @@ def build_summary_parts(
 
     def _confirmed(e: dict) -> bool:
         if (not _can_confirm or e.get("source") == "panel"
-                or e.get("scenario") == "CONTROLLER_FAULT"
-                or e.get("scenario") in _TRANSITION_SCENARIOS):
+                or e.get("scenario") == "CONTROLLER_FAULT"):
             return True
         a0, a1 = _dt(e.get("t_open")), _dt(e.get("t_close"))
         if w0 is not None and (a0 is None or a0 < w0):
@@ -781,11 +785,20 @@ def build_summary_parts(
                                        g.get("period_blind_sec") or 0.0)
             g["since"] = before[0].isoformat()
             g["since_text"] = _fmt_dm(g["since"], tz)
-    remarks = sorted(groups.values(),
+    # Разовые события перехода (v5.1.10): «событие ЧЧ:ММ:СС», никогда не «на конец»,
+    # +1 к вердикту; сортируются с остальными — ниже живых, выше снятых
+    ev_groups = _event_groups(segments, event_eps, w0, w1, tz)
+    for g in ev_groups:
+        g["sev_rank"] = _SEV_RANK_MD.get("CAUTION", 0)
+    remarks = sorted(list(groups.values()) + ev_groups,
                      key=lambda g: (-g["sev_rank"], _remark_live(g) <= 0,
                                     -g.get("period_sec", g["active_sec"])))
     for g in remarks:
         g.pop("sev_rank", None)
+
+    # Парная событию проваленная проверка вторым замечанием не считается
+    _ev_sc = {g["scenario"] for g in ev_groups}
+    failed_checks = [c for c in failed_checks if EVENT_CHECKS.get(c.get("check")) not in _ev_sc]
 
     # Риск нагара: замечание — только где долг вырос (не в стопе)
     coking_part = _coking_part(segments, tz)
@@ -832,7 +845,10 @@ _DATA_QUALITY_CHECKS = frozenset({"subseg_data_coverage"})
 # Наблюдения, а не замечания: аварию по ним несёт сама панель (v5.1.7) —
 # «обороты не упали после перехода в Стоп» (у панели код 1245), «на конце
 # сегмента активна аварийная маска»
-_INFO_CHECKS = frozenset({"rpm_stop_profile", "no_active_shutdown_fault"})
+_INFO_CHECKS = frozenset({"rpm_stop_profile", "no_active_shutdown_fault",
+                          # v5.1.10: переход не оценён (нет нагрузки в данных); холодный
+                          # пуск без фазы прогрева — первый сезон наблюдением (12.10)
+                          "cooldown_not_evaluated", "cold_start_no_warmup"})
 # Проверки, не влияющие на вердикт
 _NO_VERDICT_CHECKS = _DATA_QUALITY_CHECKS | _INFO_CHECKS
 # Только в данных (characteristics_json): маску на конце уже показывают блок отчёта
@@ -840,8 +856,41 @@ _NO_VERDICT_CHECKS = _DATA_QUALITY_CHECKS | _INFO_CHECKS
 _HIDDEN_CHECKS = frozenset({"no_active_shutdown_fault"})
 
 
-# Детекции межсегментных проверок перехода (segmenter._inter_segment_checks)
-_TRANSITION_SCENARIOS = frozenset({"COOLDOWN_VIOLATION", "WARMUP_VIOLATION"})
+def _event_groups(segments, event_eps, w0, w1, tz) -> list[dict]:
+    """Группы замечаний разовых событий перехода: из детекций сегментов окна;
+    точечный эпизод — запасной источник, если детекции нет (сбой контекста)."""
+    from .contract import EVENT_SCENARIOS
+    on: dict[tuple, dict] = {}
+
+    def _in(t):
+        return t is not None and (w0 is None or t >= w0) and (w1 is None or t < w1)
+
+    for s in segments or []:
+        for sub in getattr(s, "subsegments", None) or []:
+            for d in getattr(sub, "detections", None) or []:
+                dd = _as_dict(d)
+                sc = dd.get("scenario")
+                t = _dt(dd.get("t_detected"))
+                if sc in EVENT_SCENARIOS and _in(t):
+                    on.setdefault((sc, t), {"text": dd.get("trigger")})
+    for e in event_eps or []:
+        sc, t = e.get("scenario"), _dt(e.get("t_open"))
+        if sc in EVENT_SCENARIOS and _in(t) and (sc, t) not in on:
+            on[(sc, t)] = {"text": None}
+    groups: dict[str, dict] = {}
+    for (sc, t), v in sorted(on.items(), key=lambda x: x[0][1]):
+        g = groups.setdefault(sc, {
+            "name": SCENARIO_RU.get(sc, sc), "source": "analytics", "scenario": sc,
+            "severity": "CAUTION", "kind": "event", "count": 0, "events": [],
+            "active_sec": 0.0, "blind_sec": 0.0, "period_sec": 0.0, "period_blind_sec": 0.0,
+            "suppressed": 0, "unconfirmed": 0, "unconfirmed_at": [], "open": 0, "open_live": 0,
+            "before": False, "appeared": True, "at_end": False,
+        })
+        g["count"] += 1
+        tt = t.astimezone(tz) if tz is not None else t
+        g["events"].append({"t": t.isoformat(), "t_text": tt.strftime("%d.%m %H:%M:%S"),
+                            "text": v.get("text")})
+    return list(groups.values())
 
 
 def _remark_live(g: dict) -> int:
@@ -923,6 +972,8 @@ def apply_gate_suppression(parts: dict[str, Any], scenarios) -> dict[str, Any]:
     # Без отметок «на конец» уровень конца из групп не восстановить — прежний
     keep_end = not all("at_end" in g for g in remarks)
     for g in remarks:
+        if g.get("kind") == "event":
+            continue   # разовое событие перехода гейт не снимает (v5.1.10)
         if g.get("source") == "analytics" and g.get("scenario") in sc:
             # Вердикт гейта касается открытых эпизодов: закрывшиеся раньше в
             # этом же сегменте остаются замечаниями, как и при живой пометке
@@ -966,6 +1017,14 @@ def render_summary_md(parts: dict[str, Any]) -> str:
             if g.get("kind") == "state":
                 ck = parts.get("coking") or {}
                 a(f"- {emoji} **{g['name']}** [{src_ru}]: {coking_state_text(ck) or ''}")
+                continue
+            if g.get("kind") == "event":
+                evs = g.get("events") or []
+                when = ", ".join(e.get("t_text") or "?" for e in evs)
+                txt = next((e.get("text") for e in reversed(evs) if e.get("text")), None)
+                a(f"- {emoji} **{g['name']}** [{src_ru}]: "
+                  f"{'событие' if len(evs) == 1 else 'события'} {when}"
+                  + (f" — {txt}" if txt else ""))
                 continue
             if "period_sec" in g:
                 n = g.get("onsets") or g["count"]

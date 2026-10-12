@@ -31,7 +31,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from analytics.contract import CokingRisk, STATE_SCENARIOS
+from analytics.contract import CokingRisk, EVENT_SCENARIOS, STATE_SCENARIOS
 from online import db as online_db
 
 logger = logging.getLogger(__name__)
@@ -181,7 +181,8 @@ def _live_new_episodes(segments: list, eps: list[dict], live_keys: set[str],
                 dd = d.to_dict()
                 key = _alert_key(dd)
                 if (key not in live_keys or key in have or key in out
-                        or dd.get("scenario") in STATE_SCENARIOS):
+                        or dd.get("scenario") in STATE_SCENARIOS
+                        or dd.get("scenario") in EVENT_SCENARIOS):
                     continue
                 # Снятый панелью фронт того же бита — не живой (с v5.1.6 у «Общей
                 # аварии» по детекции на каждый период: брался закрытый фронт)
@@ -413,6 +414,16 @@ def _origin_by_rs(inh: dict[int, float] | None, head) -> datetime | None:
         return None
 
 
+def _push_transition(ctx: list, seg) -> list:
+    """Добавить закрытый сегмент в контекст проверок перехода."""
+    from analytics.transitions import link_from_segment, push_ctx
+    try:
+        return push_ctx(ctx, link_from_segment(seg))
+    except Exception:
+        logger.warning("Контекст переходов: сегмент не добавлен", exc_info=True)
+        return list(ctx)
+
+
 def _rs_carry(inh: dict[int, float] | None, rs: int | None) -> dict[int, float]:
     """Унаследованное время только режима сегмента: переход внутри обрыва связи
     на суточной границе не должен тащить в отчёт время чужого режима (35690:
@@ -509,9 +520,26 @@ def _extract_open_segment_data(seg) -> tuple[dict, list]:
         if (dd.get("scenario") == "CONTROLLER_FAULT"
                 and (dd.get("values") or {}).get("fault_end")):
             continue
+        # Разовое событие перехода — не живая тревога (v5.1.10): иначе эпизод,
+        # «воздействие» на весь стоп, журнал и состав гейта
+        if dd.get("scenario") in EVENT_SCENARIOS:
+            continue
         active_dets.append(dd)
 
     return current_values, active_dets
+
+
+def _put_counts(d, c: dict, run_origin_ts) -> None:
+    """Счётчики «за 30 дней» и «с пуска» в values детекции; у разового события —
+    без «суммарно»: воздействия у него нет (v5.1.10)."""
+    d.values["history_count_30d"] = c["count_window"]
+    d.values["startup_count"] = c["count_since"]
+    if d.scenario not in EVENT_SCENARIOS:
+        d.values["history_duration_30d_sec"] = round(c["dur_window"])
+        d.values["history_blind_30d_sec"] = round(c.get("blind_window", 0))
+        d.values["startup_duration_sec"] = round(c["dur_since"])
+    if run_origin_ts is not None:
+        d.values["startup_since"] = _tz_utc(run_origin_ts).isoformat()
 
 
 def _alert_key(d: dict) -> str:
@@ -691,6 +719,33 @@ async def _load_data(
     return history, enum_periods, fault_periods, gaps
 
 
+async def _load_seed(router_sn: str, equip_type: str, panel_id: int,
+                     ts_from: datetime, cfg) -> dict | None:
+    """Последний замер нагрузки перед окном истории и обрывы связи от него до окна.
+
+    У головы окна преамбула истории — 300 с, а ряд LOAD_PCT при постоянном
+    значении пишется раз в ~15 мин: без этого замера проверка охлаждения не
+    знала удержанной нагрузки («не оценено» у 13 из 14 стопов, v5.1.10).
+    """
+    from analytics import source as _src
+    addr = cfg.role_to_addr("LOAD_PCT")
+    if addr is None:
+        return None
+    t_hist = _tz_utc(ts_from) - timedelta(seconds=_PREAMBLE_LOOKBACK_SEC)
+    max_age = float(cfg.det("COOLDOWN_VIOLATION", "load_hold_max_sec", default=1800.0))
+    try:
+        row = await _src.get_last_value_before(router_sn, equip_type, panel_id, addr,
+                                               t_hist, max_age)
+        if not row:
+            return None
+        gaps = await _src.get_data_gaps(router_sn, equip_type, panel_id,
+                                        _tz_utc(row["ts"]), _tz_utc(ts_from))
+        return {"ts": _tz_utc(row["ts"]), "value": float(row["value"]), "gaps": gaps}
+    except Exception:
+        logger.warning("Удержанная нагрузка перед окном не прочитана", exc_info=True)
+        return None
+
+
 def _synth_connectivity_gap(
     history: list[dict],
     t_from: datetime,
@@ -734,6 +789,7 @@ async def _run_segment(
     ts_to: datetime,
     cfg,
     initial_coking_risk: CokingRisk,
+    transition_ctx: list | None = None,
 ) -> tuple[list, dict[str, dict], list[dict], dict[str, dict]]:
     """Загрузить данные и запустить segment() в отдельном потоке.
 
@@ -750,6 +806,7 @@ async def _run_segment(
     history, enum_periods, fault_periods, gaps = await _load_data(
         router_sn, equip_type, panel_id, ts_from, ts_to, cfg
     )
+    load_seed = await _load_seed(router_sn, equip_type, panel_id, ts_from, cfg)
     synth_gap = _synth_connectivity_gap(history, ts_from, ts_to, cfg)
     if synth_gap is not None:
         gaps = gaps + [synth_gap]
@@ -768,6 +825,8 @@ async def _run_segment(
             ts_from=_tz_utc(ts_from),
             ts_to=_tz_utc(ts_to),
             initial_coking_risk=copy.deepcopy(initial_coking_risk),
+            transition_ctx=list(transition_ctx or []),
+            load_seed=load_seed,
         )
     )
     # Стоп-сегменты получают ДВА артефакта, и они не исключают друг друга:
@@ -1090,7 +1149,11 @@ async def _collect_and_enrich_detections(
             # раньше фронты того же бита засеваются; засеянное — по фронту
             _panel = info["scenario"] == "CONTROLLER_FAULT"
             _cleared = _panel and bool((info.get("values") or {}).get("fault_end"))
-            if (k in open_keys and not _cleared) or (k, info.get("t_open")) in open_keys:
+            _event = info["scenario"] in EVENT_SCENARIOS
+            # Событие — только по онсету: старый живой эпизод того же сценария
+            # (до v5.1.10) не должен блокировать новый (v5.1.10)
+            if ((k in open_keys and not _cleared and not _event)
+                    or (k, info.get("t_open")) in open_keys):
                 continue
             if (k, info.get("t_open")) in _already:
                 continue
@@ -1103,6 +1166,8 @@ async def _collect_and_enrich_detections(
                     t_close = min(_tz_utc(datetime.fromisoformat(_fe)), t_close)
                 except (TypeError, ValueError):
                     pass
+            if _event:
+                t_close = t_open   # разовое событие: точечный эпизод, без воздействия
             # Воздействие — астрономическое, слепая доля считается рядом
             _span = max(0.0, (t_close - t_open).total_seconds())
             _blind = 0.0
@@ -1121,9 +1186,10 @@ async def _collect_and_enrich_detections(
                     open_values=info["values"],
                     addr=info["addr"], bit=info["bit"],
                     blind_sec=_blind,
+                    close_reason="transition_event" if _event else "condition_cleared",
                 )
                 if seeded_out is not None:
-                    seeded_out.add((k, info.get("t_open")) if _panel else k)
+                    seeded_out.add((k, info.get("t_open")) if (_panel or _event) else k)
             except Exception:
                 logger.warning("Не удалось создать эпизод для %s", k, exc_info=True)
 
@@ -1142,13 +1208,7 @@ async def _collect_and_enrich_detections(
         for d in sub.detections:
             c = counts.get(_alert_key({"scenario": d.scenario, "values": d.values}))
             if c:
-                d.values["history_count_30d"]        = c["count_window"]
-                d.values["history_duration_30d_sec"] = round(c["dur_window"])
-                d.values["history_blind_30d_sec"]    = round(c.get("blind_window", 0))
-                d.values["startup_count"]            = c["count_since"]
-                d.values["startup_duration_sec"]     = round(c["dur_since"])
-                if run_origin_ts is not None:
-                    d.values["startup_since"]        = _tz_utc(run_origin_ts).isoformat()
+                _put_counts(d, c, run_origin_ts)
 
     # События для detection_events (переходный период) — по тревоге
     events = [
@@ -1201,13 +1261,7 @@ async def _enrich_open_seg_detections(
         for d in sub.detections:
             c = counts.get(_alert_key({"scenario": d.scenario, "values": d.values}))
             if c:
-                d.values["history_count_30d"]        = c["count_window"]
-                d.values["history_duration_30d_sec"] = round(c["dur_window"])
-                d.values["history_blind_30d_sec"]    = round(c.get("blind_window", 0))
-                d.values["startup_count"]            = c["count_since"]
-                d.values["startup_duration_sec"]     = round(c["dur_since"])
-                if run_origin_ts is not None:
-                    d.values["startup_since"]        = _tz_utc(run_origin_ts).isoformat()
+                _put_counts(d, c, run_origin_ts)
 
 
 class OnlinePollEngine:
@@ -1246,6 +1300,13 @@ class OnlinePollEngine:
         self.last_processed_to: datetime | None  = None
         # Последний закрытый сегмент как duck-typed хинт для prev_seg в отчётах
         self._prev_seg_hint = None
+        # Звенья закрытых сегментов перед курсором — контекст проверок перехода
+        # (analytics.transitions, v5.1.10); после перезапуска — из auto_segments
+        self._transition_ctx: list = []
+        # Удержанная нагрузка перед окном открытого сегмента — одна на курсор
+        self._load_seed_cache: tuple | None = None
+        # Засеянные точечные эпизоды событий перехода (сценарий, онсет)
+        self._events_seeded: set = set()
 
         self._running = False
         self._task: asyncio.Task | None = None
@@ -1401,6 +1462,19 @@ class OnlinePollEngine:
         живые эпизоды висели открытыми навсегда, а на те же тревоги
         заводились новые.
         """
+        # Контекст проверок перехода — закрытые сегменты до курсора (v5.1.10).
+        # Сбой — пустой контекст: голова на стыке не оценивается, ложных нарушений нет
+        try:
+            from analytics.transitions import link_from_row
+            _rows = await online_db.get_transition_chain(
+                self.router_sn, self.equip_type, self.panel_id, _tz_utc(self.cursor_ts),
+            ) if self.cursor_ts is not None else []
+            self._transition_ctx = [lk for lk in (link_from_row(r) for r in _rows) if lk is not None]
+        except Exception:
+            self._transition_ctx = []
+            logger.warning("OnlineEngine[%s]: контекст переходов не восстановлен", self.key,
+                           exc_info=True)
+
         # Восстановить живые тревоги из журнала (незакрытые на момент рестарта)
         try:
             active = await online_db.get_active_alerts(
@@ -1952,6 +2026,63 @@ class OnlinePollEngine:
 
     # ── Закрытие окна (DAILY_BOUNDARY) ────────────────────────────────────────
 
+    async def _open_load_seed(self, ts_from: datetime) -> dict | None:
+        """Удержанная нагрузка перед окном — кэш на курсор (окно открытого сегмента
+        начинается с одного и того же места, пока сегмент не закроется)."""
+        key = _tz_utc(ts_from)
+        if self._load_seed_cache and self._load_seed_cache[0] == key:
+            return self._load_seed_cache[1]
+        seed = await _load_seed(self.router_sn, self.equip_type, self.panel_id, key, self.cfg)
+        self._load_seed_cache = (key, seed)
+        return seed
+
+    async def _seed_open_events(self, open_seg, t_to: datetime) -> None:
+        """Точечный эпизод разового события открытого сегмента (v5.1.10).
+
+        Иначе пока стоп открыт (часами), счётчики «за 30 дней» и хронология гейта
+        его не видят. Сеется после стабилизации (60 с от онсета), один раз на
+        (сценарий, онсет); при закрытии повтор отсекает existing_episode_onsets.
+        """
+        stab = float(self.cfg.det("ALARM_EPISODES", "event_seed_after_sec", default=60.0) or 60.0)
+        cand = []
+        for sub in open_seg.subsegments or []:
+            for d in sub.detections:
+                if d.scenario not in EVENT_SCENARIOS:
+                    continue
+                try:
+                    t_open = _tz_utc(datetime.fromisoformat(d.t_detected))
+                except (TypeError, ValueError):
+                    continue
+                if (d.scenario, t_open) in self._events_seeded:
+                    continue
+                if (_tz_utc(t_to) - t_open).total_seconds() < stab:
+                    continue
+                cand.append((d, t_open))
+        if not cand:
+            return
+        try:
+            have = await online_db.existing_episode_onsets(
+                self.router_sn, self.equip_type, self.panel_id, [t for _, t in cand])
+        except Exception:
+            logger.warning("OnlineEngine[%s]: онсеты событий не проверены", self.key, exc_info=True)
+            return
+        for d, t_open in cand:
+            key = (d.scenario, t_open)
+            if (_alert_key(d.to_dict()), t_open) in have:
+                self._events_seeded.add(key)
+                continue
+            try:
+                await online_db.insert_closed_episode(
+                    self.router_sn, self.equip_type, self.panel_id,
+                    scenario=d.scenario, source="analytics", severity=d.severity,
+                    t_open=t_open, t_close=t_open, active_sec=0.0,
+                    open_values=d.values, blind_sec=0.0, close_reason="transition_event",
+                )
+                self._events_seeded.add(key)
+            except Exception:
+                logger.warning("OnlineEngine[%s]: точечный эпизод события не заведён",
+                               self.key, exc_info=True)
+
     def _fill_coking_accum_end(self, t_from: datetime) -> None:
         """Конец накопления нагара, если в перенесённом состоянии его нет (v5.1.9).
 
@@ -1986,6 +2117,7 @@ class OnlinePollEngine:
                 self.router_sn, self.equip_type, self.panel_id, self.engine_sn,
                 t_from, t_to, self.cfg,
                 self.inherited_coking_risk,
+                transition_ctx=self._transition_ctx,
             )
         except Exception:
             logger.exception("OnlineEngine[%s]: ошибка анализа [%s, %s]", self.key, t_from, t_to)
@@ -2255,6 +2387,7 @@ class OnlinePollEngine:
 
             self.last_processed_to = seg_t_end
             self._prev_seg_hint = seg
+            self._transition_ctx = _push_transition(self._transition_ctx, seg)
             last_committed_t_end = seg_t_end
             # Риск нагара — вместе с курсором: если суточную границу в переходном
             # режиме пропустят (break ниже), следующее окно начнётся с конца этого
@@ -2439,6 +2572,8 @@ class OnlinePollEngine:
                     ts_from=ts_from_utc,
                     ts_to=ts_to_utc,
                     initial_coking_risk=copy.deepcopy(self.inherited_coking_risk),
+                    transition_ctx=list(self._transition_ctx),
+                    load_seed=await self._open_load_seed(ts_from_utc),
                 )
             )
             if tl_pre is not None:
@@ -2696,6 +2831,7 @@ class OnlinePollEngine:
                 self.inherited_coking_risk = coking_risk
                 self.inherited_run_state_sec = {}  # смена RS — счётчик сбрасывается
                 self._prev_seg_hint = seg
+                self._transition_ctx = _push_transition(self._transition_ctx, seg)
                 carry_continued_from = None   # только первый сегмент несёт ссылку
                 self.continued_from_id = None
                 self.forward_fill_memory = None
@@ -2729,6 +2865,12 @@ class OnlinePollEngine:
         except Exception:
             logger.warning("OnlineEngine[%s]: ошибка обработки эпизодов тревог",
                            self.key, exc_info=True)
+
+        # Разовые события перехода — точечный эпизод до счётчиков (v5.1.10)
+        try:
+            await self._seed_open_events(open_seg, t_to)
+        except Exception:
+            logger.warning("OnlineEngine[%s]: посев событий", self.key, exc_info=True)
 
         # Обогатить детекции счётчиками ДО _extract_open_segment_data / to_markdown
         _t0 = _time.perf_counter()

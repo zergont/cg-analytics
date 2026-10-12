@@ -452,6 +452,11 @@ def _remarks_from_summary(segment_row: dict) -> str | None:
     for g in parts.get("remarks") or []:
         if g.get("kind") == "state":
             continue      # риск нагара — отдельной строкой состояния (_coking_from_summary)
+        if g.get("kind") == "event":
+            when = ", ".join(e.get("t_text") or "?" for e in g.get("events") or [])
+            items.append(f"{g.get('name')} [{g.get('severity') or 'CAUTION'}, аналитика, "
+                         f"разовое событие {when} — уже случилось, не тревога]")
+            continue
         tags = [cap_severity(g.get("scenario"), g.get("severity")) or "?",
                 "панель" if g.get("source") == "panel" else "аналитика"]
         k, n = g.get("suppressed") or 0, g.get("count") or 0

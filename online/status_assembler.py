@@ -158,7 +158,9 @@ def compute_analytics_hash(dets: list[dict]) -> str:
     Подавление действует, пока состав не изменился: новая аналитическая
     детекция меняет хэш, и вердикт Claude теряет силу.
     """
-    analytics = [d for d in dets if isinstance(d, dict) and d.get("scenario") != "CONTROLLER_FAULT"]
+    from analytics.contract import EVENT_SCENARIOS
+    analytics = [d for d in dets if isinstance(d, dict) and d.get("scenario") != "CONTROLLER_FAULT"
+                 and d.get("scenario") not in EVENT_SCENARIOS]   # событие не в составе гейта
     key = tuple(sorted(
         (d.get("scenario", ""), _hash_codes(d))
         for d in analytics
@@ -206,9 +208,12 @@ def is_analytics_suppressed(seg_row: dict, active_dets: list[dict]) -> bool:
 
 
 def _without_state(dets: list[dict]) -> list[dict]:
-    """Без сценариев-состояний (риск нагара): это не тревога, гейт их не разбирает."""
-    from analytics.contract import STATE_SCENARIOS
-    return [d for d in dets or [] if not (isinstance(d, dict) and d.get("scenario") in STATE_SCENARIOS)]
+    """Без сценариев-состояний (риск нагара) и разовых событий перехода: это не
+    тревога, гейт их не разбирает (v5.1.3, v5.1.10)."""
+    from analytics.contract import EVENT_SCENARIOS, STATE_SCENARIOS
+    return [d for d in dets or [] if not (
+        isinstance(d, dict) and (d.get("scenario") in STATE_SCENARIOS
+                                 or d.get("scenario") in EVENT_SCENARIOS))]
 
 
 _COKING_LEVEL_RU = {"GREEN": "низкий", "YELLOW": "повышенный", "RED": "высокий"}
@@ -620,6 +625,10 @@ def build_warning_prompt(
                 t_close.strftime("%H:%M:%S") if hasattr(t_close, "strftime") else "активна"
             )
             supp = " — отменена гейтом" if e.get("gate_suppressed") else ""
+            if e.get("close_reason") == "transition_event":
+                lines.append(f"  [{cap_severity(e.get('scenario'), e.get('severity'))}] "
+                             f"{e.get('scenario')}: разовое событие {t_open_s}")
+                continue
             lines.append(
                 f"  [{cap_severity(e.get('scenario'), e.get('severity'))}] {e.get('scenario')}: {span}, "
                 f"воздействие {_fmt_duration(e.get('active_sec') or 0)}"

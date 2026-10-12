@@ -273,6 +273,17 @@ class RiskAccumulators:
 # цепочке coking_risk_json по сегментам, в сводке своя часть (v5.1.3).
 STATE_SCENARIOS = frozenset({"COKING_RISK"})
 
+# Разовые события перехода (v5.1.10, решения владельца 12.10): нарушение уже
+# случилось (останов без охлаждения, пуск с коротким прогревом). Не живая
+# тревога: нет «воздействия», журнала тревог, состава гейта (гейт не снимает —
+# исключение из «CAUTION — ИИ может снять»), строки «Состояние». В сводке —
+# замечание «событие ЧЧ:ММ:СС» из детекции сегмента; эпизод точечный (для
+# счётчиков и хронологии): t_open = t_close, воздействие 0
+EVENT_SCENARIOS = frozenset({"COOLDOWN_VIOLATION", "WARMUP_VIOLATION"})
+# Проверка, парная событию: вторым замечанием не считается
+EVENT_CHECKS = {"cooldown_after_elevated": "COOLDOWN_VIOLATION",
+                "warmup_duration": "WARMUP_VIOLATION"}
+
 # Догма уровней (подтверждено владельцем 11.10.2026): WARNING и SHUTDOWN выставляет
 # только панель управления. Предупреждение аналитики выше CAUTION не бывает.
 PANEL_SCENARIOS = frozenset({"CONTROLLER_FAULT"})

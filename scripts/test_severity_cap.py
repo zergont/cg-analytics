@@ -94,10 +94,13 @@ cfg = binding.build_config(ROOT / "knowledge_base", controller_id="pcc3300", eng
 
 # 5. Останов без охлаждения после высокой нагрузки — CAUTION (был зашит WARNING)
 run = seg([sub(1, [], zone="ELEVATED")], 3)
+run.subsegments[0].characteristics["LOAD_PCT"] = {"max": 80.0}
 stp = seg([sub(1, [])], 0, t0=T0 + timedelta(hours=1))
-_check_cooldown_transition(stp, [run], cfg, Detection)
+_la = cfg.role_to_addr("LOAD_PCT")
+_rows = {_la: [{"ts": T0 + timedelta(hours=1) - timedelta(seconds=s), "value": 80.0} for s in (200, 100, 10)]}
+_check_cooldown_transition(stp, [run], cfg, Detection, _rows)
 cd = [d for d in stp.subsegments[0].detections if d.scenario == "COOLDOWN_VIOLATION"]
-check(cd and cd[0].severity == "CAUTION" and "заклинивания" in cd[0].trigger,
+check(cd and cd[0].severity == "CAUTION" and "турбины" in cd[0].trigger,
       f"5: охлаждение после ELEVATED — CAUTION, риск в тексте: {cd and (cd[0].severity, cd[0].trigger)}")
 
 # 6. Старый эпизод «не остановился» WARNING — в сводке 🟡, не 🟠

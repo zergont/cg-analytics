@@ -358,13 +358,15 @@ async def analyze_incident(
 
     prompt = build_incident_prompt(incident, seg_row, cycle_segments)
 
+    _meta: dict = {}
     try:
         if provider == "llm":
             from llm.client import chat
             # У шлюза «Горыныч» модель, рассуждение и приоритет — по градации
             # («разбор аварийного останова»), а не имя модели маршрута уровня
             analysis = (await chat(get_prompt("warning_claude"), prompt,
-                                   model=model or None, depth="incident")).strip()
+                                   model=model or None, depth="incident",
+                                   meta=_meta)).strip()
         else:
             analysis = (await _ask_claude(prompt, model)).strip()
     except Exception:
@@ -375,6 +377,21 @@ async def analyze_incident(
     if not analysis:
         logger.warning("IncidentGate: пустой ответ провайдера, разбор не сохранён")
         return
+
+    # Подпись модели — как у разборов гейта: по реально ответившей (у шлюза —
+    # голова), у Claude API — имя модели. Без неё по разбору аварии 12.10 не
+    # понять, писал Claude или шлюз (v5.1.10)
+    try:
+        from llm.client import gateway_label
+        from llm.router import format_ai_signature
+        if provider == "llm":
+            label = gateway_label(_meta, model)
+        else:
+            from corpus.settings import get_claude_settings
+            label = model or get_claude_settings().get("model") or "Claude API"
+        analysis = analysis + format_ai_signature(label)
+    except Exception:
+        logger.warning("IncidentGate: подпись модели не добавлена", exc_info=True)
 
     try:
         saved = await online_db.save_segment_warning(

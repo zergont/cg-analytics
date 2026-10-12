@@ -146,6 +146,42 @@ async def delete_observation(
 
 # ── auto_segments ─────────────────────────────────────────────────────────────
 
+async def get_transition_chain(
+    router_sn: str, equip_type: str, panel_id: int, t_to: datetime, limit: int = 8,
+) -> list[dict[str, Any]]:
+    """Закрытые сегменты, кончающиеся не позже t_to, — звенья контекста проверок
+    перехода (analytics.transitions, v5.1.10). Только лёгкая проекция: режим,
+    границы, причина открытия, максимумы нагрузки подсегментов, Т ОЖ на начало."""
+    conn = await _connect()
+    try:
+        rows = await conn.fetch("""
+            SELECT id, run_state, t_start, t_end,
+                   characteristics_json->>'cause_open' AS cause_open,
+                   jsonb_path_query_array(characteristics_json,
+                       '$.subsegments[*].characteristics.LOAD_PCT.max') AS load_pct_max,
+                   characteristics_json #>> '{subsegments,0,characteristics,COOLANT_TEMP,value_start}'
+                       AS coolant_start
+            FROM auto_segments
+            WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+              AND t_end IS NOT NULL AND t_end <= $4
+            ORDER BY t_end DESC, id DESC
+            LIMIT $5
+        """, router_sn, equip_type, panel_id, t_to, limit)
+        out = []
+        for r in rows:
+            d = dict(r)
+            lm = d.get("load_pct_max")
+            if isinstance(lm, str):
+                try:
+                    d["load_pct_max"] = json.loads(lm)
+                except ValueError:
+                    d["load_pct_max"] = None
+            out.append(d)
+        return list(reversed(out))
+    finally:
+        await conn.close()
+
+
 async def get_last_closed_segment(
     router_sn: str, equip_type: str, panel_id: int
 ) -> dict[str, Any] | None:
@@ -1143,9 +1179,11 @@ async def insert_closed_episode(
     open_values: dict | None = None,
     addr: int | None = None, bit: int | None = None,
     blind_sec: float = 0.0,
+    close_reason: str = "condition_cleared",
 ) -> int:
     """Сразу закрытый эпизод — для детекций короткого сегмента, не живших
-    в снимке открытого окна (например START_FAILURE за один цикл)."""
+    в снимке открытого окна (например START_FAILURE за один цикл), и точечный
+    эпизод разового события перехода (close_reason='transition_event', v5.1.10)."""
     conn = await _connect()
     try:
         row = await conn.fetchrow("""
@@ -1153,13 +1191,13 @@ async def insert_closed_episode(
                 (router_sn, equip_type, panel_id, scenario, source, severity,
                  t_open, t_close, close_reason, active_sec, open_values_json,
                  addr, bit, blind_sec)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'condition_cleared', $9, $10,
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $14, $9, $10,
                     $11, $12, $13)
             RETURNING id
         """, router_sn, equip_type, panel_id, scenario, source, severity,
              t_open, t_close, active_sec,
              json.dumps(open_values or {}, ensure_ascii=False, default=str),
-             addr, bit, max(0.0, float(blind_sec)))
+             addr, bit, max(0.0, float(blind_sec)), close_reason)
         return int(row["id"])
     finally:
         await conn.close()
@@ -1291,7 +1329,9 @@ async def get_episodes_overlapping(
             SELECT * FROM alarm_episodes
             WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
               AND t_open < $5
-              AND (t_close IS NULL OR t_close > $4)
+              AND (t_close IS NULL OR t_close > $4
+                   -- точечное событие перехода на самой голове окна (v5.1.10)
+                   OR (close_reason = 'transition_event' AND t_open >= $4))
             ORDER BY t_open
         """, router_sn, equip_type, panel_id, t_from, t_to)
         return [dict(r) for r in rows]

@@ -60,11 +60,13 @@ def _seg_active_dets(chars_json: Any, active_dets_json: Any = None) -> list[dict
             dets = list(subs[-1].get("detections") or [])
     if not dets and active_dets_json:
         dets = _parse_json(active_dets_json, [], ctx="active_detections_json") or []
+    from analytics.contract import EVENT_SCENARIOS
     return [
         d for d in dets
         if isinstance(d, dict)
         and not (d.get("scenario") == "CONTROLLER_FAULT"
                  and (d.get("values") or {}).get("fault_end"))
+        and d.get("scenario") not in EVENT_SCENARIOS   # разовое событие не висит
     ]
 
 
@@ -120,7 +122,14 @@ def severity_from_parts(parts: dict, stop_kind: str | None) -> str | None:
     if parts.get("no_data"):
         return None
     if stop_kind == "SIMPLE":
-        return _LEVEL_TO_SEVERITY.get(parts.get("end_level") or "НОРМА")
+        # По тому, что висит на конец (v4.9.73); разовое событие перехода (останов
+        # без охлаждения) — повод посмотреть машину до пуска: стоп жёлтый (12.10)
+        lvl = parts.get("end_level") or "НОРМА"
+        if lvl == "НОРМА" and any(
+                g.get("kind") == "event" and (g.get("count") or 0) > (g.get("suppressed") or 0)
+                for g in parts.get("remarks") or []):
+            lvl = "CAUTION"
+        return _LEVEL_TO_SEVERITY.get(lvl)
     return _LEVEL_TO_SEVERITY.get(((parts.get("verdict") or {}).get("level")) or "НОРМА")
 
 
