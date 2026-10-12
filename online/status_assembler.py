@@ -146,10 +146,56 @@ def compute_severity_level(active_dets: list[dict]) -> str:
 def _hash_codes(d: dict) -> tuple:
     """Подключ состава гейта: у аналитики — справочные коды (стабильны, различают
     параметр LIMIT_PROXIMITY), у панели — её код. Старые детекции без ref_codes дают
-    то же, что раньше: у них fault_codes и были справочными (v5.1.6)."""
+    то же, что раньше: у них fault_codes и были справочными (v5.1.6).
+    Нарушение паспорта отличается от «в пределах шага датчика» (v5.1.12): иначе
+    разбор и снятие прежнего состава перенеслись бы на нарушение."""
     if d.get("scenario") != "CONTROLLER_FAULT" and d.get("ref_codes"):
-        return tuple(sorted(d["ref_codes"]))
-    return tuple(sorted(d.get("fault_codes") or []))
+        key = tuple(sorted(d["ref_codes"]))
+    else:
+        key = tuple(sorted(d.get("fault_codes") or []))
+    return key + ("passport",) if passport_hard(d) else key
+
+
+# Режимные замечания — факт по времени, модель его не опровергнет: гейт их не
+# разбирает, не снимает и соседей не блокирует (решение владельца 12.10, как
+# нагар и события перехода). В сводке и уровне — живые замечания
+GATE_EXCLUDED_SCENARIOS = frozenset({"NO_LOAD_TOO_LONG", "IDLE_TOO_LONG"})
+# Версия правил гейта: разборы и снятия по старым правилам не повторяются и не
+# применяются заново (перепроверка один раз, v5.1.12)
+GATE_RULES_VERSION = "5.1.12"
+
+
+def _limit(d: dict) -> dict:
+    return d.get("limit") or (d.get("values") or {}).get("limit") or {}
+
+
+def passport_hard(d: dict) -> bool:
+    """Нарушение паспорта двигателя дальше шага датчика — гейт не снимает (v5.1.12)."""
+    lim = _limit(d) if isinstance(d, dict) else {}
+    return lim.get("kind") == "passport" and lim.get("hard") is True
+
+
+def level_dets(dets: list[dict], suppressed: bool) -> list[dict]:
+    """Детекции для уровня: при действующем снятии — панель и режимные
+    замечания (их гейт не снимает). Одно правило для статуса, API и карточки."""
+    if not suppressed:
+        return list(dets or [])
+    return [d for d in dets or [] if isinstance(d, dict) and (
+        d.get("scenario") == "CONTROLLER_FAULT" or d.get("scenario") in GATE_EXCLUDED_SCENARIOS)]
+
+
+def passport_hard_seen(d: dict) -> bool:
+    """В подсегменте было нарушение паспорта (живое или давнее): эпизод с ним
+    снятым гейтом не помечается — снятие сниженного «в пределах шага» состава
+    действует на статус, но не стирает факт нарушения из сводки (ревью v5.1.12)."""
+    lim = _limit(d) if isinstance(d, dict) else {}
+    return lim.get("kind") == "passport" and (lim.get("hard") is True or bool(lim.get("hard_until")))
+
+
+def gate_dets(dets: list[dict]) -> list[dict]:
+    """Состав для гейта: без режимных замечаний."""
+    return [d for d in dets or [] if not (
+        isinstance(d, dict) and d.get("scenario") in GATE_EXCLUDED_SCENARIOS)]
 
 
 def compute_analytics_hash(dets: list[dict]) -> str:
@@ -159,7 +205,8 @@ def compute_analytics_hash(dets: list[dict]) -> str:
     детекция меняет хэш, и вердикт Claude теряет силу.
     """
     from analytics.contract import EVENT_SCENARIOS
-    analytics = [d for d in dets if isinstance(d, dict) and d.get("scenario") != "CONTROLLER_FAULT"
+    analytics = [d for d in gate_dets(dets)
+                 if isinstance(d, dict) and d.get("scenario") != "CONTROLLER_FAULT"
                  and d.get("scenario") not in EVENT_SCENARIOS]   # событие не в составе гейта
     key = tuple(sorted(
         (d.get("scenario", ""), _hash_codes(d))
@@ -179,15 +226,40 @@ UNCANCELLABLE_SCENARIOS = frozenset({
 
 
 def has_uncancellable(dets: list[dict]) -> bool:
-    """Есть ли в составе сигнал, который гейт снимать не вправе."""
-    return any(isinstance(d, dict) and d.get("scenario") in UNCANCELLABLE_SCENARIOS
+    """Есть ли в составе сигнал, который гейт снимать не вправе: несимметрия или
+    нарушение паспорта двигателя (v5.1.12)."""
+    return any(isinstance(d, dict) and (d.get("scenario") in UNCANCELLABLE_SCENARIOS
+                                        or passport_hard(d))
                for d in dets or [])
 
 
+def uncancellable_reasons(s: dict) -> list[dict]:
+    """Почему гейт не вправе снять состав: [{code, text}] (пусто — вправе).
+
+    panel — сигнал панели WARNING/SHUTDOWN; panel_fresh — «Общая авария» с кодом,
+    появившаяся в этом сегменте (решение 12.10: висевшая на начало — сведения);
+    asymmetry — несимметрия (v5.0.1); passport — нарушение паспорта (v5.1.12).
+    """
+    out: list[dict] = []
+    if s.get("panel_severity", "норма") != "норма":
+        out.append({"code": "panel", "text": "активны сигналы панели управления"})
+    for p in s.get("panel_alarms") or []:
+        if p.get("severity") == "CAUTION" and p.get("fresh"):
+            codes = ", ".join(str(c) for c in p.get("fault_codes") or [])
+            out.append({"code": "panel_fresh",
+                        "text": f"«Общая авария» с кодом {codes} появилась в этом сегменте"})
+    alarms = s.get("analytics_alarms") or []
+    if any(a.get("scenario") in UNCANCELLABLE_SCENARIOS for a in alarms):
+        out.append({"code": "asymmetry", "text": "в составе ранний сигнал несимметрии"})
+    for i, a in enumerate(alarms, 1):
+        if passport_hard(a):
+            out.append({"code": "passport", "text": f"A{i}: нарушение паспорта двигателя"})
+    return out
+
+
 def gate_can_cancel(s: dict) -> bool:
-    """Может ли гейт снять состав: панель в норме и нет несимметрии."""
-    return (s.get("panel_severity", "норма") == "норма"
-            and not has_uncancellable(s.get("analytics_alarms") or []))
+    """Может ли гейт снять состав (причин запрета нет)."""
+    return not uncancellable_reasons(s)
 
 
 def is_analytics_suppressed(seg_row: dict, active_dets: list[dict]) -> bool:
@@ -195,8 +267,9 @@ def is_analytics_suppressed(seg_row: dict, active_dets: list[dict]) -> bool:
     suppressed = seg_row.get("gate_suppressed_hash")
     if not suppressed:
         return False
-    # Риск нагара в составе гейта не участвует (v5.1.3) — и в сверке хеша тоже
-    active_dets = _without_state(active_dets)
+    # Риск нагара в составе гейта не участвует (v5.1.3) — и в сверке хеша тоже;
+    # режимные замечания — тоже (v5.1.12)
+    active_dets = gate_dets(_without_state(active_dets))
     # Вердикт, поставленный до правила (или на составе, совпавшем по хешу), не
     # гасит несимметрию
     if has_uncancellable(active_dets):
@@ -302,12 +375,10 @@ def build_structural_status(
             time_in_mode_sec = max(0.0, (now_utc - ts).total_seconds())
 
     # ── Severity (раздельно по источнику) ──
-    # Вердикт гейта «отменить» подавляет аналитику, пока состав детекций не изменился
+    # Вердикт гейта «отменить» подавляет аналитику, пока состав детекций не изменился.
+    # Режимные замечания гейт не снимает — в уровне они остаются (v5.1.12)
     suppressed    = is_analytics_suppressed(seg_row, active_dets)
-    dets_for_level = (
-        [d for d in active_dets if d.get("scenario") == "CONTROLLER_FAULT"]
-        if suppressed else active_dets
-    )
+    dets_for_level = level_dets(active_dets, suppressed)
     panel_sev     = compute_panel_severity(active_dets)
     analytics_sev = compute_analytics_severity(dets_for_level)
     sev_level     = compute_severity_level(dets_for_level)
@@ -322,6 +393,9 @@ def build_structural_status(
     # ── Активные тревоги с расшифровкой из справочника ──
     panel_alarms:     list[dict] = []
     analytics_alarms: list[dict] = []
+    regime_alarms:    list[dict] = []
+    seg_t0 = _as_dt(seg_row.get("t_start"))
+    code_at_start = _code_at_segment_start(chars)
     for d in active_dets:
         scenario    = d.get("scenario", "?")
         severity    = cap_severity(scenario, d.get("severity", "INFO"))
@@ -345,7 +419,8 @@ def build_structural_status(
         # у сигнала «близко к порогу» (v5.1.6, решение B)
         if not description and scenario != "CONTROLLER_FAULT":
             from analytics.serializer import SCENARIO_RU
-            description = (f"{trigger.split(':', 1)[0].strip()} у паспортного порога"
+            # Порог LIMIT_PROXIMITY — уставка останова панели, не паспорт (v5.1.12)
+            description = (f"{trigger.split(':', 1)[0].strip()} у уставки останова панели"
                            if scenario == "LIMIT_PROXIMITY" and ":" in (trigger or "")
                            else SCENARIO_RU.get(scenario))
         if not description:
@@ -364,9 +439,25 @@ def build_structural_status(
             "history_duration_30d_sec": det_vals.get("history_duration_30d_sec"),
             "startup_count":            det_vals.get("startup_count"),
             "startup_duration_sec":     det_vals.get("startup_duration_sec"),
+            # v5.1.12: свой параметр тревоги и её порог — гейту, чтобы судить
+            # по нему, а не по соседнему
+            "related_roles":     [r for r in d.get("related_roles") or []
+                                  if not str(r).startswith(("FAULT_MASK", "LAST_FAULT"))],
+            "limit":             _limit(d) or None,
         }
         if scenario == "CONTROLLER_FAULT":
+            since = _as_dt(det_vals.get("fault_start"))
+            alarm["since"] = det_vals.get("fault_start")
+            # «Общая авария» с кодом висела на начало сегмента (и код тот же) —
+            # сведения; появилась или сменила код в этом сегменте — запрет снятия
+            alarm["fresh"] = bool(
+                severity == "CAUTION" and (
+                    since is None or seg_t0 is None or since >= seg_t0
+                    or (code_at_start is not None and fault_codes
+                        and int(fault_codes[0]) != code_at_start)))
             panel_alarms.append(alarm)
+        elif scenario in GATE_EXCLUDED_SCENARIOS:
+            regime_alarms.append(alarm)
         else:
             analytics_alarms.append(alarm)
 
@@ -388,6 +479,11 @@ def build_structural_status(
                 except (TypeError, ValueError):
                     pass
 
+    try:
+        last_code = int((values.get("LAST_FAULT_CODE") or {}).get("value") or 0)
+    except (TypeError, ValueError):
+        last_code = 0
+
     return {
         "run_state":          run_state,
         "mode_label":         mode_label,
@@ -399,8 +495,13 @@ def build_structural_status(
         "analytics_suppressed": suppressed,
         "time_in_mode_sec":   time_in_mode_sec,
         "panel_alarms":       panel_alarms,
+        # Состав гейта (без режимных замечаний); режимные — отдельно, для строки
         "analytics_alarms":   analytics_alarms,
+        "regime_alarms":      regime_alarms,
         "key_params":         key_params,
+        # Все параметры подсегмента — гейту (решение 12.10: не 2–3 ключевых)
+        "params":             _all_params(values),
+        "last_fault_code":    last_code or None,
         # Вид стопа нарезки: аварийность здесь не только по маскам, но и по
         # типу последней неисправности (40013), которого нет в детекциях
         "stop_kind":          _stop_kind,
@@ -408,6 +509,70 @@ def build_structural_status(
                                if _stop_kind == "EMERGENCY" else None),
         "coking":             _coking_state(seg_row),
     }
+
+
+def _as_dt(raw) -> datetime | None:
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
+def _code_at_segment_start(chars: dict) -> int | None:
+    """Код последней неисправности (40012) на начало сегмента — по первому подсегменту."""
+    subs = (chars or {}).get("subsegments") or []
+    if not subs:
+        return None
+    lfc = ((subs[0] or {}).get("characteristics") or {}).get("LAST_FAULT_CODE") or {}
+    v = lfc.get("value_start")
+    try:
+        return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+# Служебные счётчики и коды — не параметры для разбора
+_PARAM_SKIP = frozenset({"HEARTBEAT", "FUEL_TOTAL", "ENGINE_HOURS", "START_ATTEMPTS_TOTAL",
+                         "LAST_FAULT_CODE", "LAST_FAULT_TYPE"})
+_PARAM_GROUPS = ("Двигатель", "Генератор", "Нагрузка")
+
+
+def _param_group(role: str) -> str | None:
+    if role in _PARAM_SKIP or role.startswith("FAULT_MASK"):
+        return None
+    if role.startswith(("LOAD_PCT", "ACTIVE_POWER", "REACTIVE_POWER", "APPARENT_POWER", "RATING_")):
+        return "Нагрузка"
+    if role.startswith(("VOLTAGE", "CURRENT", "FREQUENCY", "POWER_FACTOR")):
+        return "Генератор"
+    return "Двигатель"
+
+
+def _num(v) -> float | None:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return round(f, 1)
+
+
+def _all_params(values: dict) -> list[dict]:
+    """Все параметры открытой строки: роль, группа, сейчас / мин / макс, единица."""
+    out: list[dict] = []
+    for role, v in (values or {}).items():
+        grp = _param_group(role)
+        if grp is None or not isinstance(v, dict):
+            continue
+        val = _num(v.get("value") if v.get("value") is not None else v.get("median"))
+        if val is None:
+            continue
+        out.append({"role": role, "group": grp, "value": val, "min": _num(v.get("min")),
+                    "max": _num(v.get("max")), "unit": v.get("unit") or ""})
+    return out
 
 
 def _emergency_text(panel_alarms: list[dict], values: dict, fault_ref=None) -> str:
@@ -480,10 +645,14 @@ def format_status_text(s: dict) -> str:
         desc = panel_alarms[0].get("description") or panel_alarms[0]["scenario"]
         parts.append(f"🟠 панель: {desc}")
 
-    if analytics_sev == "предупреждение" and analytics_alarms:
-        desc = analytics_alarms[0].get("description") or analytics_alarms[0]["scenario"]
+    # Снятый состав — «проверено ИИ»; режимное замечание рядом остаётся живым
+    regime = s.get("regime_alarms") or []
+    supp = s.get("analytics_suppressed")
+    shown = regime if supp else (analytics_alarms or regime)
+    if analytics_sev == "предупреждение" and shown:
+        desc = shown[0].get("description") or shown[0]["scenario"]
         parts.append(f"🟡 аналитика: {desc}")
-    elif s.get("analytics_suppressed"):
+    if supp:
         # Ненавязчивый след гейта: срабатывание было, ИИ проверил и отменил
         parts.append("✓ аналитика: срабатывание проверено ИИ, угрозы нет")
 
@@ -557,8 +726,10 @@ def extract_alarm_text(s: dict) -> str | None:
         return s["emergency_text"]
     if panel_sev != "норма" and panel_alarms:
         return _compose_alarm_text(panel_alarms)
-    if analytics_sev == "предупреждение" and analytics_alarms:
-        return _compose_alarm_text(analytics_alarms)
+    regime = s.get("regime_alarms") or []
+    shown = regime if s.get("analytics_suppressed") else analytics_alarms + regime
+    if analytics_sev == "предупреждение" and shown:
+        return _compose_alarm_text(shown)
     return None
 
 
@@ -604,8 +775,9 @@ def build_warning_prompt(
     if prev_analyses:
         lines.append("")
         lines.append(
-            "Предыдущие разборы этого сегмента (события развиваются — новые "
-            "сигналы могут быть следствием исходной аварии или действий персонала):"
+            "Предыдущие разборы этого сегмента — прошлые мнения, не довод (события "
+            "развиваются — новые сигналы могут быть следствием исходной аварии или "
+            "действий персонала):"
         )
         for pa in prev_analyses:
             t = (pa.get("t") or "")[:16].replace("T", " ")
@@ -624,7 +796,8 @@ def build_warning_prompt(
             span = f"{t_open_s} → " + (
                 t_close.strftime("%H:%M:%S") if hasattr(t_close, "strftime") else "активна"
             )
-            supp = " — отменена гейтом" if e.get("gate_suppressed") else ""
+            supp = (" — снималась гейтом (прошлое решение, не довод)"
+                    if e.get("gate_suppressed") else "")
             if e.get("close_reason") == "transition_event":
                 lines.append(f"  [{cap_severity(e.get('scenario'), e.get('severity'))}] "
                              f"{e.get('scenario')}: разовое событие {t_open_s}")
@@ -661,7 +834,8 @@ def build_warning_prompt(
                     f" (мин {v.get('min')}, макс {v.get('max')})"
                 )
         for al in trip_context.get("open_alarms", []):
-            supp = " — отменена гейтом" if al.get("gate_suppressed") else ""
+            supp = (" — снималась гейтом (прошлое решение, не довод)"
+                    if al.get("gate_suppressed") else "")
             lines.append(
                 f"  Висела тревога: {al.get('scenario')} "
                 f"[{cap_severity(al.get('scenario'), al.get('severity'))}]"
@@ -684,24 +858,24 @@ def build_warning_prompt(
         lines.append(f"Время в режиме: {_fmt_duration(dur)}")
 
     lines.append(f"Итоговый уровень: {s['severity_level']}")
-    lines.append(f"Источник панели: {s.get('panel_severity', 'норма')}")
+    panel_caution = [a for a in s.get("panel_alarms") or [] if a.get("severity") == "CAUTION"]
+    lines.append(f"Источник панели: {s.get('panel_severity', 'норма')}"
+                 + (" (есть CAUTION панели, см. ниже)" if panel_caution else ""))
     lines.append(f"Источник аналитики: {s.get('analytics_severity', 'норма')}")
-    if s.get("panel_severity", "норма") != "норма":
-        lines.append(
-            "Гейт: активны сигналы панели управления — отмена НЕДОСТУПНА, "
-            "вердикт только pass."
-        )
-    elif has_uncancellable(s.get("analytics_alarms") or []):
-        lines.append(
-            "Гейт: в составе ранний сигнал несимметрии (ток обратной "
-            "последовательности, перекос фаз или ток нейтрали) — отмена НЕДОСТУПНА, "
-            "вердикт только pass. Поясни, что проверить: распределение однофазной "
-            "нагрузки по фазам, соединения, трансформатор."
-        )
+    lines.append(_panel_line(s))
+    reasons = uncancellable_reasons(s)
+    if reasons:
+        line = ("Гейт: отмена НЕДОСТУПНА — " + "; ".join(r["text"] for r in reasons)
+                + ". Вердикт только pass; поясни оператору, что проверить.")
+        if any(r["code"] == "asymmetry" for r in reasons):
+            line += (" Несимметрия (ток обратной последовательности, перекос фаз или ток "
+                     "нейтрали): распределение однофазной нагрузки по фазам, соединения, "
+                     "трансформатор.")
+        lines.append(line)
     else:
         lines.append(
-            "Гейт: сигналов панели нет — предупреждение чисто аналитическое, "
-            "вердикт cancel ДОПУСТИМ, если угроза не подтверждается."
+            "Гейт: тревоги чисто аналитические — вердикт cancel ДОПУСТИМ, если угроза "
+            "не подтверждается по собственным параметрам тревог."
         )
     lines.append("")
 
@@ -719,13 +893,13 @@ def build_warning_prompt(
         if panel_alarms:
             lines.append("")
         lines.append("Сигналы аналитического движка:")
-        for a in analytics_alarms:
+        for n, a in enumerate(analytics_alarms, 1):
             desc          = a.get("description") or a["scenario"]
             codes         = ", ".join(str(c) for c in a.get("fault_codes", []))
             count_30d     = a.get("history_count_30d")
             count_startup = a.get("startup_count")
             trig          = a.get("trigger")
-            line = (f"  [{a['severity']}] {desc}" + (f": {trig}" if trig and trig != desc else "")
+            line = (f"  A{n} [{a['severity']}] {desc}" + (f": {trig}" if trig and trig != desc else "")
                     + (f" (код панели выставлен: {codes})" if codes else ""))
             if count_30d is not None:
                 line += f" — за 30 дней: {count_30d}"
@@ -742,17 +916,117 @@ def build_warning_prompt(
                 if dur_startup:
                     line += f" ({int(dur_startup) // 60} мин)"
             lines.append(line)
+            lim_line = _limit_line(a)
+            if lim_line:
+                lines.append(f"     {lim_line}")
 
-    kp = s.get("key_params", [])
-    if kp:
+    params = s.get("params") or []
+    if params:
+        marks: dict[str, list[str]] = {}
+        for n, a in enumerate(analytics_alarms, 1):
+            for r in a.get("related_roles") or []:
+                marks.setdefault(r, []).append(f"A{n}")
         lines.append("")
-        lines.append("Ключевые параметры:")
-        for p in kp:
-            lines.append(f"  {p['role']}: {p['value']} {p['unit']}")
+        lines.append("Параметры (сейчас; у параметров тревог — мин / макс за подсегмент):")
+        for grp in _PARAM_GROUPS:
+            rows = [p for p in params if p["group"] == grp]
+            if not rows:
+                continue
+            lines.append(f"  {grp}:")
+            for p in rows:
+                txt = f"    {p['role']}: {_fmt_num(p['value'])} {p['unit']}".rstrip()
+                if p["role"] in marks:
+                    if p.get("min") is not None and p.get("max") is not None:
+                        txt += f" (мин {_fmt_num(p['min'])} / макс {_fmt_num(p['max'])})"
+                    txt += f"  ← параметр тревоги {', '.join(marks[p['role']])}"
+                lines.append(txt)
+    else:
+        kp = s.get("key_params", [])
+        if kp:
+            lines.append("")
+            lines.append("Ключевые параметры:")
+            for p in kp:
+                lines.append(f"  {p['role']}: {p['value']} {p['unit']}")
 
     lines += [
+        "",
+        "Правила вердикта:",
+        "- каждую тревогу оценивай по её собственному параметру (помечен «← параметр "
+        "тревоги»); другие параметры её не подтверждают и не опровергают;",
+        "- нарушение паспорта двигателя — не норма, даже при большом запасе до уставок "
+        "панели; ниже паспорта в пределах шага датчика — тоже не норма, снять можно "
+        "только как погрешность данных;",
+        "- прошлые разборы и снятия гейтом — не довод, решай по текущим значениям;",
+        "- cancel — только с причиной: недостоверные данные / кратковременно / порог "
+        "аналитики строже панели и тренда нет.",
         "",
         "Дай краткий технический анализ: что произошло, возможные причины, "
         "на что обратить внимание оператору. Ответ на русском языке.",
     ]
     return "\n".join(lines)
+
+
+def _fmt_num(v) -> str:
+    if v is None:
+        return "—"
+    f = float(v)
+    return f"{f:.0f}" if f == int(f) else f"{f:g}"
+
+
+def _panel_line(s: dict) -> str:
+    """Честная строка панели (v5.1.12): раньше при CAUTION панели гейт писал
+    «сигналов панели нет» — во всех 66 снятиях за 19.09–12.10."""
+    sev = s.get("panel_severity", "норма")
+    caution = [a for a in s.get("panel_alarms") or [] if a.get("severity") == "CAUTION"]
+    if sev != "норма":
+        return f"Панель управления: {sev} — сигналы WARNING/SHUTDOWN, см. ниже."
+    if caution:
+        parts = []
+        for a in caution:
+            codes = ", ".join(str(c) for c in a.get("fault_codes") or [])
+            since = (a.get("since") or "")[:16].replace("T", " ")
+            txt = (f"CAUTION — {a.get('description') or 'Общая авария'}, несброшенный код {codes}"
+                   + (f", с {since} UTC" if since else ""))
+            txt += (" — появилась в этом сегменте: снятие аналитики запрещено"
+                    if a.get("fresh") else
+                    " — висела на начало сегмента: это сведения, снятие аналитики не блокирует")
+            parts.append(txt)
+        return "Панель управления: " + "; ".join(parts) + "."
+    code = s.get("last_fault_code")
+    return ("Панель управления: аварийных и предупредительных сигналов нет"
+            + (f"; в 40012 несброшенный код последней неисправности {code}." if code else "."))
+
+
+def _limit_line(a: dict) -> str | None:
+    """Порог тревоги и его вид — для паспорта; у остальных порог в тексте срабатывания."""
+    lim = a.get("limit") or {}
+    if lim.get("kind") != "passport":
+        return None
+    step = lim.get("step") or 0
+    step_txt = (f", шаг датчика {_fmt_num(step)} {lim.get('unit', '')}"
+                + (" (по истории машины)" if lim.get("step_source") == "history" else ""))
+    head = (f"порог: паспорт {lim.get('engine') or 'двигателя'} — минимум "
+            f"{_fmt_num(lim.get('limit'))} {lim.get('unit', '')}{step_txt}; "
+            f"мин. {_fmt_num(lim.get('value'))}, ниже паспорта непрерывно "
+            f"{_fmt_duration(lim.get('run_sec') or 0)}")
+    if lim.get("hard"):
+        return head + ". НАРУШЕНИЕ ПАСПОРТА — это не норма, снять нельзя."
+    return head + ". Ниже паспорта в пределах шага датчика — не норма; снять можно, только если это погрешность данных."
+
+
+def gate_facts_md(s: dict, decision: str, applied: bool, reasons: list[dict]) -> str:
+    """Абзац «Факты (система, не ИИ)» в начало разбора гейта (v5.1.12): заключение
+    и оператор видят факты рядом с мнением модели, а не только мнение."""
+    facts = [_panel_line(s).replace("Панель управления: ", "панель — ").rstrip(".")]
+    for n, a in enumerate(s.get("analytics_alarms") or [], 1):
+        lim = a.get("limit") or {}
+        if lim.get("kind") == "passport":
+            facts.append(
+                f"A{n}: давление масла мин. {_fmt_num(lim.get('value'))} {lim.get('unit', '')} "
+                f"при паспорте {_fmt_num(lim.get('limit'))} (шаг датчика {_fmt_num(lim.get('step'))})"
+                + (" — нарушение паспорта" if lim.get("hard") else " — ниже паспорта в пределах шага, не норма"))
+    if decision == "cancel":
+        facts.append("вердикт модели «снять» — " + (
+            "применён (на момент разбора)" if applied else
+            "не применён: " + "; ".join(r["text"] for r in reasons)))
+    return "**Факты (система, не ИИ):** " + "; ".join(facts) + ".\n\n"

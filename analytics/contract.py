@@ -114,6 +114,23 @@ class DerivedMetrics:
     dOil_press_dt_min: Optional[float] = None  # кПа/с   — Class B, для LLM Stage 2
     coolant_below_60_sec: Optional[float] = None
     coolant_asymptote_c: Optional[float] = None  # °C — оценка асимптоты прогрева (Phase 1 predictor)
+    # ── Давление масла ниже паспорта своего двигателя (v5.1.12) ─────────────
+    # По пакетам связи с удержанием, только на рабочих оборотах, без дыр связи и
+    # без показаний ниже уставки останова панели (панель промолчала — данные
+    # сомнительны). «Жёстко» — ниже паспорта больше чем на шаг датчика.
+    oil_press_passport_kpa: Optional[float] = None       # паспортный минимум
+    oil_press_step_kpa: Optional[float] = None           # шаг показаний датчика (допуск)
+    oil_press_step_source: Optional[str] = None          # history / default / none
+    oil_press_below_passport_run_sec: Optional[float] = None   # самый длинный участок ниже паспорта
+    oil_press_below_passport_min_kpa: Optional[float] = None   # минимум в участках ≥ выдержки
+    oil_press_hard_run_sec: Optional[float] = None       # ниже паспорта больше чем на шаг
+    oil_press_hard_min_kpa: Optional[float] = None
+    oil_press_passport_until: Optional[str] = None       # конец последнего участка ≥ выдержки (ISO)
+    oil_press_passport_ongoing: Optional[bool] = None    # участок идёт на конце окна
+    oil_press_last_min_kpa: Optional[float] = None       # минимум «в пределах шага» последнего участка после нарушения
+    oil_press_instep_min_kpa: Optional[float] = None     # минимум показаний в пределах шага (участки ≥ выдержки)
+    oil_press_hard_until: Optional[str] = None           # то же для «нарушения» (дальше шага)
+    oil_press_hard_ongoing: Optional[bool] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {k: v for k, v in self.__dict__.items()}

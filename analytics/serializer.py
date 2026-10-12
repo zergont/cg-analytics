@@ -47,7 +47,7 @@ SCENARIO_RU: dict[str, str] = {
     "COOLDOWN_VIOLATION": "Нарушение охлаждения перед остановом",
     "START_FAILURE":      "Проблема пуска",
     "THERMAL_HIGHLOAD":   "Перегрев под высокой нагрузкой",
-    "LIMIT_PROXIMITY":    "Приближение к паспортному порогу",
+    "LIMIT_PROXIMITY":    "Приближение к уставке останова панели",
     "STOP_PROFILE":       "Отклонение профиля останова",
     "RPM_UNDERSPEED":     "Просадка оборотов",
     "DETECTION_COUNTER":  "Повторные срабатывания за период",
@@ -963,8 +963,9 @@ def apply_gate_suppression(parts: dict[str, Any], scenarios) -> dict[str, Any]:
     вердикт лёг в закрытую строку, а части там заморожены при закрытии.
     Несимметрию гейт не снимает (online.status_assembler.UNCANCELLABLE_SCENARIOS).
     """
-    from online.status_assembler import UNCANCELLABLE_SCENARIOS
-    sc = {x for x in scenarios if x not in UNCANCELLABLE_SCENARIOS}
+    from online.status_assembler import GATE_EXCLUDED_SCENARIOS, UNCANCELLABLE_SCENARIOS
+    sc = {x for x in scenarios
+          if x not in UNCANCELLABLE_SCENARIOS and x not in GATE_EXCLUDED_SCENARIOS}
     if not sc or not parts or parts.get("no_data"):
         return parts
     out = json.loads(json.dumps(parts))

@@ -67,7 +67,10 @@ async def _get_app_setting(key, default=None):
 
 
 async def _get_open_segment(sn, et, pid):
-    return {"id": SEG["id"], "warning_analyzed_hash": SEG["analyzed"]}
+    # Разобранным считается разбор по нынешним правилам гейта (rules, v5.1.12)
+    return {"id": SEG["id"], "warning_analyzed_hash": SEG["analyzed"],
+            "warning_analyses": ([{"fault_hash": SEG["analyzed"], "rules": "5.1.12"}]
+                                 if SEG["analyzed"] else [])}
 
 
 async def _noop(*a, **k):
@@ -78,7 +81,8 @@ dba.get_app_setting = _get_app_setting
 odb.get_open_segment = _get_open_segment
 odb.update_open_segment_status = _noop
 sa.build_structural_status = lambda seg, ref, tz: {"severity_level": STATE["level"],
-                                                   "panel_severity": "норма"}
+                                                   "panel_severity": "норма",
+                                                   "analytics_alarms": [{"scenario": "COOLING_FAILURE"}]}
 sa.compute_fault_hash = lambda s: STATE["hash"]
 sa.format_status_text = lambda s: "статус"
 sa.extract_alarm_text = lambda s: "тревога"

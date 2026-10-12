@@ -143,7 +143,10 @@ def _gate_suppressed_scenarios(gate_state: dict | None, seg) -> set[str]:
     h = (gate_state or {}).get("suppressed_hash")
     if not h:
         return set()
-    from online.status_assembler import UNCANCELLABLE_SCENARIOS, is_analytics_suppressed
+    from online.status_assembler import (
+        GATE_EXCLUDED_SCENARIOS, UNCANCELLABLE_SCENARIOS, is_analytics_suppressed,
+        passport_hard_seen,
+    )
     try:
         _, dets = _extract_open_segment_data(seg)
     except Exception:
@@ -151,8 +154,11 @@ def _gate_suppressed_scenarios(gate_state: dict | None, seg) -> set[str]:
         return set()
     if not is_analytics_suppressed({"gate_suppressed_hash": h}, dets):
         return set()
-    return {d.get("scenario") for d in dets
-            if d.get("scenario") and d.get("scenario") != "CONTROLLER_FAULT"} - UNCANCELLABLE_SCENARIOS
+    # Режимные замечания гейт не снимает (решение 12.10)
+    return ({d.get("scenario") for d in dets
+             if d.get("scenario") and d.get("scenario") != "CONTROLLER_FAULT"
+             and not passport_hard_seen(d)}
+            - UNCANCELLABLE_SCENARIOS - GATE_EXCLUDED_SCENARIOS)
 
 
 def _live_new_episodes(segments: list, eps: list[dict], live_keys: set[str],
@@ -503,11 +509,15 @@ def _extract_open_segment_data(seg) -> tuple[dict, list]:
                 "value": char.get("value_end"),
                 "unit":  char.get("unit", ""),
                 "median": char.get("median"),
+                # Мин/макс подсегмента — гейту у параметров тревог (v5.1.12)
+                "min": char.get("min"),
+                "max": char.get("max"),
             }
             for role, char in last_sub.characteristics.items()
             if isinstance(char, dict)
         },
     }
+    _end = _as_utc(last_sub.t_end or last_sub.t_start)
 
     # Детекции только из последнего подсегмента — текущее состояние детекторов.
     # Накопленная «живая» картина ведётся отдельно через _diff_alerts / alert_journal.
@@ -524,9 +534,55 @@ def _extract_open_segment_data(seg) -> tuple[dict, list]:
         # «воздействие» на весь стоп, журнал и состав гейта
         if dd.get("scenario") in EVENT_SCENARIOS:
             continue
+        # Давление ниже паспорта, давно вернувшееся в норму, — факт подсегмента
+        # для отчёта, но не живая тревога: иначе висела бы до его конца (v5.1.12)
+        if _passport_stale(dd, _end):
+            continue
+        _passport_live_hardness(dd, _end)
         active_dets.append(dd)
 
     return current_values, active_dets
+
+
+# Нарушение паспорта в живом составе — пока идёт или закончилось недавно
+from analytics.detectors import PASSPORT_RECENT_SEC as _PASSPORT_RECENT_SEC  # noqa: E402
+
+
+def _as_utc(ts) -> datetime | None:
+    if ts is None:
+        return None
+    if isinstance(ts, str):
+        try:
+            ts = datetime.fromisoformat(ts)
+        except ValueError:
+            return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
+def _passport_live_hardness(d: dict, end: datetime | None) -> None:
+    """Живая копия: «нарушение» давно прошло, а свежий участок — в пределах шага
+    датчика → живое значение «в пределах шага» (снимаемо). В отчёте подсегмента
+    детекция остаётся как есть (ревью v5.1.12: запрет снятия залипал)."""
+    lim = (d.get("values") or {}).get("limit") or {}
+    if lim.get("kind") != "passport" or not lim.get("hard") or lim.get("hard_ongoing") or end is None:
+        return
+    hu = _as_utc(lim.get("hard_until"))
+    if hu is None or (end - hu).total_seconds() <= _PASSPORT_RECENT_SEC:
+        return
+    from analytics.detectors import passport_trigger
+    live = dict(lim, hard=False)
+    if lim.get("last_value") is not None:
+        live["value"] = lim["last_value"]
+    d["values"] = dict(d["values"], limit=live, oil_press_min=live.get("value"))
+    d["trigger"] = passport_trigger(live)
+
+
+def _passport_stale(d: dict, end: datetime | None) -> bool:
+    lim = (d.get("values") or {}).get("limit") or {}
+    if lim.get("kind") != "passport" or lim.get("ongoing") or end is None:
+        return False
+    until = _as_utc(lim.get("until"))
+    return until is not None and (end - until).total_seconds() > _PASSPORT_RECENT_SEC
 
 
 def _put_counts(d, c: dict, run_origin_ts) -> None:
@@ -1337,6 +1393,8 @@ class OnlinePollEngine:
         # он же заказывает разбор у Клауда — без этой отметки и то, и другое
         # повторялось бы каждым циклом
         self._act_done_for: datetime | None = None
+        # Когда последний раз оценивали шаг показаний датчиков (v5.1.12)
+        self._sensor_steps_at: datetime | None = None
 
     @property
     def key(self) -> str:
@@ -1580,7 +1638,10 @@ class OnlinePollEngine:
         False — открытой строки нет (проверку надо повторить после upsert).
         """
         try:
-            from online.status_assembler import UNCANCELLABLE_SCENARIOS, is_analytics_suppressed
+            from online.status_assembler import (
+                GATE_EXCLUDED_SCENARIOS, UNCANCELLABLE_SCENARIOS, is_analytics_suppressed,
+                passport_hard_seen,
+            )
             _row = await online_db.get_open_segment(
                 self.router_sn, self.equip_type, self.panel_id)
             if not _row:
@@ -1588,7 +1649,10 @@ class OnlinePollEngine:
             if is_analytics_suppressed(_row, curr_dets):
                 await online_db.set_episodes_gate_suppressed(
                     self.router_sn, self.equip_type, self.panel_id,
-                    [s for s in scenarios if s not in UNCANCELLABLE_SCENARIOS],
+                    [s for s in scenarios if s not in UNCANCELLABLE_SCENARIOS
+                     and s not in GATE_EXCLUDED_SCENARIOS
+                     and not any(passport_hard_seen(d) and d.get("scenario") == s
+                                 for d in curr_dets)],
                 )
         except Exception:
             logger.warning("OnlineEngine[%s]: не удалось перенести снятие гейтом "
@@ -1988,8 +2052,42 @@ class OnlinePollEngine:
 
     # ── Один цикл опроса ──────────────────────────────────────────────────────
 
+    async def _refresh_sensor_steps(self, now: datetime) -> None:
+        """Шаг показаний датчиков машины по истории 30 дней — раз в сутки (v5.1.12).
+
+        Допуск «ниже паспорта в пределах точности датчика» (решение 12.10): у ДЭС
+        №3 (QSX15 через ESM) сетка давления 8 кПа, у ДГУ №1/№2 — 4. Мало истории —
+        остаётся умолчание контроллера из KB. Сбой чтения — тоже умолчание.
+        """
+        if (self._sensor_steps_at is not None
+                and (now - self._sensor_steps_at).total_seconds() < 86400):
+            return
+        self._sensor_steps_at = now
+        from analytics import source as _src
+        from analytics.metrics import estimate_sensor_step
+        for role in ("OIL_PRESS",):
+            addr = self.cfg.role_to_addr(role)
+            if not addr:
+                continue
+            try:
+                hist = await _src.get_value_histogram(
+                    self.router_sn, self.equip_type, self.panel_id, addr,
+                    now - timedelta(days=30))
+            except Exception:
+                logger.warning("OnlineEngine[%s]: шаг датчика %s не оценён", self.key, role,
+                               exc_info=True)
+                continue
+            step = estimate_sensor_step(hist)
+            if step is None:
+                continue
+            if self.cfg.sensor_step(role) != (step, "history"):
+                logger.info("OnlineEngine[%s]: шаг показаний %s по истории 30 дней — %g",
+                            self.key, role, step)
+            self.cfg.set_sensor_step(role, step, "history")
+
     async def _poll_cycle(self) -> None:
         now = datetime.now(timezone.utc)
+        await self._refresh_sensor_steps(now)
 
         # N+1 буфер: первый цикл — только запомнить метку времени
         if self.prev_poll_ts is None:

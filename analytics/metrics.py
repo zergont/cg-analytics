@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import cmath
 import math
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -405,6 +406,14 @@ def compute_derived_metrics(
             neutral_current_pct_med = _median([v for _, v in neutral])
             neutral_current_run_sec = _longest_run_at_or_above(neutral, neutral_thr, max_gap)
 
+    # ── Давление масла ниже паспорта своего двигателя (v5.1.12) ──────────────
+    # Паспорт — слой двигателя (KTA50 310, QSX15 242); раньше детектор у QSX15
+    # сравнивал с 310 от KTA50 и горел всегда (ДЭС №3: 47 подсегментов из 47).
+    # Ряд — по пакетам с удержанием (как перекос фаз), только на рабочих оборотах
+    # и не ниже уставки останова панели: нули остановленного двигателя при
+    # RUN_STATE=3 и сбои датчика, на которые панель промолчала, — не нарушение.
+    op = _oil_passport_runs(_rows_in, _addr, gaps, cfg, heartbeat, max_mult)
+
     # S-consistency: |√(P²+Q²) - S_тег|
     p_total = _rows_in(_addr("ACTIVE_POWER_TOTAL") or 0) if _addr("ACTIVE_POWER_TOTAL") else []
     q_total = _rows_in(_addr("REACTIVE_POWER_TOTAL") or 0) if _addr("REACTIVE_POWER_TOTAL") else []
@@ -553,7 +562,125 @@ def compute_derived_metrics(
         dOil_press_dt_min=_r(dOil_press_dt_min),
         coolant_below_60_sec=_r(coolant_below_60_sec),
         coolant_asymptote_c=_r(coolant_asymptote_c, decimals=1),
+        **op,
     )
+
+
+def estimate_sensor_step(hist: list[tuple[float, int]], min_samples: int = 1000) -> float | None:
+    """Шаг показаний датчика по истории: самый частый промежуток между соседними
+    различными положительными значениями (v5.1.12, решение владельца 12.10).
+
+    ДЭС №3 (QSX15, дополнительный ESM): …232, 240, 248, 252… → 8 кПа; ДГУ №1/№2
+    (KTA50): …376, 380, 383, 388… → 4. Редкие показания ложатся на ту же сетку,
+    поэтому выбросы шаг не сбивают. Мало истории — None (берётся умолчание KB).
+    """
+    pos = [(round(float(v), 1), int(n)) for v, n in hist or []
+           if v is not None and float(v) > 0 and int(n or 0) > 0]
+    if sum(n for _, n in pos) < min_samples:
+        return None
+    vals = sorted({v for v, _ in pos})
+    if len(vals) < 5:
+        return None
+    gaps = Counter(round(b - a, 1) for a, b in zip(vals, vals[1:]) if b - a > 0)
+    if not gaps:
+        return None
+    step, _ = max(gaps.items(), key=lambda kv: (kv[1], -kv[0]))   # при равенстве — меньший
+    return float(step)
+
+
+def _runs_below(
+    series: list[tuple[datetime, float | None, bool]], threshold: float, max_gap_sec: float,
+    gaps: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Непрерывные участки «значение < порога» по пакетам: рвутся на непригодном
+    замере (ok=False), на замере не ниже порога, на паузе длиннее max_gap_sec и
+    на дыре связи из data_gaps (слепой интервал — не подтверждение)."""
+    runs: list[dict[str, Any]] = []
+    cur: dict[str, Any] | None = None
+    for (ts, v, ok), (ts_next, _, _) in zip(series, series[1:]):
+        dt = (ts_next - ts).total_seconds()
+        if (ok and v is not None and v < threshold and dt <= max_gap_sec
+                and not _gap_between(ts, ts_next, gaps)):
+            if cur is None:
+                cur = {"start": ts, "end": ts_next, "sec": 0.0, "min": v}
+            cur["sec"] += dt
+            cur["end"] = ts_next
+            cur["min"] = min(cur["min"], v)
+        elif cur is not None:
+            runs.append(cur)
+            cur = None
+    if cur is not None:
+        runs.append(cur)
+    return runs
+
+
+def _oil_passport_runs(_rows_in, _addr, gaps, cfg: AnalyticsConfig,
+                       heartbeat: float, max_mult: float) -> dict[str, Any]:
+    """Поля DerivedMetrics oil_press_* (пустой dict — паспорта/регистров нет)."""
+    p_addr, rpm_addr = _addr("OIL_PRESS"), _addr("RPM")
+    p_min = cfg.thr("oil_pressure", "passport", "rated_min_kpa")
+    if not p_addr or not rpm_addr or p_min is None:
+        return {}
+    limit = float(p_min)
+    step, source = cfg.sensor_step("OIL_PRESS")
+    cap = limit * float(cfg.det("OIL_DILUTION", "passport_step_max_pct", default=5.0)) / 100
+    step = min(float(step), cap) if step else 0.0
+    rpm_min = float(cfg.det("OIL_DILUTION", "passport_min_rpm", default=1400))
+    min_run = float(cfg.det("OIL_DILUTION", "passport_min_run_sec", default=60))
+    floor = cfg.thr("oil_pressure", "controller", "shutdown_rated_kpa")
+    floor = float(floor) if floor is not None else None
+    max_gap = heartbeat * max_mult
+    _hb = cfg.seg("data_quality", "heartbeat_addr", default=None)
+    hb_addr = int(_hb) if _hb is not None else None
+    samples = _held_samples(
+        {p_addr: _rows_in(p_addr), rpm_addr: _rows_in(rpm_addr)},
+        [ts for ts, _ in _rows_in(hb_addr)] if hb_addr else [],
+        gaps, max_gap, heartbeat / 2,
+    )
+    series: list[tuple[datetime, float | None, bool]] = []
+    for ts, held in samples:
+        v, rpm = held.get(p_addr), held.get(rpm_addr)
+        ok = (v is not None and rpm is not None and rpm >= rpm_min
+              and (floor is None or v >= floor))
+        series.append((ts, v, ok))
+    soft = _runs_below(series, limit, max_gap, gaps)
+    hard = _runs_below(series, limit - step, max_gap, gaps) if step > 0 else soft
+    soft_ok = [r for r in soft if r["sec"] >= min_run]
+    hard_ok = [r for r in hard if r["sec"] >= min_run]
+    out: dict[str, Any] = {
+        "oil_press_passport_kpa": limit,
+        "oil_press_step_kpa": _r(step, 1),
+        "oil_press_step_source": source if step > 0 else "none",
+    }
+    if soft:
+        out["oil_press_below_passport_run_sec"] = _r(max(r["sec"] for r in soft), 1)
+    floor = limit - step
+
+    def _instep(t0, t1) -> list[float]:
+        return [v for ts, v, ok in series
+                if ok and v is not None and t0 <= ts < t1 and floor <= v < limit]
+
+    lh = max(hard_ok, key=lambda r: r["end"]) if hard_ok else None
+    if soft_ok:
+        out["oil_press_below_passport_min_kpa"] = _r(min(r["min"] for r in soft_ok), 1)
+        inst = [v for r in soft_ok for v in _instep(r["start"], r["end"])]
+        if inst:
+            out["oil_press_instep_min_kpa"] = _r(min(inst), 1)
+        last = max(soft_ok, key=lambda r: r["end"])
+        out["oil_press_passport_until"] = _tz(last["end"]).isoformat()
+        out["oil_press_passport_ongoing"] = bool(series) and last["end"] == series[-1][0]
+        # Живая копия после давнего нарушения — число из хвоста участка после
+        # нарушения и только в пределах шага (ревью: иначе «в пределах шага, мин. 232»)
+        t0 = lh["end"] if lh is not None and last["start"] <= lh["end"] < last["end"] else last["start"]
+        tail = _instep(t0, last["end"])
+        out["oil_press_last_min_kpa"] = _r(min(tail) if tail else last["min"], 1)
+    if hard:
+        out["oil_press_hard_run_sec"] = _r(max(r["sec"] for r in hard), 1)
+    if lh is not None:
+        out["oil_press_hard_min_kpa"] = _r(min(r["min"] for r in hard_ok), 1)
+        out["oil_press_hard_until"] = _tz(lh["end"]).isoformat()
+        out["oil_press_hard_ongoing"] = bool(series) and lh["end"] == series[-1][0]
+    return out
 
 
 # ── Вспомогательные расчёты скоростей ────────────────────────────────────────

@@ -95,9 +95,13 @@ alarms = [{"scenario": "OIL_DILUTION", "fault_codes": [], "ref_codes": [143, 415
 struct = {"analytics_alarms": alarms, "panel_alarms": [], "panel_severity": "норма",
           "analytics_suppressed": False, "severity_level": "предупреждение"}
 row = {"id": 35771, "gate_suppressed_hash": "b73fbb556aef",
-       "gate_log": json.dumps([{"fault_hash": "5cf22d2ee7d6", "decision": "cancel", "decision_applied": True},
-                               {"fault_hash": "b73fbb556aef", "decision": "cancel", "decision_applied": True},
-                               {"fault_hash": "aaaa", "decision": "pass", "decision_applied": False}])}
+       "gate_log": json.dumps([{"fault_hash": "5cf22d2ee7d6", "decision": "cancel", "decision_applied": True,
+                                "rules": "5.1.12"},
+                               {"fault_hash": "b73fbb556aef", "decision": "cancel", "decision_applied": True,
+                                "rules": "5.1.12"},
+                               {"fault_hash": "aaaa", "decision": "pass", "decision_applied": False},
+                               # снятие по старым правилам гейта заново не применяется (v5.1.12)
+                               {"fault_hash": "old0", "decision": "cancel", "decision_applied": True}])}
 check(mgr._cancelled_hashes(row) == {"5cf22d2ee7d6", "b73fbb556aef"}, "1: снятые составы — из журнала гейта")
 _engine = NS(router_sn="R", equip_type="pcc", panel_id=1)
 asyncio.run(mgr.OnlineManager._reapply_cancel(None, _engine, row, struct, "5cf22d2ee7d6"))
@@ -187,7 +191,7 @@ check(g6["total_blind_sec"] >= 3000 and g6["total_blind_sec"] >= g6.get("period_
       f"6б: «с начала» без связи — по всем онсетам: {g6.get('total_blind_sec')} / {g6.get('period_blind_sec')}")
 # 6в. Вердикт разбора, перенесённый в новую строку, виден повтору снятия
 check(mgr._cancelled_hashes({"gate_log": [{"fault_hash": "X", "decision": "cancel", "decision_applied": True,
-                                           "provider": "carried"}]}) == {"X"},
+                                           "provider": "carried", "rules": "5.1.12"}]}) == {"X"},
       "6в: перенесённый вердикт виден повтору снятия")
 
 # ── 7. Оценка токенов ───────────────────────────────────────────────────────

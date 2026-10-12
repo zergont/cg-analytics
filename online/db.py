@@ -833,6 +833,7 @@ async def save_segment_warning(
     alarm_text: str | None = None,
     segment_id: int | None = None,
     ts: datetime | None = None,
+    extra: dict | None = None,
 ) -> bool:
     """Сохранить разбор гейта в сегмент, которому он относится.
 
@@ -850,6 +851,7 @@ async def save_segment_warning(
         "fault_hash": fault_hash,
         "alarm_text": alarm_text,
         "md":         analysis_md,
+        **(extra or {}),          # v5.1.12: rules, decision, applied
     }, ensure_ascii=False)
     conn = await _connect()
     try:
@@ -1363,7 +1365,10 @@ async def get_open_episodes_all() -> dict[str, list[dict[str, Any]]]:
 async def set_episodes_gate_suppressed(
     router_sn: str, equip_type: str, panel_id: int, scenarios: list[str],
 ) -> None:
-    """Пометить открытые аналитические эпизоды вердиктом гейта «отменить»."""
+    """Пометить открытые аналитические эпизоды вердиктом гейта «отменить».
+    Режимные замечания гейт не снимает (решение 12.10)."""
+    from online.status_assembler import GATE_EXCLUDED_SCENARIOS
+    scenarios = [s for s in scenarios or [] if s not in GATE_EXCLUDED_SCENARIOS]
     if not scenarios:
         return
     conn = await _connect()
@@ -1374,6 +1379,55 @@ async def set_episodes_gate_suppressed(
             WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
               AND t_close IS NULL AND scenario = ANY($4::text[])
         """, router_sn, equip_type, panel_id, scenarios)
+    finally:
+        await conn.close()
+
+
+async def clear_episodes_gate_suppressed(
+    router_sn: str, equip_type: str, panel_id: int, scenarios: list[str],
+) -> int:
+    """Снять пометку «снято гейтом» с открытых эпизодов машины (v5.1.12): тревога
+    стала нарушением паспорта — снятие на неё больше не действует."""
+    if not scenarios:
+        return 0
+    conn = await _connect()
+    try:
+        status = await conn.execute("""
+            UPDATE alarm_episodes
+            SET gate_suppressed = FALSE, updated_at = now()
+            WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+              AND t_close IS NULL AND gate_suppressed AND scenario = ANY($4::text[])
+        """, router_sn, equip_type, panel_id, scenarios)
+        try:
+            return int(str(status).split()[-1])
+        except (ValueError, IndexError):
+            return 0
+    finally:
+        await conn.close()
+
+
+async def reset_open_gate_suppression() -> tuple[int, int]:
+    """Разовый перенос v5.1.12: снятия, поставленные по старым правилам гейта, в
+    открытых строках и открытых эпизодах перестают действовать — гейт разберёт
+    живой состав заново (паспорт своего двигателя, честная панель). Закрытые
+    сегменты не трогаем. Возвращает (строк, эпизодов)."""
+    conn = await _connect()
+    try:
+        s1 = await conn.execute("""
+            UPDATE auto_segments SET gate_suppressed_hash = NULL, updated_at = now()
+            WHERE t_end IS NULL AND gate_suppressed_hash IS NOT NULL
+        """)
+        s2 = await conn.execute("""
+            UPDATE alarm_episodes SET gate_suppressed = FALSE, updated_at = now()
+            WHERE t_close IS NULL AND gate_suppressed
+        """)
+
+        def _n(st) -> int:
+            try:
+                return int(str(st).split()[-1])
+            except (ValueError, IndexError):
+                return 0
+        return _n(s1), _n(s2)
     finally:
         await conn.close()
 

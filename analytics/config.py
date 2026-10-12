@@ -50,6 +50,9 @@ class AnalyticsConfig:
         См. `AnalyticsConfig.from_pair`.
         """
         self._layers: list[Path] = self._resolve_layer_dirs(kb_path, layers)
+        # Шаг показаний датчиков ЭТОЙ машины (v5.1.12): кладёт движок раз в сутки
+        # по истории, иначе — умолчание контроллера из KB
+        self._sensor_steps: dict[str, tuple[float, str]] = {}
 
         self.mapping: dict[str, Any] = self._load_merged("mapping.yaml")
         self.thresholds: dict[str, Any] = self._load_merged("thresholds.yaml")
@@ -126,6 +129,31 @@ class AnalyticsConfig:
             if meta.get("role") == role:
                 return addr
         return None
+
+    @property
+    def engine_label(self) -> str | None:
+        """«Cummins QSX15» — по имени слоя двигателя (engines/<id>), для текстов."""
+        for p in reversed(self._layers):
+            if p.parent.name == "engines" or p.parent.parent.name == "engines":
+                name = p.name if p.parent.name == "engines" else p.parent.name
+                head, _, rest = name.partition("_")
+                return f"{head.capitalize()} {rest.replace('_', ' ').upper()}".strip()
+        return None
+
+    def set_sensor_step(self, role: str, step: float, source: str = "history") -> None:
+        """Шаг показаний датчика роли у этой машины (оценка по истории)."""
+        self._sensor_steps[role] = (float(step), source)
+
+    def sensor_step(self, role: str) -> tuple[float | None, str]:
+        """(шаг, источник): по истории машины; иначе умолчание контроллера из KB
+        (detectors.yaml: SENSOR_STEP.<роль>); иначе (None, "none")."""
+        if role in self._sensor_steps:
+            return self._sensor_steps[role]
+        d = self.det("SENSOR_STEP", role)
+        try:
+            return (float(d), "default") if d is not None else (None, "none")
+        except (TypeError, ValueError):
+            return None, "none"
 
     def role_unit(self, role: str) -> str:
         """Единица измерения роли (из mapping.yaml)."""

@@ -206,9 +206,14 @@ ch = _state_characteristics(_state_periods(na, cfg), T0 + timedelta(minutes=40),
 check("LAST_FAULT_CODE" not in ch, f"6ж: в периоде NA кода нет: {ch.get('LAST_FAULT_CODE')}")
 
 # 7. Гейт после перезапуска: разобранные составы из записей строки
-check(_analyzed_hashes({"warning_analyses": '[{"fault_hash": "b73f"}, {"fault_hash": "5cf2"}]'}) == {"b73f", "5cf2"},
+check(_analyzed_hashes({"warning_analyses": '[{"fault_hash": "b73f", "rules": "5.1.12"}, '
+                                            '{"fault_hash": "5cf2", "rules": "5.1.12"}]'}) == {"b73f", "5cf2"},
       "7: хеши из JSON-строки")
-check(_analyzed_hashes({"warning_analyses": [{"fault_hash": "d6e4"}, {"md": "x"}]}) == {"d6e4"}, "7б: из списка")
+check(_analyzed_hashes({"warning_analyses": [{"fault_hash": "d6e4", "rules": "5.1.12"}, {"md": "x"}]}) == {"d6e4"},
+      "7б: из списка")
+# v5.1.12: разбор по старым правилам гейта — не «разобрано», состав разберут заново
+check(_analyzed_hashes({"warning_analyses": [{"fault_hash": "old1"}, {"fault_hash": "new1", "rules": "5.1.12"}]})
+      == {"new1"}, "7в: разбор без rules — по старым правилам, не считается")
 check(_analyzed_hashes({"warning_analyses": None}) == set() and _analyzed_hashes({"warning_analyses": "битый"}) == set(),
       "7в: пусто / битый JSON")
 

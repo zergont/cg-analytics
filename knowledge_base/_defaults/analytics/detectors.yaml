@@ -189,8 +189,11 @@ OIL_DILUTION:
   oil_press_drop_kpa: 50          # падение OIL_PRESS на > 50 кПа от медианы подсегмента
   oil_temp_rise_c: 10             # одновременный рост OIL_TEMP на > 10 °C
   concurrent_window_sec: 300      # в пределах 5 минут
-  # Порог по абсолютным значениям (см. thresholds.yaml, oil_pressure.passport.rated_min_kpa)
-  oil_press_abs_warning_kpa: 310  # давление ниже паспортного минимума при номинале
+  # Паспорт — из слоя двигателя (thresholds.yaml: oil_pressure.passport.rated_min_kpa),
+  # v5.1.12: копии 310 от KTA50 больше нет — QSX15 сравнивался с чужим порогом
+  passport_min_run_sec: 60        # ниже паспорта непрерывно не меньше (как перекос фаз)
+  passport_min_rpm: 1400          # только на рабочих оборотах (нули стоящего мотора — не нарушение)
+  passport_step_max_pct: 5        # допуск «шаг датчика» не больше 5 % паспорта (сломанный датчик)
   severity_default: CAUTION
   _source: TUNABLE
 

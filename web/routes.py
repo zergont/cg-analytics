@@ -2143,9 +2143,10 @@ async def api_online_status():
                 )
                 dets, suppressed = _active_dets(open_seg)
                 panel_severity = compute_panel_severity(dets)
-                # Вердикт гейта «отменить» подавляет аналитику до смены состава детекций
-                if suppressed:
-                    dets = [d for d in dets if d.get("scenario") == "CONTROLLER_FAULT"]
+                # Вердикт гейта «отменить» подавляет аналитику до смены состава детекций;
+                # режимные замечания гейт не снимает (v5.1.12)
+                from online.status_assembler import level_dets
+                dets = level_dets(dets, suppressed)
                 severity_level     = compute_severity_level(dets)
                 analytics_severity = compute_analytics_severity(dets)
             except Exception:
@@ -2257,7 +2258,8 @@ async def api_machines():
                 # Вердикт гейта «отменить» подавляет аналитику до смены состава детекций
                 dets, gate_checked = _active_dets(seg)
                 if gate_checked:
-                    dets = [d for d in dets if d.get("scenario") == "CONTROLLER_FAULT"]
+                    from online.status_assembler import level_dets
+                    dets = level_dets(dets, True)
                 # Аварийный стоп держит красный до своей границы: маску могли
                 # уже снять, а рез приходит только следующим циклом опроса
                 severity_level = ("авария" if _stop_kind == "EMERGENCY"

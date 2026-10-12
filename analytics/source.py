@@ -342,6 +342,25 @@ async def get_last_value_before(
     return dict(row) if row else None
 
 
+async def get_value_histogram(
+    router_sn: str, equip_type: str, panel_id: int, addr: int, ts_from: datetime,
+) -> list[tuple[float, int]]:
+    """Распределение положительных показаний регистра с ts_from: [(значение, число)].
+
+    Для оценки шага показаний датчика машины (v5.1.12): раз в сутки на машину."""
+    async with _get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT value, count(*) AS n FROM history_rich
+            WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3 AND addr = $4
+              AND ts >= $5 AND value > 0
+            GROUP BY value
+            """,
+            router_sn, equip_type, panel_id, addr, ts_from,
+        )
+    return [(float(r["value"]), int(r["n"])) for r in rows]
+
+
 async def get_data_gaps(
     router_sn: str,
     equip_type: str,

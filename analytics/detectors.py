@@ -109,7 +109,7 @@ def run_all_detectors(
     # На остановленном/останавливающемся моторе давление масла = 0 — это норма.
     _oil_valid = set(cfg.det("OIL_DILUTION", "valid_run_states", default=[3]) or [3])
     if cfg.det("OIL_DILUTION", "enabled", default=True) and run_state in _oil_valid:
-        detections.extend(_detect_oil_dilution(characteristics, seg_start, cfg))
+        detections.extend(_detect_oil_dilution(characteristics, derived, seg_start, cfg, seg_end))
 
     # Риск нагара — накопленное состояние, а не событие подсегмента (v5.1.3):
     # детекции нет, его несут часть сводки «нагар» и таблица «Риски» отчёта.
@@ -521,15 +521,108 @@ def _detect_cooling_failure(
 
 # ── OIL_DILUTION ─────────────────────────────────────────────────────────────
 
+# В живом составе нарушение паспорта — пока идёт или закончилось не раньше
+# стольких секунд назад (online.engine._extract_open_segment_data), v5.1.12
+PASSPORT_RECENT_SEC = 600
+
+
+def passport_trigger(lim: dict[str, Any]) -> str:
+    """Текст срабатывания «ниже паспорта» по values.limit детекции."""
+    run = float(lim.get("run_sec") or 0)
+    run_txt = f"{run / 60:.0f} мин" if run >= 120 else f"{run:.0f} с"
+    engine = lim.get("engine") or "двигателя"
+    limit, value = lim.get("limit"), lim.get("value")
+    if lim.get("hard"):
+        return (f"давление масла ниже паспортного минимума {engine} {limit:.0f} кПа — "
+                f"нарушение паспорта: мин. {value:.0f} кПа, ниже паспорта непрерывно {run_txt}")
+    brief = lim.get("brief_min")
+    brief_txt = f" (кратковременно до {brief:.0f})" if brief is not None else ""
+    return (f"давление масла ниже паспортного минимума {engine} {limit:.0f} кПа "
+            f"в пределах шага датчика {float(lim.get('step') or 0):.0f} кПа: мин. {value:.0f} кПа"
+            f"{brief_txt}, непрерывно {run_txt} — не норма")
+
+
+def _passport_detection(derived: DerivedMetrics, seg_start: datetime,
+                        cfg: AnalyticsConfig) -> Detection | None:
+    """Давление масла ниже паспорта своего двигателя (v5.1.12, решения 12.10).
+
+    Ниже паспорта устойчиво (≥ выдержки) — CAUTION «ниже паспорта». Ниже больше
+    чем на шаг датчика — «нарушение паспорта»: гейт его не снимает (код), в
+    пределах шага — снимаемо, но нормой не называется. limit — для гейта,
+    статуса и заключения; oil_press_min/passport_min_kpa — для сводки отчёта.
+    """
+    min_run = float(cfg.det("OIL_DILUTION", "passport_min_run_sec", default=60))
+    limit = derived.oil_press_passport_kpa
+    run = derived.oil_press_below_passport_run_sec or 0.0
+    if limit is None or run < min_run or derived.oil_press_below_passport_min_kpa is None:
+        return None
+    hard = (derived.oil_press_hard_run_sec or 0.0) >= min_run
+    step = derived.oil_press_step_kpa or 0.0
+    brief = None
+    if hard and derived.oil_press_hard_min_kpa is not None:
+        value = derived.oil_press_hard_min_kpa
+    else:
+        # В пределах шага — минимум показаний в пределах шага; короткий провал
+        # дальше шага (< выдержки) называем отдельно, а не «в пределах шага, мин. 232»
+        value = (derived.oil_press_instep_min_kpa
+                 if derived.oil_press_instep_min_kpa is not None
+                 else derived.oil_press_below_passport_min_kpa)
+        if (derived.oil_press_below_passport_min_kpa is not None and value is not None
+                and derived.oil_press_below_passport_min_kpa < value):
+            brief = derived.oil_press_below_passport_min_kpa
+    limit_d = {
+        "kind": "passport", "param": "OIL_PRESS", "direction": "min",
+        "limit": limit, "unit": "кПа", "value": value,
+        "run_sec": run, "min_run_sec": min_run,
+        "step": step, "step_source": derived.oil_press_step_source,
+        "hard": hard, "engine": cfg.engine_label, "brief_min": brief,
+        "until": derived.oil_press_passport_until,
+        "ongoing": derived.oil_press_passport_ongoing,
+        # Свежесть «нарушения» отдельно: в живом составе давнее нарушение при
+        # свежем «в пределах шага» не держит запрет снятия (ревью v5.1.12)
+        "last_value": derived.oil_press_last_min_kpa,
+        "hard_until": derived.oil_press_hard_until,
+        "hard_ongoing": derived.oil_press_hard_ongoing,
+    }
+    return Detection(
+        scenario="OIL_DILUTION",
+        severity="CAUTION",
+        t_detected=_iso(seg_start),
+        source="PASSPORT_THRESHOLD",
+        trigger=passport_trigger(limit_d),
+        related_roles=["OIL_PRESS"],
+        fault_codes=[143, 415],
+        description_key="OIL_DILUTION.below_passport_min",
+        values={"oil_press_min": value, "passport_min_kpa": limit, "limit": limit_d},
+    )
+
+
 def _detect_oil_dilution(
     chars: dict[str, Any],
+    derived: DerivedMetrics,
     seg_start: datetime,
     cfg: AnalyticsConfig,
+    seg_end: datetime | None = None,
 ) -> list[Detection]:
+    # Паспорт — первым и без температуры масла: раньше ветка паспорта шла после
+    # комбинированной и пропадала без OIL_TEMP (v5.1.12). Паспорт главнее всегда:
+    # комбинированная ветка считает по всему подсегменту и сработала бы на том же
+    # провале — нарушение паспорта пропало бы из записи подсегмента (ревью)
+    passport = _passport_detection(derived, seg_start, cfg)
+    if passport is not None:
+        return [passport]
+    combined = _combined_oil_detection(chars, seg_start, cfg)
+    return [combined] if combined else []
+
+
+def _combined_oil_detection(
+    chars: dict[str, Any], seg_start: datetime, cfg: AnalyticsConfig,
+) -> Detection | None:
+    """Падение давления вместе с ростом температуры масла — признак разжижения."""
     oil_press_char = chars.get("OIL_PRESS")
     oil_temp_char = chars.get("OIL_TEMP")
     if not oil_press_char or not oil_temp_char:
-        return []
+        return None
 
     press_min = oil_press_char.get("min")
     press_med = oil_press_char.get("median")
@@ -537,17 +630,16 @@ def _detect_oil_dilution(
     temp_med = oil_temp_char.get("median")
 
     if press_min is None or temp_max is None or press_med is None or temp_med is None:
-        return []
+        return None
 
     press_drop_thr = float(cfg.det("OIL_DILUTION", "oil_press_drop_kpa", default=50.0))
     temp_rise_thr = float(cfg.det("OIL_DILUTION", "oil_temp_rise_threshold_c", default=10.0))
-    abs_press_warn = float(cfg.det("OIL_DILUTION", "oil_press_abs_warning_kpa", default=310.0))
 
     press_drop = press_med - press_min
     temp_rise = temp_max - temp_med
 
     if press_drop >= press_drop_thr and temp_rise >= temp_rise_thr:
-        return [Detection(
+        return Detection(
             scenario="OIL_DILUTION",
             severity=cfg.det("OIL_DILUTION", "severity_default", default="CAUTION"),
             t_detected=_iso(seg_start),
@@ -563,23 +655,9 @@ def _detect_oil_dilution(
                 "oil_press_min": press_min,
                 "oil_temp_max": temp_max,
             },
-        )]
+        )
 
-    # Также: давление ниже паспортного минимума при номинале
-    if press_min < abs_press_warn:
-        return [Detection(
-            scenario="OIL_DILUTION",
-            severity="CAUTION",
-            t_detected=_iso(seg_start),
-            source="PASSPORT_THRESHOLD",
-            trigger=f"oil_press_min={press_min:.0f}кПа < паспортного минимума {abs_press_warn:.0f}кПа",
-            related_roles=["OIL_PRESS"],
-            fault_codes=[143, 415],
-            description_key="OIL_DILUTION.below_passport_min",
-            values={"oil_press_min": press_min, "passport_min_kpa": abs_press_warn},
-        )]
-
-    return []
+    return None
 
 
 # ── COKING_RISK ──────────────────────────────────────────────────────────────

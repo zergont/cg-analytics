@@ -113,7 +113,11 @@ def _extract_verdict(
     if "WARNING" in sevs or "ALARM" in sevs:   # ALARM — легаси старых сегментов
         return "требует внимания", "WARNING"
     if "CAUTION" in sevs:
-        if gate_suppressed:
+        # Режимное замечание гейт не снимает (v5.1.12)
+        from online.status_assembler import GATE_EXCLUDED_SCENARIOS
+        if gate_suppressed and not any(
+                isinstance(d, dict) and d.get("severity") == "CAUTION"
+                and d.get("scenario") in GATE_EXCLUDED_SCENARIOS for d in detections):
             return "норма", "НОРМА"
         return "требует внимания", "CAUTION"
     return "норма", "НОРМА"
@@ -250,7 +254,7 @@ def _fmt_detections_hierarchy(chars_json: Any) -> str:
                 key = ("panel", name)
             elif scenario == "LIMIT_PROXIMITY" and ":" in trigger:
                 param = trigger.split(":", 1)[0].strip()
-                name = f"{param} у паспортного порога"
+                name = f"{param} у уставки останова панели"
                 key = ("analytics", scenario, param)
             else:
                 name = SCENARIO_RU.get(scenario, scenario)
@@ -327,14 +331,25 @@ def _format_gate_analyses(segment_row: dict) -> str:
     if not isinstance(items, list):
         return ""
 
+    # v5.1.12: разбор — мнение по ходу сегмента; факты (абзац «Факты (система)»,
+    # вердикт блока аналитики, отчёт) главнее. Раньше «не противоречь без
+    # основания» переносило в заключение «240 кПа в норме» при паспорте выше
     out: list[str] = ["## Разборы в моменты событий", "",
-                      "Сделаны по ходу сегмента, в момент срабатывания. "
-                      "Учти их и не противоречь без основания.", ""]
+                      "Это мнения модели по ходу сегмента, в момент срабатывания. Абзац "
+                      "«Факты (система, не ИИ)» и вердикт блока аналитики — проверенные факты, "
+                      "рассуждение им подчинено: если разбор называет нормой то, что указано как "
+                      "нарушение паспорта или сигнал панели, опирайся на факты и отметь расхождение. "
+                      "Что снято ИИ, а что нет, — по пометкам замечаний в шапке, а не по разборам.",
+                      ""]
     for it in items:
         if not isinstance(it, dict) or not it.get("md"):
             continue
         ts = (it.get("t") or "")[:19].replace("T", " ")
-        head = " — ".join(x for x in (ts, it.get("alarm_text")) if x)
+        verdict = None
+        if it.get("decision") == "cancel":
+            verdict = ("снятие применено (на момент разбора)" if it.get("applied")
+                       else "снятие не применено")
+        head = " — ".join(x for x in (ts, it.get("alarm_text"), verdict) if x)
         out.append(f"### {head}" if head else "###")
         out.append(str(it["md"]).strip())
         out.append("")

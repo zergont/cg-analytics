@@ -449,9 +449,32 @@ class OnlineManager:
                     },
                 )
 
+                # Тревога стала нарушением паспорта — снятие гейтом на неё больше
+                # не действует: снять пометку «снято» с её открытого эпизода (v5.1.12)
+                from online.status_assembler import passport_hard_seen
+                _hard = [a.get("scenario") for a in struct.get("analytics_alarms") or []
+                         if passport_hard_seen(a) and a.get("scenario")]
+                if _hard:
+                    try:
+                        _n = await online_db.clear_episodes_gate_suppressed(
+                            engine.router_sn, engine.equip_type, engine.panel_id, _hard)
+                        if _n:
+                            logger.info("WarningGate[%s]: нарушение паспорта — снята пометка "
+                                        "«снято гейтом» с %d эпизод(ов)", key, _n)
+                    except Exception:
+                        logger.warning("WarningGate[%s]: пометка «снято» не снята", key,
+                                       exc_info=True)
+
                 # ── Детектор предупреждений → Claude ──
                 severity = struct["severity_level"]
                 if severity == "норма":
+                    self._warning_tracker.pop(key, None)
+                    continue
+                # Только режимные замечания (без нагрузки, холостой ход) или состав
+                # уже снят — гейту разбирать нечего (решение 12.10; уровень при
+                # снятии держит режимное замечание, а не снятый состав)
+                if ((not struct.get("analytics_alarms") or struct.get("analytics_suppressed"))
+                        and struct.get("panel_severity") == "норма"):
                     self._warning_tracker.pop(key, None)
                     continue
 
@@ -476,9 +499,10 @@ class OnlineManager:
 
                 fault_hash = compute_fault_hash(struct)
                 done_row = self._gate_done.get(key, {}).get(fault_hash)
+                # Разобранным считается только разбор по нынешним правилам
+                # (rules в записи, v5.1.12): по старым правилам — один новый разбор
                 already_analyzed = (
-                    seg.get("warning_analyzed_hash") == fault_hash
-                    or (done_row is not None and done_row == seg.get("id"))
+                    (done_row is not None and done_row == seg.get("id"))
                     # Память _gate_done живёт в процессе: после перезапуска
                     # (выкладки) состав, разобранный в этой строке, уходил
                     # снова — 4 повтора в 35765. Разборы строки хранят хеш
@@ -547,7 +571,8 @@ class OnlineManager:
         этот — ничего не делаем (защита от повтора на каждом тике).
         """
         from online.status_assembler import (
-            UNCANCELLABLE_SCENARIOS, compute_analytics_hash, gate_can_cancel,
+            GATE_RULES_VERSION, UNCANCELLABLE_SCENARIOS, compute_analytics_hash, gate_can_cancel,
+            passport_hard_seen,
         )
         if struct.get("analytics_suppressed") or not gate_can_cancel(struct):
             return
@@ -564,7 +589,8 @@ class OnlineManager:
             await online_db.set_episodes_gate_suppressed(
                 r, e, p,
                 [a.get("scenario") for a in alarms
-                 if a.get("scenario") and a.get("scenario") not in UNCANCELLABLE_SCENARIOS],
+                 if a.get("scenario") and a.get("scenario") not in UNCANCELLABLE_SCENARIOS
+                 and not passport_hard_seen(a)],
             )
             await online_db.append_segment_gate_event(
                 r, e, p, segment_id=seg.get("id"), ts=now,
@@ -583,6 +609,7 @@ class OnlineManager:
                     "decision_applied": True,
                     "reason":           "повтор состава, снятого ранее в этом сегменте, — "
                                         "снятие применено без нового разбора",
+                    "rules":            GATE_RULES_VERSION,
                     "provider":         "repeat",
                     "model":            None,
                     "tokens_in":        0,
@@ -686,14 +713,18 @@ def _gate_log(seg: dict) -> list:
 
 
 def _cancelled_hashes(seg: dict) -> set[str]:
-    """Составы, по которым в этой строке был применён вердикт «отменить» (gate_log)."""
+    """Составы, по которым в этой строке был применён вердикт «отменить» (gate_log).
+    Только по нынешним правилам гейта (v5.1.12): старые снятия заново не применяются."""
+    from online.status_assembler import GATE_RULES_VERSION
     return {e.get("fault_hash") for e in _gate_log(seg)
             if isinstance(e, dict) and e.get("decision") == "cancel"
-            and e.get("decision_applied") and e.get("fault_hash")}
+            and e.get("decision_applied") and e.get("fault_hash")
+            and e.get("rules") == GATE_RULES_VERSION}
 
 
 def _analyzed_hashes(seg: dict) -> set[str]:
-    """Хеши составов, разобранных в этой строке (warning_analyses)."""
+    """Хеши составов, разобранных в этой строке по нынешним правилам гейта
+    (warning_analyses с rules, v5.1.12)."""
     raw = seg.get("warning_analyses")
     if isinstance(raw, str):
         try:
@@ -703,7 +734,9 @@ def _analyzed_hashes(seg: dict) -> set[str]:
             return set()
     if not isinstance(raw, list):
         return set()
-    return {a.get("fault_hash") for a in raw if isinstance(a, dict) and a.get("fault_hash")}
+    from online.status_assembler import GATE_RULES_VERSION
+    return {a.get("fault_hash") for a in raw if isinstance(a, dict) and a.get("fault_hash")
+            and a.get("rules") == GATE_RULES_VERSION}
 # Повтор записи разбора, вернувшегося в окно между удалением открытой строки и
 # вставкой закрытой (цикл закрытия)
 _GATE_SAVE_RETRIES = 3
@@ -731,7 +764,8 @@ _VERDICT_TOOL = {
     "name": "verdict",
     "description": (
         "Вердикт по предупреждению: cancel — срабатывание аналитики не отражает "
-        "реальной угрозы (допустимо только без сигналов панели), pass — пропустить дальше."
+        "реальной угрозы (допустимо, только если в данных написано «cancel ДОПУСТИМ»), "
+        "pass — пропустить дальше."
     ),
     "input_schema": {
         "type": "object",
@@ -974,9 +1008,11 @@ async def _analyze_warning_claude(
             episode_timeline=_timeline,
         )
         from online.status_assembler import (
-            UNCANCELLABLE_SCENARIOS, gate_can_cancel, has_uncancellable,
+            GATE_RULES_VERSION, UNCANCELLABLE_SCENARIOS, gate_facts_md, passport_hard_seen,
+            uncancellable_reasons,
         )
-        can_cancel  = gate_can_cancel(struct)
+        reasons     = uncancellable_reasons(struct)
+        can_cancel  = not reasons
 
         if provider == "llm":
             # Модель, рассуждение и приоритет — строка таблицы (resolve_depth по виду)
@@ -995,14 +1031,17 @@ async def _analyze_warning_claude(
             from llm.router import format_ai_signature
             analysis = analysis + format_ai_signature(model)
 
-        # Отмена допустима только для чисто аналитического предупреждения
+        # Отмена допустима только при отсутствии запретов (панель, свежая
+        # «Общая авария», несимметрия, нарушение паспорта — решает код, v5.1.12)
         applied = decision == "cancel" and can_cancel
-        if decision == "cancel" and not can_cancel:
+        rejected_by = [r["code"] for r in reasons] if decision == "cancel" and not applied else []
+        if rejected_by:
             logger.warning("WarningGate: cancel отклонён — %s (%s/%s/%s)",
-                           "в составе несимметрия"
-                           if has_uncancellable(struct.get("analytics_alarms") or [])
-                           else "активны сигналы панели",
+                           "; ".join(r["text"] for r in reasons),
                            router_sn, equip_type, panel_id)
+        # Факты рядом с мнением: панель, паспорт, применён ли вердикт
+        if analysis:
+            analysis = gate_facts_md(struct, decision, applied, reasons) + analysis
 
         if applied:
             _supp_hash = compute_analytics_hash(struct.get("analytics_alarms", []))
@@ -1044,6 +1083,7 @@ async def _analyze_warning_claude(
                             "decision": "cancel", "decision_applied": True,
                             "reason": "вердикт разбора, вернувшегося после закрытия сегмента, "
                                       "перенесён в новую открытую строку",
+                            "rules": GATE_RULES_VERSION,
                             "provider": "carried", "model": None,
                             "tokens_in": 0, "tokens_out": 0,
                         },
@@ -1054,9 +1094,12 @@ async def _analyze_warning_claude(
             # Эпизод живёт и меряется, но помечен: из severity исключён,
             # копим статистику ложных срабатываний для тюнинга порогов
             try:
+                _hard_seen = {a.get("scenario") for a in struct.get("analytics_alarms", [])
+                              if passport_hard_seen(a)}
                 await online_db.set_episodes_gate_suppressed(
                     router_sn, equip_type, panel_id,
-                    [sc for sc in _alarm_scenarios if sc not in UNCANCELLABLE_SCENARIOS],
+                    [sc for sc in _alarm_scenarios
+                     if sc not in UNCANCELLABLE_SCENARIOS and sc not in _hard_seen],
                 )
             except Exception:
                 logger.warning("WarningGate: не удалось пометить эпизоды gate_suppressed",
@@ -1086,12 +1129,13 @@ async def _analyze_warning_claude(
 
         saved = None
         if analysis:
+            _wa_extra = {"rules": GATE_RULES_VERSION, "decision": decision, "applied": applied}
             saved = await online_db.save_segment_warning(
                 router_sn, equip_type, panel_id,
                 analysis_md=analysis,
                 fault_hash=fault_hash,
                 alarm_text=extract_alarm_text(struct),
-                segment_id=_seg_id, ts=_gate_ts,
+                segment_id=_seg_id, ts=_gate_ts, extra=_wa_extra,
             )
             # Разбор вернулся, когда открытая строка уже удалена циклом закрытия,
             # а закрытая ещё не вставлена — повторяем запись, а не вопрос модели
@@ -1104,7 +1148,7 @@ async def _analyze_warning_claude(
                     analysis_md=analysis,
                     fault_hash=fault_hash,
                     alarm_text=extract_alarm_text(struct),
-                    segment_id=_seg_id, ts=_gate_ts,
+                    segment_id=_seg_id, ts=_gate_ts, extra=_wa_extra,
                 )
             if not saved:
                 logger.warning("WarningGate: разбор НЕ СОХРАНЁН — сегмент на %s не найден "
@@ -1130,6 +1174,12 @@ async def _analyze_warning_claude(
                 "decision":         decision,
                 "decision_applied": applied,
                 "reason":           reason,
+                "rules":            GATE_RULES_VERSION,
+                "rejected_by":      rejected_by,
+                "panel_caution":    [{"codes": a.get("fault_codes"), "since": a.get("since"),
+                                      "fresh": a.get("fresh")}
+                                     for a in struct.get("panel_alarms", [])
+                                     if a.get("severity") == "CAUTION"],
                 "provider":         provider,
                 "model":            model,
                 "tokens_in":        tokens_in,

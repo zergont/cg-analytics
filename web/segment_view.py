@@ -215,7 +215,8 @@ def _seg_severity(
     dets = (_seg_active_dets(chars_json, active_dets_json)
             if stop_kind == "SIMPLE" else all_dets)
     if suppressed:
-        dets = [d for d in dets if d.get("scenario") == "CONTROLLER_FAULT"]
+        from online.status_assembler import level_dets
+        dets = level_dets(dets, True)   # режимные замечания гейт не снимает (v5.1.12)
     if not dets:
         return None
 
