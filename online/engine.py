@@ -2220,8 +2220,10 @@ class OnlinePollEngine:
             logger.exception("OnlineEngine[%s]: ошибка анализа [%s, %s]", self.key, t_from, t_to)
             return
 
-        # Сохранить характеристики открытого сегмента для верификации (до удаления)
-        _open_row = await online_db.get_open_segment(
+        # Снять открытую строку: удалить и получить снимок одним запросом (v5.1.13) —
+        # запись гейта/аварии между чтением и удалением больше не теряется молча.
+        # Характеристики — для верификации, записи гейта — разложим ниже
+        _open_row = await online_db.pop_open_segment(
             self.router_sn, self.equip_type, self.panel_id
         )
         _open_chars: dict | None = None
@@ -2235,13 +2237,8 @@ class OnlinePollEngine:
             elif isinstance(_raw, dict):
                 _open_chars = _raw
 
-        # Записи гейта удаляемой строки — разложим по закрытым сегментам ниже
+        # Записи гейта снятой строки — разложим по закрытым сегментам ниже
         _gate_state = _parse_gate_state(_open_row)
-
-        # Удалить старый открытый сегмент
-        await online_db.delete_open_segment(
-            self.router_sn, self.equip_type, self.panel_id
-        )
 
         if not segments:
             self.cursor_ts = _tz_utc(t_to)
@@ -2712,8 +2709,8 @@ class OnlinePollEngine:
         ]
         _rs_gate_state: dict | None = None
         if closed_segs:
-            # Сохранить характеристики открытого сегмента для верификации (до удаления)
-            _rs_open_row = await online_db.get_open_segment(
+            # Снять открытую строку одним запросом (v5.1.13, см. _close_window)
+            _rs_open_row = await online_db.pop_open_segment(
                 self.router_sn, self.equip_type, self.panel_id
             )
             _rs_open_chars: dict | None = None
@@ -2727,12 +2724,8 @@ class OnlinePollEngine:
                 elif isinstance(_raw_rs, dict):
                     _rs_open_chars = _raw_rs
 
-            # Записи гейта удаляемой строки — разложим по закрытым сегментам ниже
+            # Записи гейта снятой строки — разложим по закрытым сегментам ниже
             _rs_gate_state = _parse_gate_state(_rs_open_row)
-
-            await online_db.delete_open_segment(
-                self.router_sn, self.equip_type, self.panel_id
-            )
             # Первый закрытый сегмент в окне может быть продолжением после DAILY_BOUNDARY
             carry_continued_from = self.continued_from_id
             # Подсказка предка головы окна — цикл ниже перезаписывает _prev_seg_hint

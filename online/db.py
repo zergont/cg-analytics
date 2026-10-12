@@ -456,16 +456,26 @@ async def insert_closed_segment(data: dict[str, Any]) -> int:
         await conn.close()
 
 
-async def delete_open_segment(
+async def pop_open_segment(
     router_sn: str, equip_type: str, panel_id: int
-) -> None:
+) -> dict[str, Any] | None:
+    """Удалить открытую строку и вернуть её содержимое — одним запросом (v5.1.13).
+
+    Раньше закрытие окна читало строку и отдельным запросом удаляло её: разбор
+    гейта или аварии, записанный между этими шагами, получал «UPDATE 1» и
+    пропадал вместе со строкой — тихая потеря. Теперь (READ COMMITTED) запись,
+    успевшая до удаления, попадает в снимок, а запись после — получает «UPDATE 0»
+    и повторяется писателем (он найдёт закрытый сегмент по времени).
+    """
     conn = await _connect()
     try:
-        await conn.execute("""
+        row = await conn.fetchrow("""
             DELETE FROM auto_segments
             WHERE router_sn=$1 AND equip_type=$2 AND panel_id=$3
               AND t_end IS NULL
+            RETURNING *
         """, router_sn, equip_type, panel_id)
+        return dict(row) if row else None
     finally:
         await conn.close()
 
@@ -976,13 +986,14 @@ async def set_segment_gate_suppression(
         )
         if seg_id is None:
             return False
-        await conn.execute("""
+        status = await conn.execute("""
             UPDATE auto_segments
             SET gate_suppressed_hash = $2,
                 updated_at           = now()
             WHERE id = $1
         """, seg_id, suppressed_hash)
-        return True
+        # Строку удалили между поиском и записью (цикл закрытия) — не записано (v5.1.13)
+        return status != "UPDATE 0"
     finally:
         await conn.close()
 

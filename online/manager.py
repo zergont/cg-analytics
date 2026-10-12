@@ -735,8 +735,10 @@ def _analyzed_hashes(seg: dict) -> set[str]:
     if not isinstance(raw, list):
         return set()
     from online.status_assembler import GATE_RULES_VERSION
+    # Разбор, чьё снятие не записалось (v5.1.13), — не «разобран»: после паузы
+    # состав спросят снова, иначе снятие пропало бы насовсем
     return {a.get("fault_hash") for a in raw if isinstance(a, dict) and a.get("fault_hash")
-            and a.get("rules") == GATE_RULES_VERSION}
+            and a.get("rules") == GATE_RULES_VERSION and not a.get("not_written")}
 # Повтор записи разбора, вернувшегося в окно между удалением открытой строки и
 # вставкой закрытой (цикл закрытия)
 _GATE_SAVE_RETRIES = 3
@@ -1039,17 +1041,21 @@ async def _analyze_warning_claude(
             logger.warning("WarningGate: cancel отклонён — %s (%s/%s/%s)",
                            "; ".join(r["text"] for r in reasons),
                            router_sn, equip_type, panel_id)
-        # Факты рядом с мнением: панель, паспорт, применён ли вердикт
-        if analysis:
-            analysis = gate_facts_md(struct, decision, applied, reasons) + analysis
-
+        _supp_written = False
         if applied:
             _supp_hash = compute_analytics_hash(struct.get("analytics_alarms", []))
-            if not await online_db.set_segment_gate_suppression(
-                router_sn, equip_type, panel_id,
-                suppressed_hash=_supp_hash,
-                segment_id=_seg_id, ts=_gate_ts,
-            ):
+            # Окно цикла закрытия (строка снята, закрытая ещё не вставлена) —
+            # повтор записи, а не вопрос модели (v5.1.13)
+            for _i in range(_GATE_SAVE_RETRIES + 1):
+                _supp_written = await online_db.set_segment_gate_suppression(
+                    router_sn, equip_type, panel_id,
+                    suppressed_hash=_supp_hash,
+                    segment_id=_seg_id, ts=_gate_ts,
+                )
+                if _supp_written or _i == _GATE_SAVE_RETRIES:
+                    break
+                await asyncio.sleep(_GATE_SAVE_RETRY_SEC)
+            if not _supp_written:
                 logger.warning("WarningGate: вердикт «отменить» не записан — сегмент "
                                "на %s не найден (%s/%s/%s)",
                                _gate_ts.isoformat(), router_sn, equip_type, panel_id)
@@ -1060,76 +1066,98 @@ async def _analyze_warning_claude(
             try:
                 _cur = await online_db.get_open_segment(router_sn, equip_type, panel_id)
                 if _cur and _cur.get("id") != _seg_id:
+                    # Куда легли (лягут) разбор и журнал этого вызова — по тому же
+                    # (сегмент, момент); уже текущая строка — отметка «перенос» дублировала бы
+                    _landed = await online_db.resolve_segment_id(
+                        router_sn, equip_type, panel_id, _seg_id, _gate_ts)
                     _now = datetime.now(timezone.utc)
-                    await online_db.set_segment_gate_suppression(
+                    if await online_db.set_segment_gate_suppression(
                         router_sn, equip_type, panel_id,
                         suppressed_hash=_supp_hash, segment_id=_cur["id"], ts=_now,
-                    )
+                    ):
+                        _supp_written = True
                     # И отметку в журнал новой строки: повтор этого состава в ней
                     # должен снова применить снятие (_cancelled_hashes), а сама
                     # запись разбора легла в закрытый кусок (ревью v5.1.9)
-                    await online_db.append_segment_gate_event(
-                        router_sn, equip_type, panel_id, segment_id=_cur["id"], ts=_now,
-                        event={
-                            "ts": _now.isoformat(), "fault_hash": fault_hash,
-                            "severity_level": struct.get("severity_level"),
-                            "panel_severity": struct.get("panel_severity"),
-                            "analytics_severity": struct.get("analytics_severity"),
-                            "alarms": [{"scenario": a.get("scenario"), "severity": a.get("severity"),
-                                        "fault_codes": a.get("fault_codes"),
-                                        "description": a.get("description")}
-                                       for a in struct.get("panel_alarms", [])
-                                       + struct.get("analytics_alarms", [])],
-                            "decision": "cancel", "decision_applied": True,
-                            "reason": "вердикт разбора, вернувшегося после закрытия сегмента, "
-                                      "перенесён в новую открытую строку",
-                            "rules": GATE_RULES_VERSION,
-                            "provider": "carried", "model": None,
-                            "tokens_in": 0, "tokens_out": 0,
-                        },
-                    )
+                    if _landed != _cur.get("id"):
+                        await online_db.append_segment_gate_event(
+                            router_sn, equip_type, panel_id, segment_id=_cur["id"], ts=_now,
+                            event={
+                                "ts": _now.isoformat(), "fault_hash": fault_hash,
+                                "severity_level": struct.get("severity_level"),
+                                "panel_severity": struct.get("panel_severity"),
+                                "analytics_severity": struct.get("analytics_severity"),
+                                "alarms": [{"scenario": a.get("scenario"), "severity": a.get("severity"),
+                                            "fault_codes": a.get("fault_codes"),
+                                            "description": a.get("description")}
+                                           for a in struct.get("panel_alarms", [])
+                                           + struct.get("analytics_alarms", [])],
+                                "decision": "cancel", "decision_applied": True,
+                                "reason": "вердикт разбора, вернувшегося после закрытия сегмента, "
+                                          "перенесён в новую открытую строку",
+                                "rules": GATE_RULES_VERSION,
+                                "provider": "carried", "model": None,
+                                "tokens_in": 0, "tokens_out": 0,
+                            },
+                        )
             except Exception:
                 logger.warning("WarningGate: вердикт не перенесён в новую открытую строку",
                                exc_info=True)
-            # Эпизод живёт и меряется, но помечен: из severity исключён,
-            # копим статистику ложных срабатываний для тюнинга порогов
-            try:
-                _hard_seen = {a.get("scenario") for a in struct.get("analytics_alarms", [])
-                              if passport_hard_seen(a)}
-                await online_db.set_episodes_gate_suppressed(
-                    router_sn, equip_type, panel_id,
-                    [sc for sc in _alarm_scenarios
-                     if sc not in UNCANCELLABLE_SCENARIOS and sc not in _hard_seen],
-                )
-            except Exception:
-                logger.warning("WarningGate: не удалось пометить эпизоды gate_suppressed",
-                               exc_info=True)
-            # Вердикт лёг в уже закрытый сегмент — пересчитать его сводку: её
-            # части (единый вердикт) заморожены при закрытии. Только после
-            # пометки эпизодов: сегмент, закрывшийся между ними, собрал сводку
-            # по непомеченным; закрывшийся после — уже по помеченным (пересчёт
-            # тогда ничего не меняет)
-            try:
-                _cur = await online_db.get_open_segment(router_sn, equip_type, panel_id)
-                _landed = await online_db.resolve_segment_id(
-                    router_sn, equip_type, panel_id, _seg_id, _gate_ts)
-                if _landed is not None and (_cur is None or _landed != _cur.get("id")):
-                    _changed, _lvl_changed = await online_db.apply_late_gate_suppression(
-                        _landed, _alarm_scenarios)
-                    if _changed:
-                        logger.info("WarningGate: сводка закрытого сегмента %s пересчитана "
-                                    "после поздней отмены%s", _landed,
-                                    " — вердикт сменился, заключение перезаказано"
-                                    if _lvl_changed else "")
-                    if _lvl_changed:
-                        _enqueue_segment(_landed, again=True)
-            except Exception:
-                logger.warning("WarningGate: сводка закрытого сегмента не пересчитана",
-                               exc_info=True)
+            # Снятие, которое не удалось записать ни в одну строку, — не применено:
+            # журнал и разбор не врут, эпизоды не помечаются, состав разберут
+            # снова после паузы (v5.1.13)
+            if not _supp_written:
+                applied = False
+                rejected_by = ["not_written"]
+                reasons = reasons + [{"code": "not_written",
+                                      "text": "снятие не записано — сегмент не найден"}]
+            if _supp_written:
+                # Эпизод живёт и меряется, но помечен: из severity исключён,
+                # копим статистику ложных срабатываний для тюнинга порогов
+                try:
+                    _hard_seen = {a.get("scenario") for a in struct.get("analytics_alarms", [])
+                                  if passport_hard_seen(a)}
+                    await online_db.set_episodes_gate_suppressed(
+                        router_sn, equip_type, panel_id,
+                        [sc for sc in _alarm_scenarios
+                         if sc not in UNCANCELLABLE_SCENARIOS and sc not in _hard_seen],
+                    )
+                except Exception:
+                    logger.warning("WarningGate: не удалось пометить эпизоды gate_suppressed",
+                                   exc_info=True)
+                # Вердикт лёг в уже закрытый сегмент — пересчитать его сводку: её
+                # части (единый вердикт) заморожены при закрытии. Только после
+                # пометки эпизодов: сегмент, закрывшийся между ними, собрал сводку
+                # по непомеченным; закрывшийся после — уже по помеченным (пересчёт
+                # тогда ничего не меняет)
+                try:
+                    _cur = await online_db.get_open_segment(router_sn, equip_type, panel_id)
+                    _landed = await online_db.resolve_segment_id(
+                        router_sn, equip_type, panel_id, _seg_id, _gate_ts)
+                    if _landed is not None and (_cur is None or _landed != _cur.get("id")):
+                        _changed, _lvl_changed = await online_db.apply_late_gate_suppression(
+                            _landed, _alarm_scenarios)
+                        if _changed:
+                            logger.info("WarningGate: сводка закрытого сегмента %s пересчитана "
+                                        "после поздней отмены%s", _landed,
+                                        " — вердикт сменился, заключение перезаказано"
+                                        if _lvl_changed else "")
+                        if _lvl_changed:
+                            _enqueue_segment(_landed, again=True)
+                except Exception:
+                    logger.warning("WarningGate: сводка закрытого сегмента не пересчитана",
+                                   exc_info=True)
+
+        # Факты рядом с мнением: панель, паспорт, применён ли вердикт (после
+        # записи снятия — «применён» значит записан, v5.1.13)
+        if analysis:
+            analysis = gate_facts_md(struct, decision, applied, reasons) + analysis
 
         saved = None
         if analysis:
             _wa_extra = {"rules": GATE_RULES_VERSION, "decision": decision, "applied": applied}
+            if "not_written" in rejected_by:
+                _wa_extra["not_written"] = True
             saved = await online_db.save_segment_warning(
                 router_sn, equip_type, panel_id,
                 analysis_md=analysis,
@@ -1156,11 +1184,9 @@ async def _analyze_warning_claude(
                                _gate_ts.isoformat(), router_sn, equip_type, panel_id,
                                len(analysis))
 
-        # Обязательный журнал гейта — пишется при любом исходе
-        _logged = await online_db.append_segment_gate_event(
-            router_sn, equip_type, panel_id,
-            segment_id=_seg_id, ts=_gate_ts,
-            event={
+        # Обязательный журнал гейта — пишется при любом исходе; окно цикла
+        # закрытия — повтор записи (v5.1.13)
+        _gate_event = {
                 "ts":                 _gate_ts.isoformat(),
                 "fault_hash":         fault_hash,
                 "severity_level":     struct.get("severity_level"),
@@ -1184,16 +1210,27 @@ async def _analyze_warning_claude(
                 "model":            model,
                 "tokens_in":        tokens_in,
                 "tokens_out":       tokens_out,
-            },
-        )
+        }
+        _logged = False
+        for _i in range(_GATE_SAVE_RETRIES + 1):
+            _logged = await online_db.append_segment_gate_event(
+                router_sn, equip_type, panel_id,
+                segment_id=_seg_id, ts=_gate_ts, event=_gate_event,
+            )
+            if _logged or _i == _GATE_SAVE_RETRIES:
+                break
+            await asyncio.sleep(_GATE_SAVE_RETRY_SEC)
         logger.info("WarningGate: %s/%s/%s — decision=%s applied=%s (%d симв. анализа, "
                     "разбор=%s, журнал=%s)",
                     router_sn, equip_type, panel_id, decision, applied, len(analysis or ""),
                     "сохранён" if saved else ("нет" if analysis else "—"),
                     "записан" if _logged else "ПОТЕРЯН")
         # Ответ есть, а записать некуда — разбор потерян: не «разобрано», а пауза
-        # и повтор (иначе потерянный разбор не повторился бы до смены состава)
-        return GATE_FAILED if (analysis and not saved) else GATE_OK
+        # и повтор (иначе потерянный разбор не повторился бы до смены состава).
+        # Так же — снятие, которое не записалось (v5.1.13)
+        if (analysis and not saved) or "not_written" in rejected_by:
+            return GATE_FAILED
+        return GATE_OK
 
     except asyncio.CancelledError:
         logger.warning("WarningGate: разбор снят для %s/%s/%s (задача шлюза %s)",
