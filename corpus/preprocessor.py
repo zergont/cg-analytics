@@ -460,10 +460,14 @@ def _remarks_from_summary(segment_row: dict) -> str | None:
         elif k:
             tags.append(f"снято ИИ: {k} из {n}")
         u = g.get("unconfirmed") or 0
+        at = ", ".join(g.get("unconfirmed_at") or [])
+        at = f" ({at})" if at else ""
         if u and u >= n - k:
-            tags.append("по живым данным, итоговым расчётом не подтверждено")
+            tags.append(f"только по живым данным{at}: в отчёте ниже этого эпизода нет, "
+                        f"итоговым расчётом не подтверждён, в вердикт не входит")
         elif u:
-            tags.append(f"не подтверждено итоговым расчётом: {u} из {n}")
+            tags.append(f"ещё {u} из {n} — только по живым данным{at}: в отчёте ниже их нет, "
+                        f"итоговым расчётом не подтверждены, в вердикт не входят")
         if g.get("at_end"):
             tags.append("активно на конец")
         items.append(f"{g.get('name')} [{', '.join(tags)}]")

@@ -395,6 +395,24 @@ def _chain_link(i: int, continued_from_id, prev_hint, seg):
     return continued_from_id if prev_rs is None or prev_rs == seg.run_state else None
 
 
+def _origin_by_rs(inh: dict[int, float] | None, head) -> datetime | None:
+    """Начало состояния головы окна по накопленному времени её режима.
+
+    Тот же источник, что строка отчёта «с начала состояния»: ссылки
+    continued_from, записанные до v5.1.6, рвутся (35765 без предка — «с пуска»
+    считалось от 10.10 09:00 вместо пуска 09.10 15:01, v5.1.9).
+    """
+    if head is None:
+        return None
+    sec = float((inh or {}).get(getattr(head, "run_state", None)) or 0.0)
+    if sec <= 0:
+        return None
+    try:
+        return _tz_utc(datetime.fromisoformat(head.t_start)) - timedelta(seconds=sec)
+    except (TypeError, ValueError):
+        return None
+
+
 def _rs_carry(inh: dict[int, float] | None, rs: int | None) -> dict[int, float]:
     """Унаследованное время только режима сегмента: переход внутри обрыва связи
     на суточной границе не должен тащить в отчёт время чужого режима (35690:
@@ -1934,6 +1952,22 @@ class OnlinePollEngine:
 
     # ── Закрытие окна (DAILY_BOUNDARY) ────────────────────────────────────────
 
+    def _fill_coking_accum_end(self, t_from: datetime) -> None:
+        """Конец накопления нагара, если в перенесённом состоянии его нет (v5.1.9).
+
+        Цепочка ДГУ №2 перенесена из JSON до v5.1.3 без last_accum_ts: «Перед
+        пуском» печаталось без «по DD.MM», и модель приняла дату прожига за дату
+        работы («риск накопился с последней работы 06.07»). Машина стоит —
+        накопление закончилось не позже начала стоянки.
+        """
+        cr = self.inherited_coking_risk
+        if cr is None or cr.last_accum_ts or float(cr.debt_sec or 0) <= 0:
+            return
+        sec = float((self.inherited_run_state_sec or {}).get(0) or 0)
+        if sec <= 0:
+            return
+        cr.last_accum_ts = (_tz_utc(t_from) - timedelta(seconds=sec)).isoformat()
+
     async def _close_window(
         self,
         t_from: datetime,
@@ -1941,6 +1975,7 @@ class OnlinePollEngine:
         close_reason: str,
     ) -> None:
         """Запустить полный анализ [t_from, t_to], сохранить все сегменты как закрытые."""
+        self._fill_coking_accum_end(t_from)
         if t_to <= t_from:
             return
 
@@ -2005,9 +2040,13 @@ class OnlinePollEngine:
         # Предок головы окна — для ссылки цепочки (до того как цикл сдвинет подсказку)
         _prev_hint_i0 = self._prev_seg_hint
 
-        # Вычислить начало текущего непрерывного запуска (для счётчика «с пуска»)
-        chain_origin_ts: datetime | None = None
-        if self.continued_from_id is not None:
+        # Вычислить начало текущего непрерывного запуска (для счётчика «с пуска»):
+        # по накопленному времени режима, запасной путь — цепочка continued_from
+        chain_origin_ts: datetime | None = (
+            _origin_by_rs(self.inherited_run_state_sec, segments[0] if segments else None)
+            if self.continued_from_id is not None else None
+        )
+        if self.continued_from_id is not None and chain_origin_ts is None:
             try:
                 _origin = await online_db.get_run_state_origin_ts(self.continued_from_id)
                 chain_origin_ts = _tz_utc(_origin) if _origin else None
@@ -2278,6 +2317,7 @@ class OnlinePollEngine:
         """Запустить анализ открытого окна, обновить открытый сегмент в БД."""
         if t_to <= t_from:
             return
+        self._fill_coking_accum_end(t_from)
 
         from analytics.runner import ANALYTICS_VERSION
 
@@ -2419,9 +2459,13 @@ class OnlinePollEngine:
         if not segments:
             return
 
-        # Вычислить начало текущего непрерывного запуска (для счётчика «с пуска»)
-        chain_origin_ts: datetime | None = None
-        if self.continued_from_id is not None:
+        # Вычислить начало текущего непрерывного запуска (для счётчика «с пуска»):
+        # по накопленному времени режима, запасной путь — цепочка continued_from
+        chain_origin_ts: datetime | None = (
+            _origin_by_rs(self.inherited_run_state_sec, segments[0] if segments else None)
+            if self.continued_from_id is not None else None
+        )
+        if self.continued_from_id is not None and chain_origin_ts is None:
             try:
                 _origin = await online_db.get_run_state_origin_ts(self.continued_from_id)
                 chain_origin_ts = _tz_utc(_origin) if _origin else None

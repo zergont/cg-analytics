@@ -486,6 +486,14 @@ class OnlineManager:
                 )
 
                 if already_analyzed:
+                    # Состав уже разобран в этой строке. Если тогда его сняли, а
+                    # снятие с тех пор перезаписал разбор другого состава (хеш снятия
+                    # в строке один — последний), применить прежний cancel заново,
+                    # без вопроса модели. Без этого дедуп разборов превращал cancel в
+                    # pass: ДЭС №3 12.10 — 2 эпизода порога живыми, «ЗАМЕЧАНИЯ — 4»
+                    # вместо 2 (v5.1.9)
+                    if fault_hash in _cancelled_hashes(seg):
+                        await self._reapply_cancel(engine, seg, struct, fault_hash)
                     continue
 
                 # Трекер стабилизации: ждём 1 минуту без изменения fault-кодов
@@ -531,6 +539,61 @@ class OnlineManager:
 
             except Exception:
                 logger.exception("StatusScheduler: ошибка для %s", key)
+
+    async def _reapply_cancel(self, engine, seg: dict, struct: dict, fault_hash: str) -> None:
+        """Применить заново вердикт «отменить» к составу, уже снятому в этой строке.
+
+        Условия те же, что у гейта (gate_can_cancel); если хеш снятия строки уже
+        этот — ничего не делаем (защита от повтора на каждом тике).
+        """
+        from online.status_assembler import (
+            UNCANCELLABLE_SCENARIOS, compute_analytics_hash, gate_can_cancel,
+        )
+        if struct.get("analytics_suppressed") or not gate_can_cancel(struct):
+            return
+        alarms = struct.get("analytics_alarms") or []
+        supp = compute_analytics_hash(alarms)
+        if not alarms or seg.get("gate_suppressed_hash") == supp:
+            return
+        r, e, p = engine.router_sn, engine.equip_type, engine.panel_id
+        now = datetime.now(timezone.utc)
+        try:
+            if not await online_db.set_segment_gate_suppression(
+                    r, e, p, suppressed_hash=supp, segment_id=seg.get("id"), ts=now):
+                return
+            await online_db.set_episodes_gate_suppressed(
+                r, e, p,
+                [a.get("scenario") for a in alarms
+                 if a.get("scenario") and a.get("scenario") not in UNCANCELLABLE_SCENARIOS],
+            )
+            await online_db.append_segment_gate_event(
+                r, e, p, segment_id=seg.get("id"), ts=now,
+                event={
+                    "ts":                 now.isoformat(),
+                    "fault_hash":         fault_hash,
+                    "severity_level":     struct.get("severity_level"),
+                    "panel_severity":     struct.get("panel_severity"),
+                    "analytics_severity": struct.get("analytics_severity"),
+                    "alarms": [
+                        {"scenario": a.get("scenario"), "severity": a.get("severity"),
+                         "fault_codes": a.get("fault_codes"), "description": a.get("description")}
+                        for a in struct.get("panel_alarms", []) + alarms
+                    ],
+                    "decision":         "cancel",
+                    "decision_applied": True,
+                    "reason":           "повтор состава, снятого ранее в этом сегменте, — "
+                                        "снятие применено без нового разбора",
+                    "provider":         "repeat",
+                    "model":            None,
+                    "tokens_in":        0,
+                    "tokens_out":       0,
+                },
+            )
+            logger.info("WarningGate: %s/%s/%s — повтор снятого состава %s, снятие применено "
+                        "заново", r, e, p, fault_hash)
+        except Exception:
+            logger.warning("WarningGate: не удалось заново применить снятие %s", fault_hash,
+                           exc_info=True)
 
     async def _run_gate(self, key: str, ikey: tuple[str, str], engine,
                         struct: dict, fault_hash: str) -> None:
@@ -609,6 +672,24 @@ _GATE_TIMEOUT_SEC = 3 * 3600
 _GATE_RETRY_AFTER_SEC = 15 * 60
 # Сколько разобранных составов помнить на машину
 _GATE_DONE_KEEP = 32
+
+
+def _gate_log(seg: dict) -> list:
+    raw = seg.get("gate_log")
+    if isinstance(raw, str):
+        try:
+            import json as _json
+            raw = _json.loads(raw)
+        except ValueError:
+            return []
+    return raw if isinstance(raw, list) else []
+
+
+def _cancelled_hashes(seg: dict) -> set[str]:
+    """Составы, по которым в этой строке был применён вердикт «отменить» (gate_log)."""
+    return {e.get("fault_hash") for e in _gate_log(seg)
+            if isinstance(e, dict) and e.get("decision") == "cancel"
+            and e.get("decision_applied") and e.get("fault_hash")}
 
 
 def _analyzed_hashes(seg: dict) -> set[str]:
@@ -941,10 +1022,32 @@ async def _analyze_warning_claude(
             try:
                 _cur = await online_db.get_open_segment(router_sn, equip_type, panel_id)
                 if _cur and _cur.get("id") != _seg_id:
+                    _now = datetime.now(timezone.utc)
                     await online_db.set_segment_gate_suppression(
                         router_sn, equip_type, panel_id,
-                        suppressed_hash=_supp_hash, segment_id=_cur["id"],
-                        ts=datetime.now(timezone.utc),
+                        suppressed_hash=_supp_hash, segment_id=_cur["id"], ts=_now,
+                    )
+                    # И отметку в журнал новой строки: повтор этого состава в ней
+                    # должен снова применить снятие (_cancelled_hashes), а сама
+                    # запись разбора легла в закрытый кусок (ревью v5.1.9)
+                    await online_db.append_segment_gate_event(
+                        router_sn, equip_type, panel_id, segment_id=_cur["id"], ts=_now,
+                        event={
+                            "ts": _now.isoformat(), "fault_hash": fault_hash,
+                            "severity_level": struct.get("severity_level"),
+                            "panel_severity": struct.get("panel_severity"),
+                            "analytics_severity": struct.get("analytics_severity"),
+                            "alarms": [{"scenario": a.get("scenario"), "severity": a.get("severity"),
+                                        "fault_codes": a.get("fault_codes"),
+                                        "description": a.get("description")}
+                                       for a in struct.get("panel_alarms", [])
+                                       + struct.get("analytics_alarms", [])],
+                            "decision": "cancel", "decision_applied": True,
+                            "reason": "вердикт разбора, вернувшегося после закрытия сегмента, "
+                                      "перенесён в новую открытую строку",
+                            "provider": "carried", "model": None,
+                            "tokens_in": 0, "tokens_out": 0,
+                        },
                     )
             except Exception:
                 logger.warning("WarningGate: вердикт не перенесён в новую открытую строку",

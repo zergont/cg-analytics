@@ -166,6 +166,8 @@ def to_json(
 # ── Markdown ──────────────────────────────────────────────────────────────────
 
 _SEV_RANK_MD = {"SHUTDOWN": 4, "WARNING": 3, "CAUTION": 2, "INFO": 1}
+# Сырые уровни масок панели в журнале (fault_bitmap_map)
+_RAW_SEV_EMOJI = {"shutdown": "🔴", "shutdown_cooldown": "🔴", "warning": "🟠", "derate": "🟠"}
 _SRC_RU = {"panel": "панель", "analytics": "аналитика"}
 
 
@@ -176,6 +178,21 @@ _LEVEL_RANK = {"НОРМА": 0, "CAUTION": 1, "WARNING": 2, "SHUTDOWN": 3}
 
 
 _COKING_LEVEL_RU = {"GREEN": "низкий", "YELLOW": "повышенный", "RED": "высокий"}
+
+
+def _fmt_span_dm(t_open, t_close, tz=None) -> str:
+    """«11.10 20:55–21:01» (через сутки — с датой конца), открытый — «с 11.10 20:55»."""
+    a = _dt(t_open)
+    b = _dt(t_close)
+    if a is None:
+        return "?"
+    if tz is not None:
+        a = a.astimezone(tz)
+        b = b.astimezone(tz) if b is not None else None
+    if b is None:
+        return "с " + a.strftime("%d.%m %H:%M")
+    end = b.strftime("%H:%M") if b.date() == a.date() else b.strftime("%d.%m %H:%M")
+    return f"{a.strftime('%d.%m %H:%M')}–{end}"
 
 
 def _fmt_dm(iso: str | None, tz=None) -> str | None:
@@ -697,7 +714,7 @@ def build_summary_parts(
             "scenario": e.get("scenario"),
             "sev_rank": 0, "severity": e.get("severity"),
             "count": 0, "active_sec": 0.0, "blind_sec": 0.0,
-            "suppressed": 0, "unconfirmed": 0, "open": 0, "open_live": 0,
+            "suppressed": 0, "unconfirmed": 0, "unconfirmed_at": [], "open": 0, "open_live": 0,
             "before": False, "appeared": False, "at_end": False, "_iv": [], "_on": {},
         })
         g["count"] += 1
@@ -705,6 +722,9 @@ def build_summary_parts(
         _unconf = not e.get("gate_suppressed") and not _confirmed(e)
         if _unconf:
             g["unconfirmed"] += 1
+            # Время — обязательно: в отчёте такого эпизода нет, и без времени модель
+            # приписала пометку единственной видимой детекции (35771, 12.10)
+            g["unconfirmed_at"].append(_fmt_span_dm(e.get("t_open"), e.get("t_close"), tz))
         _to, _tc = _dt(e.get("t_open")), _dt(e.get("t_close"))
         if w0 is not None and w1 is not None and _to is not None:
             _end = min(_tc or w1, w1)
@@ -755,7 +775,10 @@ def build_summary_parts(
         before = sorted(t for t in ons if t < w0)
         if before:
             g["total_sec"] = _iv_len(_merge_iv([(t, ons[t]["end"]) for t in ons]))
-            g["total_blind_sec"] = sum(ons[t]["blind"] for t in before)
+            # По всем онсетам, как total_sec, и не меньше слепой доли за период:
+            # период входит в «с начала» (ревью v5.1.9)
+            g["total_blind_sec"] = max(sum(o["blind"] for o in ons.values()),
+                                       g.get("period_blind_sec") or 0.0)
             g["since"] = before[0].isoformat()
             g["since_text"] = _fmt_dm(g["since"], tz)
     remarks = sorted(groups.values(),
@@ -949,8 +972,11 @@ def render_summary_md(parts: dict[str, Any]) -> str:
                 line = (f"- {emoji} **{g['name']}** [{src_ru}]: {n} {_eps_ru(n)}, "
                         f"воздействие за период {_fmt_duration(g['period_sec'])}")
                 if g.get("since"):
+                    _tb = g.get("total_blind_sec") or 0
                     line += (f" (с начала {_fmt_duration(g['total_sec'])} — "
-                             f"с {g.get('since_text') or g['since']})")
+                             f"с {g.get('since_text') or g['since']}"
+                             + (f", из них {_fmt_duration(_tb)} без связи" if _tb >= 1 else "")
+                             + ")")
                 # Слепая доля — обязательная оговорка: внутри неё мог быть сброс
                 if g.get("period_blind_sec", 0) >= 1:
                     line += (f"; из них {_fmt_duration(g['period_blind_sec'])} без связи — "
@@ -966,9 +992,11 @@ def render_summary_md(parts: dict[str, Any]) -> str:
                          else f" — *снято ИИ: {g['suppressed']} из {g['count']}*")
             _u = g.get("unconfirmed") or 0
             if _u:
-                line += (" — *по живым данным, в итоговом расчёте не подтверждено*"
+                _at = ", ".join(g.get("unconfirmed_at") or [])
+                _at = f" ({_at})" if _at else ""
+                line += (f" — *по живым данным{_at}, в итоговом расчёте не подтверждено*"
                          if _u == g["count"] - (g["suppressed"] or 0)
-                         else f" — *в итоговом расчёте не подтверждено: {_u} из {g['count']}*")
+                         else f" — *в итоговом расчёте не подтверждено: {_u} из {g['count']}{_at}*")
             # То же, что end_level и шапка ИИ: снятое ИИ и снятое панелью к концу не висит
             if g.get("at_end", g["open"] and not g["suppressed"]):
                 line += " — **активен на конец периода**"
@@ -1502,13 +1530,21 @@ def _append_segment(
     if seg.events:
         a("**События журнала:**")
         a("")
+        _seg_end_dt = _dt(seg.t_end)
         for ev in seg.events:
             sev = ev.get("severity") or "?"
             name = ev.get("name_ru") or ev.get("name") or "Unknown"
             t = fmt_ts(ev.get("t"))
             dur = ev.get("duration_sec")
             dur_s = f" ({_fmt_duration(dur)})" if dur else ""
-            a(f"- {_SEVERITY_EMOJI.get(sev, '')} `{name}` @ {t}{dur_s}")
+            emo = _SEVERITY_EMOJI.get(sev) or _RAW_SEV_EMOJI.get(str(sev).lower(), "")
+            _fe = _dt(ev.get("fault_end"))
+            # Строго: снятая ровно на конце (рез SHUTDOWN_CLEARED, смена режима в
+            # одном кадре) — уже не активна, как в segmenter._active_at_end
+            live = ev.get("type") == "FAULT" and (
+                _fe is None or (_seg_end_dt is not None and _fe > _seg_end_dt))
+            a(f"- {emo + ' ' if emo else ''}`{name}` @ {t}{dur_s}"
+              + (" — **активно на конец периода**" if live else ""))
         a("")
 
     # Активные неисправности + несброшенный код 40012 + коды из обнаружений
@@ -1527,8 +1563,10 @@ def _append_segment(
             rank = _raw_rank.get((ev.get("severity") or "").lower())
             if rank is None:
                 continue
-            fe = ev.get("fault_end")
-            if fe is not None and seg.t_end is not None and fe < seg.t_end:
+            # Снятая к концу сегмента или ровно на нём — не «не сброшена»
+            # (сравнение строк ISO давало «не сброшена» снятой на резе маске)
+            _fe_a, _te_a = _dt(ev.get("fault_end")), _dt(seg.t_end)
+            if _fe_a is not None and _te_a is not None and _fe_a <= _te_a:
                 continue
             active_bits.append((rank, ev))
         active_bits.sort(key=lambda x: (x[0], x[1].get("t") or ""))
@@ -1725,7 +1763,7 @@ def _append_subsegment(
             mn = _fmt_val(ch.get("min"), dec)
             mx = _fmt_val(ch.get("max"), dec)
             slope = _fmt_val(ch.get("slope"))
-            unit = ch.get("unit", "")
+            unit = ch.get("unit") or ""
             a(f"| {role} | {unit} | {med} | {mn} | {mx} | {slope} |")
         a("")
 

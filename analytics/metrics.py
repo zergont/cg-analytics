@@ -116,7 +116,7 @@ def compute_characteristics(
         if meta.get("kind") != "analog":
             continue
         role = meta.get("role", f"addr_{addr}")
-        unit = meta.get("unit", "")
+        unit = meta.get("unit") or ""
 
         # Все валидные значения в окне (включая forward-fill) — для агрегатов.
         # Только реальные измерения (is_carried_forward=False) — для slope/тренда.
@@ -506,7 +506,10 @@ def compute_derived_metrics(
     _rpm_vals = [v for _, v in rpm_for_freq_gate]
     _rpm_max = max(_rpm_vals) if _rpm_vals else 0.0
     _rpm_min = min(_rpm_vals) if _rpm_vals else 0.0
-    rpm_stays_working = (_rpm_max <= 0 or _rpm_min >= _rpm_max * rpm_min_pct / 100)
+    # Обороты есть и все ≤ 0 — двигатель стоит: переходных процессов нет (у стопа
+    # выходило «провал частоты 100 %»); ряда оборотов нет вовсе — считать как прежде
+    rpm_stays_working = (not _rpm_vals) or (
+        _rpm_max > 0 and _rpm_min >= _rpm_max * rpm_min_pct / 100)
 
     if rpm_stays_working:
         freq_dip_pct, freq_rise_pct, freq_recovery_sec = _freq_transient_metrics(

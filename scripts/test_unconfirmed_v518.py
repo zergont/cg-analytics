@@ -85,7 +85,7 @@ check(oil and not oil["unconfirmed"] and cf and cf["unconfirmed"] == 1,
 check(p["verdict"]["level"] == "CAUTION" and p["verdict"]["remarks_n"] == 1
       and p["verdict"]["unconfirmed_n"] == 1, f"1б: в вердикте только подтверждённый: {p['verdict']}")
 md = render_summary_md(p)
-check("ЗАМЕЧАНИЯ К РАБОТЕ — 1" in md and "по живым данным, в итоговом расчёте не подтверждено" in md,
+check("ЗАМЕЧАНИЯ К РАБОТЕ — 1" in md and "по живым данным (" in md and "в итоговом расчёте не подтверждено" in md,
       f"1в: пометка в md:\n{md}")
 check(p["remarks"][0]["scenario"] == "OIL_DILUTION", "1г: неподтверждённое — ниже живого")
 
@@ -118,7 +118,7 @@ check(not grp(p, "OIL_DILUTION")["unconfirmed"] and not grp(p, "CONTROLLER_FAULT
 # 6. Вход модели: пометка в шапке
 p = parts([ep("OIL_DILUTION", 10, 40), ep("COOLING_FAILURE", 70, 76)])
 r = _remarks_from_summary({"report_summary_json": p})
-check("итоговым расчётом не подтверждено" in (r or ""), f"6: шапка корпуса: {r}")
+check("только по живым данным" in (r or "") and "в отчёте ниже" in (r or ""), f"6: шапка корпуса: {r}")
 
 # 6б. Проверки перехода не сверяются: итоговый расчёт стопа начинается с его головы
 # и работы перед ним не видит (35610: настоящее «без охлаждения» выпало бы из вердикта)

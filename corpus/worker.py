@@ -348,8 +348,10 @@ async def _analyse_segment_llm(seg_row: dict, system_prompt: str,
 
 # ── Цепочка приоритетов моделей ───────────────────────────────────────────────
 
-# Оценка размера промпта: ~3 символа на токен для русского текста (консервативно)
-_EST_CHARS_PER_TOKEN = 3
+# Оценка размера промпта: по ответам шлюза русский текст с markdown-таблицами —
+# 1,75–2,1 символа на токен (21 разбор, 12.10); прежние 3 занижали вход в 1,4–1,7
+# раза — выбор модели по окну мог отправить его в модель с меньшим контекстом
+_EST_CHARS_PER_TOKEN = 1.7
 # Резерв контекста под ответ модели
 _RESPONSE_RESERVE_TOKENS = 4000
 
@@ -378,7 +380,7 @@ async def _analyse_segment_chain(
 
     user_input = _model_input(seg_row)
     verdict, alarm_level = _verdict_fields(seg_row)
-    est_tokens = (len(system_prompt) + len(user_input)) // _EST_CHARS_PER_TOKEN \
+    est_tokens = int((len(system_prompt) + len(user_input)) / _EST_CHARS_PER_TOKEN) \
                  + _RESPONSE_RESERVE_TOKENS
     trace: list[dict] = []
 

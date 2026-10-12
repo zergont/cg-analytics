@@ -67,7 +67,7 @@ check("снято ИИ" in inp and "Уровень тревоги: CAUTION" in i
 check(res["verdict"] == "требует внимания" and res["alarm_level"] == "CAUTION",
       f"1г: вердикт в корпус, не «LLM»: {res['verdict']}/{res['alarm_level']}")
 dbg = res["debug_json"]
-check(dbg["input_length"] == len(inp) and dbg["est_prompt_tokens"] == (len("СИСТЕМНЫЙ") + len(inp)) // 3 + 4000,
+check(dbg["input_length"] == len(inp) and dbg["est_prompt_tokens"] == int((len("СИСТЕМНЫЙ") + len(inp)) / 1.7) + 4000,
       f"1д: размер — по полному входу: {dbg}")
 
 # 2. Одиночная LLM
