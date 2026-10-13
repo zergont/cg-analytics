@@ -124,3 +124,14 @@ transition_confirm:
   no_data_share: 0.5      # попытка больше чем наполовину без связи — исход не объявляем
   anchor_check_sec: 900   # якорь акта: сколько от начала прошлой цепочки читать обороты
   _source: OWNER
+
+# Одиночный ноль источника (v5.1.17, см. _defaults: legacy-слой заменяет стек)
+zero_glitch:
+  enabled: true
+  max_gap_sec: 60
+  frame_tol_sec: 1
+  stop_guard_sec: 15  # ноль внутри стопа или за 15 с до него — настоящий останов
+  roles:
+    RPM: 1000
+    OIL_PRESS: 100
+  _source: OWNER

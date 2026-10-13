@@ -1051,6 +1051,130 @@ def _build_subsegments_for_running(
 
 # ── Sequence checks ───────────────────────────────────────────────────────────
 
+# ── Одиночный ноль источника (v5.1.17) ──────────────────────────────────────
+# Декодер иногда пишет «нулевой кадр»: обороты и/или давление масла ровно 0
+# одной точкой посреди работы, иногда вместе с током и мощностью. ДГУ №1 12.10
+# 14:09:17 МСК: обороты 1499 → 0 → 1501 за 9 с при частоте 50 Гц; ДЭС №3 13.10
+# 14:59:56: давление масла 300 → 0 → 316 при 1515 об/мин. За 30 дней — 18 таких
+# точек на трёх машинах; каждая давала «обороты 0», «давление масла 0 у порога»
+# и ложное падение давления масла. Решение владельца 13.10.2026: такой ноль —
+# сбой источника, в аналитику не идёт. Настоящее падение так не спрячется:
+# показание пишется по изменению, и настоящий ноль держится — следующее
+# показание тоже не рабочее или приходит позже минуты, а панель меняет режим.
+
+def _zero_glitch_params(cfg) -> dict[str, Any]:
+    def g(key: str, default: Any) -> Any:
+        try:
+            v = cfg.seg("zero_glitch", key, default=default)
+        except Exception:
+            v = default
+        return default if v is None else v
+
+    roles: dict[str, float] = {}
+    for role, thr in (g("roles", {"RPM": 1000, "OIL_PRESS": 100}) or {}).items():
+        try:
+            roles[str(role)] = float(thr)
+        except (TypeError, ValueError):
+            continue
+    return {
+        "enabled": bool(g("enabled", True)),
+        "roles": roles,
+        "max_gap_sec": float(g("max_gap_sec", 60.0)),
+        "frame_tol_sec": float(g("frame_tol_sec", 1.0)),
+        "stop_guard_sec": float(g("stop_guard_sec", 15.0)),
+    }
+
+
+def _drop_zero_glitches(
+    by_addr: dict[int, list[dict]], cfg, tt: datetime,
+    stops: list[tuple[datetime, datetime]] | None = None,
+) -> tuple[dict[int, list[dict]], list[tuple[datetime, str]]]:
+    """Убрать одиночные нули источника. (новый by_addr, [(момент, роль)]).
+
+    Ноль роли из списка (обороты, давление масла) — сбой, если показания до и
+    после него рабочие (выше порога роли) и между ними не больше max_gap_sec.
+    Ноль на краю данных, после которого показаний ещё нет, — пока сбой: живое
+    окно иначе завело бы эпизод «обороты 0» до следующего показания; если ноль
+    настоящий, следующее показание (тоже ноль или «пульс» через минуту) его
+    подтвердит. Остальные аналоговые нули того же кадра (ток, мощность) уходят
+    вместе с ним — это один и тот же сбойный кадр.
+
+    stops — периоды стопа по 40011: ноль внутри стопа или за stop_guard_sec до
+    его начала — настоящий останов (панель сменила режим), его не трогаем.
+    """
+    prm = _zero_glitch_params(cfg)
+    if not prm["enabled"] or not prm["roles"]:
+        return by_addr, []
+    tt = _tz(tt)
+    gap = prm["max_gap_sec"]
+    guard = prm["stop_guard_sec"]
+
+    def _at_stop(ts: datetime) -> bool:
+        return any(s - timedelta(seconds=guard) <= ts < e for s, e in stops or [])
+
+    drop_ids: set[int] = set()
+    found: list[tuple[datetime, str]] = []
+    for role, thr in prm["roles"].items():
+        addr = cfg.role_to_addr(role)
+        rows = by_addr.get(addr) if addr else None
+        if not rows:
+            continue
+        real = [r for r in rows if _fv(r) is not None]
+        for k, r in enumerate(real):
+            if _fv(r) != 0:
+                continue
+            prev = real[k - 1] if k > 0 else None
+            if prev is None or (_fv(prev) or 0) <= thr:
+                continue
+            ts = _tz(r["ts"])
+            if _at_stop(ts):
+                continue
+            nxt = real[k + 1] if k + 1 < len(real) else None
+            if nxt is None:
+                glitch = (tt - ts).total_seconds() < gap
+            else:
+                glitch = ((_fv(nxt) or 0) > thr
+                          and (_tz(nxt["ts"]) - _tz(prev["ts"])).total_seconds() <= gap)
+            if glitch:
+                drop_ids.add(id(r))
+                found.append((ts, role))
+    if not found:
+        return by_addr, []
+    tol = prm["frame_tol_sec"]
+    frames = sorted(t for t, _ in found)
+    out: dict[int, list[dict]] = {}
+    for addr, rows in by_addr.items():
+        analog = cfg.register_map.get(addr, {}).get("kind") == "analog"
+        keep = []
+        for r in rows:
+            if id(r) in drop_ids:
+                continue
+            if analog and _fv(r) == 0:
+                ts = _tz(r["ts"])
+                if any(abs((ts - t).total_seconds()) <= tol for t in frames):
+                    continue
+            keep.append(r)
+        out[addr] = keep
+    found.sort(key=lambda x: x[0])
+    return out, found
+
+
+def _glitch_check(glitches: list[tuple[datetime, str]], t0: datetime, t1: datetime) -> dict | None:
+    """Проверка сегмента: сколько одиночных нулей источника отброшено и когда."""
+    inside = [(t, r) for t, r in glitches if t0 <= t < t1]
+    if not inside:
+        return None
+    ru = {"RPM": "обороты", "OIL_PRESS": "давление масла"}
+    shown = ", ".join(f"{ru.get(r, r)} {t.strftime('%H:%M:%S')} UTC" for t, r in inside[:5])
+    more = f" и ещё {len(inside) - 5}" if len(inside) > 5 else ""
+    return {
+        "check": "source_zero_glitch",
+        "passed": True,
+        "count": len(inside),
+        "details": f"отброшены одиночные нули источника (сбой декодера): {shown}{more}",
+    }
+
+
 def _sequence_checks(
     run_state: int,
     subsegments: list[Subsegment],
@@ -2043,6 +2167,11 @@ def segment(
 
     # Индексируем историю по адресу; единицы — как в карте (наработка: с → ч)
     all_by_addr = _apply_scale(_build_by_addr(history), cfg)
+    # Одиночные нули источника — до всего остального (v5.1.17); ноль у
+    # настоящего останова (40011 → 0) — не сбой
+    _stops = [(_tz(p["state_start"]), _tz(p["state_end"]) if p.get("state_end") else tt)
+              for p in enum_periods if p.get("addr") == 40011 and int(p.get("value") or 0) == 0]
+    all_by_addr, _zero_glitches = _drop_zero_glitches(all_by_addr, cfg, tt, _stops)
     # Регистры-состояния для характеристик подсегментов (код неисправности)
     state_periods = _state_periods(enum_periods, cfg)
 
@@ -2226,6 +2355,9 @@ def segment(
 
         # Sequence checks
         seq_checks = _sequence_checks(run_state, subsegments, fault_periods_in_seg, cfg)
+        _gc = _glitch_check(_zero_glitches, _tz(seg_start), _tz(seg_end))
+        if _gc:
+            seq_checks.append(_gc)
 
         # Fault-события сегмента (для events[])
         events: list[dict[str, Any]] = []
