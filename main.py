@@ -157,10 +157,12 @@ async def lifespan(app: FastAPI):
             logger.info("Настройки ИИ перенесены в таблицу «Кто и как разбирает»: %s",
                         "; ".join(_route_changes) or "без изменений")
     _load_depth(await get_app_setting(_DEPTH_KEY, ""))
-    # Правила гейта v5.1.12 (паспорт своего двигателя, честная панель): разовый
-    # перенос — снятия по старым правилам в открытых строках перестают действовать
-    # (гейт разберёт живой состав заново), фраза о панели в промпте гейта
-    if await get_app_setting("gate_rules_version", "") != "5.1.12":
+    # Правила гейта (v5.1.12 — паспорт, честная панель; v5.1.15 — тренд ОЖ убран):
+    # разовый перенос при смене версии — снятия по старым правилам в открытых
+    # строках перестают действовать (гейт разберёт живой состав заново), фразы
+    # о панели в промпте гейта (повторный перенос ничего не меняет)
+    from online.status_assembler import GATE_RULES_VERSION as _GRV
+    if await get_app_setting("gate_rules_version", "") != _GRV:
         try:
             from online.db import reset_open_gate_suppression as _reset_supp
             from llm.router import get_all as _get_routing, migrate_gate_prompt as _mig_gate
@@ -169,13 +171,13 @@ async def lifespan(app: FastAPI):
             if _gp is not None:
                 await set_app_setting("ai_task_warning_claude_prompt", _gp)
                 apply_task("warning_claude", _get_routing()["warning_claude"]["provider"], _gp)
-            await set_app_setting("gate_rules_version", "5.1.12")
-            logger.info("Правила гейта 5.1.12: снятий сброшено — строк %d, эпизодов %d; "
-                        "промпт гейта %s", _rows, _eps,
+            await set_app_setting("gate_rules_version", _GRV)
+            logger.info("Правила гейта %s: снятий сброшено — строк %d, эпизодов %d; "
+                        "промпт гейта %s", _GRV, _rows, _eps,
                         "обновлён" if _gp is not None else "без изменений")
         except Exception:
-            logger.warning("Правила гейта 5.1.12: перенос не выполнен — повторится при "
-                           "следующем старте", exc_info=True)
+            logger.warning("Правила гейта %s: перенос не выполнен — повторится при "
+                           "следующем старте", _GRV, exc_info=True)
     # Сироты: status_auto (задачи нет с v4.x), llm_system_prompt (не читается)
     for _orph in ("ai_task_status_auto_", "llm_system_prompt"):
         _n = await _del_settings(_orph)

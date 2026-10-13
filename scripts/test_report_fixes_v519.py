@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+from online.status_assembler import GATE_RULES_VERSION as RULES  # noqa: E402
 
 from analytics.contract import (  # noqa: E402
     CokingRisk, Detection, DerivedMetrics, RiskAccumulators, Segment, Subsegment,
@@ -96,9 +97,9 @@ struct = {"analytics_alarms": alarms, "panel_alarms": [], "panel_severity": "н�
           "analytics_suppressed": False, "severity_level": "предупреждение"}
 row = {"id": 35771, "gate_suppressed_hash": "b73fbb556aef",
        "gate_log": json.dumps([{"fault_hash": "5cf22d2ee7d6", "decision": "cancel", "decision_applied": True,
-                                "rules": "5.1.12"},
+                                "rules": RULES},
                                {"fault_hash": "b73fbb556aef", "decision": "cancel", "decision_applied": True,
-                                "rules": "5.1.12"},
+                                "rules": RULES},
                                {"fault_hash": "aaaa", "decision": "pass", "decision_applied": False},
                                # снятие по старым правилам гейта заново не применяется (v5.1.12)
                                {"fault_hash": "old0", "decision": "cancel", "decision_applied": True}])}
@@ -191,7 +192,7 @@ check(g6["total_blind_sec"] >= 3000 and g6["total_blind_sec"] >= g6.get("period_
       f"6б: «с начала» без связи — по всем онсетам: {g6.get('total_blind_sec')} / {g6.get('period_blind_sec')}")
 # 6в. Вердикт разбора, перенесённый в новую строку, виден повтору снятия
 check(mgr._cancelled_hashes({"gate_log": [{"fault_hash": "X", "decision": "cancel", "decision_applied": True,
-                                           "provider": "carried", "rules": "5.1.12"}]}) == {"X"},
+                                           "provider": "carried", "rules": RULES}]}) == {"X"},
       "6в: перенесённый вердикт виден повтору снятия")
 
 # ── 7. Оценка токенов ───────────────────────────────────────────────────────

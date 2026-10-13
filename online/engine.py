@@ -1156,13 +1156,30 @@ async def _collect_and_enrich_detections(
     """
     window_days = int(cfg.det("DETECTION_COUNTER", "window_days", default=30) or 30)
 
-    # Уникальные тревоги per-fault (панельные — по addr/bit, аналитика — по scenario)
+    # Уникальные тревоги per-fault (панельные — по addr/bit, аналитика — по scenario).
+    # У аналитики — где кончается первый непрерывный участок подсегментов с ней и
+    # последний подсегмент с ней (v5.1.15): засеянный эпизод не тянется до конца
+    # сегмента и не дублирует живой, открытый на подсегмент раньше
     seen: dict[str, dict] = {}
+    _run_open: set = set()
     for sub in seg.subsegments:
+        _sub_end = None
+        if getattr(sub, "t_end", None):
+            try:
+                _sub_end = _tz_utc(datetime.fromisoformat(sub.t_end))
+            except (TypeError, ValueError):
+                _sub_end = None
+        _here: set = set()
         for d in sub.detections:
             k = _alert_key({"scenario": d.scenario, "values": d.values})
             # Панель — по фронту: бит, снятый и поднятый в одном сегменте, — две тревоги
             sk = (k, d.t_detected) if d.scenario == "CONTROLLER_FAULT" else k
+            if d.scenario != "CONTROLLER_FAULT":
+                _here.add(sk)
+                if sk in seen and _sub_end is not None:
+                    seen[sk]["last_end"] = _sub_end
+                    if sk in _run_open:
+                        seen[sk]["first_run_end"] = _sub_end
             if sk not in seen:
                 v = d.values or {}
                 fc = int(v.get("front_count", 1))
@@ -1178,8 +1195,11 @@ async def _collect_and_enrich_detections(
                     "scenario": d.scenario, "severity": d.severity,
                     "run_state": seg.run_state, "fc": fc,
                     "addr": v.get("addr"), "bit": v.get("bit"), "t_open": t_open,
-                    "values": v,
+                    "values": v, "first_run_end": _sub_end, "last_end": _sub_end,
                 }
+                if d.scenario != "CONTROLLER_FAULT":
+                    _run_open.add(sk)
+        _run_open &= _here
 
     if not seen:
         return []
@@ -1213,9 +1233,25 @@ async def _collect_and_enrich_detections(
                 continue
             if (k, info.get("t_open")) in _already:
                 continue
+            # Живой эпизод мог открыться на подсегмент раньше: граница зоны нагрузки
+            # подтверждается с задержкой, и живой расчёт видел показание ещё в
+            # старом подсегменте (онсет b0), итоговый — в новом (c0). Эпизод того
+            # же сценария, пересекающий первый участок детекции, — уже есть (v5.1.15)
+            if (not _panel and not _event and info.get("t_open")
+                    and info.get("first_run_end")):
+                try:
+                    _ov = await online_db.get_episodes_overlapping(
+                        router_sn, equip_type, panel_id, info["t_open"], info["first_run_end"])
+                except Exception:
+                    _ov = []
+                if any(e.get("scenario") == info["scenario"] for e in _ov):
+                    continue
             t_open = info["t_open"] or _tz_utc(seg_t_end)
-            # Снятая панелью тревога закрывается временем снятия, а не концом сегмента
+            # Снятая панелью тревога закрывается временем снятия, а не концом
+            # сегмента; аналитика — концом последнего подсегмента с ней (v5.1.15)
             t_close = _tz_utc(seg_t_end)
+            if not _panel and not _event and info.get("last_end"):
+                t_close = min(info["last_end"], t_close)
             _fe = (info.get("values") or {}).get("fault_end")
             if _fe:
                 try:

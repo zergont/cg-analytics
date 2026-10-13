@@ -30,6 +30,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from online.status_assembler import GATE_RULES_VERSION as RULES  # noqa: E402
 
 import db.analytics as dba  # noqa: E402
 import online.db as odb  # noqa: E402
@@ -69,7 +70,7 @@ async def _get_app_setting(key, default=None):
 async def _get_open_segment(sn, et, pid):
     # Разобранным считается разбор по нынешним правилам гейта (rules, v5.1.12)
     return {"id": SEG["id"], "warning_analyzed_hash": SEG["analyzed"],
-            "warning_analyses": ([{"fault_hash": SEG["analyzed"], "rules": "5.1.12"}]
+            "warning_analyses": ([{"fault_hash": SEG["analyzed"], "rules": RULES}]
                                  if SEG["analyzed"] else [])}
 
 

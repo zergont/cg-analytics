@@ -106,7 +106,8 @@ print(f"  Phase 2 short segment (4min < min_dur 5min): {len(cf_w_short)} (expect
 dets_long = run_all_detectors(chars_working, dm_working, RiskAccumulators(), [], "ELEVATED", 3,
     T(8,0), T(8,30), None, cfg)
 cf_long = [d for d in dets_long if d.scenario == "COOLING_FAILURE"]
-print(f"  Phase 2 long segment (30min) slope=0.0083 > 0.006 → {[d.severity for d in cf_long]} (expect WARNING)")
+print(f"  Phase 2 long segment (30min), max 88 < 88.0: {[d.severity for d in cf_long]} "
+      f"(expect [] — тренда нет с v5.1.15, только близость к уставке)")
 
 # Previously false alarm case: T goes 72→82 (warmup), ends exactly at working_range_low
 chars_false_alarm = {

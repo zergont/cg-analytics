@@ -18,6 +18,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+from online.status_assembler import GATE_RULES_VERSION as RULES  # noqa: E402
 
 import online.db as odb  # noqa: E402
 
@@ -172,8 +173,8 @@ check(out == mgr.GATE_OK and ev["decision_applied"] is True and LOG["marked"] ==
 
 # 4г. Разбор с незаписанным снятием — не «разобран»: состав спросят снова после паузы
 check(mgr._analyzed_hashes({"warning_analyses": [
-    {"fault_hash": "h1", "rules": "5.1.12", "applied": False, "not_written": True},
-    {"fault_hash": "h2", "rules": "5.1.12"}]}) == {"h2"}, "4г: not_written не считается разобранным")
+    {"fault_hash": "h1", "rules": RULES, "applied": False, "not_written": True},
+    {"fault_hash": "h2", "rules": RULES}]}) == {"h2"}, "4г: not_written не считается разобранным")
 reset(supp_ok=False)
 asyncio.run(mgr._analyze_warning_claude("SN", "pcc", 1, dict(STRUCT), "h3"))
 check(LOG["saved"][-1][1].get("not_written") is True, "4д: отметка not_written в записи разбора")
