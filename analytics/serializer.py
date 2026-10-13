@@ -466,7 +466,9 @@ def _key_metrics_part(segments: list, trip_roles: list[str] | None) -> dict[str,
     subs = [(sub, float(getattr(sub, "duration_sec", 0) or 0)
              * float(sub.data_quality if getattr(sub, "data_quality", None) is not None else 1.0))
             for s in segments if getattr(s, "run_state", None) == 3
-            for sub in (getattr(s, "subsegments", None) or [])]
+            for sub in (getattr(s, "subsegments", None) or [])
+            # Разгон и сброс оборотов — не работа (v5.1.16)
+            if not getattr(sub, "transient", False)]
     subs = [(sub, w) for sub, w in subs if w > 0]
     if not subs or not trip_roles:
         return None
@@ -823,6 +825,13 @@ def build_summary_parts(
     key_metrics = _key_metrics_part(segments, trip_roles)
     coking = coking_part
 
+    # Неудачная попытка выхода из стопа (v5.1.16): что не подтвердило режим
+    from .labels import attempt_facts_ru, attempt_label
+    _att = next((getattr(s, "attempt", None) for s in segments
+                 if isinstance(getattr(s, "attempt", None), dict)), None)
+    attempt_part = ({"label": attempt_label(_att), "facts": attempt_facts_ru(_att)}
+                    if _att else None)
+
     return {
         "version": SUMMARY_PARTS_VERSION,
         "verdict": verdict,
@@ -835,6 +844,7 @@ def build_summary_parts(
         "key_metrics": key_metrics,
         "coking": coking,
         "no_data": False,
+        "attempt": attempt_part,
     }
 
 
@@ -999,6 +1009,12 @@ def render_summary_md(parts: dict[str, Any]) -> str:
     a(f"## {v.get('title', '')}")
     if v.get("note"):
         a(v["note"])
+
+    att = parts.get("attempt")
+    if att:
+        a("")
+        a(f"🚫 **{att.get('label')}** — выход из стопа не подтвердился"
+          + (f": {att['facts']}" if att.get("facts") else ""))
 
     m = parts.get("mttr")
     if m:
@@ -1558,6 +1574,14 @@ def _append_segment(
     a("")
     a(f"- **Начало:** {fmt_ts(seg.t_start)}")
     a(f"- **Конец:** {fmt_ts(seg.t_end)}")
+    _att = getattr(seg, "attempt", None)
+    if isinstance(_att, dict):
+        from .labels import attempt_facts_ru
+        a(f"- **Неудачная попытка выхода из стопа:** {attempt_facts_ru(_att)}; "
+          f"останов {fmt_ts(_att.get('t_fall'))}")
+    elif getattr(seg, "attempt_pending", False):
+        a("- **Выход из стопа ещё не подтверждён:** оборотов выше 250, частоты и "
+          "«Готов к нагрузке» пока нет — аналитики работы нет")
     a(f"- **Длительность:** {dur_str}{hours_str}")
     a(f"- **Качество данных:** {dq_str}")
     # Предыдущее состояние

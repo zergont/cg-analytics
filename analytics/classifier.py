@@ -216,6 +216,7 @@ def find_baseline_anchor(
     *,
     fallback_periods: int = BASELINE_FALLBACK_PERIODS,
     fallback_min_sec: int = BASELINE_FALLBACK_MIN_SEC,
+    skip_stops: set[datetime] | None = None,
 ) -> tuple[datetime, str]:
     """Начало последнего НОРМАЛЬНОГО останова перед stop_ts. (момент, причина).
 
@@ -243,6 +244,14 @@ def find_baseline_anchor(
     Причина — 'normal_stop' либо 'fallback'. Фолбэк (эталона в горизонте нет)
     — три последних стоп-периода, но не короче суток. Отсутствие эталона само
     по себе диагноз, поэтому причина едет в акт, а не молчит.
+
+    skip_stops — начала стопов, которые эталоном не бывают: стоп после
+    неподтверждённой попытки пуска (v5.1.16). 13.10.2026 ДЭС №3: «Работа»
+    10:40:28–37 с оборотами 0 и ключом «Ручной» → «Выкл», стоп после неё
+    прошёл как нормальный — акты №2 и №3 серии отказов прокрутки начались с
+    него и не увидели ни первой аварии, ни кнопки, ни утреннего останова.
+    Подтверждение — по аналогу, которого тут нет: проверяет вызывающий
+    (online.engine._load_incident_context, exit_chain_before).
     """
     from .segmenter import _classify_stop_periods
 
@@ -265,7 +274,8 @@ def find_baseline_anchor(
             break
         stop_starts.append(p_start)
         if (p.get("stop_kind") != "EMERGENCY"
-                and p.get("cause_open") != "SHUTDOWN_CLEARED"):
+                and p.get("cause_open") != "SHUTDOWN_CLEARED"
+                and p_start not in (skip_stops or ())):
             best = p_start
     if best is not None:
         return best, "normal_stop"
@@ -276,6 +286,31 @@ def find_baseline_anchor(
     )
     by_time = stop_ts - timedelta(seconds=fallback_min_sec)
     return min(by_periods, by_time), "fallback"
+
+
+def exit_chain_before(
+    enum_periods: list[dict[str, Any]], stop_start: datetime,
+) -> tuple[datetime, datetime] | None:
+    """Нестоповая цепочка прямо перед стопом, начавшаяся из стопа: (начало, конец).
+
+    Для проверки якоря: стоп нормальный, только если до него машина
+    действительно выходила из стопа (обороты, частота или «Готов к нагрузке»).
+    None — перед стопом не выход из стопа (охлаждение после работы — тоже
+    цепочка, но она из работы и проверяется так же: начало — от прошлого стопа)
+    или данных нет.
+    """
+    stop_start = _tz(stop_start)
+    rs = _periods_for(enum_periods, _ADDR_RUN_STATE)
+    k = next((i for i, p in enumerate(rs)
+              if p.get("value") == _RS_STOP and _tz(p["state_start"]) == stop_start), None)
+    if k is None or k == 0:
+        return None
+    j = k
+    while j > 0 and rs[j - 1].get("value") != _RS_STOP:
+        j -= 1
+    if j == k or j == 0:
+        return None     # перед стопом не цепочка из стопа (или её начало вне данных)
+    return _tz(rs[j]["state_start"]), stop_start
 
 
 def summarize_events(
@@ -389,6 +424,9 @@ def build_stop_incident(
     stabilization_sec: int = 60,
     detail_events: int = ACT_DETAIL_EVENTS,
     timeline_faults: list[dict[str, Any]] | None = None,
+    anchor: tuple[datetime, str] | None = None,
+    min_window_sec: int = 0,
+    attempt: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """incident_json для аварийного стоп-сегмента; иначе None.
 
@@ -411,6 +449,14 @@ def build_stop_incident(
     fault_periods: там маски из KB, и шкала аварийности должна совпадать с
     нарезкой. None — лента по тем же fault_periods. enum_periods могут быть
     полными: классификация выбирает свои регистры по адресу.
+
+    anchor — якорь, уже найденный вызывающим с проверкой попыток по аналогу
+    (v5.1.16); None — найти здесь, как раньше. min_window_sec — окно данных
+    не короче (решение 13.10.2026: 12 ч): начало — более раннее из якоря и
+    останова минус это время; якорь при этом остаётся в акте — до него фон,
+    после него возможные предвестники. attempt — неудачная попытка выхода из
+    стопа, если авария случилась на ней: акт тогда об отказе пуска, а не о
+    падении с работы.
     """
     verdict = classify_stop_character(
         enum_periods, stop_ts, cfg, fault_periods=fault_periods
@@ -428,9 +474,15 @@ def build_stop_incident(
     # Начало окна — последний нормальный останов: всё, что случилось после
     # него, может быть предвестником этой аварии. Число минут тут не годится:
     # предупреждение способно опередить аварию на часы.
-    win_from, baseline_reason = find_baseline_anchor(
-        enum_periods, fault_periods, stop_ts, cfg
-    )
+    if anchor is not None:
+        anchor_ts, baseline_reason = _tz(anchor[0]), anchor[1]
+    else:
+        anchor_ts, baseline_reason = find_baseline_anchor(
+            enum_periods, fault_periods, stop_ts, cfg
+        )
+    win_from = anchor_ts
+    if min_window_sec and baseline_reason == "normal_stop":
+        win_from = min(anchor_ts, stop_ts - timedelta(seconds=min_window_sec))
     # Пола по предыдущей аварии тут НЕТ сознательно: если между падениями
     # не было штатного останова, значит это серия попыток, и следующий акт
     # должен вбирать предыдущие — они одна история и так уйдут в разбор ИИ.
@@ -453,6 +505,9 @@ def build_stop_incident(
         "kind": "stop_incident",
         "stop_ts": stop_ts.isoformat(),
         "stop_kind": stop_kind,
+        # Отказ пуска (авария на неподтверждённой попытке) или падение с работы
+        "failure": "start" if attempt else "work",
+        "attempt": attempt,
         "character": verdict,
         # Что висело на момент падения — маска могла подняться задолго до окна
         "standing": standing_faults(tl_faults, stop_ts),
@@ -460,6 +515,9 @@ def build_stop_incident(
             "from": win_from.isoformat(),
             "to": win_to.isoformat() if win_to else None,
             "baseline": baseline_reason,
+            # Последний нормальный останов: до него фон, после — предвестники
+            "anchor": anchor_ts.isoformat(),
+            "min_window_h": round(min_window_sec / 3600, 1) if min_window_sec else None,
         },
         # Свод по видам покрывает ВСЁ окно, детали — окрестность останова
         "summary": summary,

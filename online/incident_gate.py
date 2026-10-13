@@ -32,6 +32,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from analytics.labels import attempt_facts_ru, attempt_label, label_from_chars
+
 logger = logging.getLogger(__name__)
 
 _SEVERITY_RU = {
@@ -104,6 +106,7 @@ def _fmt_num(v: Any) -> str:
 
 def _format_cycle_params(
     segments: list[dict[str, Any]], stop_ts: Any,
+    attempt: dict[str, Any] | None = None,
 ) -> list[str]:
     """Цикл от последнего нормального останова: ход режимов и параметры.
 
@@ -135,20 +138,25 @@ def _format_cycle_params(
     stop = _dt(stop_ts)
     if stop is None:
         return []
-    before = [sg for sg in segments
-              if (_dt(sg.get("t_start")) or stop) < stop]
-    if not before:
+
+    def _fall(sg: dict[str, Any]) -> datetime | None:
+        # У плашки неудачной попытки момент останова — падение, не её начало:
+        # своя плашка этого акта в цикл не входит, прошлые — входят (v5.1.16)
+        att = (_chars_json(sg) or {}).get("attempt")
+        return _dt((att or {}).get("t_fall") if isinstance(att, dict) else None) \
+            or _dt(sg.get("t_start"))
+
+    before = [sg for sg in segments if (_fall(sg) or stop) < stop]
+    if not before and not attempt:
         return []
     def _mode(sg: dict[str, Any]) -> str:
         rs = sg.get("run_state")
         name = RUN_STATE_RU.get(rs, f"RUN_STATE={rs}")
-        raw = sg.get("characteristics_json")
-        if rs == 0 and isinstance(raw, str):
-            try:
-                import json as _json
-                raw = _json.loads(raw)
-            except Exception:
-                raw = None
+        raw = _chars_json(sg)
+        # Плашка неудачной попытки (v5.1.16): «Неудачная работа · Авария»
+        lab = label_from_chars(raw) if isinstance(raw, dict) else None
+        if lab:
+            return lab
         if rs == 0 and isinstance(raw, dict) and raw.get("stop_kind") == "EMERGENCY":
             name += " (аварийный)"
         return name
@@ -157,6 +165,9 @@ def _format_cycle_params(
     for sg in before:
         out.append(f"  - {_mode(sg)}: "
                    f"{_hms(sg.get('t_start'))} — {_hms(sg.get('t_end'))}")
+    if attempt:
+        out.append(f"  - {attempt_label(attempt)} (эта попытка): "
+                   f"{_hms(attempt.get('t_start'))} — {_hms(attempt.get('t_fall'))}")
 
     by_mode: dict[str, dict[str, dict[str, Any]]] = {}
     for sg in before:
@@ -189,12 +200,126 @@ def _format_cycle_params(
     # Откуда упала: последний не-стоповый сегмент. У 1452 это пуск или
     # прогрев — до работы машина не дошла; у штатной нагрузки — работа или
     # разгрузка. Последний рабочий — отдельно, если упала не из работы.
-    fell = next((sg for sg in reversed(before) if sg.get("run_state") != 0), None)
+    # Отказ пуска: машина остановилась с этой попытки — её факты, а не
+    # прошлая плашка или работа до штатного останова (ревью v5.1.16)
     work = next((sg for sg in reversed(before) if sg.get("run_state") == 3), None)
+    if attempt:
+        out += ["", f"Сегмент, из которого машина остановилась — {attempt_label(attempt)}, "
+                    f"{_hms(attempt.get('t_start'))} — {_hms(attempt.get('t_fall'))}: "
+                    f"{attempt_facts_ru(attempt) or ''}".rstrip(": ")]
+        fell = None
+    else:
+        fell = next((sg for sg in reversed(before) if sg.get("run_state") != 0), None)
     if fell is not None:
         _detail(fell, "Сегмент, из которого машина остановилась")
     if work is not None and work is not fell:
         _detail(work, "Последний рабочий сегмент цикла")
+    return out
+
+
+def _chars_json(sg: dict[str, Any]) -> dict[str, Any] | None:
+    raw = sg.get("characteristics_json")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _dt_any(x: Any) -> datetime | None:
+    if isinstance(x, str):
+        try:
+            x = datetime.fromisoformat(x)
+        except ValueError:
+            return None
+    if not isinstance(x, datetime):
+        return None
+    return x if x.tzinfo else x.replace(tzinfo=timezone.utc)
+
+
+def series_facts(
+    cycle_segments: list[dict[str, Any]], stop_ts: Any, anchor: Any,
+    code_name=None,
+) -> list[str]:
+    """Предыдущие аварии серии — только факты, без выводов прошлых разборов
+    (решение владельца 13.10.2026).
+
+    Серия — аварийные стопы после последнего нормального останова и до этого.
+    По каждому: когда, код панели, из какого состояния, сколько стояла до
+    сброса. Из характеристик сегментов, уже посчитанных при закрытии.
+    """
+    stop = _dt_any(stop_ts)
+    anc = _dt_any(anchor)
+    if stop is None:
+        return []
+    segs = list(cycle_segments or [])
+    chars = [_chars_json(sg) or {} for sg in segs]
+
+    def _is_cont(k: int) -> bool:
+        """Продолжение аварийного стопа после суточного реза — не новая авария."""
+        if k == 0:
+            return False
+        pc = chars[k - 1]
+        return (segs[k - 1].get("run_state") == 0 and pc.get("stop_kind") == "EMERGENCY"
+                and pc.get("cause_close") == "DAILY_BOUNDARY"
+                and _dt_any(segs[k - 1].get("t_end")) == _dt_any(segs[k].get("t_start")))
+
+    out: list[str] = []
+    for k, sg in enumerate(segs):
+        ch = chars[k]
+        if sg.get("run_state") != 0 or ch.get("stop_kind") != "EMERGENCY" or _is_cont(k):
+            continue
+        att = ch.get("attempt") if isinstance(ch.get("attempt"), dict) else None
+        fall = _dt_any((att or {}).get("t_fall") or sg.get("t_start"))
+        if fall is None or fall >= stop or (anc is not None and fall < anc):
+            continue
+        # Конец аварии — через продолжения после суточных резов
+        m = k
+        while m + 1 < len(segs) and _is_cont(m + 1):
+            m += 1
+        if att is not None:
+            # Коды самой попытки: плашка тянется весь стоп, и её агрегат
+            # подхватил бы и код, висевший до попытки, и кнопку через час
+            codes = [int(c) for c in att.get("codes") or []]
+        else:
+            codes = []
+            for x in range(k, m + 1):
+                for sub in chars[x].get("subsegments") or []:
+                    lfc = ((sub or {}).get("characteristics") or {}).get("LAST_FAULT_CODE") or {}
+                    for key in ("value_start", "max", "value_end"):
+                        try:
+                            c = int(lfc.get(key) or 0)
+                        except (TypeError, ValueError):
+                            c = 0
+                        if c > 0 and c not in codes:
+                            codes.append(c)
+        code_txt = "; ".join(
+            f"{c} «{code_name(c)}»" if code_name and code_name(c) else str(c) for c in codes
+        ) or "код не выставлен"
+        what = label_from_chars(ch)
+        if not what:
+            # Из какого режима упала — последний нестоповый перед ней
+            prev = next((segs[x] for x in range(k - 1, -1, -1)
+                         if segs[x].get("run_state") not in (0, None)), None)
+            prs = prev.get("run_state") if prev else None
+            if prs in (3, 4, 5, 6):
+                what = "аварийный стоп (падение с работы)"
+            elif prs in (1, 2):
+                from analytics.serializer import RUN_STATE_RU
+                what = f"аварийный стоп из режима «{RUN_STATE_RU.get(prs, prs)}»"
+            else:
+                what = "аварийный стоп"
+        t_end = _dt_any(segs[m].get("t_end"))
+        if chars[m].get("cause_close") == "SHUTDOWN_CLEARED" and t_end is not None:
+            reset = f"сброшена через {_age((t_end - fall).total_seconds())}"
+        else:
+            reset = "до конца сегмента не сброшена"
+        line = f"  - {fall.strftime('%Y-%m-%d %H:%M:%S')} — {what}; код: {code_txt}; {reset}"
+        facts = attempt_facts_ru(att)
+        if facts:
+            line += f"; {facts}"
+        out.append(line)
     return out
 
 
@@ -232,7 +357,12 @@ def build_incident_prompt(
     ch = incident.get("character") or {}
     win = incident.get("window") or {}
     eq = (context or {}).get("equipment") or {}
-    out: list[str] = ["Разбери аварийный останов дизель-генераторной установки."]
+    att = incident.get("attempt") if isinstance(incident.get("attempt"), dict) else None
+    out: list[str] = [
+        "Разбери отказ пуска дизель-генераторной установки: выход из стопа не "
+        "подтвердился — машина не вышла на работу — и закончился аварийным "
+        "остановом панели." if att else
+        "Разбери аварийный останов дизель-генераторной установки."]
     if eq:
         out += ["", "Оборудование (реестр):"]
         if eq.get("name"):
@@ -242,20 +372,29 @@ def build_incident_prompt(
                        + (f", s/n {eq['engine_sn']}" if eq.get("engine_sn") else ""))
         if eq.get("controller"):
             out.append(f"  - Контроллер (панель управления): {eq['controller']}")
-    out += [
-        "",
-        f"Останов: {incident.get('stop_ts') or '—'}",
-        f"Характер по детерминированному гейту: {ch.get('character', '?')} "
-        f"(уверенность {ch.get('confidence', '?')})",
-    ]
-    votes = (ch.get("immediate_votes") or []) + (ch.get("controlled_votes") or [])
-    if votes:
-        out.append("Сигналы: " + "; ".join(votes))
+    out += ["", f"Останов: {incident.get('stop_ts') or '—'}"]
+    if att:
+        # Гейт характера писан для падения с работы: у отказа пуска «без
+        # охлаждения» и «прямой аварийный» — не признаки, а свойство попытки
+        out.append(f"Попытка: {attempt_label(att)}, с {att.get('t_start') or '—'}; "
+                   f"{attempt_facts_ru(att) or ''}".rstrip("; "))
+    else:
+        out.append(f"Характер по детерминированному гейту: {ch.get('character', '?')} "
+                   f"(уверенность {ch.get('confidence', '?')})")
+        votes = (ch.get("immediate_votes") or []) + (ch.get("controlled_votes") or [])
+        if votes:
+            out.append("Сигналы: " + "; ".join(votes))
     if win.get("baseline") == "fallback":
         out.append("Предшествующего штатного останова в истории нет — "
                    "окно взято по последним сегментам.")
     elif win.get("from"):
-        out.append(f"Окно разбора от последнего штатного останова: {win['from']}")
+        anchor = win.get("anchor") or win["from"]
+        out.append(f"Последний штатный останов: {anchor}")
+        if win["from"] != anchor:
+            out.append(f"Окно данных: с {win['from']}"
+                       + (f" (не менее {win['min_window_h']:g} ч)" if win.get("min_window_h") else ""))
+        out.append("До штатного останова — фон (машина остановилась штатно), "
+                   "после — возможные предвестники.")
     codes = _fault_codes_line(incident)
     if codes:
         out.append(codes)
@@ -273,6 +412,14 @@ def build_incident_prompt(
                 since = (f" (с {_ts(raw)})" if raw[:10] == stop_day
                          else f" (с {raw[8:10]}.{raw[5:7]} {raw[11:16]} UTC)")
             out.append(f"  - {s['addr']} {s['name']} = {s['label']}{since}")
+
+    series = series_facts(cycle_segments or [], incident.get("stop_ts"),
+                          win.get("anchor") or (win.get("from") if win.get("baseline") != "fallback"
+                                                else None),
+                          (context or {}).get("code_name"))
+    if series:
+        out += ["", "Предыдущие аварии этой серии — после штатного останова (только "
+                    "факты, без выводов прошлых разборов):"] + series
 
     standing = incident.get("standing") or []
     if standing:
@@ -315,7 +462,7 @@ def build_incident_prompt(
                        f"{e.get('name') or ''}{val}{sev}")
         out.append("```")
 
-    out += _format_cycle_params(cycle_segments or [], incident.get("stop_ts"))
+    out += _format_cycle_params(cycle_segments or [], incident.get("stop_ts"), att)
 
     if seg_row and seg_row.get("report_md"):
         out += ["", "Отчёт аналитики по сегменту:", "",
@@ -323,8 +470,11 @@ def build_incident_prompt(
 
     out += [
         "",
-        "Задача: назови наиболее вероятную причину останова и на чём основан "
-        "вывод. Отдельно укажи, что из висевшего к моменту падения могло к "
+        ("Задача: назови наиболее вероятную причину отказа пуска — почему машина "
+         "не вышла на работу — и на чём основан вывод. " if att else
+         "Задача: назови наиболее вероятную причину останова и на чём основан "
+         "вывод. ")
+        + "Отдельно укажи, что из висевшего к моменту падения могло к "
         "нему привести, а что к делу не относится. Если данных для вывода "
         "не хватает — скажи прямо, какого сигнала недостаёт. Не предлагай "
         "регламентных работ, которых не следует из наблюдаемого.",
@@ -596,6 +746,20 @@ async def _context(router_sn: str, equip_type: str, panel_id: int,
     except Exception:
         logger.warning("IncidentGate: конфиг оборудования не собран", exc_info=True)
     try:
+        from analytics import binding as _b
+        from config import settings as _s
+        _fr = _b.build_fault_ref(_s.knowledge_base_path,
+                                 controller_id=eq.get("controller_id"),
+                                 engine_id=eq.get("engine_id"), kb_path=eq.get("kb_path"))
+
+        def _code_name(code: int) -> str | None:
+            e = _fr.lookup(int(code)) or {}
+            d = e.get("description") or {}
+            return d.get("ru") or d.get("en")
+        ctx["code_name"] = _code_name
+    except Exception:
+        logger.warning("IncidentGate: справочник кодов не собран", exc_info=True)
+    try:
         ctx["equipment"] = {
             "name": eq.get("name"),
             "engine": " ".join(str(x) for x in (eq.get("manufacturer"), eq.get("model")) if x) or None,
@@ -789,10 +953,6 @@ async def recover_pending(delay: float = RECOVER_DELAY_SEC) -> int:
             logger.info("IncidentGate: восстановление — лимит %d за старт, остальные "
                         "закажет следующий старт", RECOVER_MAX)
             break
-        stop_ts = _utc(row["t_start"])
-        st = await _state(row["router_sn"], row["equip_type"], row["panel_id"], stop_ts)
-        if st.get("analysed") or st.get("terminal"):
-            continue
         raw = row.get("incident_json")
         if isinstance(raw, str):
             try:
@@ -800,6 +960,16 @@ async def recover_pending(delay: float = RECOVER_DELAY_SEC) -> int:
             except ValueError:
                 raw = None
         if not isinstance(raw, dict):
+            continue
+        # Момент останова — из акта: у плашки неудачной попытки строка
+        # начинается на попытке, а авария — позже (v5.1.16)
+        try:
+            stop_ts = _utc(datetime.fromisoformat(raw["stop_ts"])) if raw.get("stop_ts") \
+                else _utc(row["t_start"])
+        except (TypeError, ValueError):
+            stop_ts = _utc(row["t_start"])
+        st = await _state(row["router_sn"], row["equip_type"], row["panel_id"], stop_ts)
+        if st.get("analysed") or st.get("terminal"):
             continue
         if order_incident_analysis(row["router_sn"], row["equip_type"], row["panel_id"],
                                    raw, stop_ts, row.get("id")):

@@ -846,6 +846,7 @@ async def _run_segment(
     cfg,
     initial_coking_risk: CokingRisk,
     transition_ctx: list | None = None,
+    confirm_to: datetime | None = None,
 ) -> tuple[list, dict[str, dict], list[dict], dict[str, dict]]:
     """Загрузить данные и запустить segment() в отдельном потоке.
 
@@ -855,12 +856,17 @@ async def _run_segment(
     Третьим возвращает дыры связи окна (уже с синтетическим хвостовым гэпом):
     они нужны вызывающему, чтобы посчитать слепую долю воздействия тревог.
     Четвёртым — хронологии стоянок (ключ тот же, seg.t_start).
+
+    confirm_to — докуда читать данные, чтобы решить исход попытки пуска на
+    краю окна (v5.1.16): сегменты режутся по ts_to, данные за ним — только для
+    подтверждения.
     """
     import functools
     from analytics.segmenter import segment as _segment
 
+    _load_to = max(_tz_utc(ts_to), _tz_utc(confirm_to)) if confirm_to else ts_to
     history, enum_periods, fault_periods, gaps = await _load_data(
-        router_sn, equip_type, panel_id, ts_from, ts_to, cfg
+        router_sn, equip_type, panel_id, ts_from, _load_to, cfg
     )
     load_seed = await _load_seed(router_sn, equip_type, panel_id, ts_from, cfg)
     synth_gap = _synth_connectivity_gap(history, ts_from, ts_to, cfg)
@@ -883,6 +889,7 @@ async def _run_segment(
             initial_coking_risk=copy.deepcopy(initial_coking_risk),
             transition_ctx=list(transition_ctx or []),
             load_seed=load_seed,
+            confirm_to=_tz_utc(confirm_to) if confirm_to else None,
         )
     )
     # Стоп-сегменты получают ДВА артефакта, и они не исключают друг друга:
@@ -898,6 +905,7 @@ async def _run_segment(
         segments, router_sn, equip_type, panel_id, ts_from, ts_to, cfg,
         enum_periods, fault_periods,
     )
+    _plates = _attempt_stops(segments)
     for seg in segments:
         if seg.run_state != 0 or not seg.t_end:
             continue
@@ -906,20 +914,27 @@ async def _run_segment(
         try:
             _st = _tz_utc(datetime.fromisoformat(seg.t_start))
             _te = _tz_utc(datetime.fromisoformat(seg.t_end))
-            if (getattr(seg, "stop_kind", None) == "EMERGENCY"
-                    and _is_stop_head(enum_periods, _st)):
+            # Момент останова: у плашки неудачной попытки — падение, не её начало
+            _stop = _stop_ts_of(seg)
+            # Падение плашки за суточным резом — акт строит её продолжение
+            if (getattr(seg, "stop_kind", None) == "EMERGENCY" and _stop < _te
+                    and _is_stop_head(enum_periods, _stop)):
                 _ctx = await _load_incident_context(
-                    router_sn, equip_type, panel_id, _st, ts_to, cfg
+                    router_sn, equip_type, panel_id, _stop, ts_to, cfg,
+                    skip_stops=_plates,
                 )
-                _ep, _fp, _tlf = (
-                    _ctx if _ctx else (tl_enum, fault_periods, tl_faults)
+                _ep, _fp, _tlf, _anc = (
+                    _ctx if _ctx else (tl_enum, fault_periods, tl_faults, None)
                 )
                 inc = _clf.build_stop_incident(
-                    _ep, _fp, _st, _te, cfg,
+                    _ep, _fp, _stop, _te, cfg,
                     stop_kind="EMERGENCY",
                     stabilization_sec=_stab_sec(cfg),
                     detail_events=_act_detail_events(cfg),
                     timeline_faults=_tlf,
+                    anchor=_anc,
+                    min_window_sec=_act_min_window_sec(cfg),
+                    attempt=getattr(seg, "attempt", None),
                 )
                 if inc is not None:
                     incidents[seg.t_start] = inc
@@ -960,11 +975,48 @@ async def _timeline_for(
         return enum_periods, fault_periods
 
 
-# Запас при догрузке данных для акта: якорный стоп-период надо захватить
-# вместе с предшествующим ему расхолаживанием, иначе повторный расчёт якоря
-# внутри build_stop_incident не увидит входа через 4/5 (SQL берёт периоды
-# строго с state_end > ts_from) и уедет в фолбэк.
+# Запас при догрузке данных для акта: SQL берёт периоды строго с
+# state_end > ts_from, без запаса якорный стоп-период выпал бы из выборки.
 _ACT_LOAD_MARGIN_SEC = 60
+# Сколько прошлых стопов проверить на «после неудачной попытки» при поиске
+# якоря (v5.1.16): серия попыток — единицы, дальше — предохранитель
+_ANCHOR_ATTEMPT_CHECKS = 8
+# Докуда смотреть за суточный рез, решая исход попытки на нём (v5.1.16):
+# попытка решается за секунды-минуты, два часа — с запасом на добор истории
+_CONFIRM_LOOKAHEAD_SEC = 2 * 3600
+
+
+def _stop_ts_of(seg) -> datetime:
+    """Момент останова стоп-сегмента (v5.1.16).
+
+    У плашки неудачной попытки сегмент начинается на попытке, а машина
+    встала позже — на падении: от него лаг акта, ключ «акт построен», проверка
+    головы стопа (период стопа в 40011 начинается там) и заказ разбора.
+    """
+    get = (lambda k: seg.get(k)) if isinstance(seg, dict) else (lambda k: getattr(seg, k, None))
+    att = get("attempt")
+    raw = att.get("t_fall") if isinstance(att, dict) else None
+    raw = raw or get("t_start")
+    return _tz_utc(datetime.fromisoformat(raw) if isinstance(raw, str) else raw)
+
+
+def _attempt_stops(segments: list) -> set[datetime]:
+    """Начала стопов после неудачных попыток в окне — эталоном не бывают."""
+    out: set[datetime] = set()
+    for s in segments or []:
+        att = getattr(s, "attempt", None)
+        if isinstance(att, dict) and att.get("t_fall"):
+            out.add(_tz_utc(datetime.fromisoformat(att["t_fall"])))
+    return out
+
+
+def _act_min_window_sec(cfg) -> int:
+    """Окно данных акта не короче, сек (KB stop_kind.act_min_window_h, дефолт 12 ч)."""
+    try:
+        h = cfg.seg("stop_kind", "act_min_window_h", default=12)
+        return int(float(12 if h is None else h) * 3600)
+    except Exception:
+        return 12 * 3600
 
 
 def _stab_sec(cfg) -> int:
@@ -1040,7 +1092,8 @@ def _is_stop_head(enum_periods: list[dict], t_start: datetime) -> bool:
 async def _load_incident_context(
     router_sn: str, equip_type: str, panel_id: int,
     stop_ts: datetime, ts_to: datetime, cfg,
-) -> tuple[list[dict], list[dict], list[dict]] | None:
+    skip_stops: set[datetime] | None = None,
+) -> tuple[list[dict], list[dict], list[dict], tuple[datetime, str]] | None:
     """enum/fault, доведённые назад до последнего нормального останова.
 
     (enum, маски для классификации, все fault-события для ленты). enum —
@@ -1062,11 +1115,19 @@ async def _load_incident_context(
     неисправности в поиске обязателен: без него прошлая авария без бита в
     масках (1452) сойдёт за нормальный останов, и акт обрежет серию на ней.
 
+    Стоп после неподтверждённой попытки пуска эталоном не бывает (v5.1.16):
+    кандидат проверяется по оборотам и частоте начала цепочки перед ним
+    (короткий запрос на каждый), плашки из окна известны заранее (skip_stops).
+    Окно данных — от якоря, но не короче act_min_window_h (решение 13.10.2026).
+    Четвёртым возвращается якорь — тот же, что ляжет в акт.
+
     None — если догрузить не удалось; вызывающий работает на обычных данных.
     """
     from analytics import classifier as _clf
     from analytics import source as _src
-    from analytics.segmenter import fault_type_shutdown
+    from analytics.segmenter import (
+        confirm_exit, confirm_params, fault_type_shutdown, ready_intervals, value_series,
+    )
 
     stop_ts = _tz_utc(stop_ts)
     horizon = stop_ts - timedelta(seconds=_clf.BASELINE_SEARCH_SEC)
@@ -1083,10 +1144,48 @@ async def _load_incident_context(
                 fault_addrs=cfg.whitelist_fault,
             ),
         )
+        skip = {_tz_utc(t) for t in (skip_stops or ())}
         anchor_ts, _reason = _clf.find_baseline_anchor(
-            rs_periods, fault_periods, stop_ts, cfg
+            rs_periods, fault_periods, stop_ts, cfg, skip_stops=skip
         )
-        load_from = anchor_ts - timedelta(seconds=_ACT_LOAD_MARGIN_SEC)
+        prm = confirm_params(cfg)
+        if prm["enabled"]:
+            _rpm_a, _fq_a = cfg.role_to_addr("RPM"), cfg.role_to_addr("FREQUENCY")
+            _addrs = frozenset(a for a in (_rpm_a, _fq_a) if a)
+            _ready = ready_intervals(fault_periods, prm, _tz_utc(ts_to))
+            for _ in range(_ANCHOR_ATTEMPT_CHECKS):
+                if _reason != "normal_stop" or not _addrs:
+                    break
+                _chain = _clf.exit_chain_before(rs_periods, anchor_ts)
+                if _chain is None:
+                    break
+                _c0, _c1 = _chain
+                if (_c1 - _c0).total_seconds() > prm["anchor_check_sec"]:
+                    break   # долгая цепочка — машина работала, якорь честный
+                _hist, _gaps = await asyncio.gather(
+                    _src.get_whitelist_history(
+                        router_sn, equip_type, panel_id,
+                        _c0 - timedelta(seconds=prm["carry_sec"]), _c1, _addrs,
+                    ),
+                    _src.get_data_gaps(router_sn, equip_type, panel_id, _c0, _c1),
+                )
+                _by: dict[int, list[dict]] = {}
+                for _r in _hist:
+                    _by.setdefault(_r["addr"], []).append(_r)
+                _st, _, _ = confirm_exit(
+                    _c0, _c1, value_series(_by, _rpm_a), value_series(_by, _fq_a),
+                    _ready, _gaps, prm,
+                )
+                if _st != "unconfirmed":
+                    break
+                skip.add(anchor_ts)
+                anchor_ts, _reason = _clf.find_baseline_anchor(
+                    rs_periods, fault_periods, stop_ts, cfg, skip_stops=skip
+                )
+        data_from = anchor_ts
+        if _reason == "normal_stop":
+            data_from = min(anchor_ts, stop_ts - timedelta(seconds=_act_min_window_sec(cfg)))
+        load_from = data_from - timedelta(seconds=_ACT_LOAD_MARGIN_SEC)
         try:
             enum_periods, timeline_faults = await _src.get_timeline_periods(
                 router_sn, equip_type, panel_id, load_from, ts_to, cfg,
@@ -1116,7 +1215,7 @@ async def _load_incident_context(
         if load_from < horizon:
             _wl = cfg.whitelist_fault
             fault_periods = [f for f in timeline_faults if f.get("addr") in _wl]
-        return enum_periods, fault_periods, timeline_faults
+        return enum_periods, fault_periods, timeline_faults, (anchor_ts, _reason)
     except Exception:
         logger.warning(
             "Не удалось догрузить данные для акта %s/%s/%s от %s",
@@ -1593,7 +1692,18 @@ class OnlinePollEngine:
                 self.router_sn, self.equip_type, self.panel_id
             )
             if _row and _row.get("incident_json") is not None and _row.get("t_start"):
-                self._act_done_for = _tz_utc(_row["t_start"])
+                # Ключ — момент останова из самого акта: у плашки неудачной
+                # попытки строка начинается раньше падения (v5.1.16)
+                _inc = _row["incident_json"]
+                if isinstance(_inc, str):
+                    try:
+                        import json as _j
+                        _inc = _j.loads(_inc)
+                    except Exception:
+                        _inc = None
+                _stop_raw = _inc.get("stop_ts") if isinstance(_inc, dict) else None
+                self._act_done_for = (_tz_utc(datetime.fromisoformat(_stop_raw)) if _stop_raw
+                                      else _tz_utc(_row["t_start"]))
                 logger.info("OnlineEngine[%s]: акт открытого сегмента уже собран (%s)",
                             self.key, self._act_done_for)
         except Exception:
@@ -2151,7 +2261,8 @@ class OnlinePollEngine:
         # last_processed_to обновляется внутри _close_window после каждого сегмента,
         # т.к. там есть await-точки между которыми event loop обслуживает API.
         for boundary in pending:
-            await self._close_window(self.cursor_ts, boundary, "DAILY_BOUNDARY")
+            await self._close_window(self.cursor_ts, boundary, "DAILY_BOUNDARY",
+                                     lookahead_to=process_to)
 
         # Открытое окно — всегда в конце (после всех границ или сразу если их нет)
         await self._update_open_window(self.cursor_ts, process_to)
@@ -2237,8 +2348,16 @@ class OnlinePollEngine:
         t_from: datetime,
         t_to: datetime,
         close_reason: str,
+        lookahead_to: datetime | None = None,
     ) -> None:
-        """Запустить полный анализ [t_from, t_to], сохранить все сегменты как закрытые."""
+        """Запустить полный анализ [t_from, t_to], сохранить все сегменты как закрытые.
+
+        lookahead_to — докуда уже есть данные: если на суточной границе идёт
+        неподтверждённая попытка пуска, её исход решается по данным за
+        границей (v5.1.16). Иначе попытка за минуту до 09:00 оставалась бы
+        «ждём подтверждения» в этом окне навсегда, и рез откладывался на весь
+        следующий режим (ревью v5.1.16).
+        """
         self._fill_coking_accum_end(t_from)
         if t_to <= t_from:
             return
@@ -2252,6 +2371,17 @@ class OnlinePollEngine:
                 self.inherited_coking_risk,
                 transition_ctx=self._transition_ctx,
             )
+            if (close_reason == "DAILY_BOUNDARY" and segments
+                    and getattr(segments[-1], "attempt_pending", False)
+                    and lookahead_to is not None and _tz_utc(lookahead_to) > _tz_utc(t_to)):
+                segments, incidents, gaps, chronologies = await _run_segment(
+                    self.router_sn, self.equip_type, self.panel_id, self.engine_sn,
+                    t_from, t_to, self.cfg,
+                    self.inherited_coking_risk,
+                    transition_ctx=self._transition_ctx,
+                    confirm_to=min(_tz_utc(lookahead_to),
+                                   _tz_utc(t_to) + timedelta(seconds=_CONFIRM_LOOKAHEAD_SEC)),
+                )
         except Exception:
             logger.exception("OnlineEngine[%s]: ошибка анализа [%s, %s]", self.key, t_from, t_to)
             return
@@ -2358,7 +2488,10 @@ class OnlinePollEngine:
 
             # DAILY_BOUNDARY пропускаем если переходное состояние (RS ≠ 0 и ≠ 3).
             # Переходные состояния кратковременны — сегмент закроется RUN_STATE_CHANGE.
-            if is_last and close_reason == "DAILY_BOUNDARY" and seg.run_state not in {0, 3}:
+            # Неподтверждённый выход из стопа — тоже переходное (v5.1.16): иначе
+            # попытку разрезало бы, и склеить её в плашку было бы уже нельзя
+            if is_last and close_reason == "DAILY_BOUNDARY" and (
+                    seg.run_state not in {0, 3} or getattr(seg, "attempt_pending", False)):
                 logger.info(
                     "OnlineEngine[%s]: DAILY_BOUNDARY@%s пропущен — RS=%d (переходное)",
                     self.key, t_to, seg.run_state,
@@ -2487,7 +2620,7 @@ class OnlinePollEngine:
             # заказывается отсюда — иначе он бы не заказался вовсе
             _daily_inc = incidents.get(seg.t_start)
             if _daily_inc is not None:
-                _daily_st = _tz_utc(datetime.fromisoformat(seg.t_start))
+                _daily_st = _stop_ts_of(seg)
                 if self._act_done_for != _daily_st:
                     self._act_done_for = _daily_st
                     self._order_incident_analysis(_daily_inc, _daily_st, db_id)
@@ -2744,6 +2877,7 @@ class OnlinePollEngine:
             if s.cause_close in ("RUN_STATE_CHANGE", "FAULT_CLEARED", "SHUTDOWN_CLEARED")
         ]
         _rs_gate_state: dict | None = None
+        _win_plates = _attempt_stops(segments)
         if closed_segs:
             # Снять открытую строку одним запросом (v5.1.13, см. _close_window)
             _rs_open_row = await online_db.pop_open_segment(
@@ -2841,6 +2975,8 @@ class OnlinePollEngine:
                             build_segment_chronology as _chrono,
                         )
                         _rs_st = _tz_utc(datetime.fromisoformat(seg.t_start))
+                        # Момент останова: у плашки неудачной попытки — падение
+                        _rs_stop = _stop_ts_of(seg)
                         # Акт собран один раз и не пересобирается: если он уже
                         # лежит на закрываемой открытой строке — переносим как
                         # есть. Пересборка дала бы тот же документ, но «один
@@ -2850,28 +2986,31 @@ class OnlinePollEngine:
                         # суточного реза ссылается на неё через continued_from
                         if (_rs_incident is None
                                 and getattr(seg, "stop_kind", None) == "EMERGENCY"
-                                and _is_stop_head(enum_periods, _rs_st)):
+                                and _is_stop_head(enum_periods, _rs_stop)):
                             _rs_ctx = await _load_incident_context(
                                 self.router_sn, self.equip_type, self.panel_id,
-                                _rs_st, ts_to_utc, self.cfg,
+                                _rs_stop, ts_to_utc, self.cfg, skip_stops=_win_plates,
                             )
-                            _rs_ep, _rs_fp, _rs_tlf = (
+                            _rs_ep, _rs_fp, _rs_tlf, _rs_anc = (
                                 _rs_ctx if _rs_ctx
-                                else (tl_enum, fault_periods, tl_faults)
+                                else (tl_enum, fault_periods, tl_faults, None)
                             )
                             _rs_incident = _clf.build_stop_incident(
                                 _rs_ep, _rs_fp,
-                                _rs_st, seg_t_end_rs, self.cfg,
+                                _rs_stop, seg_t_end_rs, self.cfg,
                                 stop_kind="EMERGENCY",
                                 stabilization_sec=_stab_sec(self.cfg),
                                 detail_events=_act_detail_events(self.cfg),
                                 timeline_faults=_rs_tlf,
+                                anchor=_rs_anc,
+                                min_window_sec=_act_min_window_sec(self.cfg),
+                                attempt=getattr(seg, "attempt", None),
                             )
                             # Авария короче лага: акта на открытой строке не
                             # было, значит разбор заказывается отсюда
                             if _rs_incident is not None:
-                                self._act_done_for = _rs_st
-                                self._order_incident_analysis(_rs_incident, _rs_st)
+                                self._act_done_for = _rs_stop
+                                self._order_incident_analysis(_rs_incident, _rs_stop)
                                 # segment_id ещё не известен — строка
                                 # вставляется ниже; разбор найдёт сегмент по ts
                         # Лента есть у любого стоп-сегмента, в том числе
@@ -3062,31 +3201,37 @@ class OnlinePollEngine:
                     build_segment_chronology as _chrono,
                 )
                 _op_st = _tz_utc(datetime.fromisoformat(open_seg.t_start))
-                _lag_done = ts_to_utc >= _op_st + timedelta(
+                # Момент останова: у плашки неудачной попытки — падение (v5.1.16)
+                _op_stop = _stop_ts_of(open_seg)
+                _lag_done = ts_to_utc >= _op_stop + timedelta(
                     seconds=_stab_sec(self.cfg)
                 )
                 if (getattr(open_seg, "stop_kind", None) == "EMERGENCY"
                         and _lag_done
-                        and self._act_done_for != _op_st
-                        and _is_stop_head(enum_periods, _op_st)):
+                        and self._act_done_for != _op_stop
+                        and _is_stop_head(enum_periods, _op_stop)):
                     _op_ctx = await _load_incident_context(
                         self.router_sn, self.equip_type, self.panel_id,
-                        _op_st, ts_to_utc, self.cfg,
+                        _op_stop, ts_to_utc, self.cfg,
+                        skip_stops=_attempt_stops(segments),
                     )
-                    _op_ep, _op_fp, _op_tlf = (
+                    _op_ep, _op_fp, _op_tlf, _op_anc = (
                         _op_ctx if _op_ctx
-                        else (tl_enum, fault_periods, tl_faults)
+                        else (tl_enum, fault_periods, tl_faults, None)
                     )
                     _open_incident = _clf.build_stop_incident(
-                        _op_ep, _op_fp, _op_st, None, self.cfg,
+                        _op_ep, _op_fp, _op_stop, None, self.cfg,
                         stop_kind="EMERGENCY",
                         stabilization_sec=_stab_sec(self.cfg),
                         detail_events=_act_detail_events(self.cfg),
                         timeline_faults=_op_tlf,
+                        anchor=_op_anc,
+                        min_window_sec=_act_min_window_sec(self.cfg),
+                        attempt=getattr(open_seg, "attempt", None),
                     )
                     if _open_incident is not None:
-                        self._act_done_for = _op_st
-                        self._order_incident_analysis(_open_incident, _op_st)
+                        self._act_done_for = _op_stop
+                        self._order_incident_analysis(_open_incident, _op_stop)
                 _open_chronology = _chrono(
                     tl_enum, tl_faults, _op_st, ts_to_utc, self.cfg
                 )

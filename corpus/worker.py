@@ -161,6 +161,17 @@ async def _process_segment(
     if seg_row.get("t_end") is None:
         logger.info("corpus/worker: сегмент #%d открытый — ручной запуск (force=True)", seg_id)
 
+    # Неудачная попытка выхода из стопа (v5.1.16): заключения модели нет —
+    # машина не вышла на работу, кроме фактов разбирать нечего (решение
+    # владельца 13.10.2026). Отказ пуска с аварией разбирает совет по акту
+    if not force:
+        _facts = _attempt_conclusion(seg_row)
+        if _facts is not None:
+            await corpus_db.upsert_analysis(seg_id, {**_facts, "status": "done",
+                                                     "analytics_version": ANALYTICS_VERSION})
+            logger.info("corpus #%d: неудачная попытка пуска — факты без модели", seg_id)
+            return
+
     kb_path = await corpus_db.get_equipment_kb_path(
         seg_row["router_sn"], seg_row["equip_type"], seg_row["panel_id"]
     )
@@ -207,6 +218,59 @@ async def _process_segment(
         result.get("tool_calls_count", 0),
         result.get("generation_time_sec", 0),
     )
+
+
+def _attempt_conclusion(seg_row: dict) -> dict | None:
+    """Заключение-факты для плашки неудачной попытки; None — не попытка."""
+    import json as _json
+    from datetime import datetime as _dt
+    from analytics.labels import attempt_facts_ru, attempt_label
+    chars = seg_row.get("characteristics_json")
+    if isinstance(chars, str):
+        try:
+            chars = _json.loads(chars)
+        except ValueError:
+            return None
+    att = chars.get("attempt") if isinstance(chars, dict) else None
+    if not isinstance(att, dict):
+        return None
+    emergency = att.get("outcome") == "EMERGENCY"
+    # Коды самой попытки (сегментатор): агрегат плашки подхватил бы и код,
+    # висевший до попытки, и кнопку на стоящей машине через час (ревью v5.1.16)
+    codes = [int(c) for c in att.get("codes") or []]
+    fall = att.get("t_fall") or "—"
+    short = (f"{attempt_label(att)}: выход из стопа не подтвердился — "
+             f"{attempt_facts_ru(att)}. Останов {fall}"
+             + (f", код панели {', '.join(map(str, codes))}" if codes else "") + ".")
+    md = "\n".join([
+        "## Сводка",
+        short,
+        "",
+        "Заключение модели для неудачной попытки не пишется: машина не вышла на "
+        "работу, разбирать нечего, кроме фактов выше. Отказ пуска с аварией "
+        "разбирает совет шлюза по акту аварии.",
+        "",
+        "---",
+        f"*Система (без ИИ) · {_dt.utcnow().strftime('%Y-%m-%d %H:%M')} UTC*",
+    ])
+    # Уровень — тот же, что у обычного пути: в стопе после попытки бывают и
+    # предупреждения панели (ревью v5.1.16)
+    try:
+        verdict, level = _verdict_fields(seg_row)
+    except Exception:
+        verdict, level = None, None
+    if not level:
+        verdict, level = (("авария", "SHUTDOWN") if emergency else ("норма", "НОРМА"))
+    return {
+        "conclusion_md": md,
+        "humanized_md": short,
+        "verdict": verdict,
+        "alarm_level": level,
+        "claude_model": "Система (без ИИ)",
+        "tokens_used": 0, "tool_calls_count": 0, "loops_count": 0,
+        "generation_time_sec": 0,
+        "debug_json": {"entry": "attempt_facts", "depth": "attempt"},
+    }
 
 
 def _segment_depth(seg_row: dict, task_id: str) -> str:

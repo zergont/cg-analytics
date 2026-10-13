@@ -332,7 +332,10 @@ def build_structural_status(
     # Разбор поднят сюда из блока времени в режиме: вид стопа нужен для подписи
     chars        = _parse_json(seg_row.get("characteristics_json")) or {}
     _stop_kind   = chars.get("stop_kind")
-    mode_label = (_STOP_KIND_LABELS.get(_stop_kind or "")
+    # Неудачная попытка выхода из стопа и неподтверждённый выход (v5.1.16)
+    from analytics.labels import label_from_chars
+    mode_label = (label_from_chars(chars)
+                  or _STOP_KIND_LABELS.get(_stop_kind or "")
                   or _RUN_STATE_LABELS.get(run_state, f"RUN_STATE={run_state}"))
 
     current_vals = _parse_json(seg_row.get("current_values_json")) or {}
@@ -416,6 +419,14 @@ def build_structural_status(
                         break
                 except (TypeError, ValueError):
                     pass
+
+        # Панель — с номером кода: «код 1248 «Предупреждение двигателя — общее»»
+        # (v5.1.16); без кода — имя бита без «addr=…, bit=…»
+        if scenario == "CONTROLLER_FAULT":
+            if description and fault_codes:
+                description = f"код {fault_codes[0]} «{description}»"
+            elif not description:
+                description = (d.get("values") or {}).get("fault_name") or None
 
         # Аналитику не подписывать именем кода Cummins: «Высокая температура масла 1»
         # у сигнала «близко к порогу» (v5.1.6, решение B)

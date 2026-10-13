@@ -1355,7 +1355,8 @@ _COKING_COLORS = {"GREEN": "success", "YELLOW": "warning", "RED": "danger"}
 _STOP_KIND_LABELS = {"EMERGENCY": "Аварийный стоп"}
 
 
-def _seg_label(run_state: int | None, stop_kind: str | None = None) -> str | None:
+def _seg_label(run_state: int | None, stop_kind: str | None = None,
+               chars: dict | None = None) -> str | None:
     """Подпись сегмента для API: вид стопа поверх словаря режимов.
 
     Сохранённый characteristics_json.run_state_label сознательно НЕ читаем.
@@ -1367,7 +1368,11 @@ def _seg_label(run_state: int | None, stop_kind: str | None = None) -> str | Non
     """
     if run_state is None:
         return None
-    return (_STOP_KIND_LABELS.get(stop_kind or "")
+    # Неудачная попытка выхода из стопа и неподтверждённый выход (v5.1.16):
+    # «Неудачная работа · Авария», «Работа — ждём подтверждения»
+    from analytics.labels import label_from_chars
+    return (label_from_chars(chars if isinstance(chars, dict) else None)
+            or _STOP_KIND_LABELS.get(stop_kind or "")
             or _RUN_STATE_LABELS.get(run_state, str(run_state)))
 
 
@@ -1775,7 +1780,7 @@ async def online_segment_detail(request: Request, seg_id: int):
             return None
         rs = s.get("run_state")
         chars = _pj(s.get("characteristics_json")) if "characteristics_json" in s else None
-        label = (chars.get("run_state_label") if chars else None) or _RUN_STATE_LABELS.get(rs, f"RS={rs}")
+        label = _seg_label(rs, (chars or {}).get("stop_kind"), chars) or f"RS={rs}"
         t_start = s.get("t_start")
         t_end   = s.get("t_end")
         if t_start and t_end:
@@ -1792,10 +1797,8 @@ async def online_segment_detail(request: Request, seg_id: int):
     prev_seg_chars = _pj(prev_seg_raw.get("characteristics_json")) if prev_seg_raw else None
     prev_run_state_label = None
     if prev_seg_chars and isinstance(prev_seg_chars, dict):
-        prev_run_state_label = (
-            prev_seg_chars.get("run_state_label")
-            or _RUN_STATE_LABELS.get(prev_seg_chars.get("run_state"))
-        )
+        prev_run_state_label = _seg_label(
+            prev_seg_chars.get("run_state"), prev_seg_chars.get("stop_kind"), prev_seg_chars)
     elif prev_seg_raw:
         rs = prev_seg_raw.get("run_state")
         prev_run_state_label = _RUN_STATE_LABELS.get(rs, f"RUN_STATE={rs}") if rs is not None else None
@@ -2279,7 +2282,7 @@ async def api_machines():
             "monitoring_status": obs["status"],        # running / stopped
             "run_state":     run_state,
             "stop_kind":     _stop_kind,
-            "run_state_label": _seg_label(run_state, _stop_kind),
+            "run_state_label": _seg_label(run_state, _stop_kind, _m_chars),
             # Уровень однозначно кодирует источник: предупреждение — только аналитика,
             # внимание/авария — только панель
             "severity_level":    severity_level,       # норма / предупреждение / внимание / авария
@@ -2432,7 +2435,7 @@ async def api_machine_segments(
             "is_open":       is_open,
             "run_state":     run_state,
             "stop_kind":     _stop_kind,
-            "run_state_label": _seg_label(run_state, _stop_kind),
+            "run_state_label": _seg_label(run_state, _stop_kind, _chars),
             "duration_sec":  dur,
             "cause_close":   seg.get("cause_close"),
             "severity":      sev,                         # SHUTDOWN/WARNING/CAUTION/None (было INFO до v4.8.9)
@@ -2522,7 +2525,7 @@ async def api_segment_detail(seg_id: int):
         "is_open":       is_open,
         "run_state":     run_state,
         "stop_kind":     _stop_kind,
-        "run_state_label": _seg_label(run_state, _stop_kind),
+        "run_state_label": _seg_label(run_state, _stop_kind, _chars),
         "duration_sec":  dur,
         "cause_close":   seg.get("cause_close"),
         "severity":      sev,

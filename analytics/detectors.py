@@ -79,8 +79,13 @@ def run_all_detectors(
     prev_zone: str | None,
     cfg: AnalyticsConfig,
     state_periods: dict[int, list[dict]] | None = None,
+    onset_faults: list[dict[str, Any]] | None = None,
 ) -> list[Detection]:
-    """Запустить все включённые детекторы, вернуть список сработавших Detection."""
+    """Запустить все включённые детекторы, вернуть список сработавших Detection.
+
+    onset_faults — маски всего сегмента: по ним проверяется, что код панели
+    принадлежит биту (v5.1.16), — в подсегменте соседний бит мог уже сняться.
+    """
     detections: list[Detection] = []
 
     # LOAD_STEP: Класс A (быстрые/электрические) — только в RUN_STATE=3
@@ -139,7 +144,8 @@ def run_all_detectors(
 
     if cfg.det("CONTROLLER_FAULT", "enabled", default=True):
         detections.extend(_detect_controller_faults(
-            fault_periods_in_seg, characteristics, seg_start, seg_end, cfg, state_periods
+            fault_periods_in_seg, characteristics, seg_start, seg_end, cfg, state_periods,
+            onset_faults=onset_faults,
         ))
 
     if cfg.det("RPM_UNDERSPEED", "enabled", default=True) and run_state == 3:
@@ -868,6 +874,7 @@ def _detect_controller_faults(
     seg_end: datetime,
     cfg: AnalyticsConfig,
     state_periods: dict[int, list[dict]] | None = None,
+    onset_faults: list[dict[str, Any]] | None = None,
 ) -> list[Detection]:
     results: list[Detection] = []
     t_start = _tz(seg_start)
@@ -923,6 +930,38 @@ def _detect_controller_faults(
                 "raw_severity": raw_sev,
             },
         ))
+
+    # Код панели к биту (v5.1.16). 40012 «последний код» встаёт в том же кадре,
+    # что и бит: без привязки строка статуса и гейт получали «Предупреждение
+    # двигателя (addr=40406, bit=2)» и советовали «расшифровать бит», хотя код
+    # 1248 и его описание есть в справочнике (ДЭС №3 13.10). Привязываем, только
+    # если в этот момент поднялся ровно один громкий бит — иначе код не его.
+    # Соседей считаем по маскам всего окна: в подсегменте сосед мог уже
+    # сняться (ревью v5.1.16). Сосед, снятый до начала окна (живое окно после
+    # снятия аварии), не виден — поэтому ещё и тяжесть кода из справочника
+    # должна подходить биту: предупреждение не получит код аварии 1438.
+    _lfc_all = (state_periods or {}).get(cfg.role_to_addr("LAST_FAULT_CODE")) or []
+    if _lfc_all and results:
+        _tol = float(cfg.det("CONTROLLER_FAULT", "code_onset_tol_sec", default=15.0))
+        _loud = [_tz(fp["fault_start"]) for fp in (onset_faults if onset_faults is not None
+                                                     else fault_periods)
+                 if cfg.bitmap_severity(fp.get("severity") or "none") != "INFO"]
+        for d in results:
+            fs = _tz(datetime.fromisoformat(d.values["fault_start"]))
+            if sum(1 for o in _loud if abs((o - fs).total_seconds()) <= _tol) != 1:
+                continue
+            best = None
+            for p in _lfc_all:
+                try:
+                    v = int(p.get("value") or 0)
+                except (TypeError, ValueError):
+                    continue
+                gap = abs((_tz(p["state_start"]) - fs).total_seconds())
+                if v > 0 and gap <= _tol and (best is None or gap < best[0]):
+                    best = (gap, v)
+            if best is not None and cfg.code_fits_bit(best[1], d.values.get("raw_severity")):
+                d.fault_codes = [best[1]]
+                d.values["panel_code"] = best[1]
 
     # Несброшенная неисправность: CommonAlarm активен, остальные не-INFO биты в
     # это время молчат, код 40012 не сброшен (сбрасывается только кнопкой после

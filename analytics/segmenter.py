@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import bisect
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -769,8 +769,16 @@ def _build_single_subsegment(
     cfg: AnalyticsConfig,
     fault_periods: list[dict],
     state_periods: dict[int, list[dict]] | None = None,
+    detect_run_state: int | None = None,
+    transient: bool = False,
+    onset_faults: list[dict] | None = None,
 ) -> tuple[Subsegment, RiskAccumulators]:
-    """Создать один подсегмент (для нейтральных состояний RUN_STATE ≠ 3)."""
+    """Создать один подсегмент (для нейтральных состояний RUN_STATE ≠ 3).
+
+    detect_run_state — режим, по которому включаются детекторы, если он не
+    совпадает с режимом накопителей: у переходного куска «Работы» (разгон,
+    сброс оборотов) детекторы работы молчат, панель — нет (v5.1.16).
+    """
     subseg_id = f"{seg_id}.{idx}"
     char_t_start = preamble_t_start if (idx == 1 and preamble_t_start) else t_start
 
@@ -790,7 +798,9 @@ def _build_single_subsegment(
     ]
     detections = run_all_detectors(
         chars, derived, new_acc, faults_in,
-        load_zone, run_state, t_start, t_end, prev_zone, cfg, state_periods,
+        load_zone, run_state if detect_run_state is None else detect_run_state,
+        t_start, t_end, prev_zone, cfg, state_periods,
+        onset_faults=onset_faults if onset_faults is not None else fault_periods,
     )
 
     dq = _compute_data_quality(seg_by_addr, t_start, t_end, gaps, cfg)
@@ -810,6 +820,7 @@ def _build_single_subsegment(
         detections=detections,
         data_quality=dq,
         data_gaps=_clip_gap_intervals(gaps, t_start, t_end),
+        transient=transient,
     )
     return subseg, new_acc
 
@@ -826,10 +837,57 @@ def _build_subsegments_for_running(
     run_state: int,
     cfg: AnalyticsConfig,
     state_periods: dict[int, list[dict]] | None = None,
+    steady: tuple[datetime | None, datetime | None] | None = None,
+    onset_faults: list[dict] | None = None,
 ) -> tuple[list[Subsegment], RiskAccumulators]:
-    """L2-сегментация внутри RUN_STATE=3: ZoneTracker + fault-события."""
-    t_start_tz = _tz(seg_start)
-    t_end_tz = _tz(seg_end)
+    """L2-сегментация внутри RUN_STATE=3: ZoneTracker + fault-события.
+
+    steady — рабочая часть сегмента (v5.1.16, _steady_window): до неё разгон с
+    нулей пуска, после — сброс оборотов перед охлаждением. Эти куски —
+    отдельные переходные подсегменты без детекторов работы (панель видна).
+    (None, None) — рабочих оборотов не было, весь сегмент переходный;
+    None — делить нечего (как до v5.1.16).
+    """
+    seg_t0 = _tz(seg_start)
+    seg_t1 = _tz(seg_end)
+    head_end, tail_start = seg_t0, seg_t1
+    if steady is not None:
+        s_from, s_to = steady
+        if s_from is None:
+            head_end = seg_t1
+        else:
+            head_end = max(seg_t0, min(_tz(s_from), seg_t1))
+            tail_start = max(head_end, min(_tz(s_to) if s_to else seg_t1, seg_t1))
+
+    pre_subs: list[Subsegment] = []
+    accumulators = prev_accumulators
+    if steady is not None and head_end <= seg_t0 and preamble_t_start is not None:
+        # Преамбула со стоянки в рабочую часть не идёт: обороты в ней ниже
+        # рабочих — это нули перед пуском (пробный пуск 13.10: «обороты 0»,
+        # «давление масла 0» у работы, вышедшей на 1498 за секунду до смены)
+        _prm = confirm_params(cfg)
+        _rpm_a = cfg.role_to_addr("RPM")
+        if any(_tz(r["ts"]) < seg_t0 and (_fv(r) or 0.0) < _prm["rated_rpm"]
+               for r in (seg_by_addr.get(_rpm_a) or []) if _fv(r) is not None):
+            preamble_t_start = None
+    if head_end > seg_t0:
+        sub, accumulators = _build_single_subsegment(
+            seg_id=seg_id, idx=1, seg_by_addr=seg_by_addr,
+            preamble_t_start=preamble_t_start, t_start=seg_t0, t_end=head_end,
+            load_zone="NA", cause_open="SEG_START",
+            cause_close="RPM_RATED" if head_end < seg_t1 else None,
+            run_state=run_state, gaps=_filter_gaps(gaps, seg_t0, head_end),
+            accumulators=accumulators, prev_zone=None, cfg=cfg,
+            fault_periods=fault_periods_in_seg, state_periods=state_periods,
+            detect_run_state=0, transient=True, onset_faults=onset_faults,
+        )
+        pre_subs.append(sub)
+        if head_end >= seg_t1:
+            return pre_subs, accumulators
+        preamble_t_start = None   # преамбула — у разгона, не у рабочей части
+
+    t_start_tz = head_end
+    t_end_tz = tail_start
 
     n_stab = int(cfg.seg("boundary_confirmation", "n_stab", default=3))
     load_addr = cfg.role_to_addr("LOAD_PCT")
@@ -915,20 +973,24 @@ def _build_subsegments_for_running(
 
     # Финальный интервал
     if prev_ts < t_end_tz:
-        intervals.append((prev_ts, t_end_tz, prev_zone, prev_cause_open, None))
+        intervals.append((prev_ts, t_end_tz, prev_zone, prev_cause_open,
+                          "RPM_RUNDOWN" if tail_start < seg_t1 else None))
 
     if not intervals:
         intervals = [(t_start_tz, t_end_tz, initial_zone, "SEG_START", None)]
+    if pre_subs:
+        # Рабочая часть открывается выходом на рабочие обороты
+        s0, e0, z0, _, c0 = intervals[0]
+        intervals[0] = (s0, e0, z0, "RPM_RATED", c0)
 
     # Создаём подсегменты
-    subsegments: list[Subsegment] = []
-    accumulators = prev_accumulators
+    subsegments: list[Subsegment] = list(pre_subs)
     prev_sub_zone: str | None = None
 
     ts_index = _build_ts_index(seg_by_addr)
 
     for idx, (t_sub_start, t_sub_end, zone, cause_open, cause_close) in enumerate(intervals):
-        subseg_id = f"{seg_id}.{idx + 1}"
+        subseg_id = f"{seg_id}.{idx + 1 + len(pre_subs)}"
         char_t_start = (preamble_t_start if idx == 0 and preamble_t_start else t_sub_start)
 
         sub_chars = _slice_by_addr(seg_by_addr, ts_index, char_t_start, t_sub_end)
@@ -947,6 +1009,7 @@ def _build_subsegments_for_running(
         detections = run_all_detectors(
             chars, derived, accumulators, faults_in_sub,
             zone, run_state, t_sub_start, t_sub_end, prev_sub_zone, cfg, state_periods,
+            onset_faults=onset_faults if onset_faults is not None else fault_periods_in_seg,
         )
 
         sub_gaps = _filter_gaps(gaps, t_sub_start, t_sub_end)
@@ -970,6 +1033,18 @@ def _build_subsegments_for_running(
         )
         subsegments.append(subseg)
         prev_sub_zone = zone
+
+    if tail_start < seg_t1:
+        sub, accumulators = _build_single_subsegment(
+            seg_id=seg_id, idx=len(subsegments) + 1, seg_by_addr=seg_by_addr,
+            preamble_t_start=None, t_start=tail_start, t_end=seg_t1,
+            load_zone="NA", cause_open="RPM_RUNDOWN", cause_close=None,
+            run_state=run_state, gaps=_filter_gaps(gaps, tail_start, seg_t1),
+            accumulators=accumulators, prev_zone=prev_sub_zone, cfg=cfg,
+            fault_periods=fault_periods_in_seg, state_periods=state_periods,
+            detect_run_state=0, transient=True, onset_faults=onset_faults,
+        )
+        subsegments.append(sub)
 
     return subsegments, accumulators
 
@@ -1218,8 +1293,9 @@ def _inter_segment_checks(
     for i, seg in enumerate(segments):
         prev_links = ctx + [lk for lk in window_links[:i] if lk is not None]
 
-        # Прогрев перед работой — у головы работы
-        if seg.run_state == 3 and warmup_en:
+        # Прогрев перед работой — у головы работы. Неподтверждённый выход из
+        # стопа ещё не пуск: оценивать нечего (v5.1.16)
+        if seg.run_state == 3 and warmup_en and not getattr(seg, "attempt_pending", False):
             _check_warmup_transition(seg, prev_links, cfg, Detection)
 
         # Охлаждение перед остановом — у головы стопа после работы
@@ -1533,6 +1609,409 @@ def _check_cooldown_transition(
         ))
 
 
+# ── Подтверждение выхода из стопа (v5.1.16) ─────────────────────────────────
+# Регистр 40011 — команда и последовательность панели, а не то, что физически
+# с машиной: по команде пуска панель сразу пишет «Прогрев» или «Номинал», хотя
+# коленвал ещё не провернулся. ДЭС №3 13.10.2026: четыре попытки за 5 минут
+# (обороты 0, трижды 1438 «Отказ прокрутки») стали «Прогревом» и тремя
+# «Работами» с ложными «давление масла 0» и «обороты 0»; ДГУ №2 20.09 —
+# четыре зелёных «Прогрева» при прокрутке стартером ~100 об/мин.
+#
+# Решения владельца 13.10.2026 (docs/plans/design_v5116_transition_confirm.md):
+#   - выход из стопа (1/2/3 после 0) подтверждается фактом — любым из трёх
+#     независимых: обороты выше стартера (> 250), частота генератора, бит
+#     «Готов к нагрузке»; механика, электрика и панель страхуют друг друга;
+#   - не подтвердился и вернулся в стоп — ОДНА плашка с устойчивым состоянием
+#     исхода: «Неудачная работа · Авария» / «Неудачная работа · Стоп»;
+#     правило «один сегмент — одно состояние» не нарушено: изменённое
+#     состояние не подтвердилось, показываем устойчивое;
+#   - охлаждение (4/5) не трогаем: машина, вставшая при входе в него, упала
+#     с работы — это ведёт логика аварийного стопа.
+
+def confirm_params(cfg) -> dict[str, Any]:
+    """Пороги подтверждения (KB: segmentation.yaml → transition_confirm).
+
+    Рабочие обороты — тот же порог, что у паспортной проверки масла
+    (OIL_DILUTION.passport_min_rpm): один источник.
+    """
+    def g(key: str, default: Any) -> Any:
+        try:
+            v = cfg.seg("transition_confirm", key, default=default)
+        except Exception:
+            v = default
+        return default if v is None else v
+
+    bits: set[tuple[int, int]] = set()
+    for b in g("ready_bits", []) or []:
+        try:
+            bits.add((int(b["addr"]), int(b["bit"])) if isinstance(b, dict)
+                     else (int(b[0]), int(b[1])))
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+    try:
+        rated = cfg.det("OIL_DILUTION", "passport_min_rpm", default=1400.0)
+    except Exception:
+        rated = 1400.0
+    return {
+        "enabled": bool(g("enabled", True)),
+        "rpm_min": float(g("rpm_min", 250.0)),
+        "freq_min": float(g("freq_min_hz", 5.0)),
+        "ready_bits": frozenset(bits),
+        "carry_sec": float(g("carry_sec", 120.0)),
+        "rated_rpm": float(g("rated_rpm_min", rated if rated is not None else 1400.0)),
+        "rated_freq": float(g("rated_freq_min_hz", 46.5)),
+        "rundown_max_sec": float(g("rundown_max_sec", 30.0)),
+        "no_data_share": float(g("no_data_share", 0.5)),
+        "anchor_check_sec": float(g("anchor_check_sec", 900.0)),
+    }
+
+
+def value_series(by_addr: dict[int, list[dict]], addr: int | None) -> list[tuple[datetime, float]]:
+    """Реальные показания регистра (ts, value) по времени — без forward-fill."""
+    if not addr:
+        return []
+    out = []
+    for r in by_addr.get(addr) or []:
+        if r.get("is_carried_forward"):
+            continue
+        v = _fv(r)
+        if v is not None:
+            out.append((_tz(r["ts"]), v))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def ready_intervals(fault_periods: list[dict], prm: dict, tt: datetime) -> list[tuple[datetime, datetime]]:
+    """Периоды бита «Готов к нагрузке» (адреса — у контроллера в KB)."""
+    if not prm["ready_bits"]:
+        return []
+    out = []
+    for fp in fault_periods or []:
+        try:
+            key = (int(fp.get("addr")), int(fp.get("bit")))
+        except (TypeError, ValueError):
+            continue
+        if key not in prm["ready_bits"]:
+            continue
+        s = _tz(fp["fault_start"])
+        e = _tz(fp["fault_end"]) if fp.get("fault_end") else _tz(tt)
+        if e > s:
+            out.append((s, e))
+    return _merge_intervals(out)
+
+
+def confirm_exit(
+    t0: datetime, t1: datetime,
+    rpm: list[tuple[datetime, float]], freq: list[tuple[datetime, float]],
+    ready: list[tuple[datetime, datetime]], gaps: list[dict] | None, prm: dict,
+) -> tuple[str, datetime | None, dict[str, Any]]:
+    """Подтвердился ли режим на [t0, t1): ('confirmed', момент, факты),
+    ('unconfirmed', None, факты) или ('no_data', None, факты).
+
+    Показание пишется по изменению: если в коротком отрезке строк нет, значение
+    держится с последнего показания до t0 (не старше carry_sec). Без единого
+    показания оборотов и частоты, или когда отрезок больше чем наполовину без
+    связи, исход не объявляется (решение 13.10: «нет данных» — не неудача).
+    """
+    t0, t1 = _tz(t0), _tz(t1)
+    facts: dict[str, Any] = {"rpm_max": None, "freq_max": None, "ready": False}
+    hits: list[datetime] = []
+    evidence = False
+    for series, thr, key in ((rpm, prm["rpm_min"], "rpm_max"),
+                             (freq, prm["freq_min"], "freq_max")):
+        vals: list[float] = []
+        carried = None
+        first_hit = None
+        for ts, v in series:
+            if ts < t0:
+                carried = v if (t0 - ts).total_seconds() <= prm["carry_sec"] else None
+                continue
+            if ts >= t1:
+                break
+            vals.append(v)
+            if first_hit is None and v > thr:
+                first_hit = ts
+        if carried is not None:
+            vals.append(carried)
+            if carried > thr:
+                first_hit = t0
+        if vals:
+            evidence = True
+            facts[key] = max(vals)
+        if first_hit is not None:
+            hits.append(first_hit)
+    for s, e in ready:
+        if s < t1 and e > t0:
+            facts["ready"] = True
+            hits.append(max(s, t0))
+    if hits:
+        return "confirmed", min(hits), facts
+    dur = (t1 - t0).total_seconds()
+    spans = []
+    for g in gaps or []:
+        gs = max(_tz(g["gap_start"]), t0)
+        ge_raw = g.get("gap_end")
+        ge = min(_tz(ge_raw) if ge_raw else t1, t1)
+        if ge > gs:
+            spans.append((gs, ge))
+    blind = union_seconds(spans)
+    if not evidence or (dur > 0 and blind / dur >= prm["no_data_share"]):
+        return "no_data", None, facts
+    return "unconfirmed", None, facts
+
+
+def _attempt_codes(code_periods: list[dict], t0: datetime, t_fall: datetime,
+                   lag_sec: float) -> list[int]:
+    """Коды 40012, которые панель выставила на попытке и в лаг после падения.
+
+    Не агрегат плашки: та тянется весь стоп после попытки, и в неё попадали бы
+    и код, висевший до попытки (1248 после сброса), и кнопка через час.
+    """
+    out: list[int] = []
+    hi = t_fall + timedelta(seconds=lag_sec)
+    for p in code_periods or []:
+        s = _tz(p["state_start"])
+        if s < t0 or s > hi:
+            continue
+        try:
+            v = int(p.get("value") or 0)
+        except (TypeError, ValueError):
+            continue
+        if v > 0 and v != 65535 and v not in out:
+            out.append(v)
+    return out
+
+
+def _attempt_record(chain: list[dict], stop: dict, res: list[tuple],
+                    code_periods: list[dict] | None = None,
+                    lag_sec: float = 60.0) -> dict[str, Any]:
+    """Что было на неудачной попытке — для подписи, отчёта и акта."""
+    path = [int(c["value"]) for c in chain]
+    t0 = _tz(chain[0]["state_start"])
+    t_fall = _tz(stop["state_start"])
+
+    def _mx(key):
+        vals = [r[2].get(key) for r in res if r[2].get(key) is not None]
+        return max(vals) if vals else None
+
+    return {
+        "from_state": 3 if 3 in path else (2 if 2 in path else path[-1]),
+        "path": path,
+        "t_start": t0.isoformat(),
+        "t_fall": t_fall.isoformat(),
+        "outcome": "EMERGENCY" if stop.get("stop_kind") == "EMERGENCY" else "SIMPLE",
+        "duration_sec": max(0.0, (t_fall - t0).total_seconds()),
+        "facts": {
+            "rpm_max": _mx("rpm_max"),
+            "freq_max": _mx("freq_max"),
+            "ready": any(r[2].get("ready") for r in res),
+        },
+        "codes": _attempt_codes(code_periods or [], t0, t_fall, lag_sec),
+    }
+
+
+def _confirm_attempts(
+    periods: list[dict],
+    all_by_addr: dict[int, list[dict]],
+    fault_periods: list[dict],
+    gaps: list[dict] | None,
+    cfg,
+    tt: datetime,
+    prev_value: int | None = None,
+    confirm_to: datetime | None = None,
+    code_periods: list[dict] | None = None,
+    carry_glue: bool = False,
+) -> list[dict]:
+    """Выходы из стопа без подтверждения — в плашку стопа-исхода.
+
+    Цепочка — подряд идущие нестоповые периоды после стопа (prev_value — режим
+    перед окном, если цепочка начинается на его краю). Задержка пуска (1) в
+    цепочку не входит и остаётся своим сегментом, как до v5.1.16: это таймер, а
+    не вращение, и на ней работает START_FAILURE; выход из стопа считается и
+    через неё. Подтвердился хоть один — неподтверждённое перед ним клеится к
+    нему (короткий кусок прогрева в ручном пуске — часть пуска). Не
+    подтвердился ни один:
+      - за цепочкой стоп — один период стопа с началом на попытке, видом стопа
+        и его резом, плюс attempt;
+      - цепочка ещё идёт — ОДИН открытый период от её начала с attempt_pending:
+        ни одно звено не закрывается, пока исход не решён, иначе живой движок
+        закрыл бы первое звено навсегда («ждём подтверждения») и потерял бы,
+        что следующее — выход из стопа (ревью v5.1.16); работы нет, суточный
+        рез переносится;
+      - нет данных — оставить как есть, неудачу не объявлять.
+    confirm_to — докуда смотреть за край окна, решая исход (суточный рез:
+    попытка за минуту до 09:00 решается после него); сегменты режутся по tt.
+    carry_glue — прошлое окно закрылось «Работой», склеенной с куском прогрева,
+    который продолжается за рез: здесь он снова клеится к своей «Работе»
+    (иначе в начале суток вылезал «Прогрев» между двумя «Работами»).
+    Вызывается после _classify_stop_periods: вид стопа решается по началу
+    стопа (там панель держит аварию), а не по началу попытки.
+    """
+    prm = confirm_params(cfg)
+    if not prm["enabled"] or not periods:
+        return periods
+    tt = _tz(tt)
+    t_res = max(tt, _tz(confirm_to)) if confirm_to else tt
+    rpm = value_series(all_by_addr, cfg.role_to_addr("RPM"))
+    freq = value_series(all_by_addr, cfg.role_to_addr("FREQUENCY"))
+    ready = ready_intervals(fault_periods, prm, t_res)
+    try:
+        lag = float(cfg.seg("stop_kind", "stabilization_sec", default=60) or 60)
+    except Exception:
+        lag = 60.0
+
+    out: list[dict] = []
+    i, n = 0, len(periods)
+    last = prev_value          # режим до текущего, без задержки пуска
+    if carry_glue and n and int(periods[0]["value"]) not in (0, 1, 3):
+        k = 0
+        while k < n and int(periods[k]["value"]) not in (0, 1, 3):
+            k += 1
+        if k < n and int(periods[k]["value"]) == 3:
+            head = dict(periods[k])
+            head["state_start"] = periods[0]["state_start"]
+            head.pop("cause_open", None)
+            head["glued_from"] = [int(c["value"]) for c in periods[:k]]
+            out.append(head)
+            last = 3
+            i = k + 1
+    while i < n:
+        p = periods[i]
+        v = int(p["value"])
+        if v == 1 or v == 0 or last != 0:
+            out.append(p)
+            if v != 1:
+                last = v
+            i += 1
+            continue
+        j = i
+        while j < n and int(periods[j]["value"]) not in (0, 1):
+            j += 1
+        chain = periods[i:j]
+        res = []
+        for c in chain:
+            c0 = _tz(c["state_start"])
+            c1 = min(_tz(c["state_end"]), t_res) if c.get("state_end") else t_res
+            res.append(confirm_exit(c0, c1, rpm, freq, ready, gaps, prm))
+
+        first = next((k for k, r in enumerate(res) if r[0] == "confirmed"), None)
+        if first is not None:
+            head = dict(chain[first])
+            head["confirmed_at"] = res[first][1]
+            if first > 0:
+                head["state_start"] = chain[0]["state_start"]
+                if chain[0].get("cause_open"):
+                    head["cause_open"] = chain[0]["cause_open"]
+                else:
+                    head.pop("cause_open", None)
+                head["glued_from"] = [int(c["value"]) for c in chain[:first]]
+            out.append(head)
+            out.extend(chain[first + 1:])
+            last = int(chain[-1]["value"])
+        elif any(r[0] == "no_data" for r in res):
+            out.extend(chain)
+            last = int(chain[-1]["value"])
+        elif j < n and int(periods[j]["value"]) == 1:
+            # За цепочкой снова задержка пуска — не выход и не возврат в стоп
+            out.extend(chain)
+            last = int(chain[-1]["value"])
+        elif j >= n or _tz(periods[j]["state_start"]) >= t_res:
+            # Исход не решён: стоп ещё не наступил. Одно открытое звено
+            pend = dict(chain[-1])
+            pend["state_start"] = chain[0]["state_start"]
+            if chain[0].get("cause_open"):
+                pend["cause_open"] = chain[0]["cause_open"]
+            else:
+                pend.pop("cause_open", None)
+            pend["attempt_pending"] = True
+            pend["pending_path"] = [int(c["value"]) for c in chain]
+            out.append(pend)
+            last = int(chain[-1]["value"])
+        else:
+            stop = periods[j]
+            plate = dict(stop)
+            plate["state_start"] = chain[0]["state_start"]
+            if chain[0].get("cause_open"):
+                plate["cause_open"] = chain[0]["cause_open"]
+            else:
+                plate.pop("cause_open", None)
+            plate["attempt"] = _attempt_record(chain, stop, res, code_periods, lag)
+            out.append(plate)
+            last = 0
+            j += 1
+        i = j
+    return out
+
+
+def _steady_window(
+    all_by_addr: dict[int, list[dict]], cfg, seg_start: datetime, seg_end: datetime,
+    next_value: int | None, pending: bool,
+) -> tuple[datetime | None, datetime | None] | None:
+    """Рабочая часть «Работы»: от выхода на рабочие обороты до их сброса перед
+    охлаждением (v5.1.16).
+
+    При ручном пуске панель пишет «Номинал» по команде, и в первый подсегмент
+    работы попадали нули до выхода на обороты: за 30 дней 29 ложных «давление
+    масла 0 / обороты 0» на 16 пусках (ДЭС №3 29.09 — 15 ч). В конце — точка
+    750 об/мин за секунду до перехода на холостой ход давала «просадку».
+    Рабочие обороты — обороты ≥ рабочего порога ИЛИ частота ≥ рабочей (если
+    датчик оборотов отвалится, электрика страхует). Сброс в конце отрезается,
+    только перед охлаждением 4/5/6 и только если он короче rundown_max_sec:
+    падение в стоп — не переход, его аналитика видит.
+
+    None — показаний нет совсем (делить не по чему, как до v5.1.16);
+    (None, None) — рабочих оборотов не было: весь сегмент переходный.
+    """
+    prm = confirm_params(cfg)
+    if not prm["enabled"]:
+        return None
+    t0, t1 = _tz(seg_start), _tz(seg_end)
+    if pending:
+        return None, None
+    rpm = value_series(all_by_addr, cfg.role_to_addr("RPM"))
+    freq = value_series(all_by_addr, cfg.role_to_addr("FREQUENCY"))
+    events: list[tuple[datetime, str, float]] = []
+    state: dict[str, float | None] = {"rpm": None, "freq": None}
+    for name, series in (("rpm", rpm), ("freq", freq)):
+        for ts, v in series:
+            if ts < t0:
+                if (t0 - ts).total_seconds() <= prm["carry_sec"]:
+                    state[name] = v
+                continue
+            if ts >= t1:
+                break
+            events.append((ts, name, v))
+    if state["rpm"] is None and state["freq"] is None and not events:
+        return None
+    events.sort(key=lambda e: e[0])
+
+    def _ok() -> bool:
+        return ((state["rpm"] is not None and state["rpm"] >= prm["rated_rpm"])
+                or (state["freq"] is not None and state["freq"] >= prm["rated_freq"]))
+
+    steady_from = t0 if _ok() else None
+    last_ok_end: datetime | None = None   # момент, когда рабочие обороты ушли
+    for ts, name, v in events:
+        was = _ok()
+        state[name] = v
+        now = _ok()
+        if now and steady_from is None:
+            steady_from = ts
+        if was and not now:
+            last_ok_end = ts
+        elif now:
+            last_ok_end = None
+    if steady_from is None:
+        return None, None
+    steady_to = t1
+    if (next_value in (4, 5, 6) and last_ok_end is not None
+            and (t1 - last_ok_end).total_seconds() <= prm["rundown_max_sec"]):
+        steady_to = last_ok_end
+    if steady_to <= steady_from:
+        return None, None
+    return steady_from, steady_to
+
+
 def segment(
     enum_periods: list[dict[str, Any]],
     history: list[dict[str, Any]],
@@ -1548,6 +2027,7 @@ def segment(
     initial_coking_risk=None,  # CokingRisk | None — для онлайн-режима (п. 5.1 ТЗ)
     transition_ctx: list | None = None,  # звенья перед окном (analytics.transitions, v5.1.10)
     load_seed: dict | None = None,  # последний замер нагрузки перед окном + обрывы до окна
+    confirm_to: datetime | None = None,  # докуда решать исход попытки за краем окна (v5.1.16)
 ) -> list[Segment]:
     """Главная точка входа: преобразует сырые данные в список сегментов.
 
@@ -1581,8 +2061,13 @@ def segment(
     # Новая модель (v4.9.68): один рез вместо двух сплиттеров, у стопа два вида.
     # Пока флаг выключен — поведение байт-в-байт прежнее.
     if bool(cfg.seg("stop_kind", "enabled", default=False)):
+        # Горизонт — тот же, что у исхода попытки (confirm_to): открытая
+        # авария, поднявшаяся на падении за суточным резом, иначе обрезалась
+        # бы по tt, и голова плашки вышла бы «Стоп», а перечитка — «Авария»
+        # (ревью v5.1.16). Сегменты всё равно режутся по tt
         run_state_periods = _classify_stop_periods(
-            run_state_periods, fault_periods, cfg, tt, enum_periods,
+            run_state_periods, fault_periods, cfg,
+            max(tt, _tz(confirm_to)) if confirm_to else tt, enum_periods,
         )
     else:
         run_state_periods = _split_stop_on_fault_cleared(
@@ -1592,12 +2077,37 @@ def segment(
             run_state_periods, fault_periods, cfg, tt,
         )
 
+    # Выход из стопа подтверждается фактом (v5.1.16). Режим перед окном — из
+    # контекста переходов: окно живого движка начинается ровно на попытке
+    _prev_rs: int | None = None
+    if transition_ctx:
+        from .transitions import ctx_for_window
+        _ctx = ctx_for_window(transition_ctx, tf,
+                              float(cfg.seg("transitions", "joint_tol_sec", default=2.0)))
+        # Задержка пуска выход из стопа не прерывает: режим до неё
+        for _lk in reversed(_ctx or []):
+            if _lk.run_state is not None and int(_lk.run_state) != 1:
+                _prev_rs = int(_lk.run_state)
+                break
+    # Прошлое окно закрыто «Работой», а первый период окна начался до него и
+    # не работа: это хвост куска, склеенного с ней за суточным резом
+    _carry = bool(
+        _prev_rs == 3 and run_state_periods
+        and _tz(run_state_periods[0]["state_start"]) < tf
+        and int(run_state_periods[0]["value"]) not in (0, 1, 3))
+    run_state_periods = _confirm_attempts(
+        run_state_periods, all_by_addr, fault_periods, gaps, cfg, tt, _prev_rs,
+        confirm_to=confirm_to,
+        code_periods=state_periods.get(cfg.role_to_addr("LAST_FAULT_CODE")) or [],
+        carry_glue=_carry,
+    )
+
     segments: list[Segment] = []
     accumulators = RiskAccumulators()
     if initial_coking_risk is not None:
         accumulators.coking_risk = _copy.deepcopy(initial_coking_risk)
 
-    for period in run_state_periods:
+    for k_period, period in enumerate(run_state_periods):
         p_start = _tz(period["state_start"])
         p_end_raw = period.get("state_end")
         p_end = _tz(p_end_raw) if p_end_raw else tt
@@ -1610,6 +2120,14 @@ def segment(
 
         run_state: int = int(period["value"])
         run_state_label: str = period.get("label") or str(run_state)
+        attempt: dict[str, Any] | None = period.get("attempt")
+        attempt_pending = bool(period.get("attempt_pending"))
+        if attempt:
+            from .labels import attempt_label
+            run_state_label = attempt_label(attempt)
+        elif attempt_pending:
+            from .labels import pending_label
+            run_state_label = pending_label(run_state)
         # Риск нагара на начало сегмента — для прироста/погашения в сводке
         coking_start = accumulators.coking_risk.to_dict()
 
@@ -1665,6 +2183,10 @@ def segment(
 
         # L2-подсегменты
         if run_state == 3:
+            _nxt = (int(run_state_periods[k_period + 1]["value"])
+                    if k_period + 1 < len(run_state_periods) and _cut_inside else None)
+            _steady = _steady_window(all_by_addr, cfg, seg_start, seg_end, _nxt,
+                                     attempt_pending)
             subsegments, accumulators = _build_subsegments_for_running(
                 seg_id=seg_id,
                 seg_by_addr=seg_by_addr,
@@ -1677,6 +2199,8 @@ def segment(
                 run_state=run_state,
                 cfg=cfg,
                 state_periods=state_periods,
+                steady=_steady,
+                onset_faults=fault_periods,
             )
         else:
             subseg, accumulators = _build_single_subsegment(
@@ -1696,6 +2220,7 @@ def segment(
                 cfg=cfg,
                 fault_periods=fault_periods_in_seg,
                 state_periods=state_periods,
+                onset_faults=fault_periods,
             )
             subsegments = [subseg]
 
@@ -1747,6 +2272,8 @@ def segment(
             events=events,
             stop_kind=stop_kind,
             coking_start=coking_start,
+            attempt=attempt,
+            attempt_pending=attempt_pending,
         )
         segments.append(seg)
 

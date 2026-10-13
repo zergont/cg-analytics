@@ -376,6 +376,10 @@ class Subsegment:
     # Интервалы потери связи внутри подсегмента (обрезаны по его границам).
     # Каждый: {"start": iso, "end": iso, "duration_sec": float}. Пусто = связь ровная.
     data_gaps: list[dict[str, Any]] = field(default_factory=list)
+    # Переходный кусок «Работы»: разгон до рабочих оборотов или их сброс перед
+    # охлаждением (v5.1.16). Аналитики работы на нём нет, в ключевые показатели
+    # периода он не входит
+    transient: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -393,6 +397,7 @@ class Subsegment:
             "detections": [d.to_dict() for d in self.detections],
             "data_quality": self.data_quality,
             "data_gaps": self.data_gaps,
+            "transient": self.transient,
         }
 
 
@@ -426,6 +431,15 @@ class Segment:
     # Риск нагара на начало сегмента (CokingRisk.to_dict) — для прироста и
     # погашения за сегмент в сводке (v5.1.3)
     coking_start: Optional[dict[str, Any]] = None
+    # Неудачная попытка выйти из стопа (v5.1.16, решения владельца 13.10.2026):
+    # прогрев или работа не подтвердились (обороты ≤ 250, частоты нет, бита
+    # «Готов к нагрузке» нет), машина вернулась в стоп. Сегмент тогда — стоп
+    # (run_state 0, вид по исходу) с началом на попытке, а здесь — что было:
+    # {from_state, path, t_start, t_fall, outcome, facts}. Иначе None.
+    attempt: Optional[dict[str, Any]] = None
+    # Выход из стопа ещё не подтверждён и не закончился (живое окно): аналитики
+    # работы нет, суточный рез переносится, как у переходных режимов
+    attempt_pending: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -449,4 +463,6 @@ class Segment:
             "events": self.events,
             "stop_kind": self.stop_kind,
             "coking_start": self.coking_start,
+            "attempt": self.attempt,
+            "attempt_pending": self.attempt_pending,
         }

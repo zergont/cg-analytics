@@ -123,6 +123,30 @@ class AnalyticsConfig:
         """Адреса fault-bitmap регистров (из fault_history)."""
         return self._whitelist_fault
 
+    def code_fits_bit(self, code: int, raw_severity: str | None) -> bool:
+        """Подходит ли код панели биту по тяжести (справочник кодов ↔ карта битов).
+
+        Код без записи в справочнике или бит без тяжести — не подходит: привязать
+        чужой код хуже, чем не привязать никакого (v5.1.16).
+        """
+        ref = getattr(self, "_fault_ref_cache", None)
+        if ref is None:
+            try:
+                from .fault_ref import FaultRef
+                ref = FaultRef(search_paths=list(reversed(self._layers)))
+            except Exception:
+                ref = False
+            self._fault_ref_cache = ref
+        if not ref or not raw_severity:
+            return False
+        # По уровню, а не по метке: у бита «предупреждение» бывает код со
+        # снижением мощности (40403/14 ↔ 421 «de»), шкала аналитики их не
+        # различает. Аварийная метка к предупреждению не подходит
+        level = {"sh": "SHUTDOWN", "sc": "SHUTDOWN", "wa": "WARNING", "de": "WARNING"}
+        entry = ref.lookup(int(code)) or {}
+        want = level.get(str(entry.get("severity") or "").lower())
+        return want is not None and want == self.bitmap_severity(raw_severity)
+
     def role_to_addr(self, role: str) -> int | None:
         """Найти addr по имени роли."""
         for addr, meta in self._register_map.items():

@@ -128,6 +128,12 @@ def main() -> int:
     asrc.get_enum_periods = fake_enum
     asrc.get_fault_periods = fake_faults
     asrc.get_catalog_addrs = fake_catalog
+
+    # Проверка якоря по оборотам (v5.1.16): данных нет — исход не объявляется
+    async def _no_rows(*a, **k):
+        return []
+    asrc.get_whitelist_history = _no_rows
+    asrc.get_data_gaps = _no_rows
     check(INFO_ADDR not in cfg.whitelist_fault and NOISY not in cfg.register_map,
           "0: тестовые адреса оказались в KB — тест ничего не проверит")
 
@@ -136,8 +142,9 @@ def main() -> int:
     ))
 
     # 1. Функция вообще отрабатывает (до v4.9.94 — NameError → None)
-    check(ctx is not None and len(ctx) == 3,
-          "1: догрузка контекста вернула не тройку — источник не импортирован?")
+    # v5.1.16: четвёртым — якорь (тот же ляжет в акт)
+    check(ctx is not None and len(ctx) == 4,
+          "1: догрузка контекста вернула не четвёрку — источник не импортирован?")
 
     # 2. Поиск якоря читает 40013 вместе с RUN_STATE
     check(bool(calls) and 40013 in calls[0]["addrs"] and 40011 in calls[0]["addrs"],
@@ -145,13 +152,17 @@ def main() -> int:
 
     # 3. Якорь — штатный останов, а не прошлая 1452 и не её хвост; и не
     #    сдвинут информационным битом с тяжестью «shutdown» из каталога
-    want = NORMAL_STOP - timedelta(seconds=_ACT_LOAD_MARGIN_SEC)
+    # v5.1.16: окно данных не короче 12 ч (решение 13.10.2026) — от более
+    # раннего из якоря и останова минус 12 ч; якорь — штатный останов
+    want = min(NORMAL_STOP, E2 - timedelta(hours=12)) - timedelta(seconds=_ACT_LOAD_MARGIN_SEC)
     check(len(calls) >= 2 and calls[1]["ts_from"] == want,
           f"3: полная загрузка от {calls[1]['ts_from'] if len(calls) >= 2 else '—'}, "
-          f"ожидали {want} (якорь на штатном останове)")
+          f"ожидали {want} (якорь на штатном останове, окно ≥ 12 ч)")
+    check(ctx is not None and ctx[3] == (NORMAL_STOP, "normal_stop"),
+          f"3б: якорь — штатный останов: {ctx and ctx[3]}")
 
-    if ctx and len(ctx) == 3:
-        ep, fp, tlf = ctx
+    if ctx and len(ctx) == 4:
+        ep, fp, tlf, _anc = ctx
         # 4. Вся серия в контексте — и регистр, которого нет в KB
         check(any(p["addr"] == 40013 and p["state_start"] == E1 for p in ep),
               "4a: первая авария серии не попала в контекст акта")
