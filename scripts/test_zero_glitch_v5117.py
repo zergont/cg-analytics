@@ -21,7 +21,21 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from analytics.config import AnalyticsConfig  # noqa: E402
+import analytics.segmenter as _sg  # noqa: E402
 from analytics.segmenter import _drop_zero_glitches, segment  # noqa: E402
+
+# Фильтр выключен в KB до исправления heartbeat db-writer (13.10.2026) —
+# логику проверяем с принудительно включённым
+_kb_params = _sg._zero_glitch_params
+
+
+def _forced_on(cfg):
+    p = _kb_params(cfg)
+    p["enabled"] = True
+    return p
+
+
+_sg._zero_glitch_params = _forced_on
 
 _errors: list[str] = []
 
@@ -124,8 +138,8 @@ check(len(g6) == 1, "6: ноль на краю окна — пока сбой (�
 _, g6b = _drop_zero_glitches(H6, CFG, t4 + timedelta(seconds=80))
 check(not g6b, "6б: показаний нет больше минуты — ноль держится, настоящий")
 
-# ── 7. Выключатель KB ──
-check(CFG.seg("zero_glitch", "enabled") is True and CFG.seg("zero_glitch", "roles", "RPM") == 1000,
+# ── 7. В KB фильтр выключен до исправления db-writer, пороги на месте ──
+check(CFG.seg("zero_glitch", "enabled") is False and CFG.seg("zero_glitch", "roles", "RPM") == 1000,
       "7: параметры в KB")
 
 if _errors:
