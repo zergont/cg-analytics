@@ -58,6 +58,20 @@ def label_from_chars(chars: dict[str, Any] | None) -> str | None:
     return None
 
 
+# Модель в segment_analyses у заключения-фактов без ИИ (плашки, v5.1.16)
+SYSTEM_MODEL = "Система (без ИИ)"
+
+
+def conclusion_by(claude_model: str | None) -> str | None:
+    """Кто написал заключение: «ai» — модель, «system» — код без ИИ, None — нет.
+
+    Для UI (v5.1.19): значок и заголовок «Заключение ИИ» — только у модели.
+    """
+    if not claude_model:
+        return None
+    return "system" if str(claude_model) == SYSTEM_MODEL else "ai"
+
+
 def attempt_facts_ru(attempt: dict[str, Any] | None) -> str | None:
     """Факты попытки одной строкой: что не подтвердило режим."""
     if not isinstance(attempt, dict):

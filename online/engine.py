@@ -254,6 +254,10 @@ def _enqueue_segment(seg_id: int | None, again: bool = False) -> None:
                         # (очередь в памяти; enqueue_pending подберёт «в очереди»)
                         from corpus.db import set_status
                         await set_status(seg_id, "queued")
+                    else:
+                        # «В очереди» видно сразу, а не с начала работы (v5.1.19)
+                        from corpus.db import mark_queued
+                        await mark_queued(seg_id)
                     worker.enqueue(seg_id, PRIORITY_NORMAL, again=again)
             except Exception:
                 logger.warning("Автопостановка сегмента %s в очередь Claude-анализа не удалась", seg_id, exc_info=True)

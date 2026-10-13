@@ -1349,10 +1349,22 @@ async def sync_equipment():
 
 # ── Онлайн-мониторинг ────────────────────────────────────────────────────────
 
+from analytics.labels import conclusion_by  # noqa: E402  (v5.1.19: кто написал заключение)
+
 
 _COKING_COLORS = {"GREEN": "success", "YELLOW": "warning", "RED": "danger"}
 # Вид стоп-сегмента поверх словаря режимов (v4.9.67)
 _STOP_KIND_LABELS = {"EMERGENCY": "Аварийный стоп"}
+
+
+def _attempt_fields(chars: dict | None) -> dict:
+    """Признаки попытки пуска для цвета плашки в UI (v5.1.19); подпись — run_state_label."""
+    att = chars.get("attempt") if isinstance(chars, dict) else None
+    return {
+        "attempt": ({"outcome": att.get("outcome"), "from_state": att.get("from_state")}
+                    if isinstance(att, dict) else None),
+        "attempt_pending": bool(chars.get("attempt_pending")) if isinstance(chars, dict) else False,
+    }
 
 
 def _seg_label(run_state: int | None, stop_kind: str | None = None,
@@ -2283,6 +2295,7 @@ async def api_machines():
             "run_state":     run_state,
             "stop_kind":     _stop_kind,
             "run_state_label": _seg_label(run_state, _stop_kind, _m_chars),
+            **_attempt_fields(_m_chars),
             # Уровень однозначно кодирует источник: предупреждение — только аналитика,
             # внимание/авария — только панель
             "severity_level":    severity_level,       # норма / предупреждение / внимание / авария
@@ -2451,8 +2464,14 @@ async def api_machine_segments(
             "analytics_version": seg.get("analytics_version"),
             # Наличие ИИ-анализа
             "has_report":    bool(seg.get("report_md") if "report_md" in (seg or {}) else None),
-            "has_claude":    ai_status.get("status") == "done",
+            # Значок ИИ — только у заключения модели; факты без ИИ (плашка
+            # неудачного пуска) — conclusion_by="system" (v5.1.19)
+            "has_claude":    (ai_status.get("status") == "done"
+                              and conclusion_by(ai_status.get("claude_model")) == "ai"),
             "has_qwen":      bool(ai_status.get("has_qwen")),
+            "conclusion_status": ai_status.get("status"),   # queued/processing/done/error | null
+            "conclusion_by": conclusion_by(ai_status.get("claude_model")),
+            **_attempt_fields(_chars),
         })
 
     return JSONResponse(result)
@@ -2502,6 +2521,8 @@ async def api_segment_detail(seg_id: int):
             if rec:
                 analysis = {
                     "status":        rec.get("status"),
+                    # Кто написал: «ai» — модель, «system» — факты без ИИ (v5.1.19)
+                    "by":            conclusion_by(rec.get("claude_model")),
                     "conclusion_md": rec.get("conclusion_md"),   # сухое заключение Claude
                     "humanized_md":  rec.get("humanized_md"),    # очеловеченное Qwen
                     "created_at":    rec["created_at"].isoformat() if rec.get("created_at") else None,
@@ -2526,6 +2547,7 @@ async def api_segment_detail(seg_id: int):
         "run_state":     run_state,
         "stop_kind":     _stop_kind,
         "run_state_label": _seg_label(run_state, _stop_kind, _chars),
+        **_attempt_fields(_chars),
         "duration_sec":  dur,
         "cause_close":   seg.get("cause_close"),
         "severity":      sev,

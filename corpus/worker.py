@@ -224,7 +224,7 @@ def _attempt_conclusion(seg_row: dict) -> dict | None:
     """Заключение-факты для плашки неудачной попытки; None — не попытка."""
     import json as _json
     from datetime import datetime as _dt
-    from analytics.labels import attempt_facts_ru, attempt_label
+    from analytics.labels import SYSTEM_MODEL, attempt_facts_ru, attempt_label
     chars = seg_row.get("characteristics_json")
     if isinstance(chars, str):
         try:
@@ -266,7 +266,7 @@ def _attempt_conclusion(seg_row: dict) -> dict | None:
         "humanized_md": short,
         "verdict": verdict,
         "alarm_level": level,
-        "claude_model": "Система (без ИИ)",
+        "claude_model": SYSTEM_MODEL,
         "tokens_used": 0, "tool_calls_count": 0, "loops_count": 0,
         "generation_time_sec": 0,
         "debug_json": {"entry": "attempt_facts", "depth": "attempt"},

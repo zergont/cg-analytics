@@ -108,6 +108,27 @@ async def set_status(
         await conn.close()
 
 
+async def mark_queued(auto_segment_id: int) -> None:
+    """«В очереди» при постановке, если записи ещё нет (v5.1.19).
+
+    Очередь воркера живёт в памяти: до начала работы записи не было, и UI
+    писал «Анализ для этого сегмента не запускался». Готовое заключение не
+    трогаем — перезаказ ставит статус сам (set_status).
+    """
+    conn = await _connect()
+    try:
+        await conn.execute(
+            """
+            INSERT INTO segment_analyses (auto_segment_id, status, updated_at)
+            VALUES ($1, 'queued', now())
+            ON CONFLICT (auto_segment_id) DO NOTHING
+            """,
+            auto_segment_id,
+        )
+    finally:
+        await conn.close()
+
+
 async def get_analysis(auto_segment_id: int) -> dict | None:
     """Получить запись анализа по ID сегмента."""
     conn = await _connect()
@@ -221,7 +242,7 @@ async def get_analyses_for_segments(seg_ids: list[int]) -> dict[int, dict]:
     conn = await _connect()
     try:
         rows = await conn.fetch(
-            """SELECT auto_segment_id, status, verdict, alarm_level,
+            """SELECT auto_segment_id, status, verdict, alarm_level, claude_model,
                       (humanized_md IS NOT NULL AND humanized_md <> '') AS has_qwen
                FROM segment_analyses
                WHERE auto_segment_id = ANY($1)""",
