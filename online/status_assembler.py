@@ -96,14 +96,9 @@ def _blind_note(blind_sec: Any) -> str:
 
 
 def _fmt_duration(sec: float) -> str:
-    s = int(sec)
-    h, rem = divmod(s, 3600)
-    m = rem // 60
-    if h:
-        return f"{h}ч {m}м"
-    if m:
-        return f"{m}м"
-    return f"{s}с"
+    """Как в UI, без секунд от минуты: строка пишется раз в тик (v5.1.20)."""
+    from analytics.labels import fmt_duration
+    return fmt_duration(sec, seconds=False)
 
 
 # ── Публичный API ─────────────────────────────────────────────────────────────

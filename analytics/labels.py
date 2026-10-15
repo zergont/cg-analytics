@@ -72,6 +72,107 @@ def conclusion_by(claude_model: str | None) -> str | None:
     return "system" if str(claude_model) == SYSTEM_MODEL else "ai"
 
 
+def fmt_duration(sec: Any, seconds: bool = True) -> str:
+    """Длительность как в UI: «18 ч 00 мин», «6 мин 15 с», «8 мин», «40 с» (v5.1.20).
+
+    От часа — без секунд; seconds=False — без секунд и до часа («6 мин»): для
+    строки статуса, которая пишется раз в тик и с секундами выглядит устаревшей.
+    Дробная часть отбрасывается, как Math.floor в UI.
+    """
+    try:
+        s = max(0, int(float(sec or 0)))
+    except (TypeError, ValueError):
+        s = 0
+    h, rem = divmod(s, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h} ч {m:02d} мин"
+    if m:
+        return f"{m} мин {s} с" if seconds and s else f"{m} мин"
+    return f"{s} с"
+
+
+# Короткие русские названия ролей — таблица «Ключевые показатели» (v5.1.20).
+# В KB у ролей только длинные описания (многострочные у QSX15), поэтому — словарь
+# в коде; неизвестная роль печатается кодом
+ROLE_LABELS: dict[str, str] = {
+    "ACTIVE_POWER_TOTAL": "Активная мощность",
+    "ACTIVE_POWER_L1": "Активная мощность L1",
+    "ACTIVE_POWER_L2": "Активная мощность L2",
+    "ACTIVE_POWER_L3": "Активная мощность L3",
+    "REACTIVE_POWER_TOTAL": "Реактивная мощность",
+    "APPARENT_POWER_TOTAL": "Полная мощность",
+    "POWER_FACTOR": "Коэффициент мощности",
+    "RPM": "Обороты двигателя",
+    "LOAD_PCT": "Нагрузка",
+    "LOAD_PCT_TOTAL": "Нагрузка (общая)",
+    "COOLANT_TEMP": "Температура ОЖ",
+    "OIL_TEMP": "Температура масла",
+    "OIL_PRESS": "Давление масла",
+    "FREQUENCY": "Частота генератора",
+    "BATTERY_V": "Напряжение АКБ",
+    "ECM_BATTERY_V": "Питание ЭБУ",
+    "INTAKE_MANIFOLD_TEMP": "Температура воздуха на впуске",
+    "BOOST_PRESSURE": "Давление наддува",
+    "FUEL_RATE": "Расход топлива",
+    "FUEL_TOTAL": "Расход топлива с начала эксплуатации",
+    "FUEL_OUTLET_PRESS": "Давление топлива после фильтра",
+    "VOLTAGE_LL_AVG": "Линейное напряжение",
+    "CURRENT_AVG": "Средний ток",
+    "CURRENT_L1": "Ток L1",
+    "CURRENT_L2": "Ток L2",
+    "CURRENT_L3": "Ток L3",
+    "ENGINE_HOURS": "Наработка",
+}
+
+# Единицы карты регистров → по-русски. psi и gal/h — единицы датчика ДЭС №3:
+# пересчёт разошёлся бы с панелью (решение 14.10.2026)
+UNIT_RU: dict[str, str] = {
+    "kW": "кВт", "kVAr": "квар", "kVA": "кВА", "rpm": "об/мин", "Hz": "Гц",
+    "V": "В", "Vdc": "В", "Vac": "В", "A": "А", "kPa": "кПа", "h": "ч",
+}
+
+
+def role_label(role: str | None) -> str:
+    return ROLE_LABELS.get(role or "", role or "?")
+
+
+def unit_ru(unit: str | None) -> str:
+    return UNIT_RU.get(unit or "", unit or "")
+
+
+def number_decimals(values: list[Any]) -> int:
+    """Знаков после запятой на строку таблицы: от 10 — один, меньше — два.
+
+    Одна точность на строку: «20,8 | 2,4 | 49,4», а не «20,8 | 2,38 | 49,4».
+    """
+    nums = []
+    for v in values:
+        try:
+            nums.append(abs(float(v)))
+        except (TypeError, ValueError):
+            pass
+    return 1 if nums and max(nums) >= 10 else 2
+
+
+def fmt_number(v: Any, decimals: int | None = None) -> str:
+    """Число для таблицы без лишних нулей: «581», «49,9», «0,85» (v5.1.20)."""
+    if v is None:
+        return "—"
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    if decimals is None:
+        decimals = 1 if abs(x) >= 10 else 2
+    txt = f"{x:.{decimals}f}"
+    if "." in txt:
+        txt = txt.rstrip("0").rstrip(".")
+    if txt in ("-0", ""):
+        txt = "0"
+    return txt.replace(".", ",")
+
+
 def attempt_facts_ru(attempt: dict[str, Any] | None) -> str | None:
     """Факты попытки одной строкой: что не подтвердило режим."""
     if not isinstance(attempt, dict):

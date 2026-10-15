@@ -125,7 +125,9 @@ p2 = build_summary_parts([s2], [ep("COOLING_FAILURE", 10, 18), ep("COOLING_FAILU
 g = next(x for x in p2["remarks"] if x["scenario"] == "COOLING_FAILURE")
 check(g["unconfirmed"] == 1 and g["unconfirmed_at"] == ["11.10 10:10–10:16"], f"2: время неподтверждённого: {g}")
 md2 = render_summary_md(p2)
-check("не подтверждено: 1 из 2 (11.10 10:10–10:16)" in md2, f"2б: в сводке:\n{md2}")
+# v5.1.20: неподтверждённое — вне воздействия, отдельной оговоркой со своим временем
+check("1 эпизод, воздействие за период 8 мин; ещё 1 по живым данным (11.10 10:10–10:16), за период 6 мин"
+      " — *в итоговом расчёте не подтверждено*" in md2, f"2б: в сводке:\n{md2}")
 tag = _remarks_from_summary({"report_summary_json": p2})
 check("ещё 1 из 2 — только по живым данным (11.10 10:10–10:16): в отчёте ниже их нет" in (tag or ""),
       f"2в: вход модели: {tag}")
@@ -181,7 +183,7 @@ check("не сброшены на закрытие" not in md5g, "5д: снят�
 e6 = ep("OIL_DILUTION", 0, 120, t_open=T0 - timedelta(hours=40), t_close=None, blind_sec=6719.0)
 p6 = build_summary_parts([seg([sub(1, [det("OIL_DILUTION")]), sub(2, [det("OIL_DILUTION")])])], [e6],
                          tz=MSK, t_from=T0, t_to=T0 + timedelta(hours=2))
-check("из них 1ч 51м 59с без связи)" in render_summary_md(p6), f"6: слепая доля «с начала»:\n{render_summary_md(p6)}")
+check("из них 1 ч 51 мин без связи)" in render_summary_md(p6), f"6: слепая доля «с начала»:\n{render_summary_md(p6)}")
 # 6б. Слепая доля «с начала» — по всем онсетам и не меньше, чем за период
 p6b = build_summary_parts([seg([sub(1, [det("OIL_DILUTION")]), sub(2, [det("OIL_DILUTION")])])],
                           [dict(e6, t_close=T0 + timedelta(minutes=10), blind_sec=600.0),

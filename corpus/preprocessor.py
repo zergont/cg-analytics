@@ -157,13 +157,9 @@ _SEV_RANK = {"SHUTDOWN": 4, "ALARM": 3, "WARNING": 3, "CAUTION": 2, "INFO": 1}
 
 
 def _fmt_dur(sec: float) -> str:
-    s = int(sec)
-    h, m = s // 3600, (s % 3600) // 60
-    if h:
-        return f"{h}ч {m:02d}м"
-    if m:
-        return f"{m}м"
-    return f"{s}с"
+    """Как в отчёте и UI, без секунд от минуты: «1 ч 05 мин», «5 мин», «40 с» (v5.1.20)."""
+    from analytics.labels import fmt_duration
+    return fmt_duration(sec, seconds=False)
 
 
 def _plural_hits(n: int) -> str:
@@ -479,6 +475,11 @@ def _remarks_from_summary(segment_row: dict) -> str | None:
             tags.append("снято ИИ")
         elif k:
             tags.append(f"снято ИИ: {k} из {n}")
+        # «На конец» — про подтверждённый эпизод: до оговорки о неподтверждённых.
+        # Стоя после неё, метка читалась как относящаяся к ним, и модель назвала
+        # неподтверждённый эпизод «активным на конец периода» (#35872, v5.1.20)
+        if g.get("at_end"):
+            tags.append("активно на конец")
         u = g.get("unconfirmed") or 0
         at = ", ".join(g.get("unconfirmed_at") or [])
         at = f" ({at})" if at else ""
@@ -488,8 +489,6 @@ def _remarks_from_summary(segment_row: dict) -> str | None:
         elif u:
             tags.append(f"ещё {u} из {n} — только по живым данным{at}: в отчёте ниже их нет, "
                         f"итоговым расчётом не подтверждены, в вердикт не входят")
-        if g.get("at_end"):
-            tags.append("активно на конец")
         items.append(f"{g.get('name')} [{', '.join(tags)}]")
     # Проваленные проверки последовательности — тоже строки «Замечаний»; обрыв
     # связи на вердикт не влияет (решение 11.10, 2а) — так и помечаем

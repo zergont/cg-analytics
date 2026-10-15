@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .contract import Segment, Subsegment, cap_severity
+from .labels import fmt_duration, fmt_number, number_decimals, role_label, unit_ru
 
 
 # ── Вспомогательные ──────────────────────────────────────────────────────────
@@ -85,19 +86,9 @@ _FAULT_TYPE_RU: dict[int, str] = {
 
 
 def _fmt_duration(sec: float) -> str:
-    """Форматировать длительность в «Xч Yм Zс» (без нулевых компонентов)."""
-    s = int(sec)
-    h = s // 3600
-    m = (s % 3600) // 60
-    s = s % 60
-    parts = []
-    if h:
-        parts.append(f"{h}ч")
-    if m:
-        parts.append(f"{m}м")
-    if s or not parts:
-        parts.append(f"{s}с")
-    return " ".join(parts)
+    """Длительность как в UI: «18 ч 00 мин», «6 мин 15 с», «40 с» (v5.1.20;
+    раньше «18ч 11с» — нулевые минуты пропадали, секунды оставались)."""
+    return fmt_duration(sec)
 
 
 def _fmt_ts(iso: str | None, tz=None) -> str:
@@ -171,13 +162,14 @@ _RAW_SEV_EMOJI = {"shutdown": "🔴", "shutdown_cooldown": "🔴", "warning": "�
 _SRC_RU = {"panel": "панель", "analytics": "аналитика"}
 
 
-SUMMARY_PARTS_VERSION = 2   # v5.1.6: воздействие за период / с начала, показатели за сегмент
+SUMMARY_PARTS_VERSION = 3   # v5.1.20: неподтверждённое вне воздействия, имена в таблице, пик нагара
 
 # Уровень в частях сводки — те же значения, что alarm_level корпуса (догма v4.9.32)
 _LEVEL_RANK = {"НОРМА": 0, "CAUTION": 1, "WARNING": 2, "SHUTDOWN": 3}
 
 
 _COKING_LEVEL_RU = {"GREEN": "низкий", "YELLOW": "повышенный", "RED": "высокий"}
+_COKING_LEVEL_PEAK_RU = {"YELLOW": "повышенного", "RED": "высокого"}
 
 
 def _fmt_span_dm(t_open, t_close, tz=None) -> str:
@@ -252,6 +244,23 @@ def _coking_part(segments: list, tz=None) -> dict[str, Any] | None:
     lp = end.get("last_purge_ts")
     if lp and lp != (start or {}).get("last_purge_ts"):
         purged_at = lp
+    # Пик внутри периода (v5.1.20): «низкий → низкий» прятал 12 ч на высоком
+    # уровне перед прожигом (ДЭС №3, 13–14.10). Уровень известен на концах
+    # подсегментов — пик и самый большой долг берём по ним
+    _rank = {"GREEN": 0, "YELLOW": 1, "RED": 2}
+    peak_level = level_start if level_start in _rank else None
+    peak_debt, peak_ts = None, None
+    for s in segments:
+        for sub in (getattr(s, "subsegments", None) or []):
+            cr = getattr(getattr(sub, "risk_accumulators", None), "coking_risk", None)
+            if cr is None:
+                continue
+            lv = getattr(cr, "risk_level", None)
+            if lv in _rank and (peak_level is None or _rank[lv] > _rank[peak_level]):
+                peak_level = lv
+            d = float(getattr(cr, "debt_sec", 0) or 0)
+            if peak_debt is None or d > peak_debt:
+                peak_debt, peak_ts = d, getattr(sub, "t_end", None)
     return {
         "level": level,
         "level_start": level_start,
@@ -280,6 +289,9 @@ def _coking_part(segments: list, tz=None) -> dict[str, Any] | None:
         # По Cummins (v5.1.5): эскалация и календарь прогонов
         "service_needed": bool(end.get("service_needed")),
         "calendar": _coking_calendar(end, now_iso, tz),
+        "level_peak": peak_level,
+        "debt_peak_sec": peak_debt,
+        "debt_peak_text": _fmt_dm(peak_ts, tz),
     }
 
 
@@ -320,10 +332,10 @@ def _coking_calendar(cr: dict, now_iso: str | None, tz=None) -> dict[str, Any] |
 
 
 def _fmt_hm(sec: float) -> str:
-    """«4 ч 48 мин» — накопленное время риска без секунд."""
+    """«4 ч 08 мин» — накопленное время риска без секунд (минуты — как в UI)."""
     m = int(round((sec or 0) / 60.0))
     h, m = divmod(m, 60)
-    return f"{h} ч {m} мин" if h else f"{m} мин"
+    return f"{h} ч {m:02d} мин" if h else f"{m} мин"
 
 
 def _coking_composition(ck: dict) -> str:
@@ -469,6 +481,9 @@ def _key_metrics_part(segments: list, trip_roles: list[str] | None) -> dict[str,
             for sub in (getattr(s, "subsegments", None) or [])
             # Разгон и сброс оборотов — не работа (v5.1.16)
             if not getattr(sub, "transient", False)]
+    # Время работы для заголовка — до отсева: подсегмент без связи (dq 0) тоже
+    # работа, выпадал из «за N работы» (ревью v5.1.20: #35743 — 18 ч 48 мин из 24 ч)
+    work_raw = sum(float(getattr(sub, "duration_sec", 0) or 0) for sub, _ in subs)
     subs = [(sub, w) for sub, w in subs if w > 0]
     if not subs or not trip_roles:
         return None
@@ -486,13 +501,15 @@ def _key_metrics_part(segments: list, trip_roles: list[str] | None) -> dict[str,
             if ch.get("max") is not None:
                 maxs.append(ch["max"])
         if meds or mins:
-            rows.append({"role": role, "median": _weighted_median(meds),
+            rows.append({"role": role, "name": role_label(role),
+                         "median": _weighted_median(meds),
                          "min": min(mins, default=None), "max": max(maxs, default=None),
                          "unit": unit})
     if not rows:
         return None
+    # work_sec взвешен качеством данных (вес медианы); в заголовок — время работы
     return {"rows": rows, "basis": "period", "work_sec": sum(w for _, w in subs),
-            "subsegments": len(subs)}
+            "work_raw_sec": work_raw, "subsegments": len(subs)}
 
 
 def build_summary_parts(
@@ -722,6 +739,7 @@ def build_summary_parts(
             "count": 0, "active_sec": 0.0, "blind_sec": 0.0,
             "suppressed": 0, "unconfirmed": 0, "unconfirmed_at": [], "open": 0, "open_live": 0,
             "before": False, "appeared": False, "at_end": False, "_iv": [], "_on": {},
+            "_uiv": [],
         })
         g["count"] += 1
         # Снятое ИИ и неподтверждённое не суммируются: снятие главнее
@@ -734,10 +752,15 @@ def build_summary_parts(
         _to, _tc = _dt(e.get("t_open")), _dt(e.get("t_close"))
         if w0 is not None and w1 is not None and _to is not None:
             _end = min(_tc or w1, w1)
-            g["_iv"].append((max(_to, w0), _end))
-            on = g["_on"].setdefault(_to, {"end": _end, "blind": 0.0})
-            on["end"] = max(on["end"], _end)
-            on["blind"] = max(on["blind"], float(e.get("blind_sec") or 0))
+            if _unconf:
+                # Не подтверждено итоговым расчётом — в вердикт не идёт, значит и в
+                # «воздействие» тоже (v5.1.20: 22 мин нулевого кадра в «2ч 14м»)
+                g["_uiv"].append((max(_to, w0), _end))
+            else:
+                g["_iv"].append((max(_to, w0), _end))
+                on = g["_on"].setdefault(_to, {"end": _end, "blind": 0.0})
+                on["end"] = max(on["end"], _end)
+                on["blind"] = max(on["blind"], float(e.get("blind_sec") or 0))
         g["active_sec"] += e.get("active_sec") or 0
         g["blind_sec"] += e.get("blind_sec") or 0
         rank = _SEV_RANK_MD.get(e.get("severity") or "", 0)
@@ -772,7 +795,17 @@ def build_summary_parts(
             else:
                 g["appeared"] = True
     for g in groups.values():
-        iv, ons = _merge_iv(g.pop("_iv")), g.pop("_on")
+        iv, ons, uiv = _merge_iv(g.pop("_iv")), g.pop("_on"), _merge_iv(g.pop("_uiv"))
+        if w0 is not None and w1 is not None and uiv:
+            # Своё время неподтверждённых внутри окна — для оговорки «за период».
+            # Не за вычетом подтверждённого: лежащий внутри него эпизод печатался
+            # «(16:10–16:40, 0 с)» (ревью v5.1.20); в воздействие оно и так не входит
+            g["unconfirmed_sec"] = _iv_len(uiv)
+            if not ons:
+                # Только неподтверждённое: воздействия нет. Явный ноль — иначе
+                # рендер ушёл бы в ветку частей v1 и напечатал active_sec
+                g["period_sec"], g["period_blind_sec"], g["onsets"] = 0.0, 0.0, 0
+                continue
         if w0 is None or w1 is None or not ons:
             continue
         g["period_sec"] = _iv_len(iv)
@@ -1043,6 +1076,16 @@ def render_summary_md(parts: dict[str, Any]) -> str:
                   f"{'событие' if len(evs) == 1 else 'события'} {when}"
                   + (f" — {txt}" if txt else ""))
                 continue
+            _u = g.get("unconfirmed") or 0
+            _at = ", ".join(g.get("unconfirmed_at") or [])
+            # Части v3: неподтверждённое уже вне воздействия — печатаем отдельно
+            _v3u = bool(_u) and "unconfirmed_sec" in g
+            if _v3u and not g.get("onsets"):
+                a(f"- {emoji} **{g['name']}** [{src_ru}]: {_u} {_eps_ru(_u)} по живым данным"
+                  + (f" ({_at})" if _at else "")
+                  + f", за период {_fmt_duration(g['unconfirmed_sec'])}"
+                  f" — *в итоговом расчёте не подтверждено*")
+                continue
             if "period_sec" in g:
                 n = g.get("onsets") or g["count"]
                 line = (f"- {emoji} **{g['name']}** [{src_ru}]: {n} {_eps_ru(n)}, "
@@ -1063,19 +1106,25 @@ def render_summary_md(parts: dict[str, Any]) -> str:
                 if g["blind_sec"] >= 1:
                     line += (f" (из них {_fmt_duration(g['blind_sec'])} без связи — "
                              f"снятие могло произойти раньше)")
+            _nc = g["count"] - (_u if _v3u else 0)
             if g["suppressed"]:
-                line += (" — *снято ИИ*" if g["suppressed"] == g["count"]
-                         else f" — *снято ИИ: {g['suppressed']} из {g['count']}*")
-            _u = g.get("unconfirmed") or 0
-            if _u:
-                _at = ", ".join(g.get("unconfirmed_at") or [])
+                line += (" — *снято ИИ*" if g["suppressed"] == _nc
+                         else f" — *снято ИИ: {g['suppressed']} из {_nc}*")
+            # То же, что end_level и шапка ИИ: снятое ИИ и снятое панелью к концу не
+            # висит. До оговорки о неподтверждённых: «на конец» — про подтверждённый
+            # эпизод (v5.1.20; модель отнесла его к неподтверждённому, #35872)
+            if g.get("at_end", g["open"] and not g["suppressed"]):
+                line += " — **активен на конец периода**"
+            if _v3u:
+                # Интервалы — целиком (эпизод мог начаться до периода), время — за период
+                line += (f"; ещё {_u} по живым данным" + (f" ({_at})" if _at else "")
+                         + f", за период {_fmt_duration(g['unconfirmed_sec'])}"
+                         f" — *в итоговом расчёте не подтверждено*")
+            elif _u:
                 _at = f" ({_at})" if _at else ""
                 line += (f" — *по живым данным{_at}, в итоговом расчёте не подтверждено*"
                          if _u == g["count"] - (g["suppressed"] or 0)
                          else f" — *в итоговом расчёте не подтверждено: {_u} из {g['count']}{_at}*")
-            # То же, что end_level и шапка ИИ: снятое ИИ и снятое панелью к концу не висит
-            if g.get("at_end", g["open"] and not g["suppressed"]):
-                line += " — **активен на конец периода**"
             a(line)
         for c in parts.get("failed_checks") or []:
             det = c.get("details") if isinstance(c, dict) else c
@@ -1084,17 +1133,20 @@ def render_summary_md(parts: dict[str, Any]) -> str:
 
     km = parts.get("key_metrics")
     if km and km.get("rows"):
+        # Вариант А (решение 14.10): период — в заголовке, без строки-пояснения;
+        # «Обычно» — медиана по времени, минимум и максимум — крайние за период
+        work = km.get("work_raw_sec", km.get("work_sec"))
         a("")
-        a("### Ключевые показатели")
-        if km.get("basis") == "period":
-            a(f"*За период работы {_fmt_duration(km.get('work_sec') or 0)}: медиана — по времени, "
-              f"мин/макс — за весь период.*")
-            a("")
-        a("| Параметр | Медиана | Мин | Макс | Ед. |")
-        a("|----------|--------:|----:|----:|-----|")
+        a(f"### Ключевые показатели за {_fmt_duration(work)} работы"
+          if km.get("basis") == "period" and work else "### Ключевые показатели")
+        a("")
+        a("| Параметр | Обычно | Минимум | Максимум | Ед. |")
+        a("|----------|-------:|--------:|---------:|-----|")
         for r in km["rows"]:
-            a(f"| {r['role']} | {_fmt_val(r.get('median'))} | {_fmt_val(r.get('min'))} "
-              f"| {_fmt_val(r.get('max'))} | {r.get('unit', '')} |")
+            _d = number_decimals([r.get("median"), r.get("min"), r.get("max")])
+            a(f"| {r.get('name') or role_label(r.get('role'))} | {fmt_number(r.get('median'), _d)} "
+              f"| {fmt_number(r.get('min'), _d)} | {fmt_number(r.get('max'), _d)} "
+              f"| {unit_ru(r.get('unit'))} |")
     ck = parts.get("coking")
     if ck and isinstance(ck, dict) and "before_start" in ck:
         if ck["before_start"]:
@@ -1118,7 +1170,19 @@ def render_summary_md(parts: dict[str, Any]) -> str:
             st = ck.get("level_start")
             show = (ck["level"] != "GREEN" or st not in (None, "GREEN")
                     or ck.get("purged_at_text") or ck.get("paid_sec"))
-            line = (f"Риск нагара: на начало **{_COKING_LEVEL_RU.get(st, st)}** → на конец **{lvl}**"
+            # Пик выше обоих концов — показываем: «низкий → низкий» прятал 12 ч
+            # высокого риска перед прожигом (v5.1.20)
+            _rk = {"GREEN": 0, "YELLOW": 1, "RED": 2}
+            pk = ck.get("level_peak")
+            peak_txt = ""
+            if pk in _rk and _rk[pk] > max(_rk.get(st, 0), _rk.get(ck["level"], 0)):
+                show = True
+                peak_txt = f" → поднимался до **{_COKING_LEVEL_PEAK_RU.get(pk, pk)}**"
+                if (ck.get("debt_peak_sec") or 0) >= 60:
+                    peak_txt += (f" (долг до ~{_fmt_hm(ck['debt_peak_sec'])}"
+                                 + (f", {ck['debt_peak_text']}" if ck.get("debt_peak_text") else "")
+                                 + ")")
+            line = (f"Риск нагара: на начало **{_COKING_LEVEL_RU.get(st, st)}**{peak_txt} → на конец **{lvl}**"
                     if st else f"Риск нагара на конец: **{lvl}**")
             if ck.get("purged_at_text"):
                 line += (f" — прожиг завершён {ck['purged_at_text']}, недогруз погашен"

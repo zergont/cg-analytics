@@ -117,7 +117,7 @@ check(head is not None and tail is not None, "2a: нарезка не дала �
 if head is not None:
     md = build_summary_md([head], episodes=[])
     check("🔴 АВАРИЯ" in md, f"2б: вердикт аварии 1452: {md.splitlines()[:2]}")
-    check("Авария снята" in md and "3м" in md,
+    check("Авария снята" in md and "3 мин 36 с" in md,
           f"2в: нет строки «Авария снята» от начала стопа (3м36с): {md!r}")
     # Продолжение после суточного реза начала аварии не знает — без MTTR
     segs2 = segment(ENUM, [], [], [], cfg, "r", "pcc3300", 1, "e", T(20, 30), T(21, 0))

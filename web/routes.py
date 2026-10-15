@@ -497,12 +497,8 @@ def _fmt_dur(seconds: float | None, is_open: bool = False) -> str:
         return "активно"
     if seconds is None:
         return "—"
-    s = int(seconds)
-    if s < 60:
-        return f"{s} с"
-    if s < 3600:
-        return f"{s // 60} мин {s % 60} с"
-    return f"{s // 3600} ч {(s % 3600) // 60} мин"
+    from analytics.labels import fmt_duration
+    return fmt_duration(seconds)
 
 
 def _build_analysis_md(
