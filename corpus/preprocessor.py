@@ -218,12 +218,42 @@ def _group_worst(scenario: str, values_list: list[dict]) -> str | None:
     return None
 
 
+def _live_clusters(d: dict) -> dict[str, float]:
+    """Кластеры values.live детекции: {начало: чистое время} (v5.1.21). У близости
+    к уставке — участки своей роли (values.role) внутри кластера. {} — без участков."""
+    v = d.get("values") if isinstance(d.get("values"), dict) else {}
+    lv = v.get("live")
+    if not isinstance(lv, dict):
+        return {}
+    role = v.get("role")
+    out: dict[str, float] = {}
+    for c in lv.get("clusters") or []:
+        if not isinstance(c, dict) or not c.get("start"):
+            continue
+        rr = c.get("roles")
+        if role and isinstance(rr, dict) and isinstance(rr.get(role), dict):
+            viol = rr[role].get("viol_sec")
+        else:
+            viol = c.get("viol_sec")
+        try:
+            out[str(c["start"])] = max(0.0, float(viol or 0.0))
+        except (TypeError, ValueError):
+            out[str(c["start"])] = 0.0
+    return out
+
+
 def _fmt_detections_hierarchy(chars_json: Any) -> str:
     """Агрегированные обнаружения для БЛОКА 1: иерархия панель→аналитика,
     по-русски, с количеством срабатываний, длительностью и худшим показателем.
 
     Длительность = сумма длительностей подсегментов, где сценарий срабатывал
     (у самой детекции длительности нет).
+
+    v5.1.21 (П9): у детекций с участками (values.live) число — уникальные
+    кластеры нарушения (один кластер виден в каждом подсегменте, который
+    пересекает), длительность — чистое время участков своей роли внутри
+    кластеров (близость по параметру: температура масла не захватывает участки
+    давления), а не длительность подсегментов. Старые сегменты — как было.
     """
     parsed = _parse_json(chars_json)
     subsegments = (parsed or {}).get("subsegments", [])
@@ -260,9 +290,8 @@ def _fmt_detections_hierarchy(chars_json: Any) -> str:
                 "name": name, "scenario": scenario, "panel": is_panel,
                 "sev_rank": 0, "severity": severity,
                 "count": 0, "dur_sec": 0.0, "values": [],
-                "fault_codes": set(),
+                "fault_codes": set(), "live": {},
             })
-            g["count"] += 1
             if _SEV_RANK.get(severity, 0) > g["sev_rank"]:
                 g["sev_rank"] = _SEV_RANK.get(severity, 0)
                 g["severity"] = severity
@@ -270,14 +299,29 @@ def _fmt_detections_hierarchy(chars_json: Any) -> str:
                 g["values"].append(d["values"])
             for fc in d.get("fault_codes") or []:
                 g["fault_codes"].add(fc)
+            # С участками — кластер: {начало: чистое время своей роли}
+            _cl = _live_clusters(d)
+            if _cl:
+                for start, viol in _cl.items():
+                    g["live"][start] = max(g["live"].get(start, 0.0), viol)
+                continue
+            g["count"] += 1
             if key not in seen_in_sub:
                 seen_in_sub.add(key)
                 g["dur_sec"] += sub_dur
+
+    for g in groups.values():
+        if g["live"]:
+            g["count"] += len(g["live"])
+            g["dur_sec"] += sum(g["live"].values())
 
     def _render(g: dict) -> str:
         parts = [_plural_hits(g["count"])]
         if g["count"] > 1 and g["dur_sec"] > 0:
             parts.append(f"суммарно {_fmt_dur(g['dur_sec'])}")
+        elif g["live"] and g["dur_sec"] > 0:
+            # Один эпизод нарушения — его чистое время (9 с провала — не «сутки»)
+            parts.append(f"длительность {_fmt_dur(g['dur_sec'])}")
         worst = _group_worst(g["scenario"], g["values"])
         if worst:
             parts.append(worst)
@@ -495,7 +539,9 @@ def _remarks_from_summary(segment_row: dict) -> str | None:
     for c in parts.get("failed_checks") or []:
         det = (c.get("details") if isinstance(c, dict) else c) or "проверка не пройдена"
         ck = c.get("check") if isinstance(c, dict) else None
-        tag = ("связь, на вердикт не влияет" if ck in _DATA_QUALITY_CHECKS
+        # Сбой датчика оборотов (v5.1.21, В4) — данные, но не связь
+        tag = ("связь, на вердикт не влияет" if ck == "subseg_data_coverage"
+               else "качество данных, на вердикт не влияет" if ck in _DATA_QUALITY_CHECKS
                else "наблюдение, на вердикт не влияет" if ck in _INFO_CHECKS else "проверка")
         items.append(f"{det} [{tag}]")
     return "; ".join(items) if items else "нет"

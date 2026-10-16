@@ -37,6 +37,7 @@ from .forward_fill import apply_forward_fill
 from .metrics import compute_characteristics, compute_derived_metrics
 from .accumulators import update_accumulators
 from .detectors import run_all_detectors
+from .live import held_before, segment_spans
 
 
 # ── Вспомогательные ──────────────────────────────────────────────────────────
@@ -839,14 +840,28 @@ def _build_subsegments_for_running(
     state_periods: dict[int, list[dict]] | None = None,
     steady: tuple[datetime | None, datetime | None] | None = None,
     onset_faults: list[dict] | None = None,
+    cause_open: str | None = None,
+    held: dict[str, Any] | None = None,
+    live_edge: bool = False,
 ) -> tuple[list[Subsegment], RiskAccumulators]:
     """L2-сегментация внутри RUN_STATE=3: ZoneTracker + fault-события.
+
+    live_edge — сегмент кончается на живом краю открытого окна: только там
+    правило B ждёт следующего отсчёта оборотов (v5.1.21, ревью analytics-3).
 
     steady — рабочая часть сегмента (v5.1.16, _steady_window): до неё разгон с
     нулей пуска, после — сброс оборотов перед охлаждением. Эти куски —
     отдельные переходные подсегменты без детекторов работы (панель видна).
     (None, None) — рабочих оборотов не было, весь сегмент переходный;
     None — делить нечего (как до v5.1.16).
+
+    Участки нарушений (v5.1.21, П2, analytics/live.py) считаются один раз на
+    рабочую часть [head_end, tail_start) до цикла подсегментов и идут в
+    детекторы рабочих подсегментов; переходные куски их не получают. held —
+    удержанные значения на начало сегмента (live.held_before): частота —
+    опросу оборотов, остальное — переносу через начало окна, только при
+    продолжении режима (cause_open REPORT_START без разгона). Сбой расчёта —
+    предупреждение и прежнее поведение (live_spans=None).
     """
     seg_t0 = _tz(seg_start)
     seg_t1 = _tz(seg_end)
@@ -888,6 +903,21 @@ def _build_subsegments_for_running(
 
     t_start_tz = head_end
     t_end_tz = tail_start
+
+    # Участки и кластеры нарушений рабочей части — один раз на сегмент (v5.1.21).
+    # None, а не {}: пустой словарь молча погасил бы четыре детектора.
+    # Горизонт правила B — только живой край открытого окна; у закрытого (рез,
+    # смена режима) будущих строк не будет (ревью v5.1.21, analytics-3)
+    live_spans: dict[str, list[dict]] | None = None
+    try:
+        live_spans = segment_spans(
+            seg_by_addr, None, cfg, head_end, tail_start, gaps, held or {},
+            carry=(cause_open == "REPORT_START" and head_end == seg_t0),
+            horizon=seg_t1 if live_edge else None,
+        )
+    except Exception:
+        logger.warning("Участки нарушений сегмента %s не посчитаны — детекторы по подсегменту",
+                       seg_id, exc_info=True)
 
     n_stab = int(cfg.seg("boundary_confirmation", "n_stab", default=3))
     load_addr = cfg.role_to_addr("LOAD_PCT")
@@ -1006,11 +1036,19 @@ def _build_subsegments_for_running(
             if _tz(fp["fault_start"]) < t_sub_end
             and (_tz(fp["fault_end"]) if fp.get("fault_end") else t_sub_end) > t_sub_start
         ]
-        detections = run_all_detectors(
-            chars, derived, accumulators, faults_in_sub,
-            zone, run_state, t_sub_start, t_sub_end, prev_sub_zone, cfg, state_periods,
-            onset_faults=onset_faults if onset_faults is not None else fault_periods_in_seg,
-        )
+        _det_args = (chars, derived, accumulators, faults_in_sub,
+                     zone, run_state, t_sub_start, t_sub_end, prev_sub_zone, cfg, state_periods)
+        _onset = onset_faults if onset_faults is not None else fault_periods_in_seg
+        try:
+            detections = run_all_detectors(*_det_args, onset_faults=_onset, live_spans=live_spans)
+        except Exception:
+            if live_spans is None:
+                raise
+            # Ветки детекторов по участкам (v5.1.21) — тоже под защитой: при сбое
+            # подсегмент считается по-старому, цикл открытого окна не падает
+            logger.warning("Детекторы по участкам подсегмента %s не отработали — по подсегменту",
+                           subseg_id, exc_info=True)
+            detections = run_all_detectors(*_det_args, onset_faults=_onset, live_spans=None)
 
         sub_gaps = _filter_gaps(gaps, t_sub_start, t_sub_end)
         dq = _compute_data_quality(seg_by_addr, t_sub_start, t_sub_end, sub_gaps, cfg)
@@ -1172,6 +1210,114 @@ def _glitch_check(glitches: list[tuple[datetime, str]], t0: datetime, t1: dateti
         "passed": True,
         "count": len(inside),
         "details": f"отброшены одиночные нули источника (сбой декодера): {shown}{more}",
+    }
+
+
+# ── Сбой датчика оборотов: сверка с частотой генератора (v5.1.21) ───────────
+# ДГУ №1 15.10 04:42–09:24 МСК: 12 одиночных отсчётов 1417–1479 об/мин при
+# 49,9–50,1 Гц, следом каждый раз 1495–1501 — сбой датчика, а не провал. Каждый
+# заводил «Просадку оборотов» на весь подсегмент. Решения владельца 15.10.2026
+# (В1, В4): такой отсчёт вырезается из аналитики и перечисляется в отчёте;
+# правило и частота опроса — analytics/rpm_freq.py. Фильтр нулей не трогаем:
+# нули и всё ниже min_rpm (выбег, холостой ход, падение в стоп) — не сюда.
+
+
+def _held_from_seed(load_seed: dict | None, cfg) -> dict[str, tuple[datetime, float]]:
+    """Удержанные значения на голове окна из load_seed["held"] (v5.1.21, П10):
+    {роль: (метка строки, значение в единицах карты)}. Пусто — посева нет
+    (перечитка, тесты, старый движок)."""
+    out: dict[str, tuple[datetime, float]] = {}
+    for role, h in ((load_seed or {}).get("held") or {}).items():
+        try:
+            ts = h["ts"]
+            ts = _tz(datetime.fromisoformat(ts)) if isinstance(ts, str) else _tz(ts)
+            v = float(h["value"])
+            addr = cfg.role_to_addr(role)
+            k = cfg.register_map.get(addr, {}).get("_scale") if addr is not None else None
+            out[str(role)] = (ts, v * k if k else v)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _drop_rpm_glitches(
+    by_addr: dict[int, list[dict]], cfg, enum_periods: list[dict] | None,
+    held_freq: tuple[datetime, float] | None = None,
+    gaps: list[dict] | None = None,
+) -> tuple[dict[int, list[dict]], list[tuple[datetime, float, float | None]]]:
+    """Вырезать одиночные сбои датчика оборотов. (новый by_addr, [(момент, обороты, f_min)]).
+
+    Отсчёт оборотов — сбой (v5.1.21, 1а), если всё сразу:
+    - min_rpm < обороты < порога (нули не трогаем — решение 13.10);
+    - в этот момент RUN_STATE = 3;
+    - вся частота опроса рабочая: 40–55 Гц и k·f ≥ порог + допуск (f ≥ 49,9);
+    - следующий отсчёт не ниже порога и не позже next_max_gap_sec.
+    Уходит только строка оборотов — частота и мощность того же опроса остаются.
+    held_freq — удержанная частота перед окном истории (П10), gaps — дыры окна
+    вместе с дырами от удержанной строки до окна.
+    """
+    from .rpm_freq import build_poll, is_glitch, rpm_freq_params
+    prm = rpm_freq_params(cfg)
+    if not prm["enabled"]:
+        return by_addr, []
+    rpm_addr = cfg.role_to_addr("RPM")
+    rows = by_addr.get(rpm_addr) if rpm_addr is not None else None
+    if not rows:
+        return by_addr, []
+    real = [r for r in rows if _fv(r) is not None and not r.get("is_carried_forward")]
+    if not any(prm["min_rpm"] < _fv(r) < prm["threshold_rpm"] for r in real):
+        return by_addr, []
+    run3 = [(_tz(p["state_start"]), _tz(p["state_end"]) if p.get("state_end") else None)
+            for p in enum_periods or []
+            if p.get("addr") == 40011 and p.get("value") is not None and int(p["value"]) == 3]
+    if not run3:
+        return by_addr, []
+    poll = build_poll(by_addr, cfg, prm, held_freq, gaps)
+    if poll is None:
+        return by_addr, []
+
+    drop_ids: set[int] = set()
+    found: list[tuple[datetime, float, float | None]] = []
+    for k, r in enumerate(real):
+        v = _fv(r)
+        if not (prm["min_rpm"] < v < prm["threshold_rpm"]):
+            continue
+        ts = _tz(r["ts"])
+        if not any(s <= ts and (e is None or ts < e) for s, e in run3):
+            continue
+        nxt = real[k + 1] if k + 1 < len(real) else None
+        nxt_p = (_tz(nxt["ts"]), _fv(nxt)) if nxt is not None else None
+        fvals = poll.window(ts, nxt_p[0] if nxt_p else None)
+        if is_glitch(v, fvals, nxt_p, ts, prm):
+            drop_ids.add(id(r))
+            found.append((ts, v, min(fvals)))
+    if not found:
+        return by_addr, []
+    out = dict(by_addr)
+    out[rpm_addr] = [r for r in rows if id(r) not in drop_ids]
+    return out, found
+
+
+def _rpm_glitch_check(
+    glitches: list[tuple[datetime, float, float | None]], t0: datetime, t1: datetime, cfg,
+) -> dict | None:
+    """Проверка сегмента source_rpm_glitch: сколько отсчётов оборотов вырезано как сбой.
+
+    Время в тексте — МСК (у _glitch_check — UTC, этот недочёт не копируем);
+    моменты лежат и в samples, отчёт перепечатывает их в своём поясе. При
+    remark_min_count и больше за сегмент — passed=False (В4): строка в
+    «Замечаниях», объекту на заметку; на вердикт не влияет (_DATA_QUALITY_CHECKS)."""
+    from .rpm_freq import glitch_details, rpm_freq_params
+    inside = [g for g in glitches if t0 <= g[0] < t1]
+    if not inside:
+        return None
+    samples = [{"t": t.isoformat(), "rpm": v, "hz": f} for t, v, f in inside]
+    return {
+        "check": "source_rpm_glitch",
+        "passed": len(inside) < rpm_freq_params(cfg)["remark_min_count"],
+        "count": len(inside),
+        "samples": samples,
+        "details": glitch_details(samples),
     }
 
 
@@ -2150,8 +2296,10 @@ def segment(
     ts_to: datetime,
     initial_coking_risk=None,  # CokingRisk | None — для онлайн-режима (п. 5.1 ТЗ)
     transition_ctx: list | None = None,  # звенья перед окном (analytics.transitions, v5.1.10)
-    load_seed: dict | None = None,  # последний замер нагрузки перед окном + обрывы до окна
+    load_seed: dict | None = None,  # последний замер нагрузки перед окном + обрывы до окна;
+                                    # held/held_gaps — удержанные значения (v5.1.21, П10)
     confirm_to: datetime | None = None,  # докуда решать исход попытки за краем окна (v5.1.16)
+    live_edge: bool = False,  # ts_to — живой край открытого окна (v5.1.21, правило B)
 ) -> list[Segment]:
     """Главная точка входа: преобразует сырые данные в список сегментов.
 
@@ -2160,6 +2308,11 @@ def segment(
 
     initial_coking_risk: если передан — инициализирует coking_risk аккумулятор
     начальным состоянием из предыдущего закрытого сегмента (ТЗ Этап 1.5, раздел 5.1).
+
+    live_edge: окно открыто (живой цикл движка), ts_to — край данных: последний
+    отсчёт оборотов без следующего правило B (dip_needs_freq: false) пока не
+    учитывает. Закрытое окно (рез, перечитка) — False: будущих строк не будет
+    (ревью v5.1.21, analytics-3).
     """
     import copy as _copy
     tf = _tz(ts_from)
@@ -2172,6 +2325,18 @@ def segment(
     _stops = [(_tz(p["state_start"]), _tz(p["state_end"]) if p.get("state_end") else tt)
               for p in enum_periods if p.get("addr") == 40011 and int(p.get("value") or 0) == 0]
     all_by_addr, _zero_glitches = _drop_zero_glitches(all_by_addr, cfg, tt, _stops)
+    # Удержанные значения перед окном истории (v5.1.21, П10): частота — сверке
+    # оборотов, остальное — переносу участков через начало окна
+    _held = _held_from_seed(load_seed, cfg)
+    _held_gaps = list(gaps or []) + list((load_seed or {}).get("held_gaps") or [])
+    # Сбой датчика оборотов, не подтверждённый частотой генератора (v5.1.21, 1а).
+    # Сбой фильтра не должен ронять анализ окна — тогда данные как есть
+    try:
+        all_by_addr, _rpm_glitches = _drop_rpm_glitches(
+            all_by_addr, cfg, enum_periods, _held.get("FREQUENCY"), _held_gaps)
+    except Exception:
+        logger.warning("Сверка оборотов с частотой не выполнена", exc_info=True)
+        _rpm_glitches = []
     # Регистры-состояния для характеристик подсегментов (код неисправности)
     state_periods = _state_periods(enum_periods, cfg)
 
@@ -2316,6 +2481,14 @@ def segment(
                     if k_period + 1 < len(run_state_periods) and _cut_inside else None)
             _steady = _steady_window(all_by_addr, cfg, seg_start, seg_end, _nxt,
                                      attempt_pending)
+            # Удержанные значения на начало сегмента (v5.1.21): последняя строка
+            # до него в окне истории, иначе посев перед окном (П10). Сбой — без них
+            try:
+                _seg_held = held_before(all_by_addr, cfg, seg_start, _held, _held_gaps,
+                                        with_passport=cause_open == "REPORT_START")
+            except Exception:
+                logger.warning("Удержанные значения на начало сегмента не определены", exc_info=True)
+                _seg_held = {}
             subsegments, accumulators = _build_subsegments_for_running(
                 seg_id=seg_id,
                 seg_by_addr=seg_by_addr,
@@ -2330,6 +2503,10 @@ def segment(
                 state_periods=state_periods,
                 steady=_steady,
                 onset_faults=fault_periods,
+                cause_open=cause_open,
+                held=_seg_held,
+                # Живой край — только у сегмента, идущего до края открытого окна
+                live_edge=live_edge and not _cut_inside,
             )
         else:
             subseg, accumulators = _build_single_subsegment(
@@ -2358,6 +2535,9 @@ def segment(
         _gc = _glitch_check(_zero_glitches, _tz(seg_start), _tz(seg_end))
         if _gc:
             seq_checks.append(_gc)
+        _rc = _rpm_glitch_check(_rpm_glitches, _tz(seg_start), _tz(seg_end), cfg)
+        if _rc:
+            seq_checks.append(_rc)
 
         # Fault-события сегмента (для events[])
         events: list[dict[str, Any]] = []

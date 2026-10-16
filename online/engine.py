@@ -58,6 +58,11 @@ def _filter_window_episodes(
     Остаются: родившиеся в окне; живые на конец окна (висящая авария обязана
     показываться в каждом суточном сегменте); закрывшиеся в окне после
     реального пересечения (> tail_sec ≈ дебаунс + цикл опроса).
+
+    v5.1.21 (П7): эпизод аналитики с участками (values.live в open_values_json)
+    закрывается точно по концу нарушения — хвоста дебаунса у него нет, и любое
+    пересечение с окном — настоящее: перенос 60 с после 09:00 остаётся в
+    сводке нового дня (порог ≈120 с его выбрасывал).
     """
     out = []
     for e in eps:
@@ -66,9 +71,28 @@ def _filter_window_episodes(
             out.append(e)
         elif t_close is None or _tz_utc(t_close) >= t_to:
             out.append(e)
+        elif _episode_has_live(e) and _tz_utc(t_close) > t_from:
+            out.append(e)
         elif (_tz_utc(t_close) - t_from).total_seconds() > tail_sec:
             out.append(e)
     return out
+
+
+def _episode_open_values(ep: dict) -> dict:
+    """open_values_json строки эпизода — словарь (asyncpg отдаёт JSON строкой)."""
+    ov = ep.get("open_values_json")
+    if isinstance(ov, str):
+        try:
+            ov = json.loads(ov)
+        except (TypeError, ValueError):
+            return {}
+    return ov if isinstance(ov, dict) else {}
+
+
+def _episode_has_live(ep: dict) -> bool:
+    """Эпизод аналитики с участками (v5.1.21): в open_values_json есть блок live."""
+    return (ep.get("scenario") != "CONTROLLER_FAULT"
+            and isinstance(_episode_open_values(ep).get("live"), dict))
 
 
 def _episode_key(ep: dict) -> str:
@@ -105,8 +129,109 @@ def _panel_cleared_at(segments: list) -> dict[str, datetime]:
     return out
 
 
+def _analytics_cleared_at(segments: list,
+                          episodes: dict[str, dict] | None = None) -> dict[str, datetime]:
+    """Где кончилось нарушение аналитики: ключ → конец кластера (v5.1.21, П5).
+
+    Рядом с _panel_cleared_at и по той же причине: движок отстаёт на цикл, и
+    первый промах вставал на горизонт обработки. Кластеры — из values.live
+    детекций всех сегментов окна; у сегмента, закрытого сменой режима 3 → 4/0,
+    идущий кластер кончается краем его рабочей части (до сброса оборотов) —
+    это и есть конец. Без episodes — самый поздний конец по ключу. С episodes —
+    только для точных эпизодов памяти: цепочка кластеров (следующий начинается
+    не дальше N видимого времени от конца предыдущего) от кластера самого
+    эпизода в этом окне — первого, кончившегося не раньше t_open и начавшегося
+    не позже until (у эпизода, открытого в окне, — кластер с началом в t_open).
+    v5.1.21, ревью (engine-1, shadow-1/2): не от until памяти — until мог
+    остаться горизонтом синтетического хвоста (пауза пакетов без data_gaps:
+    воздействие включало паузу, кластер после неё склеивался с прежним) или
+    устареть за простой сервиса (JSON — последний цикл до остановки: хвост
+    кластера терялся). Кластера эпизода в окне нет (мост после реза, рестарт
+    без него) — цепочка от until, как раньше. Кластер после простоя сервиса,
+    дальше N, — уже другой эпизод: его засеет закрытие сегмента, а этот
+    закроется по концу своего кластера, без времени простоя.
+    Сбой — пустая карта (конец берётся из until памяти)."""
+    try:
+        from analytics.live import LIVE_RECENT_SEC, live_block, subs_gaps, visible_sec
+        subs = [sub for seg in segments or [] for sub in getattr(seg, "subsegments", None) or []]
+        ends: dict[str, dict[datetime, datetime]] = {}
+        for sub in subs:
+            for d in getattr(sub, "detections", None) or []:
+                lv = live_block(d)
+                if lv is None:
+                    continue
+                key = _alert_key(d if isinstance(d, dict) else d.to_dict())
+                m = ends.setdefault(key, {})
+                for c in lv.get("clusters") or []:
+                    s, e = _as_utc(c.get("start")), _as_utc(c.get("end"))
+                    if s is not None and e is not None and (s not in m or e > m[s]):
+                        m[s] = e
+        gl = subs_gaps(subs)
+        out: dict[str, datetime] = {}
+        for key, m in ends.items():
+            if not m:
+                continue
+            if episodes is None:
+                out[key] = max(m.values())
+                continue
+            ep = episodes.get(key) or {}
+            t_open = ep.get("t_open")
+            if not ep.get("exact") or t_open is None:
+                continue
+            u0 = ep.get("until")
+            items = sorted(m.items())
+            _lim = max(u0, t_open) if u0 is not None else None
+            anchor = next((i for i, (s, e) in enumerate(items)
+                           if e >= t_open and (_lim is None or s <= _lim)), None)
+            if anchor is not None:
+                cur = best = items[anchor][1]
+                rest = items[anchor + 1:]
+            else:
+                cur, best = u0 or t_open, None
+                rest = [x for x in items if x[0] >= t_open]
+            for s, e in rest:
+                if s > cur and visible_sec(cur, s, gl) > LIVE_RECENT_SEC:
+                    break
+                cur = max(cur, e)
+                best = cur
+            if best is not None:
+                out[key] = best
+        return out
+    except Exception:
+        logger.warning("Карта концов нарушений аналитики не собрана", exc_info=True)
+        return {}
+
+
+def _exact_end(ep: dict, ca: datetime | None) -> datetime | None:
+    """Конец нарушения точного эпизода памяти (v5.1.21, ревью engine-1/shadow-2):
+    по карте концов окна (ca — _analytics_cleared_at, цепочка от кластера самого
+    эпизода), until памяти — запасной (мост после реза, рестарт без кластера в
+    окне). until — горизонт детекции без live (смешанный ключ, until_kind
+    «plain»): она была видна до него, берётся позднейшее, как раньше. Карта
+    раньше t_open — прежний период ключа, не в счёт."""
+    u = ep.get("until")
+    t_open = ep.get("t_open")
+    if ca is not None and t_open is not None and ca < t_open:
+        ca = None
+    if ca is None:
+        return u
+    if u is not None and ep.get("until_kind") == "plain":
+        return max(u, ca)
+    return ca
+
+
+def _until_kind(li: dict) -> str:
+    """Чем является until кластера цикла (v5.1.21, ревью engine-1): «plain» —
+    горизонт из-за детекции без live (смешанный ключ), «horizon» — горизонт
+    идущего кластера, «end» — фактический конец кластера."""
+    if li.get("mixed"):
+        return "plain"
+    return "horizon" if li.get("ongoing") else "end"
+
+
 def _drop_debounce_tails(eps: list[dict], segments: list,
-                         live_episodes: dict[str, dict]) -> list[dict]:
+                         live_episodes: dict[str, dict],
+                         live_keys: set[str] | None = None) -> list[dict]:
     """Убрать из сводки ЗАКРЫВАЕМОГО сегмента эпизоды, снятые до него.
 
     Эпизод закрывается после нескольких чистых циклов (дебаунс), и в цикле, где
@@ -116,23 +241,60 @@ def _drop_debounce_tails(eps: list[dict], segments: list,
     Открытый эпизод без детекции в данных самого сегмента — хвост дебаунса:
     у панели это точно (детекция строится по периоду неисправности), у
     аналитики — только если движок уже видит промах (miss > 0).
-    """
+
+    v5.1.21 (П7): точный эпизод аналитики (exact в памяти), не живой на конец
+    сегмента (нет в live_keys), закроется по концу нарушения — в сводку идёт
+    копией с t_close = конец по карте кластеров сегмента (цепочка от кластера
+    эпизода), без неё — until памяти (_exact_end, ревью v5.1.21: горизонт
+    синтетического хвоста паузы — не конец), как его закроет движок
+    (_process_episodes). Мост держит его открытым до
+    N после реза, промах в памяти ещё 0 — без этого сводка показала бы его
+    висящим до конца окна. Кончился до сегмента — хвост, в сводку не идёт.
+    БД не трогается."""
     det_keys = {
         _alert_key(d.to_dict())
         for seg in segments or []
         for sub in getattr(seg, "subsegments", None) or []
         for d in sub.detections
     }
+    live_keys = live_keys or set()
+    w0 = _as_utc(getattr(segments[0], "t_start", None)) if segments else None
+    _ca: dict[str, datetime] | None = None
     out = []
     for ep in eps:
         if ep.get("t_close") is None:
             key = _episode_key(ep)
+            mem = live_episodes.get(key) or {}
+            if (mem.get("exact") and key not in live_keys
+                    and ep.get("scenario") != "CONTROLLER_FAULT"
+                    and (mem.get("id") is None or ep.get("id") is None or mem["id"] == ep["id"])):
+                if _ca is None:
+                    _ca = _analytics_cleared_at(segments, live_episodes)
+                _tc = _exact_end(mem, _ca.get(key))
+                if _tc is not None:
+                    _to = _as_utc(ep.get("t_open"))
+                    if _to is not None and _tc < _to:
+                        _tc = _to
+                    if w0 is not None and _tc <= w0 and (_to is None or _to < w0):
+                        continue
+                    out.append(dict(ep, t_close=_tc))
+                    continue
             if key not in det_keys:
-                mem = live_episodes.get(key) or {}
                 if ep.get("scenario") == "CONTROLLER_FAULT" or mem.get("miss", 0) > 0:
                     continue
         out.append(ep)
     return out
+
+
+def _bridge_only(ep: dict, live_episodes: dict[str, dict] | None, t_from: datetime) -> bool:
+    """Открытый точный эпизод, держащийся мостом: его нарушение (until памяти)
+    кончилось не позже начала окна — в окне его нет (v5.1.21)."""
+    if ep.get("t_close") is not None or ep.get("scenario") == "CONTROLLER_FAULT":
+        return False
+    mem = (live_episodes or {}).get(_episode_key(ep)) or {}
+    u = mem.get("until")
+    return (bool(mem.get("exact")) and u is not None and _tz_utc(u) <= t_from
+            and (mem.get("id") is None or ep.get("id") is None or mem["id"] == ep["id"]))
 
 
 def _gate_suppressed_scenarios(gate_state: dict | None, seg) -> set[str]:
@@ -171,15 +333,34 @@ def _live_new_episodes(segments: list, eps: list[dict], live_keys: set[str],
     Для сводки — синтетический открытый эпизод с фазой «появилось»; снятый
     гейтом состав (suppressed_sc) помечается снятым, как пометит живой эпизод
     _process_episodes.
+
+    v5.1.21 (П7): начало синтетики аналитики с участками — начало живого
+    кластера ключа (последнего живого на конец сегмента, со взглядом назад —
+    alive_detections, как живой состав движка), а не t_detected первого
+    подсегмента с детекцией: иначе «появилось» в 09:00 при нарушении с 08:57.
+    Сбой — по t_detected, как раньше.
     """
     if not live_keys:
         return []
     # Закрытый эпизод того же ключа — прежняя вспышка, текущую он не покрывает.
     # Кроме того же онсета (v5.1.1): это та же тревога, закрытая промахом, —
-    # синтетика её заменяет (вызывающий убирает строку, _drop_same_onset)
+    # синтетика её заменяет (вызывающий убирает строку, _drop_same_onset; у
+    # аналитики с v5.1.21 — склейка строк одного онсета в сводке)
     have = {_episode_key(e) for e in eps if e.get("t_close") is None}
     closed_onsets = {(_episode_key(e), _tz_utc(e["t_open"])): e for e in eps
                      if e.get("t_close") is not None and e.get("t_open")}
+    live_on: dict[str, datetime] = {}
+    try:
+        from analytics.live import alive_detections
+        _last = (segments or [None])[-1]
+        _subs = getattr(_last, "subsegments", None) or []
+        if _subs:
+            live_on = {k: li["onset"] for k, li in
+                       _live_by_key(alive_detections(_subs), _tz_utc(t_end)).items()}
+    except Exception:
+        logger.warning("Начало живых кластеров для сводки не найдено — по t_detected",
+                       exc_info=True)
+        live_on = {}
     out: dict[str, dict] = {}
     for seg in segments or []:
         for sub in getattr(seg, "subsegments", None) or []:
@@ -200,6 +381,8 @@ def _live_new_episodes(segments: list, eps: list[dict], live_keys: set[str],
                 except (TypeError, ValueError):
                     t_open = _tz_utc(t_end)
                 panel = dd.get("scenario") == "CONTROLLER_FAULT"
+                if not panel and key in live_on:
+                    t_open = live_on[key]
                 same = closed_onsets.get((key, t_open))
                 out[key] = {
                     "scenario": dd.get("scenario"),
@@ -217,8 +400,14 @@ def _live_new_episodes(segments: list, eps: list[dict], live_keys: set[str],
 
 
 def _drop_same_onset(eps: list[dict], synthetic: list[dict]) -> list[dict]:
-    """Убрать закрытые строки, которые синтетика того же онсета заменяет."""
-    onsets = {(_episode_key(s), _tz_utc(s["t_open"])) for s in synthetic if s.get("t_open")}
+    """Убрать закрытые строки, которые синтетика того же онсета заменяет.
+
+    v5.1.21 (П7): только панель — тот же фронт неисправности. У аналитики с
+    участками тот же онсет — тот же кластер (засеянный при закрытии или
+    закрытый движком): строки склеивает сводка (_by_onset в
+    build_summary_parts), а убранная строка унесла бы его воздействие."""
+    onsets = {(_episode_key(s), _tz_utc(s["t_open"])) for s in synthetic
+              if s.get("t_open") and s.get("source") == "panel"}
     if not onsets:
         return eps
     return [e for e in eps
@@ -498,13 +687,21 @@ def _extract_coking_risk_from_segments(segments: list) -> CokingRisk:
 
 
 def _extract_open_segment_data(seg) -> tuple[dict, list]:
-    """Извлечь текущие значения и активные детекции из открытого сегмента."""
+    """Извлечь текущие значения и активные детекции из открытого сегмента.
+
+    Детекции с участками (values.live, v5.1.21, П4) — по свежести, а не по
+    одному последнему подсегменту: живая, пока её кластер идёт или кончился не
+    больше N видимого времени до конца последнего подсегмента; ключ, которого
+    нет среди живых в последнем подсегменте, берётся взглядом назад из прежних
+    подсегментов того же сегмента (analytics.live.alive_detections — та же
+    функция, что у «активен на конец» в сводке). Детекции без live — как раньше.
+    """
     if not seg.subsegments:
         return {}, []
     last_sub = seg.subsegments[-1]
 
     current_values: dict[str, Any] = {
-        "ts": last_sub.t_end or last_sub.t_start,
+        "ts": getattr(last_sub, "t_end", None) or last_sub.t_start,
         "run_state": seg.run_state,
         "run_state_label": seg.run_state_label,
         "coking_risk": last_sub.risk_accumulators.coking_risk.to_dict(),
@@ -521,16 +718,25 @@ def _extract_open_segment_data(seg) -> tuple[dict, list]:
             if isinstance(char, dict)
         },
     }
-    _end = _as_utc(last_sub.t_end or last_sub.t_start)
+    _end = _as_utc(getattr(last_sub, "t_end", None) or getattr(last_sub, "t_start", None))
 
-    # Детекции только из последнего подсегмента — текущее состояние детекторов.
+    # Детекции из последнего подсегмента — текущее состояние детекторов, у
+    # детекций с участками — по свежести кластера и со взглядом назад (v5.1.21).
     # Накопленная «живая» картина ведётся отдельно через _diff_alerts / alert_journal.
     # Снятая панелью ошибка (fault_end проставлен) — исторический факт для отчёта,
     # но НЕ активная тревога: иначе она «залипает» в статусе до границы подсегмента,
     # потому что её период всегда пересекается с окном последнего подсегмента.
+    # Сбой расчёта свежести — прежний состав: последний подсегмент как есть
+    try:
+        from analytics.live import alive_detections, subs_gaps
+        _gl = subs_gaps(seg.subsegments)
+        _cands = alive_detections(seg.subsegments, _end, _gl)
+    except Exception:
+        logger.warning("Живой состав по участкам не собран — по последнему подсегменту",
+                       exc_info=True)
+        _gl, _cands = None, [d.to_dict() for d in last_sub.detections]
     active_dets: list[dict] = []
-    for d in last_sub.detections:
-        dd = d.to_dict()
+    for dd in _cands:
         if (dd.get("scenario") == "CONTROLLER_FAULT"
                 and (dd.get("values") or {}).get("fault_end")):
             continue
@@ -540,9 +746,9 @@ def _extract_open_segment_data(seg) -> tuple[dict, list]:
             continue
         # Давление ниже паспорта, давно вернувшееся в норму, — факт подсегмента
         # для отчёта, но не живая тревога: иначе висела бы до его конца (v5.1.12)
-        if _passport_stale(dd, _end):
+        if _passport_stale(dd, _end, _gl):
             continue
-        _passport_live_hardness(dd, _end)
+        _passport_live_hardness(dd, _end, _gl)
         active_dets.append(dd)
 
     return current_values, active_dets
@@ -563,15 +769,25 @@ def _as_utc(ts) -> datetime | None:
     return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
 
 
-def _passport_live_hardness(d: dict, end: datetime | None) -> None:
+def _passport_live_hardness(d: dict, end: datetime | None, gaps: list | None = None) -> None:
     """Живая копия: «нарушение» давно прошло, а свежий участок — в пределах шага
     датчика → живое значение «в пределах шага» (снимаемо). В отчёте подсегмента
-    детекция остаётся как есть (ревью v5.1.12: запрет снятия залипал)."""
+    детекция остаётся как есть (ревью v5.1.12: запрет снятия залипал).
+
+    Вторая ступень свежести паспорта. У детекции с участками (v5.1.21) давность
+    «нарушения» — видимое время (gaps — дыры подсегментов): за обрыв связи оно
+    не устаревает, как и сам кластер (detection_live)."""
     lim = (d.get("values") or {}).get("limit") or {}
     if lim.get("kind") != "passport" or not lim.get("hard") or lim.get("hard_ongoing") or end is None:
         return
     hu = _as_utc(lim.get("hard_until"))
-    if hu is None or (end - hu).total_seconds() <= _PASSPORT_RECENT_SEC:
+    if hu is None:
+        return
+    age = (end - hu).total_seconds()
+    if gaps and age > 0 and isinstance((d.get("values") or {}).get("live"), dict):
+        from analytics.live import visible_sec
+        age = visible_sec(hu, end, gaps)
+    if age <= _PASSPORT_RECENT_SEC:
         return
     from analytics.detectors import passport_trigger
     live = dict(lim, hard=False)
@@ -581,9 +797,20 @@ def _passport_live_hardness(d: dict, end: datetime | None) -> None:
     d["trigger"] = passport_trigger(live)
 
 
-def _passport_stale(d: dict, end: datetime | None) -> bool:
+def _passport_stale(d: dict, end: datetime | None, gaps: list | None = None) -> bool:
+    """Первая ступень свежести паспорта: нарушение кончилось давно — не живое.
+
+    С v5.1.21 — обёртка над analytics.live.detection_live для детекции с
+    участками (кластер, видимое время); без участков — как в v5.1.12, по
+    limit.until/ongoing (импортирует test_gate_passport_v5112)."""
     lim = (d.get("values") or {}).get("limit") or {}
-    if lim.get("kind") != "passport" or lim.get("ongoing") or end is None:
+    if lim.get("kind") != "passport" or end is None:
+        return False
+    from analytics.live import detection_live
+    alive = detection_live(d, end, gaps)
+    if alive is not None:
+        return not alive
+    if lim.get("ongoing"):
         return False
     until = _as_utc(lim.get("until"))
     return until is not None and (end - until).total_seconds() > _PASSPORT_RECENT_SEC
@@ -635,6 +862,46 @@ def _accrual_split(
     span = (now_ts - prev_base).total_seconds()
     gap = min(span, max(0.0, gap_union_overlap_sec(gaps, prev_base, now_ts)))
     return span, gap, max(0.0, span - gap)
+
+
+def _live_by_key(curr_dets: list[dict], now_ts: datetime) -> dict[str, dict]:
+    """Кластер нарушения ключа на этот цикл (v5.1.21, П5): {ключ: {onset, until,
+    ongoing, mixed, values}}.
+
+    По всем детекциям ключа с values.live берётся самый поздний кластер: у
+    близости к уставке детекция на роль, и у каждой свои пересекающие кластеры —
+    по одной (последней в списке) until уезжал бы назад. until — конец кластера,
+    у идущего — горизонт now_ts (ongoing: until — горизонт, не конец; ревью
+    v5.1.21). mixed — у ключа есть и детекция без live (комбинированная ветка
+    OIL_DILUTION, прогноз прогрева COOLING): воздействие идёт сейчас, until —
+    горизонт. Ключа без live в ответе нет."""
+    from analytics.live import live_end
+    out: dict[str, dict] = {}
+    plain: set[str] = set()
+    for d in curr_dets:
+        sc = d.get("scenario")
+        if not sc or sc in STATE_SCENARIOS:
+            continue
+        key = _alert_key(d)
+        lv = (d.get("values") or {}).get("live")
+        if not isinstance(lv, dict):
+            plain.add(key)
+            continue
+        s = _as_utc(lv.get("onset")) or _as_utc(d.get("t_detected"))
+        if s is None:
+            plain.add(key)
+            continue
+        until, ongoing = live_end(lv)
+        _hz = bool(ongoing or until is None or until > now_ts)
+        u = now_ts if _hz else until
+        cur = out.get(key)
+        if cur is None or (s, u) > (cur["onset"], cur["until"]):
+            out[key] = {"onset": s, "until": u, "ongoing": _hz, "values": d.get("values") or {}}
+    for key, li in out.items():
+        li["mixed"] = key in plain
+        if li["mixed"]:
+            li["until"] = now_ts
+    return out
 
 
 def _live_alert_keys(seg) -> set[str]:
@@ -779,30 +1046,77 @@ async def _load_data(
     return history, enum_periods, fault_periods, gaps
 
 
+# Удержанные значения на голове окна (v5.1.21, П10): частота — сверке оборотов,
+# остальное — переносу участков аналитики через начало окна
+_HELD_ROLES = ("RPM", "FREQUENCY", "OIL_TEMP", "COOLANT_TEMP", "OIL_PRESS")
+# _run_segment: посев не передан — прочитать самому
+_SEED_UNSET: Any = object()
+
+
+def _gap_overlaps(g: dict, t0: datetime, t1: datetime) -> bool:
+    """Дыра пересекает (t0, t1) — то же условие, что у source.get_data_gaps."""
+    gs, ge = g.get("gap_start"), g.get("gap_end")
+    if gs is None:
+        return False
+    return _tz_utc(gs) < t1 and (ge is None or _tz_utc(ge) > t0)
+
+
 async def _load_seed(router_sn: str, equip_type: str, panel_id: int,
                      ts_from: datetime, cfg) -> dict | None:
-    """Последний замер нагрузки перед окном истории и обрывы связи от него до окна.
+    """Удержанные значения перед окном истории и обрывы связи от них до окна.
 
-    У головы окна преамбула истории — 300 с, а ряд LOAD_PCT при постоянном
-    значении пишется раз в ~15 мин: без этого замера проверка охлаждения не
-    знала удержанной нагрузки («не оценено» у 13 из 14 стопов, v5.1.10).
+    У головы окна преамбула истории — 300 с, а регистры пишутся по изменению
+    (при постоянном значении — «пульс» ~15 мин). Без последнего замера окно не
+    знает, что было на его начале:
+    - ts/value/gaps — нагрузка: проверка охлаждения («не оценено» у 13 из 14
+      стопов, v5.1.10); ключей нет, если нет регистра или его строки;
+    - held {роль: {ts, value}} и held_gaps (v5.1.21, П10) — обороты, частота,
+      температуры масла и ОЖ, давление масла: частота — сверке оборотов с
+      частотой генератора, остальное — переносу участков. Отдаются всегда, даже
+      без нагрузки. Значение за дырой связи (между строкой и окном) отброшено.
+    Один запрос DISTINCT ON на все регистры и один — дыр от самой старой
+    строки до окна (было два на одну нагрузку). None — строк нет или ошибка.
     """
     from analytics import source as _src
-    addr = cfg.role_to_addr("LOAD_PCT")
-    if addr is None:
+    load_addr = cfg.role_to_addr("LOAD_PCT")
+    held_addrs: dict[int, str] = {}
+    for role in _HELD_ROLES:
+        a = cfg.role_to_addr(role)
+        if a is not None:
+            held_addrs[a] = role
+    addrs = sorted(set(held_addrs) | ({load_addr} if load_addr is not None else set()))
+    if not addrs:
         return None
-    t_hist = _tz_utc(ts_from) - timedelta(seconds=_PREAMBLE_LOOKBACK_SEC)
-    max_age = float(cfg.det("COOLDOWN_VIOLATION", "load_hold_max_sec", default=1800.0))
+    t_from = _tz_utc(ts_from)
+    t_hist = t_from - timedelta(seconds=_PREAMBLE_LOOKBACK_SEC)
+    load_age = float(cfg.det("COOLDOWN_VIOLATION", "load_hold_max_sec", default=1800.0))
+    held_age = float(cfg.seg("rpm_freq_check", "freq_hold_max_sec", default=1800.0) or 1800.0)
     try:
-        row = await _src.get_last_value_before(router_sn, equip_type, panel_id, addr,
-                                               t_hist, max_age)
-        if not row:
+        rows = await _src.get_last_values_before(router_sn, equip_type, panel_id, addrs,
+                                                 t_hist, max(load_age, held_age))
+        if not rows:
             return None
-        gaps = await _src.get_data_gaps(router_sn, equip_type, panel_id,
-                                        _tz_utc(row["ts"]), _tz_utc(ts_from))
-        return {"ts": _tz_utc(row["ts"]), "value": float(row["value"]), "gaps": gaps}
+        oldest = min(_tz_utc(r["ts"]) for r in rows.values())
+        gaps = await _src.get_data_gaps(router_sn, equip_type, panel_id, oldest, t_from)
+        seed: dict = {"held": {}, "held_gaps": gaps}
+        lr = rows.get(load_addr) if load_addr is not None else None
+        if lr and lr.get("value") is not None and (t_hist - _tz_utc(lr["ts"])).total_seconds() <= load_age:
+            lts = _tz_utc(lr["ts"])
+            seed.update(ts=lts, value=float(lr["value"]),
+                        gaps=[g for g in gaps if _gap_overlaps(g, lts, t_from)])
+        for addr, role in held_addrs.items():
+            r = rows.get(addr)
+            if not r or r.get("value") is None:
+                continue
+            rts = _tz_utc(r["ts"])
+            if (t_hist - rts).total_seconds() > held_age:
+                continue
+            if any(_gap_overlaps(g, rts, t_from) for g in gaps):
+                continue   # за дырой — что было на голове окна, неизвестно
+            seed["held"][role] = {"ts": rts, "value": float(r["value"])}
+        return seed
     except Exception:
-        logger.warning("Удержанная нагрузка перед окном не прочитана", exc_info=True)
+        logger.warning("Удержанные значения перед окном не прочитаны", exc_info=True)
         return None
 
 
@@ -851,6 +1165,7 @@ async def _run_segment(
     initial_coking_risk: CokingRisk,
     transition_ctx: list | None = None,
     confirm_to: datetime | None = None,
+    load_seed: Any = _SEED_UNSET,
 ) -> tuple[list, dict[str, dict], list[dict], dict[str, dict]]:
     """Загрузить данные и запустить segment() в отдельном потоке.
 
@@ -864,6 +1179,9 @@ async def _run_segment(
     confirm_to — докуда читать данные, чтобы решить исход попытки пуска на
     краю окна (v5.1.16): сегменты режутся по ts_to, данные за ним — только для
     подтверждения.
+
+    load_seed — удержанные значения перед окном (_load_seed), если уже прочитаны:
+    рез берёт их из кэша курсора, повторный прогон с confirm_to — тоже (v5.1.21).
     """
     import functools
     from analytics.segmenter import segment as _segment
@@ -872,7 +1190,8 @@ async def _run_segment(
     history, enum_periods, fault_periods, gaps = await _load_data(
         router_sn, equip_type, panel_id, ts_from, _load_to, cfg
     )
-    load_seed = await _load_seed(router_sn, equip_type, panel_id, ts_from, cfg)
+    if load_seed is _SEED_UNSET:
+        load_seed = await _load_seed(router_sn, equip_type, panel_id, ts_from, cfg)
     synth_gap = _synth_connectivity_gap(history, ts_from, ts_to, cfg)
     if synth_gap is not None:
         gaps = gaps + [synth_gap]
@@ -1228,6 +1547,219 @@ async def _load_incident_context(
         return None
 
 
+# Напоминание снять ключ переходного месяца (решение В5 15.10.2026): ключу больше
+# этого — предупреждение в журнал при старте сервиса
+_COUNTS_SINCE_WARN_DAYS = 35
+# Нечитаемые значения ключа, о которых уже предупредили (не спамить журнал)
+_COUNTS_SINCE_BAD: set[str] = set()
+
+
+def analytics_counts_since(cfg) -> datetime | None:
+    """С какого момента считать счётчики аналитики (v5.1.21, решение В5).
+
+    ALARM_EPISODES.analytics_counts_since в detectors.yaml — дата выкладки
+    v5.1.21: эпизоды аналитики до неё строились по границам подсегмента (один
+    отсчёт давал «24 ч») и месяц раздували бы «за 30 дней» и «с пуска» в
+    гейте, отчёте и заключении. Панель ключ не трогает. Дата без времени —
+    полночь в поясе сервиса. Пусто или нечитаемо — None, фильтра нет."""
+    from datetime import date as _date
+    raw = None
+    try:
+        raw = cfg.det("ALARM_EPISODES", "analytics_counts_since", default=None)
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return None
+        if isinstance(raw, datetime):
+            ts = raw
+        elif isinstance(raw, _date):
+            ts = datetime(raw.year, raw.month, raw.day)
+        else:
+            ts = datetime.fromisoformat(str(raw).strip())
+        if ts.tzinfo is None:
+            try:
+                from config import get_tz
+                ts = ts.replace(tzinfo=get_tz())
+            except Exception:
+                ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc)
+    except Exception:
+        # Раз на значение: зовётся каждый цикл открытого окна
+        _key = repr(raw)
+        if _key not in _COUNTS_SINCE_BAD:
+            _COUNTS_SINCE_BAD.add(_key)
+            logger.warning("ALARM_EPISODES.analytics_counts_since = %s не прочитан — счётчики "
+                           "аналитики без фильтра", _key, exc_info=True)
+        return None
+
+
+def warn_stale_counts_since(cfg, now: datetime | None = None) -> bool:
+    """Ключ analytics_counts_since старше 35 дней — предупреждение в журнал
+    (зовёт менеджер при старте сервиса). True — предупредили."""
+    since = analytics_counts_since(cfg)
+    if since is None:
+        return False
+    now = _tz_utc(now or datetime.now(timezone.utc))
+    if (now - since).total_seconds() <= _COUNTS_SINCE_WARN_DAYS * 86400:
+        return False
+    logger.warning(
+        "ALARM_EPISODES.analytics_counts_since = %s — ключу больше %d дней: переходный "
+        "месяц v5.1.21 прошёл, снимите ключ в detectors.yaml (решение В5 15.10.2026)",
+        since.isoformat(), _COUNTS_SINCE_WARN_DAYS)
+    return True
+
+
+def _det_clusters(d) -> list[dict]:
+    """Кластеры values.live детекции (Detection или dict); [] — без участков."""
+    v = d.get("values") if isinstance(d, dict) else getattr(d, "values", None)
+    lv = (v or {}).get("live")
+    if not isinstance(lv, dict):
+        return []
+    return [c for c in lv.get("clusters") or []
+            if isinstance(c, dict) and _as_utc(c.get("start")) and _as_utc(c.get("end"))]
+
+
+def _segment_clusters(seg) -> dict[tuple[str, datetime], dict]:
+    """Уникальные кластеры детекций с участками сегмента (v5.1.21, П6):
+    (ключ, начало) → {key, scenario, severity, start, end, ongoing, blind_sec, values}.
+
+    Кластер считается на сегменте, а виден в каждом подсегменте, который
+    пересекает его участок, у близости — ещё и в детекции каждой роли: один
+    кластер — одна запись, конец — самый поздний. values — детекции, где он
+    встретился первым, с блоком live только этого кластера (open_values_json
+    засеянного эпизода)."""
+    out: dict[tuple[str, datetime], dict] = {}
+    for sub in getattr(seg, "subsegments", None) or []:
+        for d in getattr(sub, "detections", None) or []:
+            cl = _det_clusters(d)
+            if not cl:
+                continue
+            dd = d if isinstance(d, dict) else {"scenario": d.scenario, "severity": d.severity,
+                                                "values": d.values}
+            v = dd.get("values") or {}
+            key = _alert_key(dd)
+            for c in cl:
+                s, e = _as_utc(c["start"]), _as_utc(c["end"])
+                cur = out.get((key, s))
+                if cur is None:
+                    out[(key, s)] = {
+                        "key": key, "scenario": dd.get("scenario"), "severity": dd.get("severity"),
+                        "start": s, "end": e, "ongoing": bool(c.get("ongoing")),
+                        "blind_sec": float(c.get("blind_sec") or 0.0),
+                        "values": dict(v, live=dict(v.get("live") or {}, clusters=[c],
+                                                    onset=c["start"], until=c["end"],
+                                                    ongoing=bool(c.get("ongoing")))),
+                    }
+                    continue
+                if e > cur["end"]:
+                    cur["end"] = e
+                cur["ongoing"] = cur["ongoing"] or bool(c.get("ongoing"))
+                cur["blind_sec"] = max(cur["blind_sec"], float(c.get("blind_sec") or 0.0))
+                cur["severity"] = _max_severity(cur["severity"], dd.get("severity"),
+                                                dd.get("scenario"))
+    return out
+
+
+def _seed_carry(daily_run: bool, t_to: datetime, live_to: datetime | None,
+                poll_sec: float | None) -> bool:
+    """Продолжит ли перенос в новом окне кластер, идущий на резе (v5.1.21, П6).
+
+    Только суточный рез «Работы» (daily_run) и только если живой цикл открытого
+    окна дошёл почти до реза (не дальше трёх циклов): кластер, по которому
+    эпизода нет, живой расчёт не успел увидеть (появился в последний цикл или
+    паспорт ещё набирал выдержку 60 с) — его подхватит перенос с 09:00, начало
+    эпизода в БД — 09:00 (известное ограничение плана). Догонка после простоя
+    или рестарт — False: кластер мог начаться за часы до реза, он сеется
+    (эпизод режется на 09:00, но не теряется)."""
+    if not daily_run or live_to is None:
+        return False
+    lag = (_tz_utc(t_to) - _tz_utc(live_to)).total_seconds()
+    return lag <= 3 * float(poll_sec or 30)
+
+
+async def _seed_clusters(
+    seg, clusters: dict[tuple[str, datetime], dict],
+    router_sn: str, equip_type: str, panel_id: int, seg_t_end: datetime,
+    open_keys: set, already: set, seeded_out: set | None,
+    gaps: list[dict] | None, live_episodes: dict[str, dict] | None, carry_end: bool,
+) -> None:
+    """Посев кластеров закрытого сегмента (v5.1.21, П6; правила пропуска — в
+    _collect_and_enrich_detections). Эпизоды окна — одним запросом."""
+    from analytics.accumulators import gap_union_overlap_sec as _gos
+    from analytics.live import LIVE_RECENT_SEC, visible_sec
+    n_sec = float(LIVE_RECENT_SEC)
+    t_end = _tz_utc(seg_t_end)
+    t0 = _as_utc(getattr(seg, "t_start", None)) or min(c["start"] for c in clusters.values())
+    # Секунда запаса: эпизод, кончившийся ровно на голове сегмента, тоже сверяется
+    try:
+        ov = await online_db.get_episodes_overlapping(
+            router_sn, equip_type, panel_id, t0 - timedelta(seconds=1), t_end)
+    except Exception:
+        logger.warning("Эпизоды окна сегмента не получены — кластеры сеются без сверки "
+                       "пересечения", exc_info=True)
+        ov = []
+    # Конец нарушения открытого точного эпизода: open_values_json.live.until, память
+    # свежее и решает (ревью v5.1.21: в БД мог остаться горизонт паузы пакетов,
+    # память уточнена по кластерам окна — _refine_until)
+    mem_until = {ep.get("id"): ep.get("until") for ep in (live_episodes or {}).values()
+                 if ep.get("exact") and ep.get("until") is not None}
+    covers: list[tuple] = []     # (сценарий, начало, конец закрытого | None, until открытого | None)
+    for e in ov:
+        if e.get("scenario") == "CONTROLLER_FAULT" or e.get("t_open") is None:
+            continue
+        a = _tz_utc(e["t_open"])
+        if e.get("t_close") is not None:
+            covers.append((e.get("scenario"), a, _tz_utc(e["t_close"]), None))
+            continue
+        lv = _episode_open_values(e).get("live")
+        u = None
+        if isinstance(lv, dict):
+            u = _as_utc(lv.get("until"))
+            mu = mem_until.get(e.get("id"))
+            if mu is not None:
+                u = _tz_utc(mu)
+        covers.append((e.get("scenario"), a, None, u))   # u None — до бесконечности
+
+    def _covered(c: dict) -> bool:
+        for sc, a, b, u in covers:
+            if sc != c["scenario"] or c["end"] < a:
+                continue
+            if b is not None:
+                # Закрытый — только настоящим пересечением (ревью v5.1.21, engine-2):
+                # засеянный до реза [S, 09:00] касается перенесённого [09:00, E] при
+                # догонке — касание не покрытие, иначе продолжение терялось
+                if c["start"] < b:
+                    return True
+                continue
+            if u is None or c["start"] <= u or visible_sec(u, c["start"], gaps or []) <= n_sec:
+                return True
+        return False
+
+    for (k, s), c in sorted(clusters.items(), key=lambda x: x[0][1]):
+        if (k, s) in open_keys or (k, s) in already or _covered(c):
+            continue
+        # Идёт на конец окна, эпизода по нему нет — новое окно продолжит его
+        # переносом с 09:00 (ошибка начала — около цикла)
+        if carry_end and c["ongoing"]:
+            continue
+        e_ = max(c["end"], s)
+        span = (e_ - s).total_seconds()
+        blind = _gos(gaps, s, e_) if gaps else c["blind_sec"]
+        blind = min(span, max(0.0, float(blind or 0.0)))
+        try:
+            await online_db.insert_closed_episode(
+                router_sn, equip_type, panel_id,
+                scenario=c["scenario"], source="analytics", severity=c["severity"],
+                t_open=s, t_close=e_, active_sec=span, open_values=c["values"],
+                blind_sec=blind, close_reason="condition_cleared",
+            )
+        except Exception:
+            logger.warning("Не удалось создать эпизод кластера %s с %s", k, s, exc_info=True)
+            continue
+        if seeded_out is not None:
+            seeded_out.add((k, s))
+        # Засеянный кластер покрывает свой интервал (поздние строки сдвинули начало)
+        covers.append((c["scenario"], s, e_, None))
+
+
 async def _collect_and_enrich_detections(
     seg,
     router_sn: str,
@@ -1239,6 +1771,8 @@ async def _collect_and_enrich_detections(
     open_keys: set[str] | None = None,
     seeded_out: set[str] | None = None,
     gaps: list[dict] | None = None,
+    live_episodes: dict[str, dict] | None = None,
+    carry_end: bool = False,
 ) -> list[dict]:
     """Для закрытого сегмента: обогатить детекции счётчиками + вернуть events.
 
@@ -1255,6 +1789,26 @@ async def _collect_and_enrich_detections(
        поэтому без +1).
     4. Возвращает список event-dict для insert_detection_events (переходный период).
 
+    v5.1.21 (П6): детекции с участками (values.live) сеются по кластерам — один
+    эпизод на уникальный кластер сегмента (ключ, начало), [начало, конец],
+    воздействие = конец − начало, слепая доля — дыры внутри. Кластер не сеется:
+    - пара (ключ, начало) уже есть в alarm_episodes (existing_episode_onsets) или
+      засеяна раньше в этом окне (open_keys);
+    - его пересекает эпизод того же сценария — один запрос get_episodes_overlapping
+      на окно сегмента, фильтр в памяти. Открытый точный эпизод покрывает только
+      [t_open, until + N] (until — из open_values_json и памяти live_episodes), а
+      не «до бесконечности»: после догонки остальные кластеры сеются; открытая
+      старая строка без live — до бесконечности, как раньше;
+    - carry_end и кластер идёт на конец окна — его продолжит перенос в новом
+      окне (суточный рез «Работы» без смены режима, живой цикл шёл до самого
+      реза — _seed_carry). Начало эпизода в БД — 09:00, ошибка — около цикла.
+      При догонке после простоя carry_end = False: такой кластер мог начаться
+      за часы до 09:00, и он сеется (эпизод режется на 09:00, но не теряется).
+    Кластер, живой на конец, без эпизода в памяти и без переноса — сеется. В
+    seeded_out — пара (ключ, начало): второй закрываемый сегмент окна получает
+    свои кластеры. Прежние правила (ключ в open_keys, первый участок
+    подсегментов) — только для детекций без live; панель и события — как было.
+
     Мутация до seg.to_dict() / to_markdown() — счётчики попадают в отчёт.
     """
     window_days = int(cfg.det("DETECTION_COUNTER", "window_days", default=30) or 30)
@@ -1263,49 +1817,63 @@ async def _collect_and_enrich_detections(
     # У аналитики — где кончается первый непрерывный участок подсегментов с ней и
     # последний подсегмент с ней (v5.1.15): засеянный эпизод не тянется до конца
     # сегмента и не дублирует живой, открытый на подсегмент раньше
-    seen: dict[str, dict] = {}
-    _run_open: set = set()
-    for sub in seg.subsegments:
-        _sub_end = None
-        if getattr(sub, "t_end", None):
-            try:
-                _sub_end = _tz_utc(datetime.fromisoformat(sub.t_end))
-            except (TypeError, ValueError):
-                _sub_end = None
-        _here: set = set()
-        for d in sub.detections:
-            k = _alert_key({"scenario": d.scenario, "values": d.values})
-            # Панель — по фронту: бит, снятый и поднятый в одном сегменте, — две тревоги
-            sk = (k, d.t_detected) if d.scenario == "CONTROLLER_FAULT" else k
-            if d.scenario != "CONTROLLER_FAULT":
-                _here.add(sk)
-                if sk in seen and _sub_end is not None:
-                    seen[sk]["last_end"] = _sub_end
-                    if sk in _run_open:
-                        seen[sk]["first_run_end"] = _sub_end
-            if sk not in seen:
-                v = d.values or {}
-                fc = int(v.get("front_count", 1))
-                t_open = None
-                if d.t_detected:
-                    try:
-                        t_open = _tz_utc(datetime.fromisoformat(d.t_detected))
-                    except Exception:
-                        logger.warning("Некорректный t_detected %r в детекции %s",
-                                       d.t_detected, d.scenario)
-                seen[sk] = {
-                    "key": k,
-                    "scenario": d.scenario, "severity": d.severity,
-                    "run_state": seg.run_state, "fc": fc,
-                    "addr": v.get("addr"), "bit": v.get("bit"), "t_open": t_open,
-                    "values": v, "first_run_end": _sub_end, "last_end": _sub_end,
-                }
+    def _gather(pick) -> dict:
+        seen: dict = {}
+        _run_open: set = set()
+        for sub in seg.subsegments:
+            _sub_end = None
+            if getattr(sub, "t_end", None):
+                try:
+                    _sub_end = _tz_utc(datetime.fromisoformat(sub.t_end))
+                except (TypeError, ValueError):
+                    _sub_end = None
+            _here: set = set()
+            for d in sub.detections:
+                if not pick(d):
+                    continue
+                k = _alert_key({"scenario": d.scenario, "values": d.values})
+                # Панель — по фронту: бит, снятый и поднятый в одном сегменте, — две тревоги
+                sk = (k, d.t_detected) if d.scenario == "CONTROLLER_FAULT" else k
                 if d.scenario != "CONTROLLER_FAULT":
-                    _run_open.add(sk)
-        _run_open &= _here
+                    _here.add(sk)
+                    if sk in seen and _sub_end is not None:
+                        seen[sk]["last_end"] = _sub_end
+                        if sk in _run_open:
+                            seen[sk]["first_run_end"] = _sub_end
+                if sk not in seen:
+                    v = d.values or {}
+                    fc = int(v.get("front_count", 1))
+                    t_open = None
+                    if d.t_detected:
+                        try:
+                            t_open = _tz_utc(datetime.fromisoformat(d.t_detected))
+                        except Exception:
+                            logger.warning("Некорректный t_detected %r в детекции %s",
+                                           d.t_detected, d.scenario)
+                    seen[sk] = {
+                        "key": k,
+                        "scenario": d.scenario, "severity": d.severity,
+                        "run_state": seg.run_state, "fc": fc,
+                        "addr": v.get("addr"), "bit": v.get("bit"), "t_open": t_open,
+                        "values": v, "first_run_end": _sub_end, "last_end": _sub_end,
+                    }
+                    if d.scenario != "CONTROLLER_FAULT":
+                        _run_open.add(sk)
+            _run_open &= _here
+        return seen
 
+    # Все тревоги — для счётчиков и detection_events (как было)
+    seen = _gather(lambda d: True)
     if not seen:
         return []
+    # Кластеры детекций с участками (v5.1.21); сбой — посев по-старому для всех
+    try:
+        clusters = _segment_clusters(seg)
+    except Exception:
+        logger.warning("Кластеры сегмента для посева не собраны — посев по-старому",
+                       exc_info=True)
+        clusters = {}
+    plain = _gather(lambda d: not _det_clusters(d)) if clusters else seen
 
     # Эпизоды для эфемерных тревог — тех, у которых эпизода НЕТ ВООБЩЕ.
     # Память движка отвечает только на вопрос «жива ли тревога сейчас», а
@@ -1315,12 +1883,17 @@ async def _collect_and_enrich_detections(
         try:
             _already = await online_db.existing_episode_onsets(
                 router_sn, equip_type, panel_id,
-                [i["t_open"] for i in seen.values() if i.get("t_open")],
+                [i["t_open"] for i in plain.values() if i.get("t_open")]
+                + [c["start"] for c in clusters.values()],
             )
         except Exception:
             logger.warning("Не удалось проверить существующие эпизоды", exc_info=True)
             _already = set()
-        for _sk, info in seen.items():
+        # Детекции с участками — по кластерам (v5.1.21, П6)
+        if clusters:
+            await _seed_clusters(seg, clusters, router_sn, equip_type, panel_id, seg_t_end,
+                                 open_keys, _already, seeded_out, gaps, live_episodes, carry_end)
+        for _sk, info in plain.items():
             k = info["key"]
             if info["scenario"] in STATE_SCENARIOS:
                 continue
@@ -1388,12 +1961,14 @@ async def _collect_and_enrich_detections(
             except Exception:
                 logger.warning("Не удалось создать эпизод для %s", k, exc_info=True)
 
-    # Счётчики по эпизодам: WHERE по scenario, результат — per-fault ключом
+    # Счётчики по эпизодам: WHERE по scenario, результат — per-fault ключом;
+    # у аналитики — с даты выкладки v5.1.21 (В5, переходный месяц)
     try:
         counts = await online_db.count_episodes_batch(
             router_sn, equip_type, panel_id,
             list({info["scenario"] for info in seen.values()}),
             window_days, run_origin_ts,
+            analytics_since=analytics_counts_since(cfg),
         )
     except Exception:
         logger.warning("Счётчики эпизодов не получены", exc_info=True)
@@ -1447,6 +2022,7 @@ async def _enrich_open_seg_detections(
         counts = await online_db.count_episodes_batch(
             router_sn, equip_type, panel_id, list(scenarios),
             window_days, run_origin_ts,
+            analytics_since=analytics_counts_since(cfg),
         )
     except Exception:
         logger.warning("Счётчики эпизодов не получены", exc_info=True)
@@ -1498,7 +2074,7 @@ class OnlinePollEngine:
         # Звенья закрытых сегментов перед курсором — контекст проверок перехода
         # (analytics.transitions, v5.1.10); после перезапуска — из auto_segments
         self._transition_ctx: list = []
-        # Удержанная нагрузка перед окном открытого сегмента — одна на курсор
+        # Удержанные значения перед окном (нагрузка, частота, …) — одни на курсор
         self._load_seed_cache: tuple | None = None
         # Засеянные точечные эпизоды событий перехода (сценарий, онсет)
         self._events_seeded: set = set()
@@ -1740,10 +2316,33 @@ class OnlinePollEngine:
                             "OnlineEngine[%s]: не удалось закрыть дубль эпизода %s",
                             self.key, k, exc_info=True,
                         )
+                # Точный эпизод аналитики (v5.1.21): в open_values_json есть live,
+                # конец кластера until движок пишет туда же (update_episode). Нет
+                # until — первая же детекция ключа считается продолжением; давний
+                # until — моста нет; восстановленный until — «горизонт»: первый цикл
+                # уточнит его по карте кластеров окна (_refine_until, ревью
+                # shadow-2), и эпизод закроется по концу своего кластера, без
+                # времени простоя сервиса
+                _ov = e.get("open_values_json")
+                if isinstance(_ov, str):
+                    try:
+                        _ov = json.loads(_ov)
+                    except Exception:
+                        _ov = None
+                _lv = _ov.get("live") if isinstance(_ov, dict) else None
+                _exact = isinstance(_lv, dict) and e.get("scenario") != "CONTROLLER_FAULT"
+                _until = _as_utc(_lv.get("until")) if _exact else None
+                # until из JSON — момент последнего цикла до остановки (мог быть
+                # горизонтом идущего кластера): первый цикл уточняет его по карте
+                # кластеров окна — закрытия окна (рез в простое) и открытого
+                # (пересегментированного от курсора), ревью v5.1.21 shadow-2
                 self._episodes[k] = {
                     "id": e["id"], "severity": e.get("severity"),
                     "miss": 0, "first_miss_ts": None,
                     "t_open": _tz_utc(e["t_open"]) if e.get("t_open") else None,
+                    "until": _until,
+                    "until_kind": "horizon" if _until is not None else None,
+                    "exact": _exact,
                 }
             if self._episodes:
                 logger.info(
@@ -1813,6 +2412,7 @@ class OnlinePollEngine:
         self, curr_dets: list[dict], t_to: datetime, gaps: list[dict],
         cleared_at: dict[str, datetime] | None = None,
         gaps_from: datetime | None = None,
+        run_state: int | None = None,
     ) -> None:
         """Материализовать эпизоды тревог из снимка активных детекций.
 
@@ -1824,12 +2424,53 @@ class OnlinePollEngine:
         неисправность висит на панели, пока её не сбросят. Слепая доля не
         вычитается, а копится отдельно в blind_sec. Дебаунс при этом в дыре
         замирает — объявлять тревогу снятой, пока мы её не видим, нельзя.
+
+        Эпизоды аналитики по событию (v5.1.21, П5; жалоба 15.10: одиночный
+        отсчёт давал эпизод «24 ч» от начала подсегмента). Детекция с
+        values.live несёт кластер нарушения (analytics/live.py), её эпизод —
+        «точный» (exact в памяти):
+        - открывается с начала кластера S (values.live.onset);
+        - продолжается, если S не дальше N видимого времени от конца прежнего
+          кластера until (до начала окна — астрономически, ошибка ≤ N, без
+          запроса) или until неизвестен (после рестарта); until — конец
+          кластера, у идущего — горизонт; детекция того же ключа без live
+          (комбинированная ветка OIL_DILUTION, прогноз COOLING) — тоже горизонт;
+        - кластер дальше конца прежнего + N — разрез: прежний закрывается по
+          концу своего кластера (_exact_end), новый открывается с S;
+        - мост: окно после суточного реза или рестарта прежнего кластера не
+          видит — промах не считается, если машина в работе (run_state 3, и
+          окно продолжает работу), until не позже начала окна (gaps_from) и с
+          until прошло не больше N видимого времени. Отозванное внутри окна —
+          без моста;
+        - закрывается точно: t_close — конец по карте cleared_at (until —
+          запасной, см. ниже), не раньше t_open; active_sec = t_close − t_open,
+          blind_sec — дыры внутри (close_episode(exact=True)).
+        Эпизоды без live (панель, старые строки, восстановленные без live) —
+        как раньше.
+
+        v5.1.21, ревью (engine-1, shadow-1/2): «конец прежнего кластера» для
+        продолжения, разреза, моста и промаха — по карте cleared_at (цепочка от
+        кластера самого эпизода в окне, _analytics_cleared_at), until памяти —
+        запасной (_exact_end). until идущего кластера — горизонт (until_kind
+        «horizon»): когда тот же кластер больше не идёт, until — его
+        фактический конец, и вниз (пауза пакетов без data_gaps кончает участок
+        на последнем пакете — время паузы не воздействие). Иначе until назад не
+        уезжает (роли, поздние строки, детекция без live — «plain»).
         """
+        from analytics.live import LIVE_RECENT_SEC, visible_sec
+        _n_sec = float(LIVE_RECENT_SEC)
         debounce = int(self.cfg.det("ALARM_EPISODES", "close_debounce_cycles", default=3) or 3)
         now_ts = _tz_utc(t_to)
         # Сценарии-состояния (риск нагара) — не тревоги: эпизодов у них нет
         curr_map = {_alert_key(d): d for d in curr_dets
                     if d.get("scenario") and d.get("scenario") not in STATE_SCENARIOS}
+        # Кластеры ключей с участками (v5.1.21); сбой — эпизоды по-старому
+        try:
+            live_info = _live_by_key(curr_dets, now_ts)
+        except Exception:
+            logger.warning("OnlineEngine[%s]: кластеры детекций не разобраны — эпизоды "
+                           "по-старому", self.key, exc_info=True)
+            live_info = {}
 
         # База — конец окна, а не последние данные (как было): иначе при
         # обрыве она замирала бы и воздействие переставало идти.
@@ -1846,13 +2487,41 @@ class OnlinePollEngine:
             sc = d.get("scenario")
             sev = d.get("severity")
             _vals = d.get("values") or {}
+            li = live_info.get(key)
+            # Точный эпизод, новый кластер дальше конца прежнего + N — разрез:
+            # прежний закрывается по концу своего нарушения (по карте окна, ревью
+            # v5.1.21: не по горизонту паузы и не по until JSON после рестарта),
+            # новый — с начала своего
+            _end = (_exact_end(ep, (cleared_at or {}).get(key))
+                    if ep is not None and ep.get("exact") and li is not None else None)
+            if (ep is not None and ep.get("exact") and li is not None
+                    and not self._episode_continues(ep, li["onset"], gaps, _n_sec, end=_end)):
+                if not await self._close_exact(key, ep, _end or now_ts,
+                                               gaps, gaps_from, _hc):
+                    continue   # строка не закрылась — разрез повторит следующий цикл
+                logger.info("OnlineEngine[%s]: эпизод %s закрыт по концу нарушения %s — "
+                            "новый кластер с %s", self.key, key,
+                            (_end or now_ts).isoformat(), li["onset"].isoformat())
+                self._episodes.pop(key, None)
+                ep = None
             if ep is None:
                 t_open = now_ts
-                if d.get("t_detected"):
+                if li is not None:
+                    # Начало кластера, а не начало подсегмента (v5.1.21)
+                    t_open = li["onset"]
+                elif d.get("t_detected"):
                     try:
                         t_open = _tz_utc(datetime.fromisoformat(d["t_detected"]))
                     except Exception:
                         pass
+                # Память точного эпизода; в open_values — блок live с until
+                # горизонта (его же пишет update_episode — для рестарта)
+                _mem_live = ({"exact": True, "until": li["until"], "until_kind": _until_kind(li)}
+                             if li is not None
+                             else {"exact": False, "until": None, "until_kind": None})
+                if li is not None:
+                    _lv0 = (li["values"] or {}).get("live") or {}
+                    _vals = dict(li["values"], live=dict(_lv0, until=li["until"].isoformat()))
                 # Тот же онсет — та же тревога (см. existing_episode_onsets):
                 # эпизод, закрытый промахом, переоткрываем, а не заводим новый
                 # от того же фронта. До v5.1.1 код 40012 жил в первых 90 с окна,
@@ -1877,10 +2546,12 @@ class OnlinePollEngine:
                         _t0 = max(_tz_utc(prev["t_close"]), t_open)
                         _g = await self._gaps_back_to(_t0, gaps, gaps_from, _hc)
                         _, tail_blind, _ = _accrual_split(_t0, now_ts, _g)
+                    # until — тем же UPDATE (v5.1.21): посев и рестарт читают его из БД
+                    _ru = {"until": li["until"]} if li is not None else {}
                     try:
                         await online_db.reopen_episode(
                             ep_id, now_ts=now_ts, blind_sec_add=tail_blind,
-                            severity=_max_severity(prev.get("severity"), sev, sc),
+                            severity=_max_severity(prev.get("severity"), sev, sc), **_ru,
                         )
                     except Exception:
                         logger.warning("OnlineEngine[%s]: не удалось переоткрыть эпизод %s",
@@ -1893,7 +2564,7 @@ class OnlinePollEngine:
                     self._episodes[key] = {"id": ep_id,
                                            "severity": _max_severity(prev.get("severity"), sev, sc),
                                            "miss": 0, "first_miss_ts": None,
-                                           "t_open": t_open}
+                                           "t_open": t_open, **_mem_live}
                     if sc != "CONTROLLER_FAULT":
                         _new_analytics.append(sc)
                     continue
@@ -1921,11 +2592,12 @@ class OnlinePollEngine:
                     continue
                 self._episodes[key] = {"id": ep_id, "severity": sev,
                                        "miss": 0, "first_miss_ts": None,
-                                       "t_open": t_open}
+                                       "t_open": t_open, **_mem_live}
                 if sc != "CONTROLLER_FAULT":
                     _new_analytics.append(sc)
-                logger.info("OnlineEngine[%s]: эпизод открыт — %s (severity=%s)",
-                            self.key, key, sev)
+                logger.info("OnlineEngine[%s]: эпизод открыт — %s (severity=%s%s)",
+                            self.key, key, sev,
+                            f", с {t_open.isoformat()}" if li is not None else "")
                 if sc == "CONTROLLER_FAULT" and sev == "SHUTDOWN":
                     await self._attach_trip_context(ep_id, t_open)
             else:
@@ -1935,10 +2607,31 @@ class OnlinePollEngine:
                 if (sc == "CONTROLLER_FAULT" and new_sev == "SHUTDOWN"
                         and ep.get("severity") != "SHUTDOWN"):
                     await self._attach_trip_context(ep["id"], now_ts)
+                # Точный эпизод: конец нарушения — конец кластера (у идущего и у
+                # детекции без live — горизонт); назад не уезжает (поздние строки
+                # и детекции по ролям). В БД — тем же UPDATE (для рестарта).
+                # v5.1.21, ревью (engine-1): until был горизонтом идущего кластера,
+                # а тот же кластер (начался не позже прежнего горизонта) больше не
+                # идёт — until = его фактический конец, и вниз: синтетический хвост
+                # паузы пакетов без data_gaps держал горизонт, итоговый участок
+                # кончается на последнем пакете перед паузой
+                _upd: dict = {}
+                if ep.get("exact"):
+                    if li is None:
+                        u_new, _kind = now_ts, "plain"
+                    else:
+                        u_new, _kind = li["until"], _until_kind(li)
+                    _u0 = ep.get("until")
+                    if (_u0 is None or u_new >= _u0
+                            or (_kind == "end" and ep.get("until_kind") == "horizon"
+                                and li is not None and li["onset"] <= _u0)):
+                        ep["until"], ep["until_kind"] = u_new, _kind
+                    _upd["until"] = ep["until"]
                 try:
                     await online_db.update_episode(
                         ep["id"], active_sec_add=span_sec, blind_sec_add=gap_sec,
                         severity=new_sev if new_sev != ep.get("severity") else None,
+                        **_upd,
                     )
                     ep["severity"] = new_sev
                 except Exception:
@@ -1956,10 +2649,32 @@ class OnlinePollEngine:
         # Дебаунс закрытия — только когда данные реально шли (в дыре всё замирает)
         if live_sec <= 0:
             return
+        # Мост — только когда окно продолжает работу (суточный рез, рестарт): после
+        # смены режима (стоп → пуск) прежний кластер новому окну не родня
+        _prev_rs = getattr(getattr(self, "_prev_seg_hint", None), "run_state", None)
+        _bridge_ok = run_state == 3 and gaps_from is not None and _prev_rs in (None, 3)
         for key in list(self._episodes.keys()):
             if key in curr_map:
                 continue
             ep = self._episodes[key]
+            exact = bool(ep.get("exact"))
+            _u = ep.get("until")
+            if exact:
+                # Конец нарушения — по карте окна, until памяти — запасной (ревью
+                # v5.1.21: горизонт синтетического хвоста паузы не конец). Память
+                # — тоже фактический конец (сводка закрываемого сегмента, посев)
+                _ca_x = (cleared_at or {}).get(key)
+                _u = _exact_end(ep, _ca_x)
+                if (_u is not None and _ca_x is not None and _u != ep.get("until")
+                        and ep.get("until_kind") != "plain"):
+                    ep["until"], ep["until_kind"] = _u, "end"
+            # Мост (v5.1.21): новое окно прежнего кластера не видит (until не
+            # позже начала окна: идущий на резе кластер кончается на нём) — пока
+            # с его конца прошло не больше N, это не промах (повтор в этот срок —
+            # продолжение, иначе закрытие по until)
+            if (exact and _bridge_ok and _u is not None and _u <= _tz_utc(gaps_from)
+                    and visible_sec(_u, now_ts, gaps) <= _n_sec):
+                continue
             ep["miss"] += 1
             if ep["first_miss_ts"] is None:
                 # Панель знает точное время снятия (fault_end) — оно и есть
@@ -1969,19 +2684,109 @@ class OnlinePollEngine:
                 _ca = (cleared_at or {}).get(key)
                 if _ca is not None and ep.get("t_open") is not None and _ca < ep["t_open"]:
                     _ca = None
-                ep["first_miss_ts"] = _ca or now_ts
+                if exact:
+                    # Конец нарушения: по карте (цепочка от кластера эпизода), без
+                    # неё — until памяти (_u выше); не раньше t_open
+                    _fm = _u if _u is not None else now_ts
+                    if ep.get("t_open") is not None and _fm < ep["t_open"]:
+                        _fm = ep["t_open"]
+                    ep["first_miss_ts"] = _fm
+                else:
+                    ep["first_miss_ts"] = _ca or now_ts
             if ep["miss"] < debounce:
                 continue
-            try:
-                await online_db.close_episode(
-                    ep["id"], ep["first_miss_ts"], "condition_cleared"
-                )
-            except Exception:
-                logger.warning("OnlineEngine[%s]: не удалось закрыть эпизод %s",
-                               self.key, key, exc_info=True)
-                continue
+            if exact:
+                if not await self._close_exact(key, ep, ep["first_miss_ts"], gaps, gaps_from, _hc):
+                    continue
+            else:
+                try:
+                    await online_db.close_episode(
+                        ep["id"], ep["first_miss_ts"], "condition_cleared"
+                    )
+                except Exception:
+                    logger.warning("OnlineEngine[%s]: не удалось закрыть эпизод %s",
+                                   self.key, key, exc_info=True)
+                    continue
             logger.info("OnlineEngine[%s]: эпизод закрыт — %s", self.key, key)
             self._episodes.pop(key, None)
+
+    @staticmethod
+    def _episode_continues(ep: dict, onset: datetime, gaps: list[dict], n_sec: float,
+                           end: datetime | None = None) -> bool:
+        """Кластер с началом onset — продолжение точного эпизода (v5.1.21): until
+        неизвестен (рестарт без записи), тот же онсет или начало не дальше N
+        видимого времени от конца прежнего кластера. Часть до начала окна —
+        астрономически (дыр до окна у цикла нет; ошибка не больше N, лишнего
+        запроса нет). end — конец по карте окна (_exact_end, ревью v5.1.21):
+        until памяти мог остаться горизонтом паузы или устареть за простой."""
+        if ep.get("until") is None:
+            return True
+        u = end if end is not None else ep["until"]
+        if onset <= u or onset == ep.get("t_open"):
+            return True
+        from analytics.live import visible_sec
+        return visible_sec(u, onset, gaps) <= n_sec
+
+    def _refine_until(self, segments: list) -> None:
+        """until точных эпизодов памяти — по кластерам закрываемых сегментов
+        (v5.1.21, ревью shadow-2): цепочка от кластера эпизода в окне
+        (_analytics_cleared_at → _exact_end). После рестарта с простоем через
+        09:00 until из JSON — последний цикл до остановки: кластер, шедший на
+        резе, покрыт открытым эпизодом и не сеется, а перенос с 09:00 оказывался
+        дальше until + N — разрез, хвост до реза терялся. Горизонт
+        синтетического хвоста паузы — тоже не конец. До посева и сводки
+        закрываемых сегментов; в памяти, без запросов. Сбой — until как был."""
+        try:
+            ca = _analytics_cleared_at(segments, self._episodes)
+            for key, ep in self._episodes.items():
+                _c = ca.get(key)
+                if not ep.get("exact") or _c is None or ep.get("until_kind") == "plain":
+                    continue
+                _e = _exact_end(ep, _c)
+                if _e is not None and _e != ep.get("until"):
+                    logger.info("OnlineEngine[%s]: конец нарушения %s уточнён по кластерам окна: "
+                                "%s → %s", self.key, key,
+                                ep["until"].isoformat() if ep.get("until") else None, _e.isoformat())
+                    ep["until"], ep["until_kind"] = _e, "end"
+        except Exception:
+            logger.warning("OnlineEngine[%s]: конец нарушения по кластерам окна не уточнён",
+                           self.key, exc_info=True)
+
+    async def _close_exact(self, key: str, ep: dict, t_close: datetime, gaps: list[dict],
+                           gaps_from: datetime | None, cache: dict) -> bool:
+        """Точное закрытие эпизода аналитики (v5.1.21, П5): t_close — конец
+        нарушения (не раньше t_open), active_sec = t_close − t_open (без хвоста
+        свежести и времени после конца), blind_sec — дыры внутри [t_open,
+        t_close]: голова до окна — догрузкой разрывов (_gaps_back_to), сбой —
+        накопленная слепая доля. False — строка не закрыта."""
+        t_open = ep.get("t_open")
+        t_close = _tz_utc(t_close)
+        if t_open is not None and t_close < t_open:
+            t_close = t_open
+        blind: float | None = None
+        if t_open is not None:
+            try:
+                g: list[dict] | None = gaps
+                if gaps_from is not None and t_open < _tz_utc(gaps_from):
+                    g = await self._gaps_back_to(t_open, gaps, gaps_from, cache)
+                    _need = max(t_open, _tz_utc(gaps_from) - timedelta(days=30))
+                    if cache.get("from") is None or cache["from"] > _need:
+                        g = None   # разрывы до окна не догружены — оставить накопленное
+                if g is not None:
+                    from analytics.accumulators import gap_union_overlap_sec
+                    blind = max(0.0, gap_union_overlap_sec(g, t_open, t_close))
+            except Exception:
+                logger.warning("OnlineEngine[%s]: слепая доля эпизода %s не пересчитана",
+                               self.key, key, exc_info=True)
+                blind = None
+        try:
+            await online_db.close_episode(ep["id"], t_close, "condition_cleared",
+                                          exact=True, blind_sec=blind)
+        except Exception:
+            logger.warning("OnlineEngine[%s]: не удалось закрыть эпизод %s",
+                           self.key, key, exc_info=True)
+            return False
+        return True
 
     # ── Контекст аварии (Фаза C) ──────────────────────────────────────────────
 
@@ -2157,10 +2962,17 @@ class OnlinePollEngine:
                 tail_sec=(debounce + 1) * self.poll_interval_sec,
             )
             if closing:
-                eps = _drop_debounce_tails(eps, segments, self._episodes)
+                # Точный эпизод, не живой на конец, — до конца нарушения (v5.1.21)
+                eps = _drop_debounce_tails(eps, segments, self._episodes, live_keys or set())
                 _syn = _live_new_episodes(segments, eps, live_keys or set(), _tz_utc(t_to),
                                           suppressed_sc)
                 eps = _drop_same_onset(eps, _syn) + _syn
+            else:
+                # Мост после реза (v5.1.21): точный эпизод, чьё нарушение кончилось
+                # до окна, держится открытым до N — в данных окна его нет, в сводку
+                # открытого сегмента не идёт (иначе «не подтверждено» на 10 мин)
+                eps = [e for e in eps
+                       if not _bridge_only(e, getattr(self, "_episodes", None), _tz_utc(t_from))]
             from analytics.serializer import build_summary_parts, render_summary_md
             parts = build_summary_parts(segments, episodes=eps, tz=self.tz,
                                         trip_roles=self.cfg.trip_snapshot_roles,
@@ -2264,9 +3076,11 @@ class OnlinePollEngine:
         # Обрабатываем ВСЕ границы подряд — batch-добор идёт быстро.
         # last_processed_to обновляется внутри _close_window после каждого сегмента,
         # т.к. там есть await-точки между которыми event loop обслуживает API.
+        # live_to — докуда шёл живой цикл открытого окна (посев кластеров, v5.1.21)
+        _live_to = self.last_processed_to
         for boundary in pending:
             await self._close_window(self.cursor_ts, boundary, "DAILY_BOUNDARY",
-                                     lookahead_to=process_to)
+                                     lookahead_to=process_to, live_to=_live_to)
 
         # Открытое окно — всегда в конце (после всех границ или сразу если их нет)
         await self._update_open_window(self.cursor_ts, process_to)
@@ -2275,8 +3089,9 @@ class OnlinePollEngine:
     # ── Закрытие окна (DAILY_BOUNDARY) ────────────────────────────────────────
 
     async def _open_load_seed(self, ts_from: datetime) -> dict | None:
-        """Удержанная нагрузка перед окном — кэш на курсор (окно открытого сегмента
-        начинается с одного и того же места, пока сегмент не закроется)."""
+        """Удержанные значения перед окном — кэш на курсор (окно открытого сегмента
+        начинается с одного и того же места, пока сегмент не закроется; рез
+        закрывает окно с того же курсора — v5.1.21)."""
         key = _tz_utc(ts_from)
         if self._load_seed_cache and self._load_seed_cache[0] == key:
             return self._load_seed_cache[1]
@@ -2353,6 +3168,7 @@ class OnlinePollEngine:
         t_to: datetime,
         close_reason: str,
         lookahead_to: datetime | None = None,
+        live_to: datetime | None = None,
     ) -> None:
         """Запустить полный анализ [t_from, t_to], сохранить все сегменты как закрытые.
 
@@ -2361,6 +3177,11 @@ class OnlinePollEngine:
         границей (v5.1.16). Иначе попытка за минуту до 09:00 оставалась бы
         «ждём подтверждения» в этом окне навсегда, и рез откладывался на весь
         следующий режим (ревью v5.1.16).
+
+        live_to — докуда дошёл живой цикл открытого окна перед резом (v5.1.21,
+        П6): кластер без эпизода, идущий на 09:00, не сеется — его продолжит
+        перенос в новом окне. Живой цикл отстал больше чем на три цикла
+        (догонка после простоя, рестарт) — сеется всё непокрытое (_seed_carry).
         """
         self._fill_coking_accum_end(t_from)
         if t_to <= t_from:
@@ -2369,11 +3190,15 @@ class OnlinePollEngine:
         from analytics.runner import ANALYTICS_VERSION
 
         try:
+            # Удержанные значения перед окном — те же, что у открытого окна этого
+            # курсора: один запрос на курсор, а не на каждый прогон (v5.1.21)
+            _seed = await self._open_load_seed(t_from)
             segments, incidents, gaps, chronologies = await _run_segment(
                 self.router_sn, self.equip_type, self.panel_id, self.engine_sn,
                 t_from, t_to, self.cfg,
                 self.inherited_coking_risk,
                 transition_ctx=self._transition_ctx,
+                load_seed=_seed,
             )
             if (close_reason == "DAILY_BOUNDARY" and segments
                     and getattr(segments[-1], "attempt_pending", False)
@@ -2385,6 +3210,7 @@ class OnlinePollEngine:
                     transition_ctx=self._transition_ctx,
                     confirm_to=min(_tz_utc(lookahead_to),
                                    _tz_utc(t_to) + timedelta(seconds=_CONFIRM_LOOKAHEAD_SEC)),
+                    load_seed=_seed,
                 )
         except Exception:
             logger.exception("OnlineEngine[%s]: ошибка анализа [%s, %s]", self.key, t_from, t_to)
@@ -2454,6 +3280,10 @@ class OnlinePollEngine:
         running_rs_sec = dict(self.inherited_run_state_sec)
         # t_end последнего успешно сохранённого сегмента (для отката cursor_ts при пропуске границы)
         last_committed_t_end: datetime = _tz_utc(t_from)
+
+        # Конец нарушения точных эпизодов памяти — по кластерам закрываемого окна,
+        # до посева и сводки (v5.1.21, ревью shadow-2: рестарт с простоем через рез)
+        self._refine_until(segments)
 
         # Тревоги, активные на конец окна: живой эпизод по ним заведётся на
         # следующем цикле, поэтому «эфемерными» их считать нельзя
@@ -2533,11 +3363,18 @@ class OnlinePollEngine:
             )
 
             # Обогатить детекции счётчиками ДО to_dict() / to_markdown()
+            # Кластер без эпизода, идущий на суточном резе «Работы», продолжит
+            # перенос с 09:00 в новом окне — его не сеять (v5.1.21, П6); при
+            # догонке живого цикла не было — сеять всё непокрытое
+            _carry_end = _seed_carry(
+                is_last and close_reason == "DAILY_BOUNDARY" and seg.run_state == 3,
+                t_to, live_to, getattr(self, "poll_interval_sec", 30))
             _det_events = [] if _seg_no_data else await _collect_and_enrich_detections(
                 seg, self.router_sn, self.equip_type, self.panel_id,
                 seg_t_end, self.cfg, run_origin_ts=_run_origin,
                 open_keys=set(self._episodes) | _live_keys | _seeded,
-                seeded_out=_seeded, gaps=gaps,
+                seeded_out=_seeded, gaps=gaps, live_episodes=self._episodes,
+                carry_end=_carry_end,
             )
 
             seg_dict = seg.to_dict()
@@ -2841,6 +3678,9 @@ class OnlinePollEngine:
                     initial_coking_risk=copy.deepcopy(self.inherited_coking_risk),
                     transition_ctx=list(self._transition_ctx),
                     load_seed=await self._open_load_seed(ts_from_utc),
+                    # Открытое окно: ts_to — живой край (правило B ждёт следующего
+                    # отсчёта только здесь; рез и перечитка — нет, ревью v5.1.21)
+                    live_edge=True,
                 )
             )
             if tl_pre is not None:
@@ -2906,6 +3746,9 @@ class OnlinePollEngine:
             _prev_hint_rs0 = self._prev_seg_hint
             # Унаследованное RS время: ci==0 продолжает цепочку, ci>0 — новый RS
             _rs_inherited_before = dict(self.inherited_run_state_sec)
+            # Конец нарушения точных эпизодов памяти — по кластерам окна, до посева
+            # и сводки закрываемых сегментов (v5.1.21, ревью shadow-2)
+            self._refine_until(segments)
             # Тревоги, активные в остающемся открытом сегменте: по ним ниже в
             # этом же цикле заведётся живой эпизод (память движка отстаёт)
             _live_keys = _live_alert_keys(segments[-1])
@@ -2934,7 +3777,7 @@ class OnlinePollEngine:
                     seg, self.router_sn, self.equip_type, self.panel_id,
                     seg_t_end_rs, self.cfg, run_origin_ts=_rs_run_origin,
                     open_keys=set(self._episodes) | _live_keys | _seeded,
-                    seeded_out=_seeded, gaps=gaps,
+                    seeded_out=_seeded, gaps=gaps, live_episodes=self._episodes,
                 )
 
                 if _rs_no_data:
@@ -3125,12 +3968,16 @@ class OnlinePollEngine:
         else:
             _open_run_origin = _tz_utc(datetime.fromisoformat(open_seg.t_start))
 
-        # Эпизоды тревог — ДО обогащения: счётчики уже включат текущий эпизод
+        # Эпизоды тревог — ДО обогащения: счётчики уже включат текущий эпизод.
+        # Конец нарушения: у панели — снятие (fault_end), у аналитики — конец
+        # кластера (v5.1.21); режим открытого сегмента — для моста
         try:
             _, _raw_curr_dets = _extract_open_segment_data(open_seg)
             await self._process_episodes(_raw_curr_dets, t_to, gaps,
-                                         cleared_at=_panel_cleared_at(segments),
-                                         gaps_from=ts_from_utc)
+                                         cleared_at={**_panel_cleared_at(segments),
+                                                     **_analytics_cleared_at(segments, self._episodes)},
+                                         gaps_from=ts_from_utc,
+                                         run_state=open_seg.run_state)
         except Exception:
             logger.warning("OnlineEngine[%s]: ошибка обработки эпизодов тревог",
                            self.key, exc_info=True)

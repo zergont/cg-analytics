@@ -111,6 +111,20 @@ class OnlineManager:
                     obs["router_sn"], obs["equip_type"], obs["panel_id"],
                 )
 
+        # Напоминание снять ключ переходного месяца v5.1.21 (решение В5): ключ
+        # analytics_counts_since старше 35 дней — предупреждение, раз на значение
+        try:
+            from online.engine import analytics_counts_since, warn_stale_counts_since
+            _since_seen: set = set()
+            for _eng in self._engines.values():
+                _s = analytics_counts_since(_eng.cfg)
+                if _s is not None and _s not in _since_seen:
+                    _since_seen.add(_s)
+                    warn_stale_counts_since(_eng.cfg)
+        except Exception:
+            logger.warning("OnlineManager: срок ключа analytics_counts_since не проверен",
+                           exc_info=True)
+
         # Запустить планировщик статус-строк (ИИ-оператор Уровень 1)
         self._status_task = asyncio.create_task(
             self._run_status_scheduler(), name="status_line_scheduler"
@@ -632,12 +646,15 @@ class OnlineManager:
         Срок держит сама задача: проверка на тике не сработала бы, пока машина
         в норме, а снятие на тике тут же отправляло тот же состав снова.
         """
+        # Счётчики аналитики — с даты выкладки v5.1.21 (ключ пуст — без фильтра)
+        _since = _counts_since_of(engine)
         try:
             try:
                 outcome = await asyncio.wait_for(
                     _analyze_warning_claude(
                         engine.router_sn, engine.equip_type, engine.panel_id,
                         struct, fault_hash,
+                        **({"analytics_since": _since} if _since is not None else {}),
                     ),
                     _GATE_TIMEOUT_SEC,
                 )
@@ -890,9 +907,19 @@ async def _run_warning_gate_llm(
     return analysis, decision, reason, t_in, t_out
 
 
+def _counts_since_of(engine) -> "datetime | None":
+    """С какой даты гейт считает счётчики аналитики машины (v5.1.21, В5)."""
+    try:
+        from online.engine import analytics_counts_since
+        return analytics_counts_since(engine.cfg)
+    except Exception:
+        return None
+
+
 async def _analyze_warning_claude(
     router_sn: str, equip_type: str, panel_id: int,
     struct: dict, fault_hash: str,
+    analytics_since: "datetime | None" = None,
 ) -> str:
     """Гейт предупреждений: анализирует сигнал и выносит вердикт cancel/pass.
 
@@ -945,8 +972,10 @@ async def _analyze_warning_claude(
         ]
         if _alarm_scenarios:
             try:
+                # Аналитика — с даты выкладки v5.1.21 (ALARM_EPISODES.analytics_counts_since)
                 _counts = await online_db.count_episodes_batch(
-                    router_sn, equip_type, panel_id, _alarm_scenarios, 30, _run_origin_ts
+                    router_sn, equip_type, panel_id, _alarm_scenarios, 30, _run_origin_ts,
+                    analytics_since=analytics_since,
                 )
             except Exception:
                 logger.warning("WarningGate: счётчики эпизодов не получены", exc_info=True)

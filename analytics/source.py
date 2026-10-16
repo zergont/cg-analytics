@@ -342,6 +342,31 @@ async def get_last_value_before(
     return dict(row) if row else None
 
 
+async def get_last_values_before(
+    router_sn: str, equip_type: str, panel_id: int, addrs: list[int],
+    ts_before: datetime, max_age_sec: float,
+) -> dict[int, dict[str, Any]]:
+    """Последний замер каждого регистра до ts_before, не старше max_age_sec:
+    {addr: {ts, value}} — одним запросом DISTINCT ON (v5.1.21, П10: удержанные
+    значения на голове окна — нагрузка, обороты, частота, температуры, давление)."""
+    from datetime import timedelta as _TD
+    if not addrs:
+        return {}
+    async with _get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT ON (addr) addr, ts, value FROM history_rich
+            WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+              AND addr = ANY($4::int[])
+              AND ts < $5 AND ts >= $6 AND value IS NOT NULL
+            ORDER BY addr, ts DESC
+            """,
+            router_sn, equip_type, panel_id, list(addrs), ts_before,
+            ts_before - _TD(seconds=max_age_sec),
+        )
+    return {int(r["addr"]): {"ts": r["ts"], "value": r["value"]} for r in rows}
+
+
 async def get_value_histogram(
     router_sn: str, equip_type: str, panel_id: int, addr: int, ts_from: datetime,
 ) -> list[tuple[float, int]]:

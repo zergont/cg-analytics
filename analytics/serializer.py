@@ -651,7 +651,10 @@ def build_summary_parts(
     # в последнем подсегменте есть детекция без снятого фронта (fault_end) —
     # снятая панелью уже не висит, хотя эпизод ещё в дебаунсе закрытия, а
     # поднятая снова после снятия висит; аналитика висит, только если её
-    # детекция есть в последнем подсегменте
+    # детекция есть в последнем подсегменте. v5.1.21 (П4): детекция с участками
+    # (values.live) — по свежести кластера и со взглядом назад через смену зоны,
+    # той же функцией, что живой состав движка (analytics.live.alive_detections):
+    # «активен на конец» в отчёте совпадает с движком
     last_sub = None
     if segments and getattr(segments[-1], "subsegments", None):
         last_sub = segments[-1].subsegments[-1]
@@ -669,8 +672,15 @@ def build_summary_parts(
                 _fe, _end = _dt(v.get("fault_end")), _dt(getattr(last_sub, "t_end", None))
                 if not _fe or (_end is not None and _fe >= _end):
                     panel_live.add((v.get("addr"), v.get("bit")))
-            else:
-                analytics_at_end.add(dd.get("scenario"))
+        try:
+            from .live import alive_detections
+            for dd in alive_detections(segments[-1].subsegments):
+                if dd.get("scenario") != "CONTROLLER_FAULT":
+                    analytics_at_end.add(dd.get("scenario"))
+        except Exception:
+            # Сбой свежести — как до v5.1.21: по последнему подсегменту
+            analytics_at_end = {_as_dict(d).get("scenario") for d in last_dets
+                                if _as_dict(d).get("scenario") != "CONTROLLER_FAULT"}
 
     # Строки одного фронта — один эпизод (дубли до v5.1.1: «Общая авария» 8 строк на
     # один фронт; заголовок «ЗАМЕЧАНИЯ — n» считал строки, список — фронты)
@@ -704,12 +714,31 @@ def build_summary_parts(
     # проверка, а итоговый расчёт сегмента начинается с его головы и предыдущего
     # сегмента не видит — отсутствие детекции там ничего не опровергает (ревью v5.1.8:
     # 4 из 5 настоящих «без охлаждения» за 30 дней выпали бы из вердикта)
+    # v5.1.21 (П9): детекция с участками (values.live) подтверждает эпизод своим
+    # кластером нарушения, а не всем подсегментом (одиночный отсчёт давал
+    # «подтверждено» на весь подсегмент); детекция без live — подсегментом, как
+    # раньше (смешанный ключ: комбинированная ветка OIL_DILUTION, прогноз COOLING)
     _subs = [sub for s in segments for sub in (getattr(s, "subsegments", None) or [])]
-    _sub_scs = [
-        (_dt(getattr(sub, "t_start", None)), _dt(getattr(sub, "t_end", None)),
-         {_as_dict(d).get("scenario") for d in (getattr(sub, "detections", None) or [])})
-        for sub in _subs
-    ]
+    _sub_scs = []
+    _live_iv: dict[str, dict[datetime, tuple]] = {}   # сценарий → {начало: (конец, идёт)}
+    for sub in _subs:
+        _plain_scs = set()
+        for d in (getattr(sub, "detections", None) or []):
+            dd = _as_dict(d)
+            lv = (dd.get("values") or {}).get("live")
+            _cl = [(_dt(c.get("start")), _dt(c.get("end")), bool(c.get("ongoing")))
+                   for c in ((lv or {}).get("clusters") or []) if isinstance(c, dict)] \
+                if isinstance(lv, dict) else []
+            _cl = [c for c in _cl if c[0] is not None and c[1] is not None]
+            if not _cl:
+                _plain_scs.add(dd.get("scenario"))
+                continue
+            m = _live_iv.setdefault(dd.get("scenario"), {})
+            for cs, ce, og in _cl:
+                pe, po = m.get(cs, (ce, og))
+                m[cs] = (max(pe, ce), po or og)
+        _sub_scs.append((_dt(getattr(sub, "t_start", None)), _dt(getattr(sub, "t_end", None)),
+                         _plain_scs))
     # Сверять не с чем — подсегменты без сведений о детекциях (не из сегментатора)
     _can_confirm = any(getattr(sub, "detections", None) is not None for sub in _subs)
 
@@ -723,12 +752,39 @@ def build_summary_parts(
         if w1 is not None and (a1 is None or a1 > w1):
             a1 = w1
         sc = e.get("scenario")
+        if any((a1 is None or cs <= a1) and (a0 is None or ce >= a0)
+               for cs, (ce, _og) in (_live_iv.get(sc) or {}).items()):
+            return True
         return any(
             sc in scs
             and (a1 is None or s0 is None or s0 <= a1)
             and (a0 is None or s1 is None or s1 >= a0)
             for s0, s1, scs in _sub_scs
         )
+
+    def _open_end(e: dict) -> datetime | None:
+        """Конец периода открытого эпизода аналитики с участками (v5.1.21, П9):
+        конец его нарушения — последнего пересекающего кластера своего сценария
+        (идущий — до конца окна; детекция без live — до конца своего
+        подсегмента), а не конец окна: воздействие в сводке — то, что эпизод
+        получит при закрытии. Кластеров сценария в сегменте нет — None (до конца
+        окна, как раньше); есть, но ни один не пересекает эпизод (мост после
+        реза) — пустой период."""
+        sc = e.get("scenario")
+        iv = _live_iv.get(sc)
+        if not iv or w1 is None or e.get("source") == "panel" or sc == "CONTROLLER_FAULT":
+            return None
+        a0 = _dt(e.get("t_open"))
+        if a0 is None:
+            return None
+        if w0 is not None and a0 < w0:
+            a0 = w0
+        ends = [w1 if og else ce for cs, (ce, og) in iv.items() if ce >= a0 and cs <= w1]
+        ends += [s1 or w1 for s0, s1, scs in _sub_scs
+                 if sc in scs and (s1 is None or s1 >= a0) and (s0 is None or s0 <= w1)]
+        if not ends:
+            return a0
+        return max(a0, min(max(ends), w1))
 
     groups: dict[tuple, dict] = {}
     for e in episodes:
@@ -752,6 +808,10 @@ def build_summary_parts(
         _to, _tc = _dt(e.get("t_open")), _dt(e.get("t_close"))
         if w0 is not None and w1 is not None and _to is not None:
             _end = min(_tc or w1, w1)
+            if _tc is None:
+                # Открытый точный эпизод — до конца нарушения (v5.1.21, П9);
+                # «активен на конец» — по свежести, ниже
+                _end = _open_end(e) or _end
             if _unconf:
                 # Не подтверждено итоговым расчётом — в вердикт не идёт, значит и в
                 # «воздействие» тоже (v5.1.20: 22 мин нулевого кадра в «2ч 14м»)
@@ -883,8 +943,9 @@ def build_summary_parts(
 
 # Проверки последовательности, которые говорят о качестве данных, а не о
 # работе машины: замечанием к работе не считаются (решение 11.10, 2а) — строкой
-# в «Замечаниях» остаются, на вердикт не влияют
-_DATA_QUALITY_CHECKS = frozenset({"subseg_data_coverage"})
+# в «Замечаниях» остаются, на вердикт не влияют. v5.1.21 (В4): сбои датчика
+# оборотов, не подтверждённые частотой, — от 3 за сегмент, объекту на заметку
+_DATA_QUALITY_CHECKS = frozenset({"subseg_data_coverage", "source_rpm_glitch"})
 # Наблюдения, а не замечания: аварию по ним несёт сама панель (v5.1.7) —
 # «обороты не упали после перехода в Стоп» (у панели код 1245), «на конце
 # сегмента активна аварийная маска»
@@ -951,15 +1012,22 @@ def _verdict_from_remarks(
     Живой панельный CAUTION («Общая авария» + несброшенный 40012) — замечание
     к работе (решение 11.10, 1а): раньше заголовок писал «НОРМА — замечаний нет»
     при 🟡 строке ниже.
+
+    «ЗАМЕЧАНИЯ — N» считает виды замечаний — строки с живыми эпизодами, — а не
+    эпизоды (решение В2а 16.10.2026: ДЭС №3 14.10 — 15 по эпизодам при 5 видах;
+    с окном свежести v5.1.21 эпизоды короче и их больше). Число эпизодов — в
+    строке замечания и в remarks_episodes_n.
     """
     live = _remark_live
 
     panel = [g for g in remarks if g.get("source") == "panel" and live(g) > 0]
     shutdown = any(g.get("severity") == "SHUTDOWN" for g in panel)
     warning = any(g.get("severity") == "WARNING" for g in panel)
-    n = (sum(live(g) for g in remarks if g.get("source") == "analytics")
-         + sum(live(g) for g in panel if g.get("severity") not in ("SHUTDOWN", "WARNING"))
-         + sum(1 for c in checks if c.get("check") not in _NO_VERDICT_CHECKS))
+    _an = [g for g in remarks if g.get("source") == "analytics" and live(g) > 0]
+    _pc = [g for g in panel if g.get("severity") not in ("SHUTDOWN", "WARNING")]
+    _ck = sum(1 for c in checks if c.get("check") not in _NO_VERDICT_CHECKS)
+    n = len(_an) + len(_pc) + _ck
+    n_eps = sum(live(g) for g in _an) + sum(live(g) for g in _pc) + _ck
     suppressed_n = sum(g.get("suppressed", 0) for g in remarks)
     unconfirmed_n = sum(g.get("unconfirmed", 0) for g in remarks)
 
@@ -981,6 +1049,7 @@ def _verdict_from_remarks(
     else:
         verdict = {"level": "НОРМА", "title": "🟢 НОРМА", "note": "Замечаний к работе нет."}
     verdict["remarks_n"] = n
+    verdict["remarks_episodes_n"] = n_eps
     verdict["suppressed_n"] = suppressed_n
     verdict["unconfirmed_n"] = unconfirmed_n
 
@@ -1435,8 +1504,52 @@ def _det_counter_lines(d: dict, fmt_ts) -> list[str]:
     return out
 
 
-def _append_detections(lines: list[str], seg: Segment, idx: int, fmt_ts) -> None:
-    """Обнаружения сегмента одним блоком, повторы по подсегментам свёрнуты."""
+def _violation_line(entries: list[tuple[int, dict]], tz=None) -> str | None:
+    """Строка «Нарушение: …» пункта обнаружения с участками (v5.1.21, П9).
+
+    Уникальные кластеры values.live вхождений (один кластер виден в каждом
+    подсегменте, который пересекает), «чистое время» — объединение участков,
+    у близости к уставке — участки своей роли (values.role). Без live — None."""
+    cl: dict[datetime, dict] = {}
+    role = None
+    for _, d in entries:
+        v = d.get("values") or {}
+        lv = v.get("live")
+        if not isinstance(lv, dict):
+            continue
+        role = role or v.get("role")
+        for c in lv.get("clusters") or []:
+            cs, ce = (_dt(c.get("start")), _dt(c.get("end"))) if isinstance(c, dict) else (None, None)
+            if cs is None or ce is None:
+                continue
+            cur = cl.get(cs)
+            if cur is None or ce > _dt(cur["end"]):
+                cl[cs] = c
+    if not cl:
+        return None
+    items = [cl[k] for k in sorted(cl)]
+
+    def _clean(c: dict) -> float:
+        rr = c.get("roles")
+        if role and isinstance(rr, dict) and isinstance(rr.get(role), dict):
+            return float(rr[role].get("viol_sec") or 0.0)
+        return float(c.get("viol_sec") or 0.0)
+
+    spans = [_fmt_span(c["start"], c["end"], tz) + (" (идёт)" if c.get("ongoing") else "")
+             for c in items]
+    if len(spans) > 6:
+        spans = spans[:3] + ["…"] + spans[-2:]
+    n = len(items)
+    head = "Нарушение" + (f" ({n} {_plural(n, 'эпизод', 'эпизода', 'эпизодов')})" if n > 1 else "")
+    return (f"  - {head}: {', '.join(spans)} "
+            f"(чистое время {_fmt_duration(sum(_clean(c) for c in items))})")
+
+
+def _append_detections(lines: list[str], seg: Segment, idx: int, fmt_ts, tz=None) -> None:
+    """Обнаружения сегмента одним блоком, повторы по подсегментам свёрнуты.
+
+    v5.1.21 (П9): у обнаружения с участками — строка «Нарушение: …» по
+    уникальным кластерам с чистым временем (_violation_line)."""
     groups = _group_detections(seg.subsegments)
     if not groups:
         return
@@ -1468,6 +1581,9 @@ def _append_detections(lines: list[str], seg: Segment, idx: int, fmt_ts) -> None
                 a(f"  - худшее ({_fmt_sub_ranges([w[0]], idx)}): {w[1].get('trigger')}")
             a(f"  - последнее ({_fmt_sub_ranges([li], idx)}): {ld.get('trigger')}")
             a(f"  - всего разных значений: {len(trig)}")
+        _vl = _violation_line(g["entries"], tz)
+        if _vl:
+            a(_vl)
         lv = g["last"].get("values") or {}
         if g["last"].get("scenario") == "CONTROLLER_FAULT" and lv.get("fault_start"):
             a(f"  - Активна с {fmt_ts(lv['fault_start'])}")
@@ -1499,6 +1615,13 @@ def _check_details(c: dict, tz=None) -> str:
     rng = c.get("ranges")
     if c.get("check") == "subseg_data_coverage" and rng:
         return "отсутствие связи/данных: " + ", ".join(_fmt_span(r["start"], r["end"], tz) for r in rng)
+    # Сбой датчика оборотов (v5.1.21): моменты — в поясе отчёта
+    if c.get("check") == "source_rpm_glitch" and c.get("samples") and tz is not None:
+        try:
+            from .rpm_freq import glitch_details
+            return glitch_details(c["samples"], tz)
+        except Exception:
+            pass
     return c.get("details") or c.get("detail") or ""
 
 
@@ -1816,6 +1939,11 @@ def _append_segment(
                      if not c.get("passed") and c.get("check") not in _HIDDEN_CHECKS]
     _obs = [c for c in failed_checks if c.get("check") in _INFO_CHECKS]
     _warn = [c for c in failed_checks if c.get("check") not in _INFO_CHECKS]
+    # 1–2 сбоя датчика оборотов (passed=True) — наблюдением в полном отчёте:
+    # отсчёт вырезан, минимум оборотов в таблице без него, — иначе он менялся
+    # без объяснения (ревью v5.1.21, compat-1). В сводку — только от 3 (В4)
+    _obs += [c for c in seg.sequence_checks
+             if c.get("passed") and c.get("check") == "source_rpm_glitch"]
     if _warn:
         a("**Предупреждения по последовательности:**")
         a("")
@@ -1830,7 +1958,7 @@ def _append_segment(
         a("")
 
     # Обнаружения — одним блоком на сегмент, повторы по подсегментам свёрнуты
-    _append_detections(lines, seg, idx, fmt_ts)
+    _append_detections(lines, seg, idx, fmt_ts, tz=tz)
 
     # Подсегменты
     if len(seg.subsegments) > 1:

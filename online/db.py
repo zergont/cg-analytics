@@ -1169,7 +1169,9 @@ async def existing_episode_onsets(
 
     Спрашиваем базу, а не память: совпадение онсета до секунды означает ту же
     тревогу — у обоих писателей t_open берётся из одного t_detected. Один
-    индексный запрос на сегмент вместо цепочки частных условий.
+    индексный запрос на сегмент вместо цепочки частных условий. С v5.1.21 у
+    аналитики с участками метка — начало кластера нарушения (values.live.onset,
+    оно же t_detected), а не начало подсегмента.
     """
     if not onsets:
         return set()
@@ -1217,7 +1219,7 @@ async def find_episode_by_onset(
 
 async def reopen_episode(
     episode_id: int, *, now_ts: datetime, blind_sec_add: float = 0.0,
-    severity: str | None = None,
+    severity: str | None = None, until: datetime | None = None,
 ) -> None:
     """Снова открыть эпизод того же онсета — тревога не снималась.
 
@@ -1227,7 +1229,14 @@ async def reopen_episode(
     закрытого эпизода сбрасывается: его заново поставит проверка текущего
     состава (_inherit_gate_suppression), как у нового эпизода. Открытый —
     просто подхватывается.
+
+    until (v5.1.21) — конец кластера точного эпизода аналитики, тем же UPDATE,
+    как в update_episode: иначе до следующего цикла в open_values_json лежал бы
+    конец с момента открытия (посев и рестарт брали бы его).
     """
+    until_iso = None
+    if until is not None:
+        until_iso = (until if until.tzinfo else until.replace(tzinfo=timezone.utc)).isoformat()
     conn = await _connect()
     try:
         await conn.execute("""
@@ -1238,9 +1247,11 @@ async def reopen_episode(
                 active_sec = GREATEST(active_sec, EXTRACT(EPOCH FROM ($2 - t_open))),
                 blind_sec  = blind_sec + $3,
                 severity   = COALESCE($4, severity),
+                open_values_json = CASE WHEN $5::text IS NULL THEN open_values_json
+                    ELSE jsonb_set(open_values_json, '{live,until}', to_jsonb($5::text)) END,
                 updated_at = now()
             WHERE id = $1
-        """, episode_id, now_ts, max(0.0, float(blind_sec_add)), severity)
+        """, episode_id, now_ts, max(0.0, float(blind_sec_add)), severity, until_iso)
     finally:
         await conn.close()
 
@@ -1278,9 +1289,19 @@ async def insert_closed_episode(
 
 async def update_episode(
     episode_id: int, *, active_sec_add: float = 0.0, severity: str | None = None,
-    blind_sec_add: float = 0.0,
+    blind_sec_add: float = 0.0, until: datetime | None = None,
 ) -> None:
-    """Приращение воздействия (и его слепой доли) и/или эскалация severity."""
+    """Приращение воздействия (и его слепой доли) и/или эскалация severity.
+
+    v5.1.21 (П8): только открытого эпизода — строку, уже закрытую в БД, цикл
+    не трогает. until — конец кластера точного эпизода аналитики: пишется в
+    open_values_json.live.until тем же UPDATE (схема не меняется, лишнего
+    запроса нет), после рестарта движок поднимает его в память. Строка без
+    блока live (панель, старые) — jsonb_set оставляет её как есть.
+    """
+    until_iso = None
+    if until is not None:
+        until_iso = (until if until.tzinfo else until.replace(tzinfo=timezone.utc)).isoformat()
     conn = await _connect()
     try:
         await conn.execute("""
@@ -1288,9 +1309,11 @@ async def update_episode(
             SET active_sec = active_sec + $2,
                 blind_sec  = blind_sec + $4,
                 severity   = COALESCE($3, severity),
+                open_values_json = CASE WHEN $5::text IS NULL THEN open_values_json
+                    ELSE jsonb_set(open_values_json, '{live,until}', to_jsonb($5::text)) END,
                 updated_at = now()
-            WHERE id = $1
-        """, episode_id, active_sec_add, severity, blind_sec_add)
+            WHERE id = $1 AND t_close IS NULL
+        """, episode_id, active_sec_add, severity, blind_sec_add, until_iso)
     finally:
         await conn.close()
 
@@ -1321,9 +1344,31 @@ async def retarget_episode_segments(
         await conn.close()
 
 
-async def close_episode(episode_id: int, t_close: datetime, reason: str) -> None:
+async def close_episode(episode_id: int, t_close: datetime, reason: str,
+                        exact: bool = False, blind_sec: float | None = None) -> None:
+    """Закрыть открытый эпизод.
+
+    Без exact (панель, старые строки) — воздействие не меньше начисленного по
+    циклам (GREATEST), как раньше. exact — точный эпизод аналитики (v5.1.21,
+    П8): t_close — конец нарушения, воздействие ровно t_close − t_open
+    (начисленное по циклам включает хвост свежести после конца кластера),
+    слепая доля — пересчитанная blind_sec (None — накопленная), не больше
+    воздействия.
+    """
     conn = await _connect()
     try:
+        if exact:
+            await conn.execute("""
+                UPDATE alarm_episodes
+                SET t_close = $2, close_reason = $3,
+                    active_sec = GREATEST(0, EXTRACT(EPOCH FROM ($2 - t_open))),
+                    blind_sec  = LEAST(COALESCE($4::double precision, blind_sec),
+                                       GREATEST(0, EXTRACT(EPOCH FROM ($2 - t_open)))),
+                    updated_at = now()
+                WHERE id = $1 AND t_close IS NULL
+            """, episode_id, t_close, reason,
+                 None if blind_sec is None else max(0.0, float(blind_sec)))
+            return
         await conn.execute("""
             UPDATE alarm_episodes
             SET t_close = $2, close_reason = $3,
@@ -1484,6 +1529,7 @@ async def count_episodes_batch(
     scenarios: list[str],
     window_days: int = 30,
     since_ts: datetime | None = None,
+    analytics_since: datetime | None = None,
 ) -> dict[str, dict[str, float]]:
     """Счётчики эпизодов одним запросом: фронты И суммарная длительность.
 
@@ -1497,6 +1543,11 @@ async def count_episodes_batch(
     несколько строк с одним t_open (эпизод закрывался промахом и заводился
     заново, каждый — от фронта), и ДЭС №3 получала «14 срабатываний, 725 ч за
     30 суток». По строкам одного онсета — максимум воздействия и слепой доли.
+
+    analytics_since (v5.1.21, решение В5) — строки source='analytics' только с
+    t_open не раньше этой даты (выкладка эпизодов по событию: старые строки
+    «24 ч от одного отсчёта» не смешиваются с новыми); панель не трогается.
+    None — без фильтра (ALARM_EPISODES.analytics_counts_since пуст).
     """
     if not scenarios:
         return {}
@@ -1511,6 +1562,8 @@ async def count_episodes_batch(
                   AND scenario = ANY($4::text[])
                   AND (t_open > now() - ($5 || ' days')::interval
                        OR ($6::timestamptz IS NOT NULL AND t_open >= $6))
+                  AND ($7::timestamptz IS NULL OR source IS DISTINCT FROM 'analytics'
+                       OR t_open >= $7)
                 GROUP BY scenario, addr, bit, t_open
             )
             SELECT scenario, addr, bit,
@@ -1526,7 +1579,8 @@ async def count_episodes_batch(
                        WHERE $6::timestamptz IS NOT NULL AND t_open >= $6), 0) AS dur_since
             FROM e
             GROUP BY scenario, addr, bit
-        """, router_sn, equip_type, panel_id, scenarios, str(window_days), since_ts)
+        """, router_sn, equip_type, panel_id, scenarios, str(window_days), since_ts,
+             analytics_since)
         # Ключ — per-fault (совпадает с engine._alert_key)
         result: dict[str, dict[str, float]] = {}
         for r in rows:

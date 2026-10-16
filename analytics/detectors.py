@@ -20,6 +20,9 @@ from typing import Any
 
 from .contract import Detection, DerivedMetrics, RiskAccumulators
 from .config import AnalyticsConfig
+from .live import (
+    LIVE_RECENT_SEC, cooling_proximity, limit_checks, live_values, sub_hits, sub_samples,
+)
 
 
 def _tz(ts: datetime) -> datetime:
@@ -80,13 +83,26 @@ def run_all_detectors(
     cfg: AnalyticsConfig,
     state_periods: dict[int, list[dict]] | None = None,
     onset_faults: list[dict[str, Any]] | None = None,
+    live_spans: dict[str, list[dict]] | None = None,
 ) -> list[Detection]:
     """Запустить все включённые детекторы, вернуть список сработавших Detection.
 
     onset_faults — маски всего сегмента: по ним проверяется, что код панели
     принадлежит биту (v5.1.16), — в подсегменте соседний бит мог уже сняться.
+
+    live_spans — участки нарушений сегмента (analytics/live.py, v5.1.21, П3):
+    None — как раньше, по min/max подсегмента (тесты с ручными DerivedMetrics,
+    откат при сбое расчёта участков); словарь — RPM_UNDERSPEED, LIMIT_PROXIMITY
+    (по роли), близость COOLING_FAILURE и паспорт OIL_DILUTION срабатывают,
+    только если участок их ключа пересекает [seg_start, seg_end). Ключа нет —
+    детекции нет: срабатывание по строке преамбулы или копии forward-fill ушло.
+    t_detected — начало первого пересекающего кластера (одно во всех
+    подсегментах кластера), values.live — кластеры, onset, first.
     """
     detections: list[Detection] = []
+
+    def _lv(key: str) -> list[dict] | None:
+        return None if live_spans is None else (live_spans.get(key) or [])
 
     # LOAD_STEP: Класс A (быстрые/электрические) — только в RUN_STATE=3
     if cfg.det("LOAD_STEP", "enabled", default=True) and run_state == 3:
@@ -108,13 +124,15 @@ def run_all_detectors(
             detections.extend(_fn(derived, seg_start, cfg))
 
     if cfg.det("COOLING_FAILURE", "enabled", default=True):
-        detections.extend(_detect_cooling_failure(characteristics, derived, run_state, seg_start, seg_end, cfg))
+        detections.extend(_detect_cooling_failure(characteristics, derived, run_state, seg_start, seg_end, cfg,
+                                                  live=_lv("COOLING_FAILURE")))
 
     # Масляные детекторы валидны ТОЛЬКО при работающем двигателе (RUN_STATE=3).
     # На остановленном/останавливающемся моторе давление масла = 0 — это норма.
     _oil_valid = set(cfg.det("OIL_DILUTION", "valid_run_states", default=[3]) or [3])
     if cfg.det("OIL_DILUTION", "enabled", default=True) and run_state in _oil_valid:
-        detections.extend(_detect_oil_dilution(characteristics, derived, seg_start, cfg, seg_end))
+        detections.extend(_detect_oil_dilution(characteristics, derived, seg_start, cfg, seg_end,
+                                               live=_lv("OIL_DILUTION")))
 
     # Риск нагара — накопленное состояние, а не событие подсегмента (v5.1.3):
     # детекции нет, его несут часть сводки «нагар» и таблица «Риски» отчёта.
@@ -140,7 +158,8 @@ def run_all_detectors(
 
     _lp_valid = set(cfg.det("LIMIT_PROXIMITY", "valid_run_states", default=[3]) or [3])
     if cfg.det("LIMIT_PROXIMITY", "enabled", default=True) and run_state in _lp_valid:
-        detections.extend(_detect_limit_proximity(characteristics, seg_start, cfg))
+        detections.extend(_detect_limit_proximity(characteristics, seg_start, cfg,
+                                                  live=_lv("LIMIT_PROXIMITY"), seg_end=seg_end))
 
     if cfg.det("CONTROLLER_FAULT", "enabled", default=True):
         detections.extend(_detect_controller_faults(
@@ -149,7 +168,8 @@ def run_all_detectors(
         ))
 
     if cfg.det("RPM_UNDERSPEED", "enabled", default=True) and run_state == 3:
-        detections.extend(_detect_rpm_underspeed(characteristics, derived, seg_start, cfg))
+        detections.extend(_detect_rpm_underspeed(characteristics, derived, seg_start, cfg,
+                                                 live=_lv("RPM_UNDERSPEED"), seg_end=seg_end))
 
     lfc = (state_periods or {}).get(cfg.role_to_addr("LAST_FAULT_CODE")) or []
     confirm_panel_codes(detections, panel_codes_in(lfc, seg_start, seg_end))
@@ -405,8 +425,13 @@ def _detect_cooling_failure(
     seg_start: datetime,
     seg_end: datetime,
     cfg: AnalyticsConfig,
+    live: list[dict] | None = None,
 ) -> list[Detection]:
     """Детектор отказа охлаждения (v5.1.15, решение владельца 13.10, вариант Г).
+
+    live — кластеры COOLING_FAILURE сегмента (v5.1.21): близость — только при
+    участке, пересекающем подсегмент, максимум — по его отсчётам; None — по
+    максимуму подсегмента, как раньше. Прогноз прогрева — без участков.
 
     БЛИЗОСТЬ к уставке HCT Warning панели — главная проверка: максимум ОЖ за
     подсегмент в пределах proximity_warning_pct от уставки. Проверяется ВСЕГДА в
@@ -439,22 +464,32 @@ def _detect_cooling_failure(
     cool_max = cool_char.get("max")
 
     # ── Близость к уставке HCT Warning панели ───────────────────────────────
-    hct_warn = float(cfg.thr("coolant_temperature", "controller", "warning_c", default=97.8))
-    prox_pct = float(cfg.det("COOLING_FAILURE", "proximity_warning_pct", default=10.0))
-    prox_thr = hct_warn * (1 - prox_pct / 100)
+    _cp = cooling_proximity(cfg)
+    hct_warn, prox_pct, prox_thr = _cp["hct_warning_c"], _cp["pct"], _cp["near"]
+    t_det, live_v = _iso(seg_start), None
+    if live is not None:
+        # По участкам (v5.1.21): максимум — по отсчётам участков подсегмента
+        hits = sub_hits(live, seg_start, seg_end)
+        pts = sub_samples([s for _, sp in hits for s in sp], seg_start, seg_end)
+        cool_max = max(p[1] for p in pts) if pts else None
+        if cool_max is not None:
+            t_det, live_v = hits[0][0]["start"], live_values(hits, seg_start)
     if cool_max is not None and cool_max >= prox_thr:
+        values = {"coolant_temp_max": cool_max, "hct_warning_c": hct_warn,
+                  "proximity_threshold_c": prox_thr}
+        if live_v is not None:
+            values["live"] = live_v
         results.append(Detection(
             scenario="COOLING_FAILURE",
             severity="CAUTION",
-            t_detected=_iso(seg_start),
+            t_detected=t_det,
             source="PASSPORT_THRESHOLD",
             trigger=(f"ОЖ дошла до {cool_max:.0f} °C — не ниже {prox_thr:.1f} °C "
                      f"({prox_pct:.0f} % до уставки предупреждения панели {hct_warn:g} °C)"),
             related_roles=["COOLANT_TEMP"],
             fault_codes=[144],
             description_key="COOLING_FAILURE.approaching_hct_limit",
-            values={"coolant_temp_max": cool_max, "hct_warning_c": hct_warn,
-                    "proximity_threshold_c": prox_thr},
+            values=values,
         ))
         return results
 
@@ -496,8 +531,9 @@ def _detect_cooling_failure(
 # ── OIL_DILUTION ─────────────────────────────────────────────────────────────
 
 # В живом составе нарушение паспорта — пока идёт или закончилось не раньше
-# стольких секунд назад (online.engine._extract_open_segment_data), v5.1.12
-PASSPORT_RECENT_SEC = 600
+# стольких секунд назад (online.engine._extract_open_segment_data), v5.1.12.
+# С v5.1.21 — псевдоним общего окна свежести участков (analytics/live.py, В2)
+PASSPORT_RECENT_SEC = LIVE_RECENT_SEC
 
 
 def passport_trigger(lim: dict[str, Any]) -> str:
@@ -516,58 +552,114 @@ def passport_trigger(lim: dict[str, Any]) -> str:
             f"{brief_txt}, непрерывно {run_txt} — не норма")
 
 
+def _passport_from_live(live: list[dict], seg_start: datetime,
+                        seg_end: datetime | None) -> dict[str, Any] | None:
+    """Поля паспорта из кластеров, пересекающих подсегмент (v5.1.21): значение,
+    run_sec, until/ongoing, hard/hard_until/last_value. None — участка нет или
+    нужного поля нет (детекции нет — без падения на форматировании)."""
+    if seg_end is None:
+        return None
+    hits = sub_hits(live, seg_start, seg_end)
+    if not hits:
+        return None
+    cls = [c for c, _ in hits]
+    last = cls[-1]
+    hard_cls = [c for c in cls if c.get("hard") and c.get("hard_min") is not None]
+    mins = [c["vmin"] for c in cls if c.get("vmin") is not None]
+    if not mins:
+        return None
+    soft_min = min(mins)
+    brief = None
+    if hard_cls:
+        value = min(c["hard_min"] for c in hard_cls)
+        lh = max(hard_cls, key=lambda c: datetime.fromisoformat(c["hard_until"]))
+        hard_until, hard_ongoing = lh["hard_until"], bool(lh.get("hard_ongoing"))
+    else:
+        inst = [c["instep_min"] for c in cls if c.get("instep_min") is not None]
+        value = min(inst) if inst else soft_min
+        if soft_min < value:
+            brief = soft_min
+        hard_until, hard_ongoing = None, None
+    return {
+        "value": value, "brief": brief, "hard": bool(hard_cls),
+        "run": max(float(c.get("run_sec") or 0.0) for c in cls),
+        "until": last["end"], "ongoing": bool(last["ongoing"]),
+        "last_value": last.get("last_value"),
+        "hard_until": hard_until, "hard_ongoing": hard_ongoing,
+        "t_detected": cls[0]["start"], "live": live_values(hits, seg_start),
+    }
+
+
 def _passport_detection(derived: DerivedMetrics, seg_start: datetime,
-                        cfg: AnalyticsConfig) -> Detection | None:
+                        cfg: AnalyticsConfig, live: list[dict] | None = None,
+                        seg_end: datetime | None = None) -> Detection | None:
     """Давление масла ниже паспорта своего двигателя (v5.1.12, решения 12.10).
 
     Ниже паспорта устойчиво (≥ выдержки) — CAUTION «ниже паспорта». Ниже больше
     чем на шаг датчика — «нарушение паспорта»: гейт его не снимает (код), в
     пределах шага — снимаемо, но нормой не называется. limit — для гейта,
     статуса и заключения; oil_press_min/passport_min_kpa — для сводки отчёта.
+
+    live — кластеры OIL_DILUTION сегмента (v5.1.21): значение, run_sec, until,
+    ongoing, hard, hard_until — из кластера, из DerivedMetrics — только шаг
+    датчика и паспортный предел; начало эпизода — начало участка (В7).
     """
     min_run = float(cfg.det("OIL_DILUTION", "passport_min_run_sec", default=60))
     limit = derived.oil_press_passport_kpa
-    run = derived.oil_press_below_passport_run_sec or 0.0
-    if limit is None or run < min_run or derived.oil_press_below_passport_min_kpa is None:
-        return None
-    hard = (derived.oil_press_hard_run_sec or 0.0) >= min_run
     step = derived.oil_press_step_kpa or 0.0
-    brief = None
-    if hard and derived.oil_press_hard_min_kpa is not None:
-        value = derived.oil_press_hard_min_kpa
+    t_det, extra = _iso(seg_start), {}
+    if live is not None:
+        lv = _passport_from_live(live, seg_start, seg_end)
+        if limit is None or lv is None or lv["value"] is None:
+            return None
+        value, brief, hard, run = lv["value"], lv["brief"], lv["hard"], lv["run"]
+        until, ongoing, last_value = lv["until"], lv["ongoing"], lv["last_value"]
+        hard_until, hard_ongoing = lv["hard_until"], lv["hard_ongoing"]
+        t_det, extra = lv["t_detected"], {"live": lv["live"]}
     else:
-        # В пределах шага — минимум показаний в пределах шага; короткий провал
-        # дальше шага (< выдержки) называем отдельно, а не «в пределах шага, мин. 232»
-        value = (derived.oil_press_instep_min_kpa
-                 if derived.oil_press_instep_min_kpa is not None
-                 else derived.oil_press_below_passport_min_kpa)
-        if (derived.oil_press_below_passport_min_kpa is not None and value is not None
-                and derived.oil_press_below_passport_min_kpa < value):
-            brief = derived.oil_press_below_passport_min_kpa
+        run = derived.oil_press_below_passport_run_sec or 0.0
+        if limit is None or run < min_run or derived.oil_press_below_passport_min_kpa is None:
+            return None
+        hard = (derived.oil_press_hard_run_sec or 0.0) >= min_run
+        brief = None
+        if hard and derived.oil_press_hard_min_kpa is not None:
+            value = derived.oil_press_hard_min_kpa
+        else:
+            # В пределах шага — минимум показаний в пределах шага; короткий провал
+            # дальше шага (< выдержки) называем отдельно, а не «в пределах шага, мин. 232»
+            value = (derived.oil_press_instep_min_kpa
+                     if derived.oil_press_instep_min_kpa is not None
+                     else derived.oil_press_below_passport_min_kpa)
+            if (derived.oil_press_below_passport_min_kpa is not None and value is not None
+                    and derived.oil_press_below_passport_min_kpa < value):
+                brief = derived.oil_press_below_passport_min_kpa
+        until, ongoing = derived.oil_press_passport_until, derived.oil_press_passport_ongoing
+        last_value = derived.oil_press_last_min_kpa
+        hard_until, hard_ongoing = derived.oil_press_hard_until, derived.oil_press_hard_ongoing
     limit_d = {
         "kind": "passport", "param": "OIL_PRESS", "direction": "min",
         "limit": limit, "unit": "кПа", "value": value,
         "run_sec": run, "min_run_sec": min_run,
         "step": step, "step_source": derived.oil_press_step_source,
         "hard": hard, "engine": cfg.engine_label, "brief_min": brief,
-        "until": derived.oil_press_passport_until,
-        "ongoing": derived.oil_press_passport_ongoing,
+        "until": until,
+        "ongoing": ongoing,
         # Свежесть «нарушения» отдельно: в живом составе давнее нарушение при
         # свежем «в пределах шага» не держит запрет снятия (ревью v5.1.12)
-        "last_value": derived.oil_press_last_min_kpa,
-        "hard_until": derived.oil_press_hard_until,
-        "hard_ongoing": derived.oil_press_hard_ongoing,
+        "last_value": last_value,
+        "hard_until": hard_until,
+        "hard_ongoing": hard_ongoing,
     }
     return Detection(
         scenario="OIL_DILUTION",
         severity="CAUTION",
-        t_detected=_iso(seg_start),
+        t_detected=t_det,
         source="PASSPORT_THRESHOLD",
         trigger=passport_trigger(limit_d),
         related_roles=["OIL_PRESS"],
         fault_codes=[143, 415],
         description_key="OIL_DILUTION.below_passport_min",
-        values={"oil_press_min": value, "passport_min_kpa": limit, "limit": limit_d},
+        values={"oil_press_min": value, "passport_min_kpa": limit, "limit": limit_d, **extra},
     )
 
 
@@ -577,12 +669,14 @@ def _detect_oil_dilution(
     seg_start: datetime,
     cfg: AnalyticsConfig,
     seg_end: datetime | None = None,
+    live: list[dict] | None = None,
 ) -> list[Detection]:
     # Паспорт — первым и без температуры масла: раньше ветка паспорта шла после
     # комбинированной и пропадала без OIL_TEMP (v5.1.12). Паспорт главнее всегда:
     # комбинированная ветка считает по всему подсегменту и сработала бы на том же
-    # провале — нарушение паспорта пропало бы из записи подсегмента (ревью)
-    passport = _passport_detection(derived, seg_start, cfg)
+    # провале — нарушение паспорта пропало бы из записи подсегмента (ревью).
+    # live — кластеры паспорта сегмента (v5.1.21); комбинированная ветка — без них
+    passport = _passport_detection(derived, seg_start, cfg, live=live, seg_end=seg_end)
     if passport is not None:
         return [passport]
     combined = _combined_oil_detection(chars, seg_start, cfg)
@@ -592,7 +686,13 @@ def _detect_oil_dilution(
 def _combined_oil_detection(
     chars: dict[str, Any], seg_start: datetime, cfg: AnalyticsConfig,
 ) -> Detection | None:
-    """Падение давления вместе с ростом температуры масла — признак разжижения."""
+    """Падение давления вместе с ростом температуры масла — признак разжижения.
+
+    Пол давления (v5.1.21, В3): минимум подсегмента ниже уставки останова на
+    рабочих оборотах без останова панели — не замер (нулевой кадр), ветка в
+    этом подсегменте не оценивается. ДЭС №3 13.10 14:59:56: давление 300 → 0 →
+    316 дало строку «разжижения» на 22 мин 37 с (14902). Ветка — без участков
+    (по событию — v5.1.22)."""
     oil_press_char = chars.get("OIL_PRESS")
     oil_temp_char = chars.get("OIL_TEMP")
     if not oil_press_char or not oil_temp_char:
@@ -604,6 +704,9 @@ def _combined_oil_detection(
     temp_med = oil_temp_char.get("median")
 
     if press_min is None or temp_max is None or press_med is None or temp_med is None:
+        return None
+    _floor = cfg.thr("oil_pressure", "controller", "shutdown_rated_kpa")
+    if _floor is not None and press_min < float(_floor):
         return None
 
     press_drop_thr = float(cfg.det("OIL_DILUTION", "oil_press_drop_kpa", default=50.0))
@@ -791,56 +894,60 @@ def _detect_limit_proximity(
     chars: dict[str, Any],
     seg_start: datetime,
     cfg: AnalyticsConfig,
+    live: list[dict] | None = None,
+    seg_end: datetime | None = None,
 ) -> list[Detection]:
-    prox_pct = float(cfg.det("LIMIT_PROXIMITY", "proximity_pct", default=10.0))
+    """Близость к уставкам останова панели — одна детекция на роль.
+
+    live — кластеры LIMIT_PROXIMITY сегмента (v5.1.21): три роли в одном наборе
+    кластеров, детекция роли — только при участке этой роли в подсегменте,
+    значение — по отсчётам участков; пол давления (В3) уже в участках. None —
+    по min/max подсегмента, как раньше. Пороги — live.limit_checks."""
     results: list[Detection] = []
-
-    checks = [
-        ("OIL_PRESS", "min",
-         float(cfg.thr("oil_pressure", "controller", "shutdown_rated_kpa", default=241.3)),
-         "oil_press_min", "Давление масла", [415], True),
-        ("COOLANT_TEMP", "max",
-         float(cfg.thr("coolant_temperature", "controller", "shutdown_c", default=103.9)),
-         "coolant_temp_max", "Температура ОЖ", [151], False),
-        ("OIL_TEMP", "max",
-         float(cfg.thr("oil_temperature", "controller", "shutdown_c", default=110.0)),
-         "oil_temp_max", "Температура масла", [214], False),
-    ]
-
-    for role, stat_key, limit, val_key, label, fcodes, below_is_bad in checks:
+    for chk in limit_checks(cfg):
+        role, limit = chk["role"], chk["limit"]
+        if live is not None:
+            hits = sub_hits(live, seg_start, seg_end, role=role) if seg_end is not None else []
+            pts = sub_samples([s for _, sp in hits for s in sp], seg_start, seg_end) if hits else []
+            if not pts:
+                continue
+            vals = [p[1] for p in pts]
+            val = min(vals) if chk["below"] else max(vals)
+            results.append(_limit_detection(role, val, limit, chk["label"], chk["codes"], seg_start, cfg,
+                                            hits=hits))
+            continue
         char = chars.get(role)
         if not char:
             continue
-        val = char.get(stat_key)
+        val = char.get(chk["stat"])
         if val is None:
             continue
-
-        if below_is_bad:
-            # Плохо = значение слишком низкое: val < limit * (1 + prox_pct/100)
-            near_thr = limit * (1 + prox_pct / 100)
-            if val < near_thr:
-                results.append(_limit_detection(role, val, limit, label, fcodes, seg_start, cfg))
-        else:
-            # Плохо = значение слишком высокое: val > limit * (1 - prox_pct/100)
-            near_thr = limit * (1 - prox_pct / 100)
-            if val > near_thr:
-                results.append(_limit_detection(role, val, limit, label, fcodes, seg_start, cfg))
+        # Плохо: давление — val < limit·(1 + pct), температуры — val > limit·(1 − pct)
+        if (val < chk["near"]) if chk["below"] else (val > chk["near"]):
+            results.append(_limit_detection(role, val, limit, chk["label"], chk["codes"], seg_start, cfg))
 
     return results
 
 
-def _limit_detection(role, val, limit, label, fcodes, seg_start, cfg) -> Detection:
+def _limit_detection(role, val, limit, label, fcodes, seg_start, cfg, hits=None) -> Detection:
     prox_pct = float(cfg.det("LIMIT_PROXIMITY", "proximity_pct", default=10.0))
+    values = {"value": val, "shutdown_limit": limit, "proximity_pct": prox_pct}
+    t_det = _iso(seg_start)
+    if hits:
+        # v5.1.21: начало — первый кластер (общий для трёх ролей ключа), роль —
+        # задел на ключ по параметру (v5.1.22)
+        t_det = hits[0][0]["start"]
+        values.update(role=role, live=live_values(hits, seg_start))
     return Detection(
         scenario="LIMIT_PROXIMITY",
         severity=cfg.det("LIMIT_PROXIMITY", "severity_default", default="CAUTION"),
-        t_detected=_iso(seg_start),
+        t_detected=t_det,
         source="PASSPORT_THRESHOLD",
         trigger=f"{label}: {val:.2f} в пределах {prox_pct:.0f}% от порога {limit:.1f}",
         related_roles=[role],
         fault_codes=fcodes,
         description_key=f"LIMIT_PROXIMITY.{role.lower()}_near_limit",
-        values={"value": val, "shutdown_limit": limit, "proximity_pct": prox_pct},
+        values=values,
     )
 
 
@@ -1024,6 +1131,8 @@ def _detect_rpm_underspeed(
     derived: DerivedMetrics,
     seg_start: datetime,
     cfg: AnalyticsConfig,
+    live: list[dict] | None = None,
+    seg_end: datetime | None = None,
 ) -> list[Detection]:
     """Детектор просадки оборотов под нагрузкой (Addendum v1.6).
 
@@ -1035,17 +1144,36 @@ def _detect_rpm_underspeed(
     Gate: только RUN_STATE=3 (проверяется в run_all_detectors).
     Задержки нет (hold_sec=0): даже один срез ниже порога = детекция.
     Условие: min(RPM) за сегмент < threshold_rpm.
-    """
-    rpm_char = chars.get("RPM")
-    if not rpm_char:
-        return []
-    rpm_min = rpm_char.get("min")
-    if rpm_min is None:
-        return []
 
+    live — кластеры RPM_UNDERSPEED сегмента (v5.1.21, В1): провал — по v*,
+    обороты и частота опроса ниже порога (analytics/rpm_freq.py). Детекция —
+    только при участке провала в подсегменте; rpm_min — по отсчётам провала,
+    freq_rpm_min — обороты по частоте генератора (k·f_min), front_count —
+    число участков в подсегменте. None — по минимуму подсегмента, как раньше.
+    """
+    rpm_char = chars.get("RPM") or {}
     threshold = float(cfg.det("RPM_UNDERSPEED", "threshold_rpm", default=1485.0))
-    if rpm_min >= threshold:
-        return []
+    freq_rpm_min, live_v, t_det = None, None, _iso(seg_start)
+    if live is not None:
+        hits = sub_hits(live, seg_start, seg_end) if seg_end is not None else []
+        spans = [s for _, sp in hits for s in sp]
+        pts = sub_samples(spans, seg_start, seg_end) if spans else []
+        if not pts:
+            return []
+        rpm_min = min(p[1] for p in pts)
+        kfs = [p[2] for p in pts if p[2] is not None]
+        freq_rpm_min = round(min(kfs), 1) if kfs else None
+        front_live: int | None = len(spans)
+        t_det, live_v = hits[0][0]["start"], live_values(hits, seg_start)
+    else:
+        if not rpm_char:
+            return []
+        rpm_min = rpm_char.get("min")
+        if rpm_min is None:
+            return []
+        if rpm_min >= threshold:
+            return []
+        front_live = None
 
     panel_setpoint = float(cfg.det("RPM_UNDERSPEED", "panel_setpoint_rpm", default=1350.0))
     rated = float(cfg.det("RPM_UNDERSPEED", "rated_rpm", default=1500.0))
@@ -1058,32 +1186,40 @@ def _detect_rpm_underspeed(
     below = threshold - rpm_min
     spread = (rpm_max - rpm_min) if rpm_max is not None else None
     drop_rpm, drop_pct = spread, (spread / rated * 100) if spread is not None else None  # устар., = размах
-    front_count = derived.rpm_underspeed_fronts_count if derived.rpm_underspeed_fronts_count else 1
+    if front_live is not None:
+        front_count = front_live
+    else:
+        front_count = derived.rpm_underspeed_fronts_count if derived.rpm_underspeed_fronts_count else 1
 
+    values = {
+        "rpm_min": rpm_min,
+        "rpm_max": rpm_max,
+        "rpm_med": rpm_char.get("median"),
+        "threshold_rpm": threshold,
+        "panel_setpoint_rpm": panel_setpoint,
+        "rated_rpm": rated,
+        "below_threshold_rpm": round(below, 1),
+        "spread_rpm": spread,
+        "drop_rpm": drop_rpm,
+        "drop_pct": round(drop_pct, 1) if drop_pct is not None else None,
+        "front_count": front_count,
+    }
+    if live_v is not None:
+        values.update(freq_rpm_min=freq_rpm_min, live=live_v)
     return [Detection(
         scenario="RPM_UNDERSPEED",
         severity=cfg.det("RPM_UNDERSPEED", "severity_default", default="CAUTION"),
-        t_detected=_iso(seg_start),
+        t_detected=t_det,
         source="METRIC_RULE",
         trigger=(
-            f"RPM мин. {rpm_min:.0f} об/мин — на {below:.0f} ниже порога {threshold:.0f}"
+            f"RPM мин. {rpm_min:.0f} об/мин"
+            + (f" (по частоте ≈ {freq_rpm_min:.0f})" if freq_rpm_min is not None else "")
+            + f" — на {below:.0f} ниже порога {threshold:.0f}"
             + (f" (размах {spread:.0f} об/мин от макс. {rpm_max:.0f})" if spread is not None else "")
             + f", фронтов: {front_count}"
         ),
         related_roles=["RPM", "ACTIVE_POWER_TOTAL"],
         fault_codes=[fault_code],
         description_key="RPM_UNDERSPEED.below_threshold",
-        values={
-            "rpm_min": rpm_min,
-            "rpm_max": rpm_max,
-            "rpm_med": rpm_char.get("median"),
-            "threshold_rpm": threshold,
-            "panel_setpoint_rpm": panel_setpoint,
-            "rated_rpm": rated,
-            "below_threshold_rpm": round(below, 1),
-            "spread_rpm": spread,
-            "drop_rpm": drop_rpm,
-            "drop_pct": round(drop_pct, 1) if drop_pct is not None else None,
-            "front_count": front_count,
-        },
+        values=values,
     )]

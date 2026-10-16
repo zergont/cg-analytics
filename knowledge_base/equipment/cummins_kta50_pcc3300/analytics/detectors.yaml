@@ -369,6 +369,13 @@ DETECTION_COUNTER:
   enabled: true
   window_days: 30            # TUNABLE: окно подсчёта в днях
 
+# ─── ALARM_EPISODES: эпизоды тревог (online/engine.py) ──────────────────────
+# analytics_counts_since — переходный месяц v5.1.21 (решение В5, 15.10.2026):
+# счётчики аналитики с даты выкладки, панель не затрагивается. Пусто — без
+# фильтра. Снять после ≈15.11.2026. Подробно — _defaults/analytics/detectors.yaml.
+ALARM_EPISODES:
+  analytics_counts_since: "2026-10-16"   # выкладка v5.1.21; СНЯТЬ после 15.11.2026
+
 # ─── CONTROLLER_FAULT: Активная неисправность контроллера ───────────────────
 CONTROLLER_FAULT:
   enabled: true
