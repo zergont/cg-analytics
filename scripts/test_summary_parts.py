@@ -214,9 +214,18 @@ s15.subsegments[0].risk_accumulators = NS(coking_risk=Risk())
 s15.subsegments[0].detections = [Det2("OIL_DILUTION", "CAUTION", "2026-10-10T05:59:50+00:00")]
 from online.status_assembler import compute_analytics_hash  # noqa: E402
 h = compute_analytics_hash([{"scenario": "OIL_DILUTION"}])
-supp = eng._gate_suppressed_scenarios({"suppressed_hash": h}, s15)
+# v5.1.22 (P1-1): новые тревоги наследуют только своё решение строки — в журнале
+# гейта применённый разбор моделью с этим хешем; перенесённое снятие — нет
+_own = {"suppressed_hash": h, "gate_log": [{"ts": "2026-10-10T05:00:00+00:00", "kind": "llm",
+                                             "decision": "cancel", "decision_applied": True,
+                                             "suppressed_hash": h, "fault_hash": "f"}]}
+supp = eng._gate_suppressed_scenarios(_own, s15)
 check(supp == {"OIL_DILUTION"}, f"15: состав снят гейтом: {supp}")
-check(eng._gate_suppressed_scenarios({"suppressed_hash": "чужой"}, s15) == set(), "15б: другой состав — не снят")
+check(eng._gate_suppressed_scenarios(dict(_own, suppressed_hash="чужой"), s15) == set(),
+      "15б: другой состав — не снят")
+check(eng._gate_suppressed_scenarios({"suppressed_hash": h, "gate_log": [dict(
+    _own["gate_log"][0], kind="carry")]}, s15) == set(),
+      "15г: перенесённое снятие новые тревоги не наследуют (v5.1.22)")
 syn = eng._live_new_episodes([s15], [], {"OIL_DILUTION"}, T0 + timedelta(hours=24), supp)
 p = build_summary_parts([s15], syn)
 check(syn[0]["gate_suppressed"] and p["verdict"]["level"] == "НОРМА", f"15в: синтетика снята: {p['verdict']}")

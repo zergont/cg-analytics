@@ -277,6 +277,171 @@ def is_analytics_suppressed(seg_row: dict, active_dets: list[dict]) -> bool:
     return has_analytics and compute_analytics_hash(active_dets) == suppressed
 
 
+# ── Снятие гейтом: запреты, предикат, источник (v5.1.22, P1-1) ───────────────
+
+# Виды записей журнала гейта (v5.1.22): разбор моделью (llm — шлюз или
+# локальная, api — Claude API), повтор снятого в этой строке состава (repeat),
+# наследование снятия новым эпизодом в той же строке (inherited), перенос
+# продолжающегося снятого эпизода в новую строку (carry), поздний вердикт,
+# дописанный в текущую строку (late). Своё решение строки — llm / api / repeat:
+# только оно даёт основание повтору (_cancelled_hashes) и наследованию; carry и
+# late защищают только продолжающиеся эпизоды, новые от них не наследуют.
+GATE_MODEL_KINDS = frozenset({"llm", "api"})
+GATE_OWN_KINDS = frozenset({"llm", "api", "repeat"})
+GATE_CARRY_KINDS = frozenset({"carry", "late"})
+
+
+def gate_entry_kind(e: dict) -> str | None:
+    """Вид записи журнала гейта. Старые записи без ключа kind — по provider:
+    «carried» до v5.1.22 писал поздний вердикт (→ late), repeat — повтор,
+    api — Claude API, остальное — разбор моделью шлюза (llm)."""
+    if not isinstance(e, dict):
+        return None
+    if e.get("kind"):
+        return e["kind"]
+    prov = e.get("provider")
+    if prov == "carried":
+        return "late"
+    if prov in ("repeat", "api"):
+        return prov
+    return "llm"
+
+
+def _applied_cancel(e: dict) -> bool:
+    return isinstance(e, dict) and e.get("decision") == "cancel" and bool(e.get("decision_applied"))
+
+
+def _record_source(rec: dict, gate_log: list) -> dict:
+    """Источник записи: исходный разбор. У repeat — разбор моделью с тем же
+    составом (#35891: повтор 09:41 → разбор 09:01:59), у carry/late/inherited —
+    записанный в ней источник."""
+    src = rec.get("source")
+    if isinstance(src, dict) and src.get("ts"):
+        return {"ts": src.get("ts"), "segment_id": src.get("segment_id")}
+    if gate_entry_kind(rec) == "repeat":
+        for e in gate_log or []:
+            if (gate_entry_kind(e) in GATE_MODEL_KINDS and _applied_cancel(e)
+                    and e.get("fault_hash") and e.get("fault_hash") == rec.get("fault_hash")):
+                return {"ts": e.get("ts"), "segment_id": None}
+    return {"ts": rec.get("ts"), "segment_id": None}
+
+
+def gate_decision_source(gate_log: list | None, suppressed_hash: str | None,
+                         kinds: frozenset = GATE_OWN_KINDS) -> dict | None:
+    """Источник действующего снятия строки по её журналу (v5.1.22).
+
+    kinds = GATE_OWN_KINDS — своё решение строки (llm / api / repeat): последняя
+    применённая запись с этим suppressed_hash; у старых записей без
+    suppressed_hash — последнее применённое снятие строки, если оно и есть
+    последнее (по нему и стоял хеш). kinds = GATE_CARRY_KINDS — перенос или
+    поздний вердикт с этим хешем. Возвращает {ts, segment_id, fault_hash, kind}
+    или None — основания нет.
+    """
+    if not suppressed_hash:
+        return None
+    log = [e for e in gate_log or [] if isinstance(e, dict)]
+    recs = [e for e in log if gate_entry_kind(e) in kinds and _applied_cancel(e)]
+    match = [e for e in recs if e.get("suppressed_hash") == suppressed_hash]
+    if not match and kinds is GATE_OWN_KINDS and recs and "suppressed_hash" not in recs[-1]:
+        match = [recs[-1]]
+    if not match:
+        return None
+    rec = match[-1]
+    return {**_record_source(rec, log), "fault_hash": rec.get("fault_hash"),
+            "kind": gate_entry_kind(rec)}
+
+
+def gate_hash_source(gate_log: list | None, fault_hash: str | None) -> dict | None:
+    """Исходный разбор состава fault_hash в этой строке — источник повтора
+    (repeat, v5.1.22): первый применённый разбор моделью с этим составом, иначе
+    источник прежнего повтора. None — разбора в строке нет."""
+    if not fault_hash:
+        return None
+    log = [e for e in gate_log or [] if isinstance(e, dict)]
+    for e in log:
+        if (gate_entry_kind(e) in GATE_MODEL_KINDS and _applied_cancel(e)
+                and e.get("fault_hash") == fault_hash):
+            return {**_record_source(e, log), "fault_hash": fault_hash}
+    for e in reversed(log):
+        if (gate_entry_kind(e) == "repeat" and _applied_cancel(e)
+                and e.get("fault_hash") == fault_hash):
+            return {**_record_source(e, log), "fault_hash": fault_hash}
+    return None
+
+
+def gate_record_episodes(gate_log: list | None, suppressed_hash: str | None) -> set[int] | None:
+    """id эпизодов, снятых записями строки с этим хешем (своё решение, повтор,
+    наследование, перенос, поздний вердикт — v5.1.22). None — ни одна такая
+    запись не несёт списка эпизодов (журнал до v5.1.22)."""
+    if not suppressed_hash:
+        return None
+    ids: set[int] = set()
+    seen = False
+    for e in gate_log or []:
+        if not (isinstance(e, dict) and _applied_cancel(e)
+                and gate_entry_kind(e) in (GATE_OWN_KINDS | GATE_CARRY_KINDS | {"inherited"})):
+            continue
+        if e.get("suppressed_hash") != suppressed_hash or not isinstance(e.get("episodes"), list):
+            continue
+        seen = True
+        for i in e["episodes"]:
+            try:
+                ids.add(int(i))
+            except (TypeError, ValueError):
+                pass
+    return ids if seen else None
+
+
+def _caution_fresh(since_raw, fault_codes, seg_t0, code_at_start) -> bool:
+    """«Общая авария» с кодом появилась в этом сегменте (решение 12.10): фронт
+    не раньше начала строки или код сменился с начала сегмента."""
+    since = _as_dt(since_raw)
+    try:
+        code_changed = bool(code_at_start is not None and fault_codes
+                            and int(fault_codes[0]) != code_at_start)
+    except (TypeError, ValueError):
+        code_changed = False
+    return since is None or seg_t0 is None or since >= seg_t0 or code_changed
+
+
+def suppression_bans(seg_row: dict, dets: list[dict]) -> list[str]:
+    """Запреты действия снятия по детекциям и виду стопа (v5.1.22): panel —
+    сигнал панели WARNING/SHUTDOWN, panel_fresh — свежая «Общая авария» с кодом,
+    emergency — аварийный стоп. Несимметрию и паспорт проверяет
+    is_analytics_suppressed. Тот же расчёт свежести, что у статуса."""
+    chars = _parse_json(seg_row.get("characteristics_json")) or {}
+    out: list[str] = []
+    if isinstance(chars, dict) and chars.get("stop_kind") == "EMERGENCY":
+        out.append("emergency")
+    seg_t0 = _as_dt(seg_row.get("t_start"))
+    code0 = _code_at_segment_start(chars if isinstance(chars, dict) else {})
+    for d in dets or []:
+        if not isinstance(d, dict) or d.get("scenario") != "CONTROLLER_FAULT":
+            continue
+        sev = d.get("severity")
+        if sev in ("WARNING", "SHUTDOWN"):
+            code = "panel"
+        elif sev == "CAUTION" and _caution_fresh((d.get("values") or {}).get("fault_start"),
+                                                 d.get("fault_codes") or [], seg_t0, code0):
+            code = "panel_fresh"
+        else:
+            continue
+        if code not in out:
+            out.append(code)
+    return out
+
+
+def suppression_active(seg_row: dict, active_dets: list[dict]) -> bool:
+    """Действует ли снятие гейтом сейчас (v5.1.22): хеш состава совпал и запретов
+    нет (сигнал панели, свежая «Общая авария», аварийный стоп, несимметрия,
+    паспорт). Один предикат у статуса, наследования эпизодом и пометки новых
+    тревог в сводке. is_analytics_suppressed (без запретов панели) остаётся для
+    закрытых сегментов."""
+    if not is_analytics_suppressed(seg_row, active_dets):
+        return False
+    return not suppression_bans(seg_row, active_dets)
+
+
 def _without_state(dets: list[dict]) -> list[dict]:
     """Без сценариев-состояний (риск нагара) и разовых событий перехода: это не
     тревога, гейт их не разбирает (v5.1.3, v5.1.10)."""
@@ -376,8 +541,10 @@ def build_structural_status(
 
     # ── Severity (раздельно по источнику) ──
     # Вердикт гейта «отменить» подавляет аналитику, пока состав детекций не изменился.
-    # Режимные замечания гейт не снимает — в уровне они остаются (v5.1.12)
-    suppressed    = is_analytics_suppressed(seg_row, active_dets)
+    # Режимные замечания гейт не снимает — в уровне они остаются (v5.1.12).
+    # v5.1.22: при сигнале панели, свежей «Общей аварии» и аварийном стопе снятие
+    # не действует — тот же предикат, что у наследования эпизодом и сводки
+    suppressed    = suppression_active(seg_row, active_dets)
     dets_for_level = level_dets(active_dets, suppressed)
     panel_sev     = compute_panel_severity(active_dets)
     analytics_sev = compute_analytics_severity(dets_for_level)
@@ -454,15 +621,13 @@ def build_structural_status(
             "limit":             _limit(d) or None,
         }
         if scenario == "CONTROLLER_FAULT":
-            since = _as_dt(det_vals.get("fault_start"))
             alarm["since"] = det_vals.get("fault_start")
             # «Общая авария» с кодом висела на начало сегмента (и код тот же) —
             # сведения; появилась или сменила код в этом сегменте — запрет снятия
+            # (расчёт общий с suppression_bans, v5.1.22)
             alarm["fresh"] = bool(
-                severity == "CAUTION" and (
-                    since is None or seg_t0 is None or since >= seg_t0
-                    or (code_at_start is not None and fault_codes
-                        and int(fault_codes[0]) != code_at_start)))
+                severity == "CAUTION" and _caution_fresh(
+                    det_vals.get("fault_start"), fault_codes, seg_t0, code_at_start))
             panel_alarms.append(alarm)
         elif scenario in GATE_EXCLUDED_SCENARIOS:
             regime_alarms.append(alarm)
@@ -787,23 +952,26 @@ def build_warning_prompt(
             "развиваются — новые сигналы могут быть следствием исходной аварии или "
             "действий персонала):"
         )
+        from analytics.labels import fmt_local, tz_label
         for pa in prev_analyses:
-            t = (pa.get("t") or "")[:16].replace("T", " ")
+            # Местное время с поясом (v5.1.22, P1-6), было — UTC
+            _lt = fmt_local(pa.get("t"), day=True, seconds=False)
+            t = f"{_lt} {tz_label()}" if _lt else (pa.get("t") or "")[:16].replace("T", " ") + " UTC"
             alarm = pa.get("alarm_text") or "состав тревог не записан"
-            lines.append(f"--- Разбор {t} UTC — {alarm} ---")
+            lines.append(f"--- Разбор {t} — {alarm} ---")
             lines.append(pa.get("md") or "")
         lines.append("--- Конец предыдущих разборов ---")
 
     if episode_timeline:
         lines.append("")
-        lines.append("Хронология тревог сегмента:")
+        from analytics.labels import fmt_local as _fl, tz_label as _tzl
+        # Время — местное (v5.1.22, P1-6), было — UTC без пометки
+        lines.append(f"Хронология тревог сегмента (время {_tzl()}):")
         for e in episode_timeline:
             t_open = e.get("t_open")
-            t_open_s = t_open.strftime("%H:%M:%S") if hasattr(t_open, "strftime") else str(t_open or "?")
+            t_open_s = _fl(t_open) or str(t_open or "?")
             t_close = e.get("t_close")
-            span = f"{t_open_s} → " + (
-                t_close.strftime("%H:%M:%S") if hasattr(t_close, "strftime") else "активна"
-            )
+            span = f"{t_open_s} → " + (_fl(t_close) or "активна" if t_close else "активна")
             supp = (" — снималась гейтом (прошлое решение, не довод)"
                     if e.get("gate_suppressed") else "")
             if e.get("close_reason") == "transition_event":
@@ -992,9 +1160,13 @@ def _panel_line(s: dict) -> str:
         parts = []
         for a in caution:
             codes = ", ".join(str(c) for c in a.get("fault_codes") or [])
-            since = (a.get("since") or "")[:16].replace("T", " ")
+            # Местное время с поясом (v5.1.22, P1-6): «с 13.10 15:01 МСК»
+            from analytics.labels import fmt_local, tz_label
+            _lt = fmt_local(a.get("since"), day=True, seconds=False) if a.get("since") else None
+            since = (f"{_lt} {tz_label()}" if _lt
+                     else ((a.get("since") or "")[:16].replace("T", " ") + " UTC" if a.get("since") else ""))
             txt = (f"CAUTION — {a.get('description') or 'Общая авария'}, несброшенный код {codes}"
-                   + (f", с {since} UTC" if since else ""))
+                   + (f", с {since}" if since else ""))
             txt += (" — появилась в этом сегменте: снятие аналитики запрещено"
                     if a.get("fresh") else
                     " — висела на начало сегмента: это сведения, снятие аналитики не блокирует")

@@ -303,3 +303,11 @@ ALTER TABLE alarm_episodes
 -- своя лента внутри incident_json, дублировать её незачем.
 ALTER TABLE auto_segments
     ADD COLUMN IF NOT EXISTS chronology_json JSONB;
+
+-- Миграция v5.1.22 (P1-1): источник снятия эпизода гейтом — {ts, segment_id,
+-- kind}: время исходного разбора, закрытый сегмент с ним, вид записи (llm /
+-- api / repeat / inherited / carry / late). Снятие относится к своим эпизодам
+-- и подписывается в сводке «снято ИИ (разбор 09:59)» или «снято по разбору от
+-- 14.10 03:36 (#35876)». Файл играется целиком при каждом старте — без CHECK.
+ALTER TABLE alarm_episodes
+    ADD COLUMN IF NOT EXISTS gate_suppressed_src JSONB;

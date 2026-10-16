@@ -40,6 +40,10 @@ class Link:
     cause_open: str | None = None
     load_pct_max: float | None = None   # максимум LOAD_PCT по подсегментам
     coolant_start: float | None = None  # Т ОЖ на начало сегмента
+    # Начало интервала аварии, которым сегмент отмечен «… прервана аварийным
+    # остановом» (closed_by_trip.iv, v5.1.22, ревью verdict-4): нарезка следующего
+    # окна ту же аварию второй раз не отмечает
+    trip_iv: datetime | None = None
 
     @property
     def duration_sec(self) -> float:
@@ -103,12 +107,14 @@ def link_from_segment(seg: Any) -> Link | None:
         return None
     subs = list(get("subsegments") or [])
     rs = get("run_state")
+    trip = get("closed_by_trip")
     return Link(
         run_state=int(rs) if rs is not None else None,
         t_start=t0, t_end=t1,
         cause_open=get("cause_open"),
         load_pct_max=_load_max(subs),
         coolant_start=_coolant_start(subs),
+        trip_iv=_dt(trip.get("iv")) if isinstance(trip, dict) else None,
     )
 
 
@@ -128,6 +134,7 @@ def link_from_row(row: dict) -> Link | None:
         cause_open=row.get("cause_open"),
         load_pct_max=_num(lmax),
         coolant_start=_num(row.get("coolant_start")),
+        trip_iv=_dt(row.get("trip_iv")),
     )
 
 

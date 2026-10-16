@@ -43,7 +43,7 @@ def _active_dets(seg_row: dict) -> tuple[list[dict], bool]:
     при suppressed=True вызывающий делает сам — панельные severity считаются
     по полному списку.
     """
-    from online.status_assembler import _without_state, is_analytics_suppressed
+    from online.status_assembler import _without_state, suppression_active
     dets = _parse_json(seg_row.get("active_detections_json"), [], ctx="active_detections_json") or []
     # Риск нагара — состояние, не тревога (v5.1.3), как в build_structural_status
     dets = _without_state([d for d in dets if isinstance(d, dict)])
@@ -52,7 +52,9 @@ def _active_dets(seg_row: dict) -> tuple[list[dict], bool]:
     dets = [d if d.get("severity") == cap_severity(d.get("scenario"), d.get("severity"))
             else dict(d, severity=cap_severity(d.get("scenario"), d.get("severity")))
             for d in dets]
-    return dets, is_analytics_suppressed(seg_row, dets)
+    # Тот же предикат, что у статуса (v5.1.22): при сигнале панели, свежей
+    # «Общей аварии» и аварийном стопе снятие не действует
+    return dets, suppression_active(seg_row, dets)
 
 
 def _cap_sev(scenario: str | None, severity: str | None) -> str | None:
@@ -2258,8 +2260,12 @@ async def api_machines():
             status_struct = ss if isinstance(ss, dict) else {}
             gl = _parse_json(seg.get("gate_log"), ctx="gate_log")
             if isinstance(gl, list):
-                # Отметки разбора аварии (kind=incident, v5.1.11) — не вердикты гейта
-                gl = [e for e in gl if not (isinstance(e, dict) and e.get("kind") == "incident")]
+                # Отметки разбора аварии (kind=incident, v5.1.11) — не вердикты гейта.
+                # v5.1.22: «Гейт ИИ обработал …» — только разборы моделью: повтор,
+                # наследование, перенос и поздний вердикт — не разборы
+                from online.status_assembler import GATE_MODEL_KINDS, gate_entry_kind
+                gl = [e for e in gl if isinstance(e, dict)
+                      and gate_entry_kind(e) in GATE_MODEL_KINDS]
                 gate_events_count    = len(gl)
                 gate_cancelled_count = sum(
                     1 for e in gl if isinstance(e, dict) and e.get("decision_applied")

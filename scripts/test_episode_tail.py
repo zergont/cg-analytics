@@ -118,12 +118,16 @@ e._episode_accrual_ts = T("09:03:37")
 asyncio.run(run_cycles())
 check(calls["close"] == [(78, T("09:04:07"))], f"3б: без времени панели — горизонт обработки, как раньше: {calls['close']}")
 
-# 4. Новый эпизод уже снятого гейтом состава наследует снятие (v5.1.0)
+# 4. Новый эпизод уже снятого гейтом состава наследует снятие (v5.1.0).
+# v5.1.22 (P1-1): только от своего решения строки (в журнале — разбор моделью с
+# этим хешем), пометка по id эпизода, запись inherited со ссылкой на разбор
 from online.status_assembler import compute_analytics_hash  # noqa: E402
 
 LOW = {"scenario": "OIL_DILUTION", "severity": "CAUTION", "fault_codes": [], "values": {},
        "t_detected": "2026-10-06T09:10:00+00:00"}
 marked: list = []
+events: list = []
+_H = compute_analytics_hash([LOW])
 
 
 async def _open(*a, **k):
@@ -131,11 +135,19 @@ async def _open(*a, **k):
 
 
 async def _row(*a, **k):
-    return {"id": 5, "gate_suppressed_hash": compute_analytics_hash([LOW])}
+    return {"id": 5, "gate_suppressed_hash": _H, "t_start": T("09:00:00"),
+            "gate_log": [{"ts": "2026-10-06T09:05:00+00:00", "kind": "llm", "fault_hash": "f1",
+                          "suppressed_hash": _H, "decision": "cancel", "decision_applied": True}]}
 
 
-async def _mark(sn, et, pid, scenarios):
-    marked.append(list(scenarios))
+async def _mark(sn, et, pid, scenarios, ids=None, src=None, **k):
+    marked.append((list(scenarios), list(ids or []), (src or {}).get("kind")))
+    return list(ids or [])
+
+
+async def _event(*a, event=None, **k):
+    events.append(event)
+    return True
 
 
 async def _noop2(*a, **k):
@@ -146,11 +158,16 @@ eng.online_db.open_episode = _open
 eng.online_db.find_episode_by_onset = _noop2   # онсет не встречался — новый эпизод
 eng.online_db.get_open_segment = _row
 eng.online_db.set_episodes_gate_suppressed = _mark
+eng.online_db.append_segment_gate_event = _event
 e._attach_trip_context = _noop2
 e._episodes, e._last_open_seg_id = {}, 5
 e._episode_accrual_ts = T("09:09:00")
 asyncio.run(e._process_episodes([LOW], T("09:10:30"), []))
-check(marked == [["OIL_DILUTION"]], f"4: снятие перенесено на новый эпизод: {marked}")
+check(marked == [(["OIL_DILUTION"], [99], "inherited")],
+      f"4: снятие перенесено на новый эпизод (по id, вид inherited): {marked}")
+check(len(events) == 1 and events[0]["kind"] == "inherited" and events[0]["episodes"] == [99]
+      and events[0]["source"]["ts"] == "2026-10-06T09:05:00+00:00" and events[0]["fault_hash"] == "f1",
+      f"4а: запись inherited со ссылкой на исходный разбор: {events}")
 
 # 4б. Цикл смены режима: открытая строка уже удалена — проверка откладывается
 marked.clear()
@@ -164,12 +181,12 @@ eng.online_db.get_open_segment = _no_row
 e._episodes, e._supp_recheck = {}, None
 e._episode_accrual_ts = T("09:09:00")
 asyncio.run(e._process_episodes([LOW], T("09:10:30"), []))
-check(marked == [] and e._supp_recheck == (["OIL_DILUTION"], [LOW]),
-      f"4б: строки нет — проверка отложена: {marked}, {e._supp_recheck}")
+check(marked == [] and e._supp_recheck == ([("OIL_DILUTION", 99, T("09:10:00"))], [LOW]),
+      f"4б: строки нет — проверка отложена (с id): {marked}, {e._supp_recheck}")
 eng.online_db.get_open_segment = _row      # upsert записал строку с хвостом гейта
 _sc, _dets = e._supp_recheck
 asyncio.run(e._inherit_gate_suppression(_sc, _dets))
-check(marked == [["OIL_DILUTION"]], f"4в: после upsert снятие перенесено: {marked}")
+check(marked == [(["OIL_DILUTION"], [99], "inherited")], f"4в: после upsert снятие перенесено: {marked}")
 
 if _errors:
     print(f"FAIL — {len(_errors)} расхождений:")

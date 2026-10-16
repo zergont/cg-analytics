@@ -42,11 +42,28 @@ _SEVERITY_RU = {
 }
 
 
-def _ts(raw: Any) -> str:
+def _ts(raw: Any, tz=None, ref: Any = None) -> str:
+    """Метка входа в местном поясе (v5.1.22, P1-6): «09:26:23»; другие сутки,
+    чем у ref (момент останова), — «15.10 21:41:02». Было — срез ISO в UTC без
+    пометки: совет писал «06:26:23» и «00:45:32 → 06:25:52» при МСК в отчёте."""
     if not raw:
         return "—"
-    s = str(raw)
-    return s[11:19] if len(s) > 19 else s
+    from analytics.labels import fmt_local
+    t = fmt_local(raw, tz)
+    if t is None:
+        s = str(raw)
+        return s[11:19] if len(s) > 19 else s
+    if ref is not None:
+        d1, d2 = fmt_local(raw, tz, day=True), fmt_local(ref, tz, day=True)
+        if d1 and d2 and d1[:5] != d2[:5]:
+            return d1
+    return t
+
+
+def _day(raw: Any, tz=None) -> str:
+    """«16.10 09:26:23» в местном поясе; битая метка — как есть."""
+    from analytics.labels import fmt_local
+    return fmt_local(raw, tz, day=True) or (str(raw) if raw else "—")
 
 
 def _age(sec: float) -> str:
@@ -61,94 +78,139 @@ def _age(sec: float) -> str:
 
 
 # Не параметры, а коды: последняя неисправность и её тип идут в ленту
-# Счётчик наработки — монотонный, не параметр режима (в акте «мин–макс» бессмыслен)
-_NOT_PARAMS = {"LAST_FAULT_CODE", "LAST_FAULT_TYPE", "ENGINE_HOURS"}
+# Счётчик наработки — монотонный, не параметр режима (в акте «мин–макс» бессмыслен).
+# v5.1.22: пульс опроса и номиналы установки — не параметры режима, только шум
+_NOT_PARAMS = {"LAST_FAULT_CODE", "LAST_FAULT_TYPE", "ENGINE_HOURS",
+               "HEARTBEAT", "RATING_KW", "RATING_KVA"}
+# Строка хода цикла: ключевые параметры сегмента (v5.1.22, P1-4) — нагрузка,
+# ток, обороты, частота, масло, ОЖ, АКБ; прочее — в подробных блоках
+_CYCLE_KEYS = (("ACTIVE_POWER_TOTAL", "P"), ("CURRENT_AVG", "I"), ("RPM", "обороты"),
+               ("FREQUENCY", "частота"), ("OIL_PRESS", "Pм"), ("OIL_TEMP", "Tм"),
+               ("COOLANT_TEMP", "ОЖ"), ("BATTERY_V", "АКБ"))
+# Не больше строк хода цикла; более ранние сворачиваются в одну
+_CYCLE_MAX_LINES = 30
 
 
-def _chars_of(seg: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def _chars_of(seg: dict[str, Any] | list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Расчётные характеристики сегмента по ролям, сведённые по подсегментам.
 
     Мин и макс — по всему сегменту, «на конце» — последнее значение
-    последнего подсегмента, где роль есть.
+    последнего подсегмента, где роль есть. Список — части одного режима через
+    суточный рез, сведённые вместе (v5.1.22).
     """
     import json as _json
-    raw = seg.get("characteristics_json")
-    if isinstance(raw, str):
-        try:
-            raw = _json.loads(raw)
-        except Exception:
-            return {}
+    segs = seg if isinstance(seg, list) else [seg]
     out: dict[str, dict[str, Any]] = {}
-    for sub in (raw or {}).get("subsegments") or []:
-        for role, ch in ((sub or {}).get("characteristics") or {}).items():
-            if not isinstance(ch, dict) or role in _NOT_PARAMS:
+    for sg in segs:
+        raw = sg.get("characteristics_json")
+        if isinstance(raw, str):
+            try:
+                raw = _json.loads(raw)
+            except Exception:
                 continue
-            acc = out.setdefault(role, {"min": None, "max": None, "end": None,
-                                        "unit": ch.get("unit") or ""})
-            for k, pick in (("min", min), ("max", max)):
-                v = ch.get(k)
-                if v is not None:
-                    acc[k] = v if acc[k] is None else pick(acc[k], v)
-            if ch.get("value_end") is not None:
-                acc["end"] = ch["value_end"]
+        for sub in (raw or {}).get("subsegments") or []:
+            for role, ch in ((sub or {}).get("characteristics") or {}).items():
+                if not isinstance(ch, dict) or role in _NOT_PARAMS:
+                    continue
+                acc = out.setdefault(role, {"min": None, "max": None, "end": None,
+                                            "unit": ch.get("unit") or ""})
+                for k, pick in (("min", min), ("max", max)):
+                    v = ch.get(k)
+                    if v is not None:
+                        acc[k] = v if acc[k] is None else pick(acc[k], v)
+                if ch.get("value_end") is not None:
+                    acc["end"] = ch["value_end"]
     return out
 
 
 def _fmt_num(v: Any) -> str:
+    """Число входа совета — как в ленте отсчётов: «56,8», «1696», «0,85»."""
+    from analytics.labels import fmt_number
     if v is None:
         return "—"
     try:
         f = float(v)
     except (TypeError, ValueError):
         return str(v)
-    return f"{f:.0f}" if abs(f) >= 100 else f"{f:.2f}".rstrip("0").rstrip(".")
+    return fmt_number(f, 0 if abs(f) >= 100 else None)
+
+
+def _cycle_dt(x: Any) -> datetime | None:
+    if isinstance(x, str):
+        try:
+            x = datetime.fromisoformat(x)
+        except ValueError:
+            return None
+    if not isinstance(x, datetime):
+        return None
+    return x if x.tzinfo else x.replace(tzinfo=timezone.utc)
+
+
+def _key_params(chars: dict[str, dict[str, Any]]) -> str:
+    """«P 0…713 кВт; I 0…1324 А; обороты 1496…1504 об/мин; …» — ключевые роли."""
+    from analytics.labels import unit_ru
+    bits = []
+    for role, name in _CYCLE_KEYS:
+        c = chars.get(role)
+        if not c or (c.get("min") is None and c.get("max") is None):
+            continue
+        lo, hi = _fmt_num(c.get("min")), _fmt_num(c.get("max"))
+        rng = lo if lo == hi or c.get("max") is None else (hi if c.get("min") is None else f"{lo}…{hi}")
+        bits.append(f"{name} {rng} {unit_ru(c.get('unit'))}".rstrip())
+    return "; ".join(bits)
 
 
 def _format_cycle_params(
     segments: list[dict[str, Any]], stop_ts: Any,
     attempt: dict[str, Any] | None = None,
+    anchor: Any = None, trace: dict[str, Any] | None = None, tz=None,
 ) -> list[str]:
-    """Цикл от последнего нормального останова: ход режимов и параметры.
+    """Цикл от последнего нормального останова: ход по сегментам и параметры
+    (v5.1.22, P1-4).
 
     Параметры не читаются заново — это расчётные характеристики, которые
-    аналитика посчитала при закрытии каждого сегмента. Весь цикл — сводкой
-    мин/макс, подробно — сегмент, из которого машина упала, и последний
-    рабочий: тот же приём, что у ленты событий.
-
-    Сводка — ПО РЕЖИМАМ. Общая на весь цикл врала бы: минимум давления масла
-    приходил бы со стоянки, а максимум температуры ОЖ — с прогрева после
-    прошлой аварии, когда насос уже встал.
+    аналитика посчитала при закрытии каждого сегмента. До v5.1.22 они сводились
+    мин/макс ПО РЕЖИМАМ за всё окно: в «Работу» #35931 попали 14 ч под
+    нагрузкой до штатного останова вместе с пусками без нагрузки — «0 / 713 кВт,
+    41,5 / 56,8 Гц», совет писал «под нагрузкой» при разомкнутом автомате, а
+    параметры #35929 у #35941 «отсутствовали». Теперь у каждого сегмента своя
+    строка с ключевыми параметрами (части одного режима через суточный рез — одной
+    строкой «N части»), после якоря — разделитель «последний штатный останов;
+    дальше — возможные предвестники», не больше 30 строк (ранние свёрнуты).
+    Подробно (мин / макс / на конце) — сегмент, из которого машина
+    остановилась, сразу за ним лента отсчётов (trace), и последняя работа до
+    штатного останова — фоном. Время — местное (P1-6).
     """
+    from analytics.labels import fmt_duration
     from analytics.serializer import RUN_STATE_RU
 
-    def _dt(x: Any) -> datetime | None:
-        if isinstance(x, str):
-            try:
-                x = datetime.fromisoformat(x)
-            except ValueError:
-                return None
-        if not isinstance(x, datetime):
-            return None
-        return x if x.tzinfo else x.replace(tzinfo=timezone.utc)
-
-    def _hms(x: Any) -> str:
-        d = _dt(x)
-        return d.strftime("%Y-%m-%d %H:%M:%S") if d else "—"
-
-    stop = _dt(stop_ts)
+    stop = _cycle_dt(stop_ts)
     if stop is None:
         return []
+    anc = _cycle_dt(anchor)
+
+    def _t(x: Any) -> str:
+        return _ts(x, tz, stop) if x else "—"
+
+    def _span(a: Any, b: Any) -> str:
+        """«15.10 13:28:53 — 03:41:03 (14 ч 12 мин)»: конец — с датой, если сутки
+        другие, чем у начала."""
+        ta, tb = _cycle_dt(a), _cycle_dt(b)
+        end = _ts(b, tz, a) if b else "…"
+        dur = f" ({fmt_duration((tb - ta).total_seconds())})" if ta and tb else ""
+        return f"{_t(a)} — {end}{dur}"
 
     def _fall(sg: dict[str, Any]) -> datetime | None:
         # У плашки неудачной попытки момент останова — падение, не её начало:
         # своя плашка этого акта в цикл не входит, прошлые — входят (v5.1.16)
         att = (_chars_json(sg) or {}).get("attempt")
-        return _dt((att or {}).get("t_fall") if isinstance(att, dict) else None) \
-            or _dt(sg.get("t_start"))
+        return _cycle_dt((att or {}).get("t_fall") if isinstance(att, dict) else None) \
+            or _cycle_dt(sg.get("t_start"))
 
     before = [sg for sg in segments if (_fall(sg) or stop) < stop]
     if not before and not attempt:
         return []
+
     def _mode(sg: dict[str, Any]) -> str:
         rs = sg.get("run_state")
         name = RUN_STATE_RU.get(rs, f"RUN_STATE={rs}")
@@ -161,36 +223,68 @@ def _format_cycle_params(
             name += " (аварийный)"
         return name
 
-    out: list[str] = ["", "Ход цикла (сегменты аналитики, UTC):"]
+    def _with_params(sg: dict[str, Any]) -> bool:
+        # Стоянка — без параметров (нули и остывание); плашка попытки — с ними
+        return sg.get("run_state") != 0 or bool(label_from_chars(_chars_json(sg) or {}))
+
+    # Части одного режима через суточный рез — одна строка
+    groups: list[list[dict[str, Any]]] = []
     for sg in before:
-        out.append(f"  - {_mode(sg)}: "
-                   f"{_hms(sg.get('t_start'))} — {_hms(sg.get('t_end'))}")
+        if groups:
+            prev = groups[-1][-1]
+            pc = _chars_json(prev) or {}
+            if (pc.get("cause_close") == "DAILY_BOUNDARY" and _mode(prev) == _mode(sg)
+                    and _cycle_dt(prev.get("t_end")) == _cycle_dt(sg.get("t_start"))):
+                groups[-1].append(sg)
+                continue
+        groups.append([sg])
+
+    def _line(g: list[dict[str, Any]]) -> str:
+        txt = f"  - {_mode(g[0])}: {_span(g[0].get('t_start'), g[-1].get('t_end'))}"
+        if len(g) > 1:
+            txt += f", {len(g)} части через суточный рез"
+        if _with_params(g[0]):
+            kp = _key_params(_chars_of(g))
+            if kp:
+                txt += f": {kp}"
+        return txt
+
+    lines: list[tuple[datetime | None, str]] = [(_cycle_dt(g[0].get("t_start")), _line(g))
+                                                for g in groups]
+    folded = ""
+    if len(lines) > _CYCLE_MAX_LINES:
+        k = len(lines) - _CYCLE_MAX_LINES + 1
+        cnt: dict[str, int] = {}
+        for g in groups[:k]:
+            cnt[_mode(g[0])] = cnt.get(_mode(g[0]), 0) + 1
+        folded = (f"  - … ранее {k} строк: {_t(groups[0][0].get('t_start'))} — "
+                  f"{_t(groups[k - 1][-1].get('t_end'))} ("
+                  + ", ".join(f"{m} ×{n}" for m, n in cnt.items()) + ")")
+        lines = lines[k:]
+
+    out: list[str] = ["", f"Ход цикла (сегменты аналитики, время {_tz_label(tz)}):"]
+    if folded:
+        out.append(folded)
+    sep = (f"  ── {_t(anc)} последний штатный останов; дальше — возможные предвестники ──"
+           if anc is not None else None)
+    for t0, txt in lines:
+        if sep and t0 is not None and t0 >= anc:
+            out.append(sep)
+            sep = None
+        out.append(txt)
     if attempt:
+        if sep:
+            out.append(sep)
+            sep = None
         out.append(f"  - {attempt_label(attempt)} (эта попытка): "
-                   f"{_hms(attempt.get('t_start'))} — {_hms(attempt.get('t_fall'))}")
+                   f"{_span(attempt.get('t_start'), attempt.get('t_fall'))}")
 
-    by_mode: dict[str, dict[str, dict[str, Any]]] = {}
-    for sg in before:
-        cyc = by_mode.setdefault(_mode(sg), {})
-        for role, ch in _chars_of(sg).items():
-            acc = cyc.setdefault(role, {"min": None, "max": None, "unit": ch["unit"]})
-            for k, pick in (("min", min), ("max", max)):
-                if ch[k] is not None:
-                    acc[k] = ch[k] if acc[k] is None else pick(acc[k], ch[k])
-    for mode, cyc in by_mode.items():
-        if not cyc:
-            continue
-        out += ["", f"Параметры за цикл — {mode} (расчётные, мин / макс):"]
-        for role in sorted(cyc):
-            c = cyc[role]
-            out.append(f"  {role}: {_fmt_num(c['min'])} / {_fmt_num(c['max'])} {c['unit']}".rstrip())
-
-    def _detail(sg: dict[str, Any], title: str) -> None:
-        chars = _chars_of(sg)
+    def _detail(g: list[dict[str, Any]], title: str) -> None:
+        chars = _chars_of(g)
         if not chars:
             return
-        out.extend(["", f"{title} — {_mode(sg)}, "
-                        f"{_hms(sg.get('t_start'))} — {_hms(sg.get('t_end'))} "
+        out.extend(["", f"{title} — {_mode(g[0])}, "
+                        f"{_span(g[0].get('t_start'), g[-1].get('t_end'))} "
                         f"(мин / макс / на конце):"])
         for role in sorted(chars):
             c = chars[role]
@@ -199,22 +293,40 @@ def _format_cycle_params(
 
     # Откуда упала: последний не-стоповый сегмент. У 1452 это пуск или
     # прогрев — до работы машина не дошла; у штатной нагрузки — работа или
-    # разгрузка. Последний рабочий — отдельно, если упала не из работы.
-    # Отказ пуска: машина остановилась с этой попытки — её факты, а не
-    # прошлая плашка или работа до штатного останова (ревью v5.1.16)
-    work = next((sg for sg in reversed(before) if sg.get("run_state") == 3), None)
+    # разгрузка. Отказ пуска: машина остановилась с этой попытки — её факты, а
+    # не прошлая плашка или работа до штатного останова (ревью v5.1.16)
     if attempt:
         out += ["", f"Сегмент, из которого машина остановилась — {attempt_label(attempt)}, "
-                    f"{_hms(attempt.get('t_start'))} — {_hms(attempt.get('t_fall'))}: "
+                    f"{_span(attempt.get('t_start'), attempt.get('t_fall'))}: "
                     f"{attempt_facts_ru(attempt) or ''}".rstrip(": ")]
         fell = None
     else:
-        fell = next((sg for sg in reversed(before) if sg.get("run_state") != 0), None)
+        fell = next((g for g in reversed(groups) if g[0].get("run_state") != 0), None)
     if fell is not None:
         _detail(fell, "Сегмент, из которого машина остановилась")
+    # Лента отсчётов — сразу за сегментом падения (v5.1.22, P1-4)
+    try:
+        from analytics.reconstructor import format_analog_trace_ru
+        tl = format_analog_trace_ru(trace, tz)
+    except Exception:
+        logger.warning("IncidentGate: лента отсчётов не напечатана", exc_info=True)
+        tl = []
+    if tl:
+        out += [""] + tl
+    # Фон: последняя работа до штатного останова — то, на чём машина ходила до
+    # него (нагрузка 14 ч — не условия падения). Якоря нет — последняя работа
+    # цикла, если упала не из неё
+    work = next((g for g in reversed(groups) if g[0].get("run_state") == 3
+                 and (anc is None or (_cycle_dt(g[-1].get("t_end")) or stop) <= anc)), None)
     if work is not None and work is not fell:
-        _detail(work, "Последний рабочий сегмент цикла")
+        _detail(work, "Последняя работа до штатного останова (фон)" if anc is not None
+                else "Последний рабочий сегмент цикла")
     return out
+
+
+def _tz_label(tz=None) -> str:
+    from analytics.labels import tz_label
+    return tz_label(tz)
 
 
 def _chars_json(sg: dict[str, Any]) -> dict[str, Any] | None:
@@ -240,7 +352,7 @@ def _dt_any(x: Any) -> datetime | None:
 
 def series_facts(
     cycle_segments: list[dict[str, Any]], stop_ts: Any, anchor: Any,
-    code_name=None,
+    code_name=None, tz=None,
 ) -> list[str]:
     """Предыдущие аварии серии — только факты, без выводов прошлых разборов
     (решение владельца 13.10.2026).
@@ -248,6 +360,7 @@ def series_facts(
     Серия — аварийные стопы после последнего нормального останова и до этого.
     По каждому: когда, код панели, из какого состояния, сколько стояла до
     сброса. Из характеристик сегментов, уже посчитанных при закрытии.
+    Время — местное, с датой (v5.1.22, P1-6).
     """
     stop = _dt_any(stop_ts)
     anc = _dt_any(anchor)
@@ -315,7 +428,7 @@ def series_facts(
             reset = f"сброшена через {_age((t_end - fall).total_seconds())}"
         else:
             reset = "до конца сегмента не сброшена"
-        line = f"  - {fall.strftime('%Y-%m-%d %H:%M:%S')} — {what}; код: {code_txt}; {reset}"
+        line = f"  - {_day(fall, tz)} — {what}; код: {code_txt}; {reset}"
         facts = attempt_facts_ru(att)
         if facts:
             line += f"; {facts}"
@@ -346,6 +459,7 @@ def build_incident_prompt(
     incident: dict[str, Any], seg_row: dict[str, Any] | None = None,
     cycle_segments: list[dict[str, Any]] | None = None,
     context: dict[str, Any] | None = None,
+    tz=None,
 ) -> str:
     """Промпт разбора аварии из акта.
 
@@ -353,16 +467,25 @@ def build_incident_prompt(
     везла на себе к моменту падения, потом сам останов, потом лента. Вопрос в
     конце — иначе модель отвечает на первое, что увидела. context — оборудование
     из реестра и состояние на момент останова (_context, v5.1.14).
+
+    v5.1.22: время во входе — местное (МСК, P1-6; было — UTC без пометки, и
+    совет писал «06:26:23» при «09:26:23» в отчёте); ход цикла по сегментам
+    вместо склейки по режимам и лента отсчётов сегмента падения (P1-4).
+    tz — пояс подписей (None — пояс сервиса, config.get_tz).
     """
+    from analytics.labels import tz_label
+    tzl = tz_label(tz)
     ch = incident.get("character") or {}
     win = incident.get("window") or {}
     eq = (context or {}).get("equipment") or {}
     att = incident.get("attempt") if isinstance(incident.get("attempt"), dict) else None
+    stop_raw = incident.get("stop_ts")
     out: list[str] = [
         "Разбери отказ пуска дизель-генераторной установки: выход из стопа не "
         "подтвердился — машина не вышла на работу — и закончился аварийным "
         "остановом панели." if att else
-        "Разбери аварийный останов дизель-генераторной установки."]
+        "Разбери аварийный останов дизель-генераторной установки.",
+        f"Время во входе — {tzl}."]
     if eq:
         out += ["", "Оборудование (реестр):"]
         if eq.get("name"):
@@ -372,11 +495,11 @@ def build_incident_prompt(
                        + (f", s/n {eq['engine_sn']}" if eq.get("engine_sn") else ""))
         if eq.get("controller"):
             out.append(f"  - Контроллер (панель управления): {eq['controller']}")
-    out += ["", f"Останов: {incident.get('stop_ts') or '—'}"]
+    out += ["", f"Останов: {_day(stop_raw, tz) if stop_raw else '—'}"]
     if att:
         # Гейт характера писан для падения с работы: у отказа пуска «без
         # охлаждения» и «прямой аварийный» — не признаки, а свойство попытки
-        out.append(f"Попытка: {attempt_label(att)}, с {att.get('t_start') or '—'}; "
+        out.append(f"Попытка: {attempt_label(att)}, с {_ts(att.get('t_start'), tz, stop_raw)}; "
                    f"{attempt_facts_ru(att) or ''}".rstrip("; "))
     else:
         out.append(f"Характер по детерминированному гейту: {ch.get('character', '?')} "
@@ -389,9 +512,9 @@ def build_incident_prompt(
                    "окно взято по последним сегментам.")
     elif win.get("from"):
         anchor = win.get("anchor") or win["from"]
-        out.append(f"Последний штатный останов: {anchor}")
+        out.append(f"Последний штатный останов: {_day(anchor, tz)}")
         if win["from"] != anchor:
-            out.append(f"Окно данных: с {win['from']}"
+            out.append(f"Окно данных: с {_day(win['from'], tz)}"
                        + (f" (не менее {win['min_window_h']:g} ч)" if win.get("min_window_h") else ""))
         out.append("До штатного останова — фон (машина остановилась штатно), "
                    "после — возможные предвестники.")
@@ -403,20 +526,17 @@ def build_incident_prompt(
     if states:
         out += ["", "Состояние на момент останова (не обязательно менялось в окне — "
                     "в ленту попадают только смены):"]
-        stop_day = str(incident.get("stop_ts") or "")[:10]
         for s in states:
             since = ""
             if s.get("since"):
-                raw = str(s["since"])
-                # Давнее состояние — с датой: «с 29.09 13:10 UTC», а не «с 13:10:22»
-                since = (f" (с {_ts(raw)})" if raw[:10] == stop_day
-                         else f" (с {raw[8:10]}.{raw[5:7]} {raw[11:16]} UTC)")
+                # Давнее состояние — с датой: «с 29.09 13:10:22», сегодняшнее — время
+                since = f" (с {_ts(s['since'], tz, stop_raw)})"
             out.append(f"  - {s['addr']} {s['name']} = {s['label']}{since}")
 
-    series = series_facts(cycle_segments or [], incident.get("stop_ts"),
+    series = series_facts(cycle_segments or [], stop_raw,
                           win.get("anchor") or (win.get("from") if win.get("baseline") != "fallback"
                                                 else None),
-                          (context or {}).get("code_name"))
+                          (context or {}).get("code_name"), tz=tz)
     if series:
         out += ["", "Предыдущие аварии этой серии — после штатного останова (только "
                     "факты, без выводов прошлых разборов):"] + series
@@ -426,7 +546,7 @@ def build_incident_prompt(
         out += ["", "Висело на момент останова (маска — с какого времени):"]
         for f in standing:
             sev = _SEVERITY_RU.get(f.get("severity") or "", f.get("severity") or "событие")
-            out.append(f"  - {f.get('name')} [{sev}] — с {f.get('since')} "
+            out.append(f"  - {f.get('name')} [{sev}] — с {_day(f.get('since'), tz)} "
                        f"({_age(f.get('age_sec') or 0)})")
 
     summary = incident.get("summary") or []
@@ -444,13 +564,13 @@ def build_incident_prompt(
                 mark = "фронт: " + _SEVERITY_RU.get(g["severity"], g["severity"])
             else:
                 mark = "событие"
-            span = (f"{_ts(g.get('first'))}—{_ts(g.get('last'))}"
-                    if (g.get("count") or 1) > 1 else _ts(g.get("first")))
+            span = (f"{_ts(g.get('first'), tz, stop_raw)}—{_ts(g.get('last'), tz, stop_raw)}"
+                    if (g.get("count") or 1) > 1 else _ts(g.get("first"), tz, stop_raw))
             out.append(f"  - {g.get('name')} [{mark}] × {g.get('count')} ({span})")
 
     chrono = incident.get("chronology") or []
     if chrono:
-        out += ["", "Лента вокруг останова (UTC):", "```"]
+        out += ["", f"Лента вокруг останова ({tzl}):", "```"]
         for e in chrono:
             kind = "СОБЫТИЕ  " if e.get("kind") == "fault" else "состояние"
             bit = e.get("bit")
@@ -458,15 +578,29 @@ def build_incident_prompt(
             val = (f" = {e.get('label')}"
                    if e.get("kind") == "state" and e.get("label") else "")
             sev = f"  [{e.get('severity')}]" if e.get("severity") else ""
-            out.append(f"{_ts(e.get('ts'))}  {kind} {addr:9} "
+            out.append(f"{_ts(e.get('ts'), tz, stop_raw)}  {kind} {addr:9} "
                        f"{e.get('name') or ''}{val}{sev}")
         out.append("```")
 
-    out += _format_cycle_params(cycle_segments or [], incident.get("stop_ts"), att)
+    out += _format_cycle_params(
+        cycle_segments or [], stop_raw, att,
+        anchor=win.get("anchor") if win.get("baseline") != "fallback" else None,
+        trace=incident.get("trace") if isinstance(incident.get("trace"), dict) else None,
+        tz=tz)
 
     if seg_row and seg_row.get("report_md"):
-        out += ["", "Отчёт аналитики по сегменту:", "",
-                str(seg_row["report_md"])[:8000]]
+        # Разбор заказывается в момент останова, ответ — через час: блок о коде в
+        # отчёте — снимок на тот момент, а не «сейчас» (прогон совета 16.10, #35941:
+        # «код 234 не сброшен — не сбрасывать», а сброшен он был через 29 с)
+        _rep = (str(seg_row["report_md"])
+                .replace("**⚠ Несброшенная неисправность:**",
+                         "**⚠ Код неисправности на момент останова:**")
+                .replace("Код не сброшен кнопкой сброса на панели — неисправность считается "
+                         "не устранённой.",
+                         "На момент останова код не сброшен; сброс мог произойти позже."))
+        out += ["", "Отчёт аналитики по сегменту (снимок на момент останова; состояние "
+                "кода — на этот момент, сброс мог произойти позже):", "",
+                _rep[:8000]]
 
     out += [
         "",
@@ -477,7 +611,8 @@ def build_incident_prompt(
         + "Отдельно укажи, что из висевшего к моменту падения могло к "
         "нему привести, а что к делу не относится. Если данных для вывода "
         "не хватает — скажи прямо, какого сигнала недостаёт. Не предлагай "
-        "регламентных работ, которых не следует из наблюдаемого.",
+        "регламентных работ, которых не следует из наблюдаемого. "
+        f"Время в ответе указывай по {tzl}, как во входе.",
     ]
     return "\n".join(out)
 
@@ -667,6 +802,35 @@ async def _ask(prompt: str, meta: dict) -> str:
         label = model or "Claude API"
     if not text:
         raise EmptyIncidentAnswer("модель вернула пустой ответ")
+    # Чужой язык в ответе совета (v5.1.22, решение В4): один проход «очистка /
+    # перевод» быстрой моделью, без перезаказа совета (это час работы шлюза).
+    # Цитаты руководств со ссылкой [Wn] — законны. Отметка — meta["lang_check"]
+    try:
+        from llm.lang_check import clean_text
+        from llm.router import get_depth
+        text, _lang = await clean_text(text, prompt, priority=get_depth("incident").get("priority"),
+                                       allow_ref_quotes=True)
+        if _lang:
+            meta["lang_check"] = _lang
+    except asyncio.CancelledError:
+        # v5.1.22, ревью incident-4: остановка сервиса посреди очистки (до 240 с) —
+        # ответ совета (час работы шлюза) уже получен: исходник без очистки, с
+        # подписью — в meta, _run_incident сохранит его до проброса отмены
+        try:
+            from llm.lang_check import foreign_fragments
+            _found = foreign_fragments(text, prompt, allow_ref_quotes=True)[:10]
+        except Exception:
+            _found = []
+        try:
+            _sig = format_ai_signature(label)
+        except Exception:
+            _sig = ""
+        meta["uncleaned"] = text + _sig
+        meta["lang_check"] = {"found": _found, "cleaned": False, "accepted": False,
+                              "error": "остановка сервиса во время очистки — сохранён исходник"}
+        raise
+    except Exception:
+        logger.warning("IncidentGate: проверка языка не выполнена", exc_info=True)
     try:
         text += format_ai_signature(label)
     except Exception:
@@ -824,17 +988,22 @@ async def _material(router_sn: str, equip_type: str, panel_id: int,
 
 
 async def _save(router_sn: str, equip_type: str, panel_id: int, stop_ts: datetime,
-                segment_id: int | None, analysis: str) -> bool:
+                segment_id: int | None, analysis: str, extra: dict | None = None,
+                tries: int | None = None) -> bool:
     """Записать разбор рядом с разборами гейта; сегмента нет — повтор раз в
-    минуту до 15 мин. Модель повторно не спрашиваем."""
+    минуту до 15 мин. Модель повторно не спрашиваем. extra — поля записи разбора
+    (v5.1.22: lang_check — отметка прохода «очистка / перевод»). tries — число
+    попыток (остановка сервиса — одна, без ожидания, ревью incident-4)."""
     from online import db as online_db
-    tries = max(1, INCIDENT_SAVE_WINDOW_SEC // max(1, INCIDENT_SAVE_RETRY_SEC)) + 1
+    if tries is None:
+        tries = max(1, INCIDENT_SAVE_WINDOW_SEC // max(1, INCIDENT_SAVE_RETRY_SEC)) + 1
     for i in range(tries):
         try:
             if await online_db.save_segment_warning(
                     router_sn, equip_type, panel_id,
                     analysis_md=analysis, fault_hash=incident_hash(stop_ts),
-                    alarm_text="Аварийный останов", segment_id=segment_id, ts=stop_ts):
+                    alarm_text="Аварийный останов", segment_id=segment_id, ts=stop_ts,
+                    **({"extra": extra} if extra else {})):
                 logger.info("IncidentGate: разбор аварии сохранён (%d симв.)", len(analysis))
                 return True
             logger.warning("IncidentGate: сегмент на %s не найден — разбор держу, повтор "
@@ -844,6 +1013,37 @@ async def _save(router_sn: str, equip_type: str, panel_id: int, stop_ts: datetim
         if i < tries - 1:
             await asyncio.sleep(INCIDENT_SAVE_RETRY_SEC)
     return False
+
+
+async def _reorder_conclusion(router_sn: str, equip_type: str, panel_id: int,
+                              stop_ts: datetime, segment_id: int | None) -> None:
+    """Совет не получен (failed / save_failed) — заключение аварийного стопа
+    пишет ИИ (v5.1.22, P1-5): сегмент заказывается повторно, воркер увидит
+    терминальную отметку в журнале и отдаст его модели строки. Только при строке
+    «Система (без ИИ)»: иначе ИИ-заключение уже есть. Сбой — в журнал."""
+    try:
+        from llm.router import SYSTEM_PROVIDER, get_route
+        if get_route("seg_shutdown").get("provider") != SYSTEM_PROVIDER:
+            return
+        from online import db as online_db
+        # v5.1.22, ревью incident-5: id мог устареть (совет заказан по открытой
+        # стоп-строке, цикл закрытия её удалил, закрытая получила новый id) —
+        # прямая ссылка, иначе сегмент по моменту останова, как у _mark и _save
+        sid = await online_db.resolve_segment_id(
+            router_sn, equip_type, panel_id, segment_id, stop_ts)
+        if not sid:
+            return
+        # Стоп ещё открыт — перезаказ не нужен: закрытый сегмент получит
+        # отметку журнала (_slice_gate_state) и уйдёт к ИИ при закрытии
+        row = await online_db.get_segment_by_id(int(sid))
+        if not row or row.get("t_end") is None:
+            return
+        from online.engine import _enqueue_segment
+        _enqueue_segment(int(sid), again=True)
+        logger.info("IncidentGate: совет по %s не получен — заключение аварии #%s "
+                    "перезаказано у ИИ", incident_hash(stop_ts), sid)
+    except Exception:
+        logger.warning("IncidentGate: заключение аварии не перезаказано", exc_info=True)
 
 
 async def _run_incident(
@@ -877,6 +1077,7 @@ async def _run_incident(
                         reason=f"исчерпано заказов: {ordered}", model=label)
             logger.warning("IncidentGate: %s — исчерпано %d заказов, разбор не получен",
                            fh, ordered)
+            await _reorder_conclusion(router_sn, equip_type, panel_id, stop_ts, segment_id)
             return INC_FAILED
         attempt += 1
         await _mark(router_sn, equip_type, panel_id, stop_ts, segment_id, INC_ORDERED,
@@ -890,6 +1091,23 @@ async def _run_incident(
         except asyncio.TimeoutError:
             outcome, reason = INC_FAILED, f"нет ответа за {INCIDENT_DEADLINE_SEC // 3600} ч"
         except asyncio.CancelledError:
+            _raw = meta.get("uncleaned")
+            if _raw:
+                # v5.1.22, ревью incident-4: ответ совета получен, остановка пришла
+                # во время очистки языка — сохраняем исходник одной записью (иначе
+                # восстановление заказало бы совет заново: час шлюза и заказ в
+                # INCIDENT_MAX_ORDERS), текст — и в журнал сервиса
+                _ok = False
+                try:
+                    _lc = meta.get("lang_check")
+                    _ok = await _save(router_sn, equip_type, panel_id, stop_ts, segment_id, _raw,
+                                      extra={"lang_check": _lc} if _lc else None, tries=1)
+                except BaseException:
+                    logger.warning("IncidentGate: исходник совета %s не сохранён", fh, exc_info=True)
+                logger.error("IncidentGate: разбор %s получен, очистка языка прервана остановкой "
+                             "сервиса — исходник %s; текст:\n%s", fh,
+                             "сохранён" if _ok else "НЕ СОХРАНЁН", _raw)
+                raise
             logger.warning("IncidentGate: разбор %s снят (остановка сервиса); задача шлюза %s "
                            "остаётся на шлюзе", fh, _task_id(meta) or "—")
             raise
@@ -908,7 +1126,9 @@ async def _run_incident(
 
         if outcome == "ok":
             try:
-                saved = await _save(router_sn, equip_type, panel_id, stop_ts, segment_id, analysis)
+                _lc = meta.get("lang_check")
+                saved = await _save(router_sn, equip_type, panel_id, stop_ts, segment_id, analysis,
+                                    extra={"lang_check": _lc} if _lc else None)
             except asyncio.CancelledError:
                 # Остановка сервиса посреди повторов записи: текст уже получен —
                 # хотя бы в журнал сервиса. Отметки нет: восстановление закажет снова
@@ -922,11 +1142,14 @@ async def _run_incident(
                          fh, INCIDENT_SAVE_WINDOW_SEC // 60, analysis)
             await _mark(router_sn, equip_type, panel_id, stop_ts, segment_id, INC_SAVE_FAILED,
                         reason="сегмент не найден", task_id=_task_id(meta), model=label)
+            await _reorder_conclusion(router_sn, equip_type, panel_id, stop_ts, segment_id)
             return INC_SAVE_FAILED
         if outcome == INC_REMOVED or attempt >= INCIDENT_ATTEMPTS:
             await _mark(router_sn, equip_type, panel_id, stop_ts, segment_id, outcome,
                         reason=reason, task_id=tid, model=label)
             logger.warning("IncidentGate: разбор %s не получен — %s (%s)", fh, outcome, reason)
+            if outcome == INC_FAILED:
+                await _reorder_conclusion(router_sn, equip_type, panel_id, stop_ts, segment_id)
             return outcome
         logger.info("IncidentGate: повтор разбора %s через %d мин (задача шлюза %s остаётся "
                     "на шлюзе)", fh, INCIDENT_RETRY_AFTER_SEC // 60, tid or "—")

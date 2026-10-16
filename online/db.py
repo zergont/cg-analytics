@@ -160,7 +160,10 @@ async def get_transition_chain(
                    jsonb_path_query_array(characteristics_json,
                        '$.subsegments[*].characteristics.LOAD_PCT.max') AS load_pct_max,
                    characteristics_json #>> '{subsegments,0,characteristics,COOLANT_TEMP,value_start}'
-                       AS coolant_start
+                       AS coolant_start,
+                   -- Начало аварии, которой сегмент отмечен «прервана» (v5.1.22,
+                   -- ревью verdict-4): одна авария — одна отметка и после рестарта
+                   characteristics_json #>> '{closed_by_trip,iv}' AS trip_iv
             FROM auto_segments
             WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
               AND t_end IS NOT NULL AND t_end <= $4
@@ -804,12 +807,18 @@ async def resolve_segment_id(
         await conn.close()
 
 
-async def apply_late_gate_suppression(seg_id: int, scenarios: list[str]) -> tuple[bool, bool]:
+async def apply_late_gate_suppression(
+    seg_id: int, scenarios: list[str],
+    until: datetime | None = None, src: dict | None = None,
+) -> tuple[bool, bool]:
     """Поздняя отмена гейтом в закрытом сегменте: пересчитать части сводки и md.
 
     Части закрытого сегмента замораживаются при закрытии; вердикт гейта,
     вернувшийся позже, лёг в эту строку хешем, но вердикт сводки (единый для
     ИИ, календаря и карточки) его не видел.
+
+    v5.1.22: until — момент разбора (снимаются эпизоды, начавшиеся не позже),
+    src — источник для подписи «снято ИИ (разбор ЧЧ:ММ)».
 
     Возвращает (изменено, сменился уровень вердикта). Частей нет (старый
     сегмент, без связи) или пересчёт ничего не меняет — строка не трогается.
@@ -823,7 +832,42 @@ async def apply_late_gate_suppression(seg_id: int, scenarios: list[str]) -> tupl
         parts = json.loads(raw) if isinstance(raw, str) else raw
         if not isinstance(parts, dict) or not parts.get("version"):
             return False, False
-        new_parts = apply_gate_suppression(parts, scenarios)
+        new_parts = apply_gate_suppression(parts, scenarios, until=until, src=src)
+        if new_parts == parts:
+            return False, False
+        await conn.execute(
+            """UPDATE auto_segments SET report_summary_json = $2::jsonb,
+                   report_summary_md = $3, updated_at = now() WHERE id = $1""",
+            seg_id, json.dumps(new_parts, ensure_ascii=False), render_summary_md(new_parts))
+        old_lvl = (parts.get("verdict") or {}).get("level")
+        new_lvl = (new_parts.get("verdict") or {}).get("level")
+        return True, old_lvl != new_lvl
+    finally:
+        await conn.close()
+
+
+async def apply_late_run_trip(seg_id: int, trip: dict, tz=None) -> tuple[bool, bool]:
+    """Поздняя отметка «<Режим> прерван(а) аварийным остановом» в закрытом
+    сегменте (v5.1.22, P1-3): дописать замечание в части сводки и md.
+
+    Сегмент закрылся сменой режима раньше, чем аварийность следующего стопа
+    пришла в данные, — нарезка отметить его не могла. По образцу поздней отмены
+    гейтом (apply_late_gate_suppression): единственное изменение закрытой
+    строки — эта строка замечаний и пересчитанный вердикт; отчёт не трогается.
+
+    Возвращает (изменено, сменился уровень вердикта). Частей нет или отметка
+    уже есть — строка не трогается.
+    """
+    from analytics.serializer import add_run_trip, render_summary_md
+    conn = await _connect()
+    try:
+        raw = await conn.fetchval(
+            "SELECT report_summary_json FROM auto_segments WHERE id=$1 AND t_end IS NOT NULL",
+            seg_id)
+        parts = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(parts, dict) or not parts.get("version"):
+            return False, False
+        new_parts = add_run_trip(parts, trip, tz)
         if new_parts == parts:
             return False, False
         await conn.execute(
@@ -1243,6 +1287,9 @@ async def reopen_episode(
             UPDATE alarm_episodes
             SET gate_suppressed = CASE WHEN t_close IS NOT NULL THEN FALSE
                                        ELSE gate_suppressed END,
+                -- источник снятия — вместе с пометкой (v5.1.22)
+                gate_suppressed_src = CASE WHEN t_close IS NOT NULL THEN NULL
+                                           ELSE gate_suppressed_src END,
                 t_close = NULL, close_reason = NULL,
                 active_sec = GREATEST(active_sec, EXTRACT(EPOCH FROM ($2 - t_open))),
                 blind_sec  = blind_sec + $3,
@@ -1419,22 +1466,86 @@ async def get_open_episodes_all() -> dict[str, list[dict[str, Any]]]:
 
 
 async def set_episodes_gate_suppressed(
-    router_sn: str, equip_type: str, panel_id: int, scenarios: list[str],
-) -> None:
+    router_sn: str, equip_type: str, panel_id: int, scenarios: list[str], *,
+    ids: list[int] | None = None,
+    until: datetime | None = None,
+    after: datetime | None = None,
+    src: dict | None = None,
+) -> list[int]:
     """Пометить открытые аналитические эпизоды вердиктом гейта «отменить».
-    Режимные замечания гейт не снимает (решение 12.10)."""
+    Режимные замечания гейт не снимает (решение 12.10).
+
+    v5.1.22 (P1-1): снятие относится к своим эпизодам, а не ко всем открытым
+    эпизодам сценария. ids — только эти (наследование, перенос); until — только
+    начавшиеся не позже момента разбора (своё решение гейта); after — начавшиеся
+    позже него (новые эпизоды той же строки, открытые, пока шёл разбор). src —
+    источник снятия {ts, segment_id, kind} в gate_suppressed_src; у уже снятого
+    эпизода сохраняется первое решение. Возвращает id помеченных эпизодов.
+    """
     from online.status_assembler import GATE_EXCLUDED_SCENARIOS
     scenarios = [s for s in scenarios or [] if s not in GATE_EXCLUDED_SCENARIOS]
-    if not scenarios:
-        return
+    if not scenarios or (ids is not None and not ids):
+        return []
     conn = await _connect()
     try:
-        await conn.execute("""
+        rows = await conn.fetch("""
             UPDATE alarm_episodes
-            SET gate_suppressed = TRUE, updated_at = now()
+            SET gate_suppressed = TRUE,
+                gate_suppressed_src = COALESCE(gate_suppressed_src, $5::jsonb),
+                updated_at = now()
             WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
               AND t_close IS NULL AND scenario = ANY($4::text[])
-        """, router_sn, equip_type, panel_id, scenarios)
+              AND ($6::bigint[] IS NULL OR id = ANY($6::bigint[]))
+              AND ($7::timestamptz IS NULL OR t_open <= $7)
+              AND ($8::timestamptz IS NULL OR t_open > $8)
+            RETURNING id
+        """, router_sn, equip_type, panel_id, scenarios,
+             json.dumps(src, ensure_ascii=False, default=str) if src else None,
+             [int(i) for i in ids] if ids is not None else None, until, after)
+        return [int(r["id"]) for r in rows]
+    finally:
+        await conn.close()
+
+
+async def set_episodes_gate_src_segment(ids: list[int], segment_id: int) -> int:
+    """Номер закрытого сегмента с исходным разбором — в источник снятия эпизодов,
+    перенесённых в новую строку (v5.1.22): пока решение лежало в открытой строке,
+    её id менялся при закрытии. Только где номера ещё нет. Возвращает число строк."""
+    if not ids or segment_id is None:
+        return 0
+    conn = await _connect()
+    try:
+        status = await conn.execute("""
+            UPDATE alarm_episodes
+            SET gate_suppressed_src = jsonb_set(gate_suppressed_src, '{segment_id}',
+                                                to_jsonb($2::bigint)),
+                updated_at = now()
+            WHERE id = ANY($1::bigint[]) AND gate_suppressed
+              AND jsonb_typeof(gate_suppressed_src) = 'object'
+              AND (gate_suppressed_src->>'segment_id') IS NULL
+        """, [int(i) for i in ids], int(segment_id))
+        try:
+            return int(str(status).split()[-1])
+        except (ValueError, IndexError):
+            return 0
+    finally:
+        await conn.close()
+
+
+async def clear_open_gate_suppression_hash(
+    router_sn: str, equip_type: str, panel_id: int, suppressed_hash: str,
+) -> bool:
+    """Снять перенесённый хеш с открытой строки (v5.1.22): в ней появился новый
+    эпизод того же состава, а своего решения в строке нет — его разбирает гейт.
+    Только если хеш тот же (решение гейта, пришедшее раньше, не трогаем)."""
+    conn = await _connect()
+    try:
+        status = await conn.execute("""
+            UPDATE auto_segments SET gate_suppressed_hash = NULL, updated_at = now()
+            WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+              AND t_end IS NULL AND gate_suppressed_hash = $4
+        """, router_sn, equip_type, panel_id, suppressed_hash)
+        return status != "UPDATE 0"
     finally:
         await conn.close()
 
@@ -1443,14 +1554,15 @@ async def clear_episodes_gate_suppressed(
     router_sn: str, equip_type: str, panel_id: int, scenarios: list[str],
 ) -> int:
     """Снять пометку «снято гейтом» с открытых эпизодов машины (v5.1.12): тревога
-    стала нарушением паспорта — снятие на неё больше не действует."""
+    стала нарушением паспорта — снятие на неё больше не действует. Источник
+    снятия обнуляется вместе с пометкой (v5.1.22)."""
     if not scenarios:
         return 0
     conn = await _connect()
     try:
         status = await conn.execute("""
             UPDATE alarm_episodes
-            SET gate_suppressed = FALSE, updated_at = now()
+            SET gate_suppressed = FALSE, gate_suppressed_src = NULL, updated_at = now()
             WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
               AND t_close IS NULL AND gate_suppressed AND scenario = ANY($4::text[])
         """, router_sn, equip_type, panel_id, scenarios)
@@ -1474,7 +1586,8 @@ async def reset_open_gate_suppression() -> tuple[int, int]:
             WHERE t_end IS NULL AND gate_suppressed_hash IS NOT NULL
         """)
         s2 = await conn.execute("""
-            UPDATE alarm_episodes SET gate_suppressed = FALSE, updated_at = now()
+            UPDATE alarm_episodes SET gate_suppressed = FALSE, gate_suppressed_src = NULL,
+                                      updated_at = now()
             WHERE t_close IS NULL AND gate_suppressed
         """)
 
@@ -1484,6 +1597,58 @@ async def reset_open_gate_suppression() -> tuple[int, int]:
             except (ValueError, IndexError):
                 return 0
         return _n(s1), _n(s2)
+    finally:
+        await conn.close()
+
+
+async def reset_carried_gate_suppression() -> tuple[int, int]:
+    """Разовый перенос v5.1.22 (P1-1): снятие гейтом относится к своим эпизодам.
+
+    Хеш открытой строки, в журнале которой нет своего применённого снятия
+    (разбор моделью или повтор с этим хешем — gate_decision_source), пришёл
+    переносом через рез или через стоп и пуск — обнуляется. У эпизодов машины,
+    начавшихся не раньше начала строки без единого своего снятия (открытых и
+    закрытых: 14931 закрыт, а сводка открытой #35949 его показывает «снято ИИ»),
+    снятие обнуляется. Строки со своим решением не трогаются, закрытые сегменты
+    — тоже. Одна транзакция; повторный запуск ничего не меняет.
+    Возвращает (строк, эпизодов).
+    """
+    from online.status_assembler import (
+        GATE_OWN_KINDS, _applied_cancel, gate_decision_source, gate_entry_kind,
+    )
+    conn = await _connect()
+    try:
+        rows = await conn.fetch("""
+            SELECT id, router_sn, equip_type, panel_id, t_start, gate_suppressed_hash, gate_log
+            FROM auto_segments WHERE t_end IS NULL
+        """)
+        n_rows = n_eps = 0
+        async with conn.transaction():
+            for r in rows:
+                log = r["gate_log"]
+                if isinstance(log, str):
+                    try:
+                        log = json.loads(log)
+                    except ValueError:
+                        log = []
+                log = log if isinstance(log, list) else []
+                h = r["gate_suppressed_hash"]
+                if h and gate_decision_source(log, h) is None:
+                    st = await conn.execute(
+                        "UPDATE auto_segments SET gate_suppressed_hash = NULL, updated_at = now() "
+                        "WHERE id = $1 AND gate_suppressed_hash = $2", r["id"], h)
+                    n_rows += int(str(st).split()[-1] or 0)
+                has_own = any(gate_entry_kind(e) in GATE_OWN_KINDS and _applied_cancel(e)
+                              for e in log if isinstance(e, dict))
+                if not has_own and r["t_start"] is not None:
+                    st = await conn.execute("""
+                        UPDATE alarm_episodes
+                        SET gate_suppressed = FALSE, gate_suppressed_src = NULL, updated_at = now()
+                        WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
+                          AND gate_suppressed AND t_open >= $4
+                    """, r["router_sn"], r["equip_type"], r["panel_id"], r["t_start"])
+                    n_eps += int(str(st).split()[-1] or 0)
+        return n_rows, n_eps
     finally:
         await conn.close()
 

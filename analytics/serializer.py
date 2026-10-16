@@ -20,7 +20,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .contract import Segment, Subsegment, cap_severity
-from .labels import fmt_duration, fmt_number, number_decimals, role_label, unit_ru
+from .labels import (
+    fault_code_close_text, fmt_duration, fmt_local, fmt_number, gate_supp_label,
+    number_decimals, role_label, run_trip_name, run_trip_text, unit_ru,
+)
 
 
 # ── Вспомогательные ──────────────────────────────────────────────────────────
@@ -162,7 +165,10 @@ _RAW_SEV_EMOJI = {"shutdown": "🔴", "shutdown_cooldown": "🔴", "warning": "�
 _SRC_RU = {"panel": "панель", "analytics": "аналитика"}
 
 
-SUMMARY_PARTS_VERSION = 3   # v5.1.20: неподтверждённое вне воздействия, имена в таблице, пик нагара
+# v5.1.20 (3): неподтверждённое вне воздействия, имена в таблице, пик нагара.
+# v5.1.22 (4, одна правка на всю версию): источник снятия гейтом в группах
+# (supp_src, supp_label, open_live_t); старые части рендерятся без новых ключей
+SUMMARY_PARTS_VERSION = 4
 
 # Уровень в частях сводки — те же значения, что alarm_level корпуса (догма v4.9.32)
 _LEVEL_RANK = {"НОРМА": 0, "CAUTION": 1, "WARNING": 2, "SHUTDOWN": 3}
@@ -535,6 +541,15 @@ def build_summary_parts(
     стоп-сегмент в календаре (v4.9.73); mttr {kind, label, sec} | None;
     remarks — замечания по причинам, с фазами before / appeared / open;
     failed_checks; key_metrics {rows} | None; coking {level} | None; no_data.
+    v5.1.22 (части v4): у группы со снятыми — supp_src [{ts, segment_id, own}],
+    supp_label («снято ИИ (разбор 09:59)» / «снято по разбору от 14.10 03:36
+    (#35876)»), supp_label_pl; open_live_t — начала открытых живых эпизодов
+    (поздний вердикт снимает только начавшиеся не позже разбора).
+    v5.1.22 (P1-2): fault_code — код 40012, снятый на закрытии (запись
+    Segment.fault_code_close + text без регистров, text_regs с ними): строка
+    «⏱ Авария снята» и шапка заключения говорят «сброшен / снят», а не
+    «несброшенная». P1-3: замечание RUN_TRIP — сегмент оборван аварийным
+    остановом (CAUTION [панель], разовое событие, +1 вид, гейт не снимает).
     """
     # Риск нагара — состояние, у него своя часть (старые эпизоды до v5.1.3 не в счёт)
     from .contract import STATE_SCENARIOS
@@ -578,6 +593,15 @@ def build_summary_parts(
             and e.get("t_open")
         ]
         t_first = min((e["t_open"] for e in panel_eps), default=None)
+        # Источник интервала аварии — для подписи «чем сняли» (v5.1.22, ревью
+        # verdict-3: «панель сняла аварийную маску» печаталось и у 1452 без маски).
+        # Маска — эпизод панели аварийной тяжести или её детекция в аварийном стопе
+        _mask_seen = t_first is not None or any(
+            getattr(d, "scenario", None) == "CONTROLLER_FAULT"
+            and getattr(d, "severity", None) == "SHUTDOWN"
+            for s in emergency for sub in (getattr(s, "subsegments", None) or [])
+            for d in (getattr(sub, "detections", None) or []))
+        _by = "mask" if _mask_seen else None
         # Эпизода нет (авария без бита в масках) — якорь в начале аварийного
         # стопа: 40013 входит в Shutdown в одном кадре с остановом. Только у
         # головы, открытой самим остановом; продолжение после суточного реза
@@ -588,6 +612,7 @@ def build_summary_parts(
             if _heads:
                 try:
                     t_first = datetime.fromisoformat(min(_heads))
+                    _by = _by or "state"
                 except (ValueError, TypeError):
                     t_first = None
         t_end_iso = getattr(segments[-1], "t_end", None)
@@ -606,6 +631,8 @@ def build_summary_parts(
                                   else "Неисправности устранены"),
                         "sec": mttr,
                     }
+                    if _by:
+                        mttr_part["by"] = _by
             except (ValueError, TypeError):
                 pass
 
@@ -695,6 +722,7 @@ def build_summary_parts(
             # открытая строка главнее: её состояние (снятие ИИ) действует сейчас
             if not e.get("t_close"):
                 cur["gate_suppressed"] = e.get("gate_suppressed")
+                cur["gate_suppressed_src"] = e.get("gate_suppressed_src")
             cur["t_close"] = None
         else:
             cur["t_close"] = max(_dt(cur["t_close"]) or _dt(e["t_close"]), _dt(e["t_close"]) or _dt(cur["t_close"]))
@@ -795,7 +823,7 @@ def build_summary_parts(
             "count": 0, "active_sec": 0.0, "blind_sec": 0.0,
             "suppressed": 0, "unconfirmed": 0, "unconfirmed_at": [], "open": 0, "open_live": 0,
             "before": False, "appeared": False, "at_end": False, "_iv": [], "_on": {},
-            "_uiv": [],
+            "_uiv": [], "_ss": [], "_ns": 0, "open_live_t": [],
         })
         g["count"] += 1
         # Снятое ИИ и неподтверждённое не суммируются: снятие главнее
@@ -828,12 +856,29 @@ def build_summary_parts(
             g["sev_rank"], g["severity"] = rank, e.get("severity")
         if e.get("gate_suppressed"):
             g["suppressed"] += 1
+            # Источник снятия — для подписи (v5.1.22)
+            _src = e.get("gate_suppressed_src")
+            if isinstance(_src, str):
+                try:
+                    _src = json.loads(_src)
+                except ValueError:
+                    _src = None
+            if isinstance(_src, dict) and _src.get("ts"):
+                g["_ss"].append(_src)
+            else:
+                # Снят до v5.1.22 — источника нет (ревью теневого прогона): новому
+                # разбору группы его не приписываем
+                g["_ns"] += 1
         if not e.get("t_close"):
             g["open"] += 1
             if not e.get("gate_suppressed") and not _unconf:
                 # Открытые и не снятые — их и снимет поздний вердикт гейта
-                # (set_episodes_gate_suppressed метит только открытые эпизоды)
+                # (set_episodes_gate_suppressed метит только открытые эпизоды).
+                # v5.1.22: с началом — поздний вердикт снимает только начавшиеся
+                # не позже момента разбора
                 g["open_live"] += 1
+                if _to is not None:
+                    g["open_live_t"].append(_to.isoformat())
                 if e.get("source") == "panel":
                     hangs = panel_live is None or (e.get("addr"), e.get("bit")) in panel_live
                 else:
@@ -854,6 +899,17 @@ def build_summary_parts(
                 g["before"] = True
             else:
                 g["appeared"] = True
+    # Подпись снятия гейтом (v5.1.22, P1-1 п. 5): решение в этой карточке —
+    # «снято ИИ (разбор 09:59)», раньше — «снято по разбору от 14.10 03:36 (#35876)»
+    for g in groups.values():
+        _ss, _ns = g.pop("_ss"), g.pop("_ns")
+        if g["suppressed"] and _ss:
+            g["supp_src"] = _supp_srcs(_ss, w0, w1)
+            g["supp_label"] = gate_supp_label(g["supp_src"], tz)
+            g["supp_label_pl"] = gate_supp_label(g["supp_src"], tz, plural=True)
+            if _ns:
+                # Сняты до v5.1.22 без источника — подпись «снято ИИ» отдельно
+                g["supp_nosrc"] = _ns
     for g in groups.values():
         iv, ons, uiv = _merge_iv(g.pop("_iv")), g.pop("_on"), _merge_iv(g.pop("_uiv"))
         if w0 is not None and w1 is not None and uiv:
@@ -883,6 +939,13 @@ def build_summary_parts(
     # Разовые события перехода (v5.1.10): «событие ЧЧ:ММ:СС», никогда не «на конец»,
     # +1 к вердикту; сортируются с остальными — ниже живых, выше снятых
     ev_groups = _event_groups(segments, event_eps, w0, w1, tz)
+    # Сегмент оборван аварийным остановом (v5.1.22, P1-3, решение В3): замечание
+    # панели уровня CAUTION — разовое событие, не эпизод; сама авария — следующий
+    # сегмент. Добавляется до сортировки (критика v5.1.22, п. 4)
+    for _sg in segments:
+        _trip = getattr(_sg, "closed_by_trip", None)
+        if isinstance(_trip, dict) and _trip.get("t"):
+            ev_groups.append(_run_trip_group(_trip, tz))
     for g in ev_groups:
         g["sev_rank"] = _SEV_RANK_MD.get("CAUTION", 0)
     remarks = sorted(list(groups.values()) + ev_groups,
@@ -925,11 +988,21 @@ def build_summary_parts(
     attempt_part = ({"label": attempt_label(_att), "facts": attempt_facts_ru(_att)}
                     if _att else None)
 
+    # Код 40012 на закрытии карточки (v5.1.22, P1-2): только у последнего
+    # сегмента — его конец и есть конец карточки
+    fault_code_part = None
+    _fcc = getattr(segments[-1], "fault_code_close", None) if segments else None
+    if isinstance(_fcc, dict) and _fcc.get("code"):
+        _tz_fc = tz if tz is not None else timezone.utc
+        fault_code_part = dict(_fcc, text=fault_code_close_text(_fcc, _tz_fc, regs=False),
+                               text_regs=fault_code_close_text(_fcc, _tz_fc, regs=True))
+
     return {
         "version": SUMMARY_PARTS_VERSION,
         "verdict": verdict,
         "end_level": end_level,
         "mttr": mttr_part,
+        "fault_code": fault_code_part,
         "remarks": remarks,
         "has_remarks": bool(remarks or failed_checks),
         "failed_checks": checks,
@@ -997,6 +1070,96 @@ def _event_groups(segments, event_eps, w0, w1, tz) -> list[dict]:
     return list(groups.values())
 
 
+def _run_trip_group(trip: dict, tz=None) -> dict:
+    """Группа замечаний «<Режим> прерван(а) аварийным остановом» (v5.1.22, P1-3).
+
+    Источник — панель, уровень CAUTION (догма: аварию несёт стоп-сегмент, у
+    работы — не выше CAUTION; прецедент — «Общая авария» + 40012, решение 11.10),
+    вид — разовое событие: «на конец» не висит, гейт его не снимает
+    (apply_gate_suppression пропускает события), воздействия нет.
+    """
+    t = trip.get("t")
+    return {
+        "name": run_trip_name(trip.get("run_state")), "source": "panel", "scenario": "RUN_TRIP",
+        "severity": "CAUTION", "kind": "event", "count": 1,
+        "events": [{"t": t, "t_text": fmt_local(t, tz if tz is not None else timezone.utc) or "?",
+                    "text": run_trip_text(trip)}],
+        "trip": {k: trip.get(k) for k in ("t", "codes", "masks", "run_state", "next_stop_kind")},
+        "active_sec": 0.0, "blind_sec": 0.0, "period_sec": 0.0, "period_blind_sec": 0.0,
+        "suppressed": 0, "unconfirmed": 0, "unconfirmed_at": [], "open": 0, "open_live": 0,
+        "before": False, "appeared": True, "at_end": False,
+    }
+
+
+def add_run_trip(parts: dict[str, Any], trip: dict | None, tz=None) -> dict[str, Any]:
+    """Дописать в части закрытого сегмента замечание «… прервана аварийным
+    остановом» и пересчитать вердикт (v5.1.22, P1-3).
+
+    Поздняя доработка, по образцу apply_gate_suppression: сегмент закрылся
+    сменой режима раньше, чем аварийность следующего стопа пришла в данные
+    (40013/маска кадром позже 40011), и нарезка отметить его не могла. Это
+    единственное изменение закрытой сводки — дописать строку, как поздняя
+    отмена гейтом; отчёт (report_md) не трогается. Уже есть — без изменений.
+    """
+    if not parts or parts.get("no_data") or not isinstance(trip, dict) or not trip.get("t"):
+        return parts
+    if any(g.get("scenario") == "RUN_TRIP" for g in parts.get("remarks") or []):
+        return parts
+    out = json.loads(json.dumps(parts))
+    remarks = out.get("remarks") or []
+    g = _run_trip_group(trip, tz)
+    cr = _SEV_RANK_MD["CAUTION"]
+    pos = len(remarks)
+    for i, x in enumerate(remarks):
+        r = _SEV_RANK_MD.get(x.get("severity") or "", 0)
+        if x.get("kind") == "state" or r < cr or (r == cr and _remark_live(x) <= 0):
+            pos = i
+            break
+    remarks.insert(pos, g)
+    out["remarks"] = remarks
+    out["has_remarks"] = True
+    out["verdict"], _end = _verdict_from_remarks(
+        remarks, out.get("failed_checks") or [], bool(out.get("emergency")))
+    return out
+
+
+def _supp_srcs(srcs: list[dict], w0: datetime | None, w1: datetime | None) -> list[dict]:
+    """Источники снятия группы без повторов, по времени: {ts, segment_id, own};
+    own — разбор внутри окна этой карточки (v5.1.22)."""
+    out: dict[str, dict] = {}
+    for s in srcs or []:
+        t = _dt(s.get("ts"))
+        if t is None:
+            continue
+        own = (w0 is None or t >= w0) and (w1 is None or t < w1)
+        key = t.isoformat()
+        if key not in out:
+            out[key] = {"ts": key, "segment_id": s.get("segment_id"), "own": own}
+        elif out[key].get("segment_id") is None and s.get("segment_id") is not None:
+            out[key]["segment_id"] = s.get("segment_id")
+    return [out[k] for k in sorted(out)]
+
+
+def supp_remark_text(g: dict, total: int) -> str | None:
+    """Подпись снятых эпизодов группы для строки замечания (сводка, вход
+    заключения): «снято ИИ (разбор 09:59)» или «…: k из n». Эпизоды, снятые до
+    v5.1.22 (без источника), — отдельной подписью «снято ИИ»: иначе групповая
+    подпись приписывала их снятие новому разбору («снято ИИ (разбор 08:52): 3 из
+    4», хотя два сняты 11.10; ревью теневого прогона v5.1.22). None — снятых нет."""
+    k = int(g.get("suppressed") or 0)
+    if k <= 0:
+        return None
+    lab = g.get("supp_label") or "снято ИИ"
+    ns = min(int(g.get("supp_nosrc") or 0), k) if g.get("supp_label") else 0
+    if ns and k - ns > 0:
+        if k >= total:
+            return f"{lab}: {k - ns}; снято ИИ: {ns}"
+        return f"{lab}: {k - ns} из {total}; снято ИИ: {ns} из {total}"
+    if ns:
+        lab = "снято ИИ"
+    return lab if k >= total else f"{lab}: {k} из {total}"
+
+
 def _remark_live(g: dict) -> int:
     """Эпизоды группы, идущие в вердикт: без снятых ИИ и неподтверждённых итоговым расчётом."""
     return g["count"] - g.get("suppressed", 0) - g.get("unconfirmed", 0)
@@ -1041,7 +1204,11 @@ def _verdict_from_remarks(
     elif suppressed_n or unconfirmed_n:
         _notes = []
         if suppressed_n:
-            _notes.append(f"Предупреждения аналитики ({suppressed_n}) сняты ИИ.")
+            # С источником (v5.1.22): одна подпись на все снятые — она, иначе общая
+            _pl = {(None if g.get("supp_nosrc") else g.get("supp_label_pl")) or "сняты ИИ"
+                   for g in remarks if g.get("suppressed")}
+            _notes.append(f"Предупреждения аналитики ({suppressed_n}) "
+                          f"{_pl.pop() if len(_pl) == 1 else 'сняты ИИ'}.")
         if unconfirmed_n:
             _notes.append(f"Эпизоды по живым данным ({unconfirmed_n}) итоговым расчётом "
                           f"не подтверждены.")
@@ -1068,12 +1235,18 @@ def _verdict_from_remarks(
     return verdict, end_level
 
 
-def apply_gate_suppression(parts: dict[str, Any], scenarios) -> dict[str, Any]:
+def apply_gate_suppression(parts: dict[str, Any], scenarios, until=None,
+                           src: dict | None = None) -> dict[str, Any]:
     """Пометить снятыми аналитические замечания этих сценариев и пересчитать вердикт.
 
     Для поздней отмены гейтом: разбор вернулся после закрытия сегмента, его
     вердикт лёг в закрытую строку, а части там заморожены при закрытии.
     Несимметрию гейт не снимает (online.status_assembler.UNCANCELLABLE_SCENARIOS).
+
+    v5.1.22 (P1-1): until — момент разбора: снимаются только открытые эпизоды,
+    начавшиеся не позже него (части с open_live_t; в старых — все открытые, как
+    раньше). src — источник для подписи: разбор лёг в этот сегмент, подпись
+    «снято ИИ (разбор ЧЧ:ММ)».
     """
     from online.status_assembler import GATE_EXCLUDED_SCENARIOS, UNCANCELLABLE_SCENARIOS
     sc = {x for x in scenarios
@@ -1084,6 +1257,7 @@ def apply_gate_suppression(parts: dict[str, Any], scenarios) -> dict[str, Any]:
     remarks = out.get("remarks") or []
     # Без отметок «на конец» уровень конца из групп не восстановить — прежний
     keep_end = not all("at_end" in g for g in remarks)
+    _u = _dt(until) if until is not None else None
     for g in remarks:
         if g.get("kind") == "event":
             continue   # разовое событие перехода гейт не снимает (v5.1.10)
@@ -1093,9 +1267,33 @@ def apply_gate_suppression(parts: dict[str, Any], scenarios) -> dict[str, Any]:
             n = g.get("open_live")
             if n is None:
                 n = _remark_live(g)
-            g["suppressed"] = g.get("suppressed", 0) + n
-            g["open_live"] = 0
-            g["at_end"] = False
+            if _u is not None and isinstance(g.get("open_live_t"), list):
+                _hit = [t for t in g["open_live_t"] if _dt(t) is not None and _dt(t) <= _u]
+                n = len(_hit)
+                g["open_live_t"] = [t for t in g["open_live_t"] if t not in _hit]
+                g["open_live"] = len(g["open_live_t"])
+            else:
+                g["open_live"] = 0
+                if isinstance(g.get("open_live_t"), list):
+                    g["open_live_t"] = []
+            if n <= 0:
+                continue
+            _k0 = g.get("suppressed", 0)
+            g["suppressed"] = _k0 + n
+            if not g["open_live"]:
+                g["at_end"] = False
+            _ss = [s for s in g.get("supp_src") or [] if isinstance(s, dict)]
+            if isinstance(src, dict) and src.get("ts"):
+                if _k0 and not _ss:
+                    # Снятые раньше без источника (до v5.1.22) — не этим разбором
+                    g["supp_nosrc"] = int(g.get("supp_nosrc") or 0) + _k0
+                _ss.append({"ts": src.get("ts"), "segment_id": src.get("segment_id"), "own": True})
+                g["supp_src"] = _ss
+                g["supp_label"] = gate_supp_label(_ss)
+                g["supp_label_pl"] = gate_supp_label(_ss, plural=True)
+            elif _ss:
+                # Снятие без источника рядом с подписанными — отдельно
+                g["supp_nosrc"] = int(g.get("supp_nosrc") or 0) + n
     out["verdict"], end_level = _verdict_from_remarks(
         remarks, out.get("failed_checks") or [], bool(out.get("emergency")))
     if not keep_end:
@@ -1121,8 +1319,12 @@ def render_summary_md(parts: dict[str, Any]) -> str:
     m = parts.get("mttr")
     if m:
         a("")
+        # v5.1.22 (P1-2): что стало с кодом 40012 — только в этой строке; у
+        # простых стопов в сводку не выносится, чтобы не шуметь
+        fc = parts.get("fault_code")
         a(f"⏱ **{m['label']}** — время до устранения: "
-          f"**{_fmt_duration(m['sec'])}** (от первого кода до сброса)")
+          f"**{_fmt_duration(m['sec'])}** (от первого кода до сброса)"
+          + (f". {fc['text']}" if isinstance(fc, dict) and fc.get("text") else ""))
 
     if parts.get("has_remarks"):
         a("")
@@ -1136,6 +1338,13 @@ def render_summary_md(parts: dict[str, Any]) -> str:
             if g.get("kind") == "state":
                 ck = parts.get("coking") or {}
                 a(f"- {emoji} **{g['name']}** [{src_ru}]: {coking_state_text(ck) or ''}")
+                continue
+            if g.get("kind") == "event" and g.get("scenario") == "RUN_TRIP":
+                # v5.1.22 (P1-3, В3): «Работа прервана аварийным остановом [панель]:
+                # 09:28:53 — код 234 «…»»
+                ev = (g.get("events") or [{}])[0]
+                a(f"- {emoji} **{g['name']}** [{src_ru}]: {ev.get('t_text') or '?'}"
+                  + (f" — {ev['text']}" if ev.get("text") else ""))
                 continue
             if g.get("kind") == "event":
                 evs = g.get("events") or []
@@ -1177,8 +1386,10 @@ def render_summary_md(parts: dict[str, Any]) -> str:
                              f"снятие могло произойти раньше)")
             _nc = g["count"] - (_u if _v3u else 0)
             if g["suppressed"]:
-                line += (" — *снято ИИ*" if g["suppressed"] == _nc
-                         else f" — *снято ИИ: {g['suppressed']} из {_nc}*")
+                # С источником (v5.1.22): «снято ИИ (разбор 09:59)» / «снято по
+                # разбору от 14.10 03:36 (#35876)»; старые части — «снято ИИ»;
+                # снятые до v5.1.22 рядом с новыми — отдельной подписью
+                line += f" — *{supp_remark_text(g, _nc)}*"
             # То же, что end_level и шапка ИИ: снятое ИИ и снятое панелью к концу не
             # висит. До оговорки о неподтверждённых: «на конец» — про подтверждённый
             # эпизод (v5.1.20; модель отнесла его к неподтверждённому, #35872)
@@ -1792,7 +2003,13 @@ def _append_segment(
             a(f"- **Предыдущее состояние:** ← начало окна анализа")
     a(f"- **Причина открытия:** {seg.cause_open}")
     if seg.cause_close:
-        a(f"- **Причина закрытия:** {seg.cause_close}")
+        # v5.1.22 (P1-3): сегмент оборван аварийным остановом — так и пишем
+        _trip = getattr(seg, "closed_by_trip", None)
+        if isinstance(_trip, dict) and _trip.get("t"):
+            a(f"- **Причина закрытия:** {seg.cause_close} — аварийный останов панели в "
+              f"{fmt_ts(_trip['t'])}, {run_trip_text(_trip)}")
+        else:
+            a(f"- **Причина закрытия:** {seg.cause_close}")
     if seg.preamble_included:
         a(f"- **Преамбула включена:** да")
     a("")
@@ -1884,7 +2101,29 @@ def _append_segment(
                 unacked_type = None
             break
 
-        if unacked_code > 0:
+        # v5.1.22 (P1-2, решение В7): код держался до конца, но снят на резе —
+        # окно полуоткрытое, и value_end — это код до снятия. «Сброшен» (сброс
+        # неисправностей / переключатель «Выкл») или «снят»; следом другой код —
+        # он относится к следующему сегменту. Слов «кнопка» и «несброшенная» нет
+        _fcc = getattr(seg, "fault_code_close", None)
+        _fcc_txt = (fault_code_close_text(_fcc, tz if tz is not None else timezone.utc)
+                    if isinstance(_fcc, dict) and _fcc.get("code") == unacked_code else None)
+        if unacked_code > 0 and _fcc_txt:
+            seen_codes.add(unacked_code)
+            type_str = ""
+            if unacked_type is not None:
+                type_str = f" (тип: {_FAULT_TYPE_RU.get(unacked_type, f'код типа {unacked_type}')})"
+            a(f"**Код неисправности на закрытии (регистр 40012){type_str}:** {_fcc_txt}. "
+              f"На конец сегмента не висит.")
+            a("")
+            desc = fault_ref.format_for_report(unacked_code)
+            if desc:
+                a("**Справочник кода:**")
+                a("")
+                for line in desc.split("\n"):
+                    a(line)
+                a("")
+        elif unacked_code > 0:
             if unacked_code in seen_codes:
                 a(f"**Последний код неисправности (регистр 40012):** `{unacked_code}` — "
                   f"дублирует активную неисправность выше.")

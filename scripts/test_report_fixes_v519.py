@@ -78,8 +78,10 @@ async def _set_supp(r, e, p, suppressed_hash, segment_id=None, ts=None):
     return True
 
 
-async def _mark(r, e, p, scs):
+async def _mark(r, e, p, scs, **k):
+    # v5.1.22: с источником снятия, возвращает id помеченных
     calls.append(("mark", tuple(scs)))
+    return [7]
 
 
 async def _log(r, e, p, segment_id=None, ts=None, event=None):
@@ -192,10 +194,13 @@ p6b = build_summary_parts([seg([sub(1, [det("OIL_DILUTION")]), sub(2, [det("OIL_
 g6 = p6b["remarks"][0]
 check(g6["total_blind_sec"] >= 3000 and g6["total_blind_sec"] >= g6.get("period_blind_sec", 0),
       f"6б: «с начала» без связи — по всем онсетам: {g6.get('total_blind_sec')} / {g6.get('period_blind_sec')}")
-# 6в. Вердикт разбора, перенесённый в новую строку, виден повтору снятия
+# 6в. Вердикт разбора, перенесённый в новую строку, повтору снятия НЕ основание.
+# v5.1.22 (P1-1, критика 1): поздний вердикт (provider=carried до v5.1.22, kind
+# late) защищает только продолжающиеся эпизоды; основание повтора — только своё
+# решение строки (разбор моделью и повтор от него)
 check(mgr._cancelled_hashes({"gate_log": [{"fault_hash": "X", "decision": "cancel", "decision_applied": True,
-                                           "provider": "carried", "rules": RULES}]}) == {"X"},
-      "6в: перенесённый вердикт виден повтору снятия")
+                                           "provider": "carried", "rules": RULES}]}) == set(),
+      "6в: перенесённый вердикт повтору снятия не основание (v5.1.22)")
 
 # ── 7. Оценка токенов ───────────────────────────────────────────────────────
 from corpus import worker  # noqa: E402

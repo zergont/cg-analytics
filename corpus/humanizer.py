@@ -14,12 +14,18 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
-async def humanize(conclusion_md: str, task_id: str = "human_auto") -> str:
+async def humanize(conclusion_md: str, task_id: str = "human_auto",
+                   meta: dict | None = None) -> str:
     """Переписать сухое заключение в прозу для оператора.
 
     Кто разбирает — строка «Пересказ для оператора» таблицы (llm.router.get_route,
     v5.1.11); промпт — по task_id.
     Возвращает пустую строку при ошибке — не критично для пайплайна.
+
+    v5.1.22 (В4): чужой язык в пересказе (#35624 — «风险信息…» и протёкшее
+    «Final answer should be clean») — один проход «очистка / перевод» быстрой
+    моделью; не принят — исходник с вычищенными иероглифами. Отметка — в
+    meta["lang_check"] (воркер пишет её в debug_json).
     """
     if not conclusion_md:
         return ""
@@ -39,9 +45,19 @@ async def humanize(conclusion_md: str, task_id: str = "human_auto") -> str:
             result = await _humanize_api(system_prompt, user_msg, model)
         else:
             from llm.client import gateway_label, get_llm_settings
-            meta: dict = {}
-            result = await _humanize_llm(system_prompt, user_msg, meta)
-            model = gateway_label(meta, get_llm_settings()["model"])
+            _gw: dict = {}
+            result = await _humanize_llm(system_prompt, user_msg, _gw)
+            model = gateway_label(_gw, get_llm_settings()["model"])
+        if result:
+            try:
+                from llm.lang_check import clean_text
+                from llm.router import get_depth
+                result, _lang = await clean_text(result, block2_text,
+                                                 priority=get_depth("humanize").get("priority"))
+                if _lang and meta is not None:
+                    meta["lang_check"] = _lang
+            except Exception:
+                logger.warning("corpus/humanizer: проверка языка не выполнена", exc_info=True)
         return result + format_ai_signature(model) if result else result
     except Exception as exc:
         logger.warning("corpus/humanizer: ошибка (некритично): %s", repr(exc))

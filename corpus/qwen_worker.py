@@ -141,12 +141,14 @@ async def _process_segment(seg_id: int, task_id: str = "human_auto") -> None:
         logger.warning("qwen/worker: conclusion_md пустой у #%d — пропускаю", seg_id)
         return
 
-    humanized = await humanize(conclusion_md, task_id=task_id)
+    _meta: dict = {}
+    humanized = await humanize(conclusion_md, task_id=task_id, meta=_meta)
     if not humanized:
         logger.warning("qwen/worker: хуманизатор вернул пустой результат для #%d", seg_id)
         return
 
-    await corpus_db.set_humanized_md(seg_id, humanized)
+    # Отметка прохода «очистка / перевод» (v5.1.22, В4) — в debug_json анализа
+    await corpus_db.set_humanized_md(seg_id, humanized, lang_check=_meta.get("lang_check"))
     logger.info("qwen/worker: #%d обработан (%d символов)", seg_id, len(humanized))
 
 

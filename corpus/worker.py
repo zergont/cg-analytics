@@ -166,10 +166,18 @@ async def _process_segment(
     # владельца 13.10.2026). Отказ пуска с аварией разбирает совет по акту
     if not force:
         _facts = _attempt_conclusion(seg_row)
+        _what = "неудачная попытка пуска"
+        if _facts is None:
+            # Аварийный стоп с актом (v5.1.22, P1-5, решение В1): заключение —
+            # фактами, причину разбирает совет по акту. ИИ — по кнопке «Анализ»
+            # (force), без акта и когда совет не получен (отметка failed /
+            # save_failed в журнале); строка таблицы — «Система (без ИИ)»
+            _facts = await _shutdown_facts_if_due(seg_row, task_id)
+            _what = "аварийный стоп"
         if _facts is not None:
             await corpus_db.upsert_analysis(seg_id, {**_facts, "status": "done",
                                                      "analytics_version": ANALYTICS_VERSION})
-            logger.info("corpus #%d: неудачная попытка пуска — факты без модели", seg_id)
+            logger.info("corpus #%d: %s — факты без модели", seg_id, _what)
             return
 
     kb_path = await corpus_db.get_equipment_kb_path(
@@ -220,11 +228,22 @@ async def _process_segment(
     )
 
 
+def _system_signature() -> str:
+    """Подпись заключения-фактов: местное время с поясом (v5.1.22, P1-6)."""
+    from datetime import datetime as _dt, timezone as _tzu
+    from analytics.labels import SYSTEM_MODEL, _local_tz, tz_label
+    now = _dt.now(_tzu.utc)
+    z = _local_tz()
+    return f"*{SYSTEM_MODEL} · {(now.astimezone(z) if z else now).strftime('%d.%m.%Y %H:%M')} {tz_label()}*"
+
+
 def _attempt_conclusion(seg_row: dict) -> dict | None:
-    """Заключение-факты для плашки неудачной попытки; None — не попытка."""
+    """Заключение-факты для плашки неудачной попытки; None — не попытка.
+
+    v5.1.22 (P1-6): время останова и подписи — местное с поясом («Останов
+    09:27:43 МСК»), было — сырой ISO в UTC «2026-10-16T06:27:43+00:00»."""
     import json as _json
-    from datetime import datetime as _dt
-    from analytics.labels import SYSTEM_MODEL, attempt_facts_ru, attempt_label
+    from analytics.labels import SYSTEM_MODEL, attempt_facts_ru, attempt_label, fmt_local, tz_label
     chars = seg_row.get("characteristics_json")
     if isinstance(chars, str):
         try:
@@ -238,7 +257,8 @@ def _attempt_conclusion(seg_row: dict) -> dict | None:
     # Коды самой попытки (сегментатор): агрегат плашки подхватил бы и код,
     # висевший до попытки, и кнопку на стоящей машине через час (ревью v5.1.16)
     codes = [int(c) for c in att.get("codes") or []]
-    fall = att.get("t_fall") or "—"
+    _f = fmt_local(att.get("t_fall")) if att.get("t_fall") else None
+    fall = f"{_f} {tz_label()}" if _f else (att.get("t_fall") or "—")
     short = (f"{attempt_label(att)}: выход из стопа не подтвердился — "
              f"{attempt_facts_ru(att)}. Останов {fall}"
              + (f", код панели {', '.join(map(str, codes))}" if codes else "") + ".")
@@ -251,7 +271,7 @@ def _attempt_conclusion(seg_row: dict) -> dict | None:
         "разбирает совет шлюза по акту аварии.",
         "",
         "---",
-        f"*Система (без ИИ) · {_dt.utcnow().strftime('%Y-%m-%d %H:%M')} UTC*",
+        _system_signature(),
     ])
     # Уровень — тот же, что у обычного пути: в стопе после попытки бывают и
     # предупреждения панели (ревью v5.1.16)
@@ -271,6 +291,268 @@ def _attempt_conclusion(seg_row: dict) -> dict | None:
         "generation_time_sec": 0,
         "debug_json": {"entry": "attempt_facts", "depth": "attempt"},
     }
+
+
+# ── Заключение аварийного стопа фактами (v5.1.22, P1-5, решение В1) ──────────
+#
+# 16.10 оба ИИ-заключения по стопам ДГУ №1 утверждали то, чего нет в данных:
+# «под нагрузкой» при разомкнутом автомате, «размыкает выключатель», порог
+# «48 Гц», «冷却», «680 ч». Как у отказов пуска (13.10): заключение — факты из
+# акта и сводки, причину разбирает совет по акту. Включается строкой «🔴 авария
+# панели» таблицы «Кто и как разбирает» = «Система (без ИИ)» (разовая установка
+# при деплое, вернуть ИИ — в таблице).
+
+def _parse(v: Any) -> Any:
+    import json as _json
+    if isinstance(v, str):
+        try:
+            return _json.loads(v)
+        except ValueError:
+            return None
+    return v
+
+
+def _council_failed(seg_row: dict, inc: dict) -> bool:
+    """Совет по этой аварии не получен: в журнале гейта терминальная отметка
+    failed / save_failed (incident_gate._run_incident) — заключение пишет ИИ."""
+    from datetime import datetime as _dt
+    from online.incident_gate import INC_FAILED, INC_SAVE_FAILED, incident_hash
+    try:
+        fh = incident_hash(_dt.fromisoformat(inc["stop_ts"]))
+    except (KeyError, TypeError, ValueError):
+        return False
+    for e in _parse(seg_row.get("gate_log")) or []:
+        if (isinstance(e, dict) and e.get("kind") == "incident" and e.get("fault_hash") == fh
+                and e.get("decision") in (INC_FAILED, INC_SAVE_FAILED)):
+            return True
+    return False
+
+
+def _act_code_names(inc: dict) -> dict[int, str]:
+    """Названия кодов 40012 из ленты акта (метки каталога БД телеметрии)."""
+    from analytics.labels import split_code_label
+    out: dict[int, str] = {}
+    for e in inc.get("chronology") or []:
+        if e.get("role") != "LAST_FAULT_CODE" or e.get("value") in (None, 0):
+            continue
+        try:
+            c = int(e["value"])
+        except (TypeError, ValueError):
+            continue
+        name, _ = split_code_label(e.get("label"))
+        if c > 0 and name and c not in out:
+            out[c] = name
+    return out
+
+
+def _stop_code(inc: dict, parts: dict | None) -> tuple[int | None, str | None, str | None]:
+    """(код, название, тип) аварии: часть сводки fault_code (P1-2), иначе первый
+    код 40012 ленты акта в кадре останова (±15 с)."""
+    from datetime import datetime as _dt
+    from analytics.labels import split_code_label
+    fc = (parts or {}).get("fault_code")
+    if isinstance(fc, dict) and fc.get("code"):
+        return int(fc["code"]), fc.get("name"), fc.get("kind")
+    try:
+        stop = _dt.fromisoformat(inc["stop_ts"])
+    except (KeyError, TypeError, ValueError):
+        return None, None, None
+    for e in inc.get("chronology") or []:
+        if e.get("role") != "LAST_FAULT_CODE" or e.get("value") in (None, 0, 65535):
+            continue
+        try:
+            if abs((_dt.fromisoformat(e["ts"]) - stop).total_seconds()) > 15:
+                continue
+            name, kind = split_code_label(e.get("label"))
+            return int(e["value"]), name, kind
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None, None, None
+
+
+def _shutdown_conclusion(seg_row: dict, cycle_segments: list[dict] | None = None,
+                         tz=None) -> dict | None:
+    """Заключение аварийного стопа фактами без ИИ (v5.1.22, P1-5, решение В1);
+    None — акта нет (тогда пишет ИИ).
+
+    Факты — каждый из одного источника: время останова (акт, местное), код и
+    его подпись (часть сводки fault_code / лента акта), из какого режима и через
+    сколько после пуска (акт: fall, chain_start), «Авария снята в … (через N с)»
+    (часть mttr — по маске) и что стало с кодом 40012 (часть fault_code, P1-2),
+    до останова — нагрузка, ток, автомат, ряд оборотов и частоты (лента
+    отсчётов акта, fall_facts_ru), предыдущие аварии серии (series_facts по
+    сегментам цикла), наработка (счётчик панели). Голос 40599 «EmergencyStop» не
+    упоминается. Поля записи — как у плашек (_attempt_conclusion).
+    """
+    from datetime import datetime as _dt
+    from analytics.labels import (
+        SYSTEM_MODEL, engine_hours_text, fmt_duration, fmt_local, tz_label,
+    )
+    from analytics.reconstructor import fall_facts_ru
+    from analytics.serializer import RUN_STATE_RU
+    from corpus.preprocessor import _engine_hours_of
+    from online.incident_gate import series_facts
+
+    inc = _parse(seg_row.get("incident_json"))
+    if not isinstance(inc, dict) or not inc.get("stop_ts"):
+        return None
+    parts = _parse(seg_row.get("report_summary_json"))
+    parts = parts if isinstance(parts, dict) and parts.get("version") else None
+    tzl = tz_label(tz)
+    stop_raw = inc["stop_ts"]
+    stop_t = fmt_local(stop_raw, tz, day=True) or stop_raw
+
+    code, name, kind = _stop_code(inc, parts)
+    code_txt = (f"код панели {code}" + (f" «{name}»" if name else "")
+                + (f" ({kind})" if kind else "")) if code else "код панели не записан"
+
+    fall = inc.get("fall") if isinstance(inc.get("fall"), dict) else {}
+    mode = fall.get("label")
+    if not mode:
+        rs = fall.get("run_state")
+        if rs is None:
+            rs = ((inc.get("character") or {}).get("signals") or {}).get("run_state_before")
+        mode = RUN_STATE_RU.get(rs) if rs is not None else None
+    since_start = None
+    try:
+        if fall.get("chain_start"):
+            since_start = (_dt.fromisoformat(stop_raw)
+                           - _dt.fromisoformat(fall["chain_start"])).total_seconds()
+    except (TypeError, ValueError):
+        since_start = None
+
+    facts: list[str] = [f"Останов: {stop_t} {tzl}, {code_txt}."]
+    if mode:
+        line = f"Из какого режима: «{mode}»"
+        if fall.get("t_start"):
+            line += (f" {fmt_local(fall['t_start'], tz) or ''}–"
+                     f"{fmt_local(fall.get('t_end') or stop_raw, tz) or ''}")
+        if since_start is not None and since_start >= 0:
+            line += (f", через {fmt_duration(since_start)} после пуска (выход из стопа в "
+                     f"{fmt_local(fall['chain_start'], tz)})")
+        facts.append(line + ".")
+    m = (parts or {}).get("mttr")
+    if isinstance(m, dict) and m.get("kind") == "SHUTDOWN_CLEARED" and seg_row.get("t_end"):
+        from analytics.labels import shutdown_cleared_how
+        facts.append(f"Авария снята в {fmt_local(seg_row['t_end'], tz)} (через "
+                     f"{fmt_duration(m.get('sec'))}) — {shutdown_cleared_how(m)}.")
+    elif seg_row.get("t_end") is None:
+        facts.append("Авария на момент заключения не снята.")
+    fc = (parts or {}).get("fault_code")
+    if isinstance(fc, dict) and (fc.get("text_regs") or fc.get("text")):
+        facts.append(f"{fc.get('text_regs') or fc.get('text')}.")
+    trace = inc.get("trace") if isinstance(inc.get("trace"), dict) else None
+    ff = fall_facts_ru(trace, tz) if trace else None
+    facts.append(ff or "До останова: ленты отсчётов в акте нет (акт до v5.1.22 или "
+                       "история окна недоступна) — параметры сегмента падения в отчёте и акте.")
+    try:
+        names = _act_code_names(inc)
+        win = inc.get("window") or {}
+        anchor = win.get("anchor") if win.get("baseline") != "fallback" else None
+        ser = series_facts(cycle_segments or [], stop_raw, anchor,
+                           lambda c: names.get(int(c)), tz=tz) if cycle_segments is not None else None
+    except Exception:
+        logger.warning("corpus/worker: серия аварий для заключения не собрана", exc_info=True)
+        ser = None
+    if ser:
+        facts.append("Предыдущие аварии серии после штатного останова:")
+        facts += [f"  {x.strip()[2:] if x.strip().startswith('- ') else x.strip()}" for x in ser]
+    elif ser is not None:
+        facts.append("Предыдущих аварий после штатного останова нет.")
+    eh = engine_hours_text(_engine_hours_of(seg_row.get("characteristics_json"),
+                                            seg_row.get("analytics_version")))
+    facts.append(f"Наработка двигателя на конец периода: {eh} (счётчик панели)." if eh
+                 else "Наработка двигателя: нет в данных.")
+    facts.append("Справочник кода (описание и порядок проверки по руководству) — в отчёте сегмента.")
+
+    short = (f"Аварийный останов {stop_t} {tzl}: {code_txt}"
+             + (f", из режима «{mode}»" if mode else "")
+             + (f" через {fmt_duration(since_start)} после пуска"
+                if since_start is not None and since_start >= 0 else "") + ".")
+    if isinstance(m, dict) and m.get("kind") == "SHUTDOWN_CLEARED" and seg_row.get("t_end"):
+        short += f" Авария снята через {fmt_duration(m.get('sec'))}."
+    md = "\n".join(["## Сводка", short, "", "## Факты"]
+                   + [f"- {x}" if not x.startswith("  ") else f"  - {x.strip()}" for x in facts]
+                   + ["",
+                      "Заключение аварийного стопа — факты без ИИ. Причину разбирает совет ИИ "
+                      "по акту аварии — разбор появится в карточке.",
+                      "", "---", _system_signature()])
+    try:
+        verdict, level = _verdict_fields(seg_row)
+    except Exception:
+        verdict, level = None, None
+    if not level:
+        verdict, level = "авария", "SHUTDOWN"
+    return {
+        "conclusion_md": md,
+        "humanized_md": short,
+        "verdict": verdict,
+        "alarm_level": level,
+        "claude_model": SYSTEM_MODEL,
+        "tokens_used": 0, "tool_calls_count": 0, "loops_count": 0,
+        "generation_time_sec": 0,
+        "debug_json": {"entry": "shutdown_facts", "depth": "seg_shutdown",
+                       "investigator_version": inc.get("investigator_version"),
+                       "trace": trace is not None},
+    }
+
+
+async def _shutdown_facts_if_due(seg_row: dict, task_id: str) -> dict | None:
+    """Заключение фактами, если положено (v5.1.22, P1-5); None — пишет ИИ.
+
+    Положено: строка «🔴 авария панели» — «Система (без ИИ)», вид разбора
+    seg_shutdown, у сегмента есть акт, совет по нему не закончился неудачей.
+    Сегменты цикла для серии — один запрос (воркер, не горячий цикл); сбой —
+    без строки серии.
+    """
+    from llm.router import SYSTEM_PROVIDER, get_route
+    try:
+        if get_route("seg_shutdown").get("provider") != SYSTEM_PROVIDER:
+            return None
+        if _segment_depth(seg_row, task_id) != "seg_shutdown":
+            return None
+        inc = _parse(seg_row.get("incident_json"))
+        if not isinstance(inc, dict) or not inc.get("stop_ts"):
+            # Акта нет (сбой построения, продолжение после реза) — пишет ИИ
+            return None
+        if _council_failed(seg_row, inc):
+            logger.info("corpus #%s: совет по аварии не получен — заключение пишет ИИ",
+                        seg_row.get("id"))
+            return None
+    except Exception:
+        logger.warning("corpus/worker: проверка заключения фактами не выполнена — пишет ИИ",
+                       exc_info=True)
+        return None
+    cycle: list[dict] | None = None
+    try:
+        from datetime import datetime as _dt
+        from online import db as online_db
+        win_from = (inc.get("window") or {}).get("from")
+        if win_from:
+            cycle = await online_db.get_segments_between(
+                seg_row["router_sn"], seg_row["equip_type"], seg_row["panel_id"],
+                _dt.fromisoformat(win_from), _dt.fromisoformat(inc["stop_ts"]))
+    except Exception:
+        logger.warning("corpus/worker: сегменты цикла для заключения не прочитаны", exc_info=True)
+        cycle = None
+    try:
+        return _shutdown_conclusion(seg_row, cycle)
+    except Exception:
+        logger.warning("corpus/worker: заключение фактами не собрано — пишет ИИ", exc_info=True)
+        return None
+
+
+async def _lang_clean(text: str, source: str, depth: str | None) -> tuple[str, dict | None]:
+    """Проход «очистка / перевод» заключения (v5.1.22, решение В4): один запрос к
+    быстрой модели, только если найден чужой язык; приоритет — строки вида."""
+    try:
+        from llm.lang_check import clean_text
+        from llm.router import get_depth
+        prio = get_depth(depth).get("priority") if depth else None
+        return await clean_text(text, source, priority=prio)
+    except Exception:
+        logger.warning("corpus/worker: проверка языка не выполнена", exc_info=True)
+        return text, None
 
 
 def _segment_depth(seg_row: dict, task_id: str) -> str:
@@ -297,6 +579,9 @@ def _route_head(depth: str) -> dict[str, Any]:
     общее подключение (карточка «Горыныч», llm.client._cfg): модель, рассуждение
     и приоритет шлюзу задаёт та же строка через depth (resolve_depth).
     Запись в формате реестра — чтобы цепочка обрабатывала её как любую другую.
+    «Система (без ИИ)» (v5.1.22, только seg_shutdown): заключение пишет ИИ лишь
+    там, где фактов нет или их мало — без акта, совет не получен, — и тогда это
+    общее подключение с моделью строки (явно, как llm).
     """
     from llm.client import get_llm_settings
     from llm.registry import DEFAULT_MAX_CTX
@@ -466,6 +751,11 @@ async def _analyse_segment_chain(
                     trace.append({"entry": entry["id"], "action": "error",
                                   "detail": str(result["error"])[:300]})
                     continue
+                # Чужой язык (В4) — один проход очистки, без повтора и смены модели
+                _cm, _lang = await _lang_clean(result.get("conclusion_md") or "", user_input, depth)
+                if _lang:
+                    result["conclusion_md"] = _cm
+                    result["debug_json"] = {**(result.get("debug_json") or {}), "lang_check": _lang}
             else:
                 from llm.router import format_ai_signature
                 meta: dict = {}
@@ -476,6 +766,11 @@ async def _analyse_segment_chain(
                 if not content:
                     raise EmptyLLMResponse("модель вернула пустой ответ")
                 f = _llm_result_fields(meta, entry["model"])
+                # Чужой язык в ответе (иероглифы, английские фразы; v5.1.22, В4):
+                # один проход «очистка / перевод» быстрой моделью — до подписи
+                content, _lang = await _lang_clean(content, user_input, depth)
+                if _lang:
+                    f["debug"]["lang_check"] = _lang
                 content += format_ai_signature(f["label"])
                 result = {
                     "verdict":            verdict,

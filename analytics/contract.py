@@ -440,6 +440,25 @@ class Segment:
     # Выход из стопа ещё не подтверждён и не закончился (живое окно): аналитики
     # работы нет, суточный рез переносится, как у переходных режимов
     attempt_pending: bool = False
+    # Код 40012, державшийся до конца, снят на резе (v5.1.22, P1-2):
+    # {code, name, kind, t_onset, t_clear, reset, reset_at, switch_off_at,
+    # switch_label, next_code, next_name, next_kind, at_end, next_state}
+    # (segmenter.fault_code_close). None — код висит за концом, рез по краю окна
+    # или сегмент до v5.1.22: отчёт пишет «Несброшенную», как раньше
+    fault_code_close: Optional[dict[str, Any]] = None
+    # Нестоповый сегмент, оборванный аварийным остановом панели (v5.1.22, P1-3,
+    # решение В3): {t, codes [{code, name, kind}], masks, run_state,
+    # next_stop_kind, by} (segmenter._trip_mark). Замечание CAUTION [панель]
+    closed_by_trip: Optional[dict[str, Any]] = None
+    # Наработка по счётчику на конец сегмента, ч (v5.1.22) — строка шапки
+    # заключения вместо выдуманной моделью
+    engine_hours_end: Optional[float] = None
+    # Лента отсчётов плашки неудачной попытки с аварией (v5.1.22, P1-4, В2):
+    # сегмент падения — сама плашка, лента снимается из истории окна при каждой
+    # нарезке и берётся актом (engine._build_act). В characteristics_json не
+    # пишется — у оборванного аварией нестопового сегмента лента лежит в
+    # closed_by_trip["trace"] (переживает рестарт через подсказку предка)
+    fall_trace: Optional[dict[str, Any]] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -465,4 +484,7 @@ class Segment:
             "coking_start": self.coking_start,
             "attempt": self.attempt,
             "attempt_pending": self.attempt_pending,
+            "fault_code_close": self.fault_code_close,
+            "closed_by_trip": self.closed_by_trip,
+            "engine_hours_end": self.engine_hours_end,
         }

@@ -18,6 +18,12 @@ import yaml
 
 _log = logging.getLogger(__name__)
 
+# Колонки ленты отсчётов акта по умолчанию (v5.1.22, P1-4) — если в mapping.yaml
+# нет ни одной пометки incident_trace: обороты, частота, мощность, ток,
+# напряжение, давление масла, АКБ, положение автомата
+_TRACE_DEFAULT_ROLES = ("RPM", "FREQUENCY", "ACTIVE_POWER_TOTAL", "CURRENT_AVG",
+                        "VOLTAGE_LL_AVG", "OIL_PRESS", "BATTERY_V", "GENSET_CB_POS")
+
 
 class AnalyticsConfig:
     """Все параметры аналитики, загруженные из YAML-файлов в директории analytics/."""
@@ -180,6 +186,35 @@ class AnalyticsConfig:
         return [(addr, meta.get("description") or meta.get("role") or f"reg_{addr}")
                 for addr, meta in sorted(self._register_map.items())
                 if meta.get("incident_state")]
+
+    @property
+    def incident_trace_registers(self) -> list[dict[str, Any]]:
+        """Колонки ленты отсчётов акта аварийного стопа (v5.1.22, P1-4): пометка
+        incident_trace: <порядок> в mapping.yaml. [{addr, role, unit, kind,
+        description}] по порядку колонки; аналог — из истории окна, enum (положение
+        автомата) — из enum-периодов. Пометок нет вовсе (рабочая копия mapping.yaml
+        на сервере перекрывает эталон целиком и ключа не знает) — те же роли по
+        умолчанию из кода, как у ключей act_trace_*; ролей нет — ленты нет."""
+        def _item(addr: int, meta: dict) -> dict[str, Any]:
+            return {"addr": addr, "role": meta.get("role") or f"reg_{addr}",
+                    "unit": meta.get("unit") or "", "kind": meta.get("kind") or "analog",
+                    "description": meta.get("description") or meta.get("role") or f"reg_{addr}"}
+        out = []
+        for addr, meta in self._register_map.items():
+            n = meta.get("incident_trace")
+            if n is None or n is False:
+                continue
+            try:
+                order = float(n)
+            except (TypeError, ValueError):
+                order = 1e9
+            out.append((order, addr, _item(addr, meta)))
+        if not out:
+            for k, role in enumerate(_TRACE_DEFAULT_ROLES):
+                addr = self.role_to_addr(role)
+                if addr is not None:
+                    out.append((float(k), addr, _item(addr, self._register_map[addr])))
+        return [x[2] for x in sorted(out, key=lambda x: (x[0], x[1]))]
 
     def set_sensor_step(self, role: str, step: float, source: str = "history") -> None:
         """Шаг показаний датчика роли у этой машины (оценка по истории)."""

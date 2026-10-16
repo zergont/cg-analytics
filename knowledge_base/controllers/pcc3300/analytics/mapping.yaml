@@ -17,6 +17,7 @@ registers:
   40034:
     role: ACTIVE_POWER_TOTAL
     domain: GENERATOR
+    incident_trace: 3
     trip_snapshot: true
     group: LOAD
     unit: kW
@@ -54,6 +55,7 @@ registers:
   40025:
     role: VOLTAGE_LL_AVG
     domain: GENERATOR
+    incident_trace: 5
     group: LOAD
     unit: Vac
     kind: analog
@@ -117,6 +119,7 @@ registers:
   40029:
     role: CURRENT_AVG
     domain: GENERATOR
+    incident_trace: 4
     group: LOAD
     unit: A
     kind: analog
@@ -153,6 +156,11 @@ registers:
   40068:
     role: RPM
     domain: ENGINE
+    # Колонка ленты отсчётов акта аварийного стопа (v5.1.22, P1-4, решение В2):
+    # номер — порядок колонки; значения берутся из уже загруженной истории
+    # сегмента падения (аналог) и enum-периодов (положение автомата), без
+    # повторного чтения. Лимиты — stop_kind.act_trace_* в segmentation.yaml
+    incident_trace: 1
     trip_snapshot: true
     group: LOAD
     unit: rpm
@@ -230,6 +238,7 @@ registers:
   40062:
     role: OIL_PRESS
     domain: ENGINE
+    incident_trace: 6
     trip_snapshot: true
     group: HYDRAULIC
     unit: kPa
@@ -244,6 +253,7 @@ registers:
   40044:
     role: FREQUENCY
     domain: GENERATOR
+    incident_trace: 2
     trip_snapshot: true
     group: HEALTH
     unit: Hz
@@ -254,6 +264,7 @@ registers:
   40061:
     role: BATTERY_V
     domain: ENGINE
+    incident_trace: 7
     trip_snapshot: true
     group: HEALTH
     unit: Vdc
@@ -432,6 +443,7 @@ registers:
   43562:
     role: GENSET_CB_POS
     domain: CONTROLLER
+    incident_trace: 8
     incident_state: true
     group: STATE
     unit: ~

@@ -137,6 +137,13 @@ _INCIDENT_PROMPT = """\
 устроены такие устройства, а не данные этой машины. Цифры этой машины — только из входа.
 - Отделяй установленное по данным от предположений.
 - Не повторяй акт целиком — выдели то, что относится к причине.
+- Время пиши по местному времени, как во входе (МСК), а не по UTC.
+- Лента отсчётов пишется с шагом около 10 с и по изменению: значение держится до \
+следующей записи («·» — новой записи нет), что было между отсчётами — не утверждай.
+- Нагрузку, ток и положение автомата перед аварией бери из ленты отсчётов и строки \
+«Без изменений»; работа до штатного останова — фон, не условия перед аварией.
+- Состояние кода неисправности во входе — снимок на момент останова: сброс мог \
+произойти позже. Не утверждай, сброшен ли код сейчас.
 
 ФОРМАТ ОТВЕТА:
 ## Коротко
@@ -146,6 +153,29 @@ _INCIDENT_PROMPT = """\
 ## Что относится к делу, а что нет
 ## Чего не хватает для полной картины\
 """
+
+# Правила входа совета v5.1.22 (P1-4, P1-6): сохранённая в настройках копия
+# промпта не получит их сама — первое сохранение страницы заморозило бы старый
+# текст. Перенос — после строки-якоря, если правил ещё нет (migrate_incident_prompt)
+INCIDENT_RULES_ANCHOR = "- Не повторяй акт целиком — выдели то, что относится к причине."
+INCIDENT_RULES_V5122 = (
+    "- Время пиши по местному времени, как во входе (МСК), а не по UTC.\n"
+    "- Лента отсчётов пишется с шагом около 10 с и по изменению: значение держится до "
+    "следующей записи («·» — новой записи нет), что было между отсчётами — не утверждай.\n"
+    "- Нагрузку, ток и положение автомата перед аварией бери из ленты отсчётов и строки "
+    "«Без изменений»; работа до штатного останова — фон, не условия перед аварией.\n"
+    # Прогон совета 16.10 (#35941): «код 234 не сброшен — не сбрасывать», а код
+    # сбросили через 29 с — разбор заказывается в момент останова, ответ через час
+    "- Состояние кода неисправности во входе — снимок на момент останова: сброс мог произойти позже. Не утверждай, сброшен ли код сейчас.")
+
+
+def migrate_incident_prompt(text: str) -> str | None:
+    """Сохранённый промпт совета с правилами v5.1.22; None — менять нечего
+    (правила уже есть или якоря нет: владелец переписал промпт сам — не трогаем)."""
+    if not text or "Лента отсчётов пишется с шагом" in text or INCIDENT_RULES_ANCHOR not in text:
+        return None
+    return text.replace(INCIDENT_RULES_ANCHOR,
+                        INCIDENT_RULES_ANCHOR + "\n" + INCIDENT_RULES_V5122, 1)
 
 # ── Таблица задач: id → (метка UI, провайдер по умолчанию, промпт по умолчанию) ─
 
@@ -233,7 +263,13 @@ _DEPTH_DEFAULT_PRIORITY: dict[str, str] = {
 # подключения, llm.client._cfg) с моделью/рассуждением/приоритетом строки; «api» —
 # Claude API, модель строки или (пусто) из карточки Claude. Одна таблица вместо
 # двух: раньше провайдера решала карточка «по уровню», а глубину — градация
-ROUTE_PROVIDERS: tuple[str, ...] = ("llm", "api")
+ROUTE_PROVIDERS: tuple[str, ...] = ("llm", "api", "system")
+# «Система (без ИИ)» (v5.1.22, P1-5, решение В1): заключение аварийного стопа —
+# фактами из акта и сводки (corpus/worker._shutdown_conclusion). Только у строки
+# seg_shutdown: гейт (manager), совет (incident_gate) и пересказ устроены как
+# «llm, иначе api» — «system» в их строке ушёл бы в платный Claude API
+SYSTEM_PROVIDER = "system"
+SYSTEM_ROUTE_KINDS: frozenset[str] = frozenset({"seg_shutdown"})
 
 
 def _default_depth(kind: str) -> dict[str, str]:
@@ -257,6 +293,8 @@ def apply_depth(kind: str, model: str, reasoning: str, priority: str, *,
         raise ValueError(f"Неизвестный вид разбора: {kind}")
     cur = _depth.get(kind) or _default_depth(kind)
     prov = cur.get("provider", "llm") if provider is None else str(provider).strip()
+    if prov == SYSTEM_PROVIDER and kind not in SYSTEM_ROUTE_KINDS:
+        prov = "llm"      # «Система (без ИИ)» — только заключение аварийного стопа
     _depth[kind] = {
         "model":     str(model or "").strip(),
         "reasoning": reasoning if reasoning in DEPTH_REASONING else "default",
@@ -321,6 +359,9 @@ def route_label(kind: str) -> str:
     r = get_depth(kind)
     if r.get("provider") == "api":
         return f"Claude: {claude_model_for(kind)}"
+    if r.get("provider") == SYSTEM_PROVIDER:
+        from analytics.labels import SYSTEM_MODEL
+        return SYSTEM_MODEL
     try:
         from llm.client import get_llm_settings
         cfg = get_llm_settings()
@@ -407,6 +448,32 @@ def migrate_routes(raw_json: str, legacy: dict[str, str]) -> tuple[str | None, l
     if not changes:
         return None, []
     return json.dumps(raw, ensure_ascii=False), changes
+
+
+SHUTDOWN_ROUTE_VERSION = "5.1.22"
+
+
+def migrate_shutdown_route(raw_json: str) -> tuple[str | None, str]:
+    """Разовая установка строки «🔴 авария панели» в «Система (без ИИ)» (v5.1.22,
+    P1-5, решение В1; по образцу ai_routes_version). (новый JSON или None, что
+    сделано). Битый JSON — None: ключ не ставится, градацию не теряем. Вернуть
+    ИИ — в таблице «Кто и как разбирает»: повторно ключ строку не трогает."""
+    import json
+    try:
+        raw = json.loads(raw_json) if raw_json else {}
+    except json.JSONDecodeError:
+        return None, "битый JSON градации — строка не изменена"
+    if not isinstance(raw, dict):
+        return None, "градация не словарь — строка не изменена"
+    prof = raw.get("seg_shutdown")
+    if not isinstance(prof, dict):
+        prof = dict(_default_depth("seg_shutdown"))
+    if prof.get("provider") == SYSTEM_PROVIDER:
+        return None, "уже «Система (без ИИ)»"
+    was = prof.get("provider") or "llm"
+    prof["provider"] = SYSTEM_PROVIDER
+    raw["seg_shutdown"] = prof
+    return json.dumps(raw, ensure_ascii=False), f"seg_shutdown: {was} → {SYSTEM_PROVIDER}"
 
 
 _SEG_DEPTH_BY_LEVEL: dict[str, str] = {

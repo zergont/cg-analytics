@@ -297,6 +297,22 @@ def _build_conclusion(
             except (ValueError, TypeError):
                 pass
 
+    # v5.1.22 (P1-2, P1-3): код 40012 на закрытии и обрыв сегмента аварией — те
+    # же строки, что в шапке входа (части сводки), не из cause_close
+    try:
+        from corpus.preprocessor import _parse_json, _trip_of
+        _parts = _parse_json(segment_row.get("report_summary_json"))
+        _parts = _parts if isinstance(_parts, dict) and _parts.get("version") else None
+        _fc = (_parts or {}).get("fault_code")
+        if isinstance(_fc, dict) and _fc.get("text"):
+            mttr_row += f"| Код 40012 | {_fc['text']} |\n"
+        _t_trip, _what_trip = _trip_of(segment_row, _parts)
+        if _t_trip:
+            mttr_row += (f"| Конец сегмента | аварийный останов панели {_t_trip}"
+                         + (f", {_what_trip}" if _what_trip else "") + " |\n")
+    except Exception:
+        pass
+
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     from llm.router import get_signature_enabled

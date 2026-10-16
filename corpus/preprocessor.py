@@ -381,10 +381,14 @@ def _format_gate_analyses(segment_row: dict) -> str:
                       "нарушение паспорта или сигнал панели, опирайся на факты и отметь расхождение. "
                       "Что снято ИИ, а что нет, — по пометкам замечаний в шапке, а не по разборам.",
                       ""]
+    from analytics.labels import fmt_local, tz_label
     for it in items:
         if not isinstance(it, dict) or not it.get("md"):
             continue
-        ts = (it.get("t") or "")[:19].replace("T", " ")
+        # Местное время с поясом (v5.1.22, P1-6): у #35872 четыре разбора
+        # «12:03:25» в UTC при МСК в отчёте
+        _lt = fmt_local(it.get("t"), day=True)
+        ts = f"{_lt} {tz_label()}" if _lt else (it.get("t") or "")[:19].replace("T", " ")
         verdict = None
         if it.get("decision") == "cancel":
             verdict = ("снятие применено (на момент разбора)" if it.get("applied")
@@ -412,9 +416,11 @@ def _format_chronology(chronology_json: Any) -> str:
     events = (chronology_json or {}).get("chronology") or []
     if not events:
         return ""
-    out = ["## Хронология стоянки", "", "```"]
+    from analytics.labels import fmt_local, tz_label
+    # Время — местное (v5.1.22, P1-6), было — UTC без пометки
+    out = ["## Хронология стоянки", "", f"Время — {tz_label()}.", "", "```"]
     for e in events:
-        ts = (e.get("ts") or "")[11:19]
+        ts = fmt_local(e.get("ts")) or (e.get("ts") or "")[11:19]
         kind = "СОБЫТИЕ  " if e.get("kind") == "fault" else "состояние"
         bit = e.get("bit")
         a = f"{e.get('addr')}/{bit}" if bit is not None else str(e.get("addr"))
@@ -457,9 +463,12 @@ def _format_incident(incident_json: Any) -> str:
         out.append(f"**За немедленный:** {'; '.join(ch['immediate_votes'])}")
     if ch.get("controlled_votes"):
         out.append(f"**За контролируемый:** {'; '.join(ch['controlled_votes'])}")
-    out += ["", "**Лента действий (время UTC; при равном ts состояние-причина перед фолтом-следствием):**", "", "```"]
+    from analytics.labels import fmt_local, tz_label
+    # Время — местное (v5.1.22, P1-6)
+    out += ["", f"**Лента действий (время {tz_label()}; при равном ts состояние-причина перед "
+                f"фолтом-следствием):**", "", "```"]
     for e in incident_json.get("chronology") or []:
-        ts = (e.get("ts") or "")[11:19]
+        ts = fmt_local(e.get("ts")) or (e.get("ts") or "")[11:19]
         kind = "СОБЫТИЕ  " if e.get("kind") == "fault" else "состояние"
         bit = e.get("bit")
         a = f"{e.get('addr')}/{bit}" if bit is not None else str(e.get("addr"))
@@ -507,6 +516,15 @@ def _remarks_from_summary(segment_row: dict) -> str | None:
     for g in parts.get("remarks") or []:
         if g.get("kind") == "state":
             continue      # риск нагара — отдельной строкой состояния (_coking_from_summary)
+        if g.get("kind") == "event" and g.get("scenario") == "RUN_TRIP":
+            # v5.1.22 (P1-3): отметка панели, а не аналитики и не «уже случилось,
+            # не тревога» — сегмент оборван аварийным остановом
+            ev = (g.get("events") or [{}])[0]
+            items.append(f"{g.get('name')} [CAUTION, панель, событие {ev.get('t_text') or '?'}"
+                         + (f" — {ev['text']}" if ev.get("text") else "")
+                         + "; сегмент закончился аварийным остановом, сам останов — "
+                           "следующий сегмент]")
+            continue
         if g.get("kind") == "event":
             when = ", ".join(e.get("t_text") or "?" for e in g.get("events") or [])
             items.append(f"{g.get('name')} [{g.get('severity') or 'CAUTION'}, аналитика, "
@@ -515,10 +533,13 @@ def _remarks_from_summary(segment_row: dict) -> str | None:
         tags = [cap_severity(g.get("scenario"), g.get("severity")) or "?",
                 "панель" if g.get("source") == "panel" else "аналитика"]
         k, n = g.get("suppressed") or 0, g.get("count") or 0
-        if k and k >= n:
-            tags.append("снято ИИ")
-        elif k:
-            tags.append(f"снято ИИ: {k} из {n}")
+        # Подпись с источником (v5.1.22): «снято по разбору от 14.10 03:36
+        # (#35876)» — решение принято в другом сегменте, модель не должна писать,
+        # что его снял ИИ в этом; старые части — «снято ИИ»
+        if k:
+            # Снятые до v5.1.22 (без источника) — отдельной подписью «снято ИИ»
+            from analytics.serializer import supp_remark_text
+            tags.append(supp_remark_text(g, n) or "снято ИИ")
         # «На конец» — про подтверждённый эпизод: до оговорки о неподтверждённых.
         # Стоя после неё, метка читалась как относящаяся к ним, и модель назвала
         # неподтверждённый эпизод «активным на конец периода» (#35872, v5.1.20)
@@ -569,8 +590,131 @@ def _coking_from_summary(segment_row: dict) -> str | None:
     return f"Риск нагара (накопленное состояние, не обнаружение этого сегмента): {txt}"
 
 
+# Наработка в часах больше этого не бывает (≈ 23 года без остановки): такое число в
+# запасных полях — секунды сегментов до v5.1.6 (v5.1.22, ревью verdict-1)
+_EH_HOURS_MAX = 200_000.0
+
+
+def _version_before(version: Any, ref: tuple[int, ...]) -> bool:
+    """analytics_version строки раньше ref; не разобрать — False."""
+    try:
+        # У строк 34986–35268 версия записана с BOM («\ufeff4.9.62»)
+        parts = tuple(int(x) for x in str(version).strip().lstrip("\ufeff").split(".")[:3])
+    except (TypeError, ValueError):
+        return False
+    return bool(parts) and parts < ref
+
+
+def _engine_hours_of(chars: Any, version: Any = None) -> float | None:
+    """Наработка по счётчику на конец сегмента: engine_hours_end (v5.1.22), иначе
+    последнее ENGINE_HOURS подсегментов (сегменты до v5.1.22), иначе на начало.
+    None — нет в данных.
+
+    v5.1.22, ревью verdict-1: до v5.1.6 (_apply_scale) запасные поля хранили
+    СЕКУНДЫ — «48 809 700 ч» в шапке #35763. Сегмент старше 5.1.6 (version —
+    analytics_version строки) или число, неправдоподобное для часов, —
+    секунды → часы; и после пересчёта неправдоподобно — «нет в данных»."""
+    chars = _parse_json(chars)
+    if not isinstance(chars, dict):
+        return None
+    v = chars.get("engine_hours_end")
+    if isinstance(v, (int, float)):
+        return float(v) if 0 <= v <= _EH_HOURS_MAX else None
+    legacy_sec = _version_before(version, (5, 1, 6))
+
+    def _hours(x: float) -> float | None:
+        h = float(x) / 3600.0 if (legacy_sec or x > _EH_HOURS_MAX) else float(x)
+        return h if 0 <= h <= _EH_HOURS_MAX else None
+
+    for sub in reversed(chars.get("subsegments") or []):
+        eh = ((sub or {}).get("characteristics") or {}).get("ENGINE_HOURS") or {}
+        v = eh.get("value_end") if isinstance(eh, dict) else None
+        if isinstance(v, (int, float)):
+            return _hours(v)
+    v = chars.get("engine_hours_start")
+    return _hours(v) if isinstance(v, (int, float)) else None
+
+
+def _trip_of(segment_row: dict, parts: dict | None) -> tuple[str | None, str | None]:
+    """(время, чем оборван) сегмента, оборванного аварийным остановом: из части
+    сводки RUN_TRIP (в том числе дописанной поздней доработкой), иначе из
+    characteristics_json.closed_by_trip; (None, None) — не оборван."""
+    from analytics.labels import fmt_local, run_trip_text
+    for g in (parts or {}).get("remarks") or []:
+        if g.get("scenario") == "RUN_TRIP":
+            ev = (g.get("events") or [{}])[0]
+            return ev.get("t_text") or fmt_local(ev.get("t")), ev.get("text")
+    chars = _parse_json(segment_row.get("characteristics_json"))
+    trip = chars.get("closed_by_trip") if isinstance(chars, dict) else None
+    if isinstance(trip, dict) and trip.get("t"):
+        return fmt_local(trip["t"]), run_trip_text(trip)
+    return None, None
+
+
+def conclusion_facts(segment_row: dict) -> list[str]:
+    """Факты шапки входа заключения — каждый из одного источника (v5.1.22, план
+    «Общая шапка входа заключения»; P1-2, P1-3, P1-5).
+
+    Порядок плана: 1 «Время во входе — МСК» (P1-6), 2 наработка,
+    3 аварийный стоп: «Авария снята в … (через N с)» — по маске (часть mttr),
+    код 40012 — только из части fault_code, никогда из cause_close (на сбросе
+    встаёт другой код: #35861 1438 → 1248), 4 сегмент, оборванный аварией, —
+    запрет «штатный / все параметры в норме», 5 «До останова: …» — лента
+    отсчётов акта (P1-4/P1-5; заключение аварийного стопа пишет ИИ: без строки
+    «Система (без ИИ)», по кнопке «Анализ», совет не получен).
+    Наработка — счётчик панели: модель выдумывала её из событий журнала —
+    «680 ч» у ДГУ №1 16.10 (длительность бита «Не в автомате»), «1340 ч 39 мин»
+    и «955 моточасов» (счётчик пусков) у ДЭС №3 13.10 при 13 643 и 15 297 ч.
+    """
+    from analytics.labels import engine_hours_text, fmt_duration, fmt_local, tz_label
+    parts = _parse_json(segment_row.get("report_summary_json"))
+    parts = parts if isinstance(parts, dict) and parts.get("version") else None
+    out: list[str] = [f"Время во входе — {tz_label()}."]
+
+    eh = engine_hours_text(_engine_hours_of(segment_row.get("characteristics_json"),
+                                            segment_row.get("analytics_version")))
+    out.append(f"Наработка двигателя на конец периода: {eh} (счётчик панели)." if eh else
+               "Наработка двигателя: нет в данных — не указывай её; часы у событий журнала — "
+               "длительность события, счётчик пусков — не наработка.")
+
+    m = (parts or {}).get("mttr")
+    if isinstance(m, dict) and m.get("kind") == "SHUTDOWN_CLEARED" and segment_row.get("t_end"):
+        t_end = fmt_local(segment_row.get("t_end"))
+        if t_end:
+            from analytics.labels import shutdown_cleared_how
+            out.append(f"Авария снята в {t_end} (через {fmt_duration(m.get('sec'))}) — "
+                       f"{shutdown_cleared_how(m)}.")
+    fc = (parts or {}).get("fault_code")
+    if isinstance(fc, dict) and (fc.get("text_regs") or fc.get("text")):
+        out.append(f"{fc.get('text_regs') or fc.get('text')}; на конец сегмента код "
+                   f"{fc.get('code')} не висит. Не называй его несброшенным и не советуй его сбрасывать.")
+
+    t_trip, what = _trip_of(segment_row, parts)
+    if t_trip:
+        out.append(f"Сегмент закончился аварийным остановом панели ({what or 'код панели'} в {t_trip}). "
+                   f"Он не штатный: не пиши «штатный», «все параметры в норме», «плановый "
+                   f"контроль»; причину не выводи — её разбирает совет по акту следующего сегмента.")
+
+    # 5. До останова — факты ленты отсчётов акта (v5.1.22, P1-4/P1-5)
+    inc = _parse_json(segment_row.get("incident_json"))
+    trace = inc.get("trace") if isinstance(inc, dict) else None
+    if isinstance(trace, dict):
+        try:
+            from analytics.reconstructor import fall_facts_ru
+            ff = fall_facts_ru(trace)
+        except Exception:
+            ff = None
+        if ff:
+            out.append(ff + " Это отсчёты панели с шагом опроса: что было между ними — не "
+                            "утверждай; нагрузку и автомат бери отсюда.")
+    return out
+
+
 def build_claude_input(segment_row: dict) -> str:
-    """Сформировать полный вход для Claude: шапка вердикта + реконструкция + report_md."""
+    """Сформировать полный вход для Claude: шапка вердикта + реконструкция + report_md.
+
+    v5.1.22: факты шапки (conclusion_facts) — наработка по счётчику, снятие
+    аварии и код 40012 на закрытии, обрыв сегмента аварией."""
     chars_json = segment_row.get("characteristics_json")
     run_state = segment_row.get("run_state")
     report_md = segment_row.get("report_md") or ""
@@ -587,6 +731,10 @@ def build_claude_input(segment_row: dict) -> str:
         if run_state is not None
         else "Неизвестно"
     )
+    try:
+        facts = conclusion_facts(segment_row)
+    except Exception:
+        facts = []
 
     header = (
         f"[ВЕРДИКТ БЛОКА АНАЛИТИКИ — НЕ ПЕРЕСМАТРИВАТЬ]\n"
@@ -595,6 +743,7 @@ def build_claude_input(segment_row: dict) -> str:
         f"Уровень тревоги: {alarm_level}\n"
         f"Обнаружения: {remarks_line or _fmt_detections(detections)}\n"
         + (f"{coking_line}\n" if coking_line else "")
+        + "".join(f"{x}\n" for x in facts)
         + f"Задача: объясни зафиксированную картину. "
         f"Не пересматривай вердикт. Не ищи дополнительных проблем.\n"
         f"---\n\n"

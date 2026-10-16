@@ -156,7 +156,44 @@ async def lifespan(app: FastAPI):
             await set_app_setting("ai_routes_version", "5.1.11")
             logger.info("Настройки ИИ перенесены в таблицу «Кто и как разбирает»: %s",
                         "; ".join(_route_changes) or "без изменений")
+    # Заключение аварийного стопа — фактами без ИИ (v5.1.22, P1-5, решение В1):
+    # строка «🔴 авария панели» разово ставится в «Система (без ИИ)» по ключу
+    # (как ai_routes_version). Вернуть ИИ — в таблице: повторно ключ строку не
+    # трогает. Битый JSON градации — ключ не ставится, повтор при следующем старте
+    from llm.router import (
+        SHUTDOWN_ROUTE_VERSION as _SRV, migrate_shutdown_route as _mig_shutdown,
+    )
+    if await get_app_setting("ai_shutdown_route_version", "") != _SRV:
+        try:
+            _sd_json, _sd_note = _mig_shutdown(await get_app_setting(_DEPTH_KEY, ""))
+            if _sd_json is not None:
+                await set_app_setting(_DEPTH_KEY, _sd_json)
+            if _sd_json is not None or _sd_note.startswith("уже"):
+                await set_app_setting("ai_shutdown_route_version", _SRV)
+            logger.info("Заключение аварийного стопа (%s): %s", _SRV, _sd_note)
+        except Exception:
+            logger.warning("Заключение аварийного стопа (%s): строка таблицы не изменена — "
+                           "повторится при следующем старте", _SRV, exc_info=True)
     _load_depth(await get_app_setting(_DEPTH_KEY, ""))
+    # Промпт совета (v5.1.22, P1-4/P1-6): сохранённая копия получает правила о МСК
+    # и ленте отсчётов (повторный перенос ничего не меняет; переписанный
+    # владельцем промпт без якоря не трогается)
+    try:
+        from llm.router import get_all as _get_routing2, migrate_incident_prompt as _mig_inc
+        _ip = _mig_inc(await get_app_setting("ai_task_incident_prompt", ""))
+        if _ip is not None:
+            await set_app_setting("ai_task_incident_prompt", _ip)
+            apply_task("incident", _get_routing2()["incident"]["provider"], _ip)
+            logger.info("Промпт совета: добавлены правила v5.1.22 (МСК, лента отсчётов)")
+    except Exception:
+        logger.warning("Промпт совета: правила v5.1.22 не перенесены", exc_info=True)
+    # Проход «очистка / перевод» чужого языка в ответах модели (v5.1.22, В4):
+    # модель и рассуждение — настройки, по умолчанию быстрая модель шлюза
+    from llm import lang_check as _lang_check
+    _lang_check.configure(
+        model=await get_app_setting("ai_lang_cleanup_model", "fast"),
+        reasoning=await get_app_setting("ai_lang_cleanup_reasoning", "off"),
+    )
     # Правила гейта (v5.1.12 — паспорт, честная панель; v5.1.15 — тренд ОЖ убран):
     # разовый перенос при смене версии — снятия по старым правилам в открытых
     # строках перестают действовать (гейт разберёт живой состав заново), фразы
@@ -178,6 +215,22 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.warning("Правила гейта %s: перенос не выполнен — повторится при "
                            "следующем старте", _GRV, exc_info=True)
+    # Снятие гейтом относится к своим эпизодам (v5.1.22, P1-1): разовый перенос —
+    # хеши открытых строк без своего решения (пришли переносом через рез или
+    # через стоп и пуск) обнуляются, снятие эпизодов, начавшихся в такой строке,
+    # — тоже. Ключ ставится только после успеха; повтор ничего не меняет.
+    # GATE_RULES_VERSION не поднимаем: тот сброс не трогает закрытые эпизоды
+    # (14931) и отменяет законные решения
+    if await get_app_setting("gate_carry_version", "") != "5.1.22":
+        try:
+            from online.db import reset_carried_gate_suppression as _reset_carried
+            _c_rows, _c_eps = await _reset_carried()
+            await set_app_setting("gate_carry_version", "5.1.22")
+            logger.info("Снятие гейтом по своим эпизодам (5.1.22): чужих хешей сброшено — "
+                        "строк %d, эпизодов %d", _c_rows, _c_eps)
+        except Exception:
+            logger.warning("Снятие гейтом по своим эпизодам (5.1.22): перенос не выполнен — "
+                           "повторится при следующем старте", exc_info=True)
     # Сироты: status_auto (задачи нет с v4.x), llm_system_prompt (не читается)
     for _orph in ("ai_task_status_auto_", "llm_system_prompt"):
         _n = await _del_settings(_orph)

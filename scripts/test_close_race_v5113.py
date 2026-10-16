@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -128,8 +128,13 @@ async def _save(*a, analysis_md=None, extra=None, **k):
     return True
 
 
-async def _mark(r, e, p, scenarios):
+async def _mark(r, e, p, scenarios, **k):
+    # v5.1.22: пометка с границей «начало ≤ момент разбора» и источником,
+    # возвращает id помеченных; второй вызов (after — открытые позже) — пусто
+    if k.get("after") is not None:
+        return []
     LOG["marked"].append(list(scenarios))
+    return [11]
 
 
 async def _late(*a, **k):
@@ -179,26 +184,64 @@ reset(supp_ok=False)
 asyncio.run(mgr._analyze_warning_claude("SN", "pcc", 1, dict(STRUCT), "h3"))
 check(LOG["saved"][-1][1].get("not_written") is True, "4д: отметка not_written в записи разбора")
 
-# 5. Перенос в новую строку: отметка «перенесено» — только если журнал ляжет не в неё
+# 5. Перенос в новую строку: отметка «перенесено» — только если журнал ляжет не в неё.
+# v5.1.22 (P1-1 п. 3): и только если закрытый сегмент с вердиктом закрыт резом или
+# сменой режима без стопа, новая строка начинается в его конце и снятый эпизод
+# ещё идёт; запись вида late (до v5.1.22 — provider=carried, всегда)
 CALLS = {"n": 0}
+T2 = T + timedelta(hours=1)
+CUR_RS = {"rs": 3}
 
 
 async def _open_changing(*a):
     CALLS["n"] += 1
-    return {"id": 1 if CALLS["n"] == 1 else 2, "t_start": T, "warning_analyses": []}
+    return {"id": 1 if CALLS["n"] == 1 else 2, "t_start": T2, "run_state": CUR_RS["rs"],
+            "warning_analyses": []}
+
+
+LANDED_ROW: dict = {}
+
+
+async def _seg_by_id(seg_id):
+    return dict(LANDED_ROW, id=seg_id)
 
 
 odb.get_open_segment = _open_changing
-for landed, want_carried in ((2, 0), (1, 1)):
+odb.get_segment_by_id = _seg_by_id
+for landed, cause, rs_cur, want_carried in ((2, "DAILY_BOUNDARY", 3, 0),
+                                            (1, "DAILY_BOUNDARY", 3, 1),
+                                            (1, "RUN_STATE_CHANGE", 3, 1),
+                                            (1, "RUN_STATE_CHANGE", 0, 0),
+                                            (1, "SHUTDOWN_CLEARED", 3, 0)):
     async def _resolve(*a, landed=landed):
         return landed
     odb.resolve_segment_id = _resolve
+    LANDED_ROW.clear()
+    LANDED_ROW.update({"t_end": T2, "cause_close": cause, "run_state": 3})
+    CUR_RS["rs"] = rs_cur
     CALLS["n"] = 0
     reset(supp_ok=True)
     asyncio.run(mgr._analyze_warning_claude("SN", "pcc", 1, dict(STRUCT), "h4"))
-    carried = [e for e in LOG["events"] if e.get("provider") == "carried"]
+    carried = [e for e in LOG["events"] if e.get("kind") == "late"]
     check(len(carried) == want_carried,
-          f"5: журнал ляжет в строку {landed} — «перенесено» {want_carried}: {len(carried)}")
+          f"5: журнал ляжет в строку {landed} ({cause}, режим строки {rs_cur}) — "
+          f"«перенесено» {want_carried}: {len(carried)}")
+    if carried:
+        c = carried[0]
+        check(c.get("episodes") == [11] and c.get("source", {}).get("segment_id") == 1
+              and c.get("suppressed_hash") and c.get("provider") == "late",
+              f"5б: запись late — эпизоды, источник, хеш: {c}")
+
+# 5в. Строка закрылась не встык (между ними стоп): вердикт в новую строку не идёт
+LANDED_ROW.clear()
+LANDED_ROW.update({"t_end": T2 - timedelta(minutes=5), "cause_close": "DAILY_BOUNDARY",
+                   "run_state": 3})
+CUR_RS["rs"] = 3
+CALLS["n"] = 0
+reset(supp_ok=True)
+asyncio.run(mgr._analyze_warning_claude("SN", "pcc", 1, dict(STRUCT), "h5"))
+check(not [e for e in LOG["events"] if e.get("kind") == "late"],
+      "5в: новая строка не встык с закрытой — вердикт не переносится")
 
 if _errors:
     print(f"FAIL — {len(_errors)} расхождений:")

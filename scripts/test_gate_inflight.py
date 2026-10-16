@@ -89,7 +89,7 @@ sa.format_status_text = lambda s: "статус"
 sa.extract_alarm_text = lambda s: "тревога"
 
 
-async def _fake_gate(sn, et, pid, struct, fault_hash):
+async def _fake_gate(sn, et, pid, struct, fault_hash, **k):
     """«Совет думает», пока тест не отпустит; исход задаёт тест."""
     CALLS.append(fault_hash)
     ev, res = asyncio.Event(), {"outcome": mgr.GATE_OK, "mark_db": True}

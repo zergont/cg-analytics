@@ -376,6 +376,7 @@ def _classify_stop_periods(
     cfg,
     tt: datetime,
     enum_periods: list[dict] | None = None,
+    shutdown_iv: list[tuple[datetime, datetime]] | None = None,
 ) -> list[dict]:
     """Разделить СТОП-периоды на два вида и поставить единственный рез.
 
@@ -398,8 +399,12 @@ def _classify_stop_periods(
     Заменяет пару _split_stop_on_fault_cleared / _split_stop_on_shutdown: те
     резали по любой смене «грязно/чисто» и по входу в аварию и давали до пяти
     кусков на один стоп, включая вырожденные в секунды.
+
+    shutdown_iv — уже посчитанные интервалы (v5.1.22: segment() считает их один
+    раз — ими же отмечается сегмент, оборванный аварией, _trip_mark).
     """
-    shutdown_iv = shutdown_intervals(fault_periods, cfg, tt, enum_periods)
+    if shutdown_iv is None:
+        shutdown_iv = shutdown_intervals(fault_periods, cfg, tt, enum_periods)
 
     out: list[dict] = []
     for period in run_state_periods:
@@ -2080,6 +2085,333 @@ def _attempt_record(chain: list[dict], stop: dict, res: list[tuple],
     }
 
 
+# ── Код 40012 на закрытии и обрыв сегмента аварией (v5.1.22, P1-2, P1-3) ────
+
+# Кадр опроса enum-регистров: подъём «Сброса неисправностей» и снятие кода
+# приходят в одном пакете, но порядок строк в нём не гарантирован — допуск в
+# один кадр после снятия (критика v5.1.22, п. 2). Свойство опроса, а не порог
+# аналитики, поэтому не в KB
+_RESET_FRAME_SEC = 10.0
+# Метки одного кадра: снятие кода и смена переключателя в одном пакете
+_SAME_FRAME_SEC = 1.0
+
+
+def _na_values(cfg, addr: int | None) -> set[int]:
+    try:
+        return {int(x) for x in ((cfg.register_map.get(addr) or {}).get("na_values") or [65535])}
+    except (TypeError, ValueError, AttributeError):
+        return {65535}
+
+
+def _enum_value(p: dict) -> int | None:
+    try:
+        return int(p.get("value"))
+    except (TypeError, ValueError):
+        return None
+
+
+def fault_code_close(
+    code_periods: list[dict], enum_periods: list[dict], cfg,
+    seg_start: datetime, seg_end: datetime, next_state: int | None = None,
+    run_state: int | None = None, tripped: bool = False,
+) -> dict[str, Any] | None:
+    """Что стало с кодом 40012, державшимся до конца сегмента (v5.1.22, P1-2).
+
+    Отчёт брал value_end последнего подсегмента. Окно полуоткрытое [t_start,
+    t_end), а аварийный стоп режется ровно по снятию аварии, — код, снятый в
+    t_end, считался висящим: «⚠ Несброшенная неисправность… код не сброшен
+    кнопкой» в 28 сегментах из 81 за 30 дней, и заключения советовали «не
+    сбрасывать» уже после пуска. Вызывается только для реза внутри окна
+    (_cut_inside): рез по краю окна будущего не знает.
+
+    Смотрит период кода, на котором окно кончилось:
+      - код держался за конец сегмента (или не снят) — None, текст прежний;
+      - снят не позже конца — что пришло следом: 0 («снят») или другой код
+        («сменился», 11 из 28: #35861 1438 → 1248), поэтому вывод «сброшен» из
+        cause_close невозможен;
+      - признак сброса: подъём «Сброса неисправностей» (роль FAULT_RESET,
+        PCC3300 40569) не раньше stop_kind.fault_reset_window_sec до снятия и
+        не позже кадра после, но не раньше появления кода; переход переключателя
+        (SWITCH_POS, 40010) в «Выкл» в кадре снятия. #35869: 40569 поднимался
+        за 1 ч 47 мин до снятия 1248 — это «снят», не «сброшен».
+    Код из state_periods (NA 65535 там отброшен); следом NA — неизвестно, None.
+    40569 и 40010 — kind: enum, уже в enum_periods нарезки: запросов нет.
+
+    v5.1.22, ревью verdict-2: нестоповый сегмент (run_state ≠ 0), оборванный
+    аварией (tripped) или чей код вытеснен другим (следом не 0), — подъёмы
+    40569 и «Выкл» 40010 позже кадра снятия не учитываются: это сброс уже
+    нового кода, сделанный в стопе (ДЭС №3 16.09: 146 вытеснен 151 в 16:26:11,
+    сброс 16:26:19 приписывался 146 — «сброшен» с обратным порядком времени).
+    Подъёмы и до, и после — последний не позже кадра снятия.
+    """
+    t0, t1 = _tz(seg_start), _tz(seg_end)
+    last = None
+    for p in code_periods or []:
+        s = _tz(p["state_start"])
+        e = _tz(p["state_end"]) if p.get("state_end") else None
+        if s >= t1 or (e is not None and e <= t0):
+            continue
+        if last is None or s >= _tz(last["state_start"]):
+            last = p
+    if last is None:
+        return None
+    code = _enum_value(last)
+    if not code or code <= 0 or last.get("state_end") is None:
+        return None
+    t_clear = _tz(last["state_end"])
+    if t_clear > t1:
+        return None                     # висит за концом сегмента — «несброшенная»
+    t_onset = _tz(last["state_start"])
+    code_addr = last.get("addr")
+
+    # Что пришло следом — сырой период того же регистра (NA тоже виден)
+    nxt = None
+    for p in enum_periods or []:
+        if p.get("addr") == code_addr and p.get("state_start") is not None \
+                and abs((_tz(p["state_start"]) - t_clear).total_seconds()) <= _SAME_FRAME_SEC:
+            nxt = p
+            break
+    nv = _enum_value(nxt) if nxt is not None else None
+    if nv is None or nv in _na_values(cfg, code_addr):
+        return None                     # следом «нет данных» — состояние неизвестно
+
+    try:
+        window = float(cfg.seg("stop_kind", "fault_reset_window_sec", default=60) or 60)
+    except (TypeError, ValueError):
+        window = 60.0
+    lo = max(t_clear - timedelta(seconds=window), t_onset)
+    # Нестоповый сегмент, оборванный аварией, или код вытеснен другим — после
+    # кадра снятия сбрасывают уже новый код (ревью verdict-2)
+    _strict = run_state not in (None, 0) and (tripped or nv != 0)
+    after_sec = _SAME_FRAME_SEC if _strict else _RESET_FRAME_SEC
+    hi = t_clear + timedelta(seconds=after_sec)
+    reset_addr = cfg.role_to_addr("FAULT_RESET")
+    sw_addr = cfg.role_to_addr("SWITCH_POS")
+    reset_at: datetime | None = None
+    switch_at: datetime | None = None
+    switch_label: str | None = None
+    for p in enum_periods or []:
+        a, v = p.get("addr"), _enum_value(p)
+        if v is None or p.get("state_start") is None:
+            continue
+        s = _tz(p["state_start"])
+        # Код вытеснен аварией (_strict): сброс и «Выкл» в кадре вытеснения
+        # относятся к новой аварии — порядок внутри кадра опроса не различить
+        # (v5.1.22, перепроверка: «Код 1451 сброшен: «Выкл»…; сразу после — 1446»)
+        if _strict and s >= t_clear:
+            continue
+        if reset_addr is not None and a == reset_addr and v != 0 \
+                and v not in _na_values(cfg, a) and lo <= s <= hi:
+            if reset_at is None or s > reset_at:
+                reset_at = s
+        elif sw_addr is not None and a == sw_addr and v == 0 \
+                and -_RESET_FRAME_SEC <= (s - t_clear).total_seconds() <= after_sec:
+            if switch_at is None or abs((s - t_clear).total_seconds()) < abs((switch_at - t_clear).total_seconds()):
+                switch_at = s
+                lab = p.get("label")
+                switch_label = str(lab) if lab and not str(lab).isdigit() else None
+
+    from .labels import split_code_label
+    name, kind = split_code_label(last.get("label"))
+    n_name, n_kind = split_code_label(nxt.get("label")) if nv else (None, None)
+    return {
+        "code": code, "name": name, "kind": kind,
+        "t_onset": t_onset.isoformat(), "t_clear": t_clear.isoformat(),
+        "reset": reset_at is not None or switch_at is not None,
+        "reset_at": reset_at.isoformat() if reset_at else None,
+        "switch_off_at": switch_at.isoformat() if switch_at else None,
+        "switch_label": switch_label,
+        "next_code": nv, "next_name": n_name, "next_kind": n_kind,
+        "at_end": abs((t_clear - t1).total_seconds()) <= _SAME_FRAME_SEC,
+        "next_state": next_state,
+    }
+
+
+def trip_record(
+    t_moment: datetime, code_periods: list[dict], fault_periods: list[dict], cfg,
+) -> dict[str, Any]:
+    """Что панель записала в момент аварийного останова (v5.1.22, P1-3): коды
+    40012, вставшие в пределах CONTROLLER_FAULT.code_onset_tol_sec от момента
+    (как у детектора панели), с метками каталога, и маски аварийной тяжести.
+
+    Общая для нарезки (отметка сегмента, оборванного аварией) и поздней
+    доработки сводки движком (online.engine: следующий сегмент стал аварийным
+    после закрытия) — подпись должна быть одна.
+    """
+    t = _tz(t_moment)
+    try:
+        tol = float(cfg.det("CONTROLLER_FAULT", "code_onset_tol_sec", default=15.0) or 15.0)
+    except (TypeError, ValueError, AttributeError):
+        tol = 15.0
+    from .labels import split_code_label
+    codes: list[dict[str, Any]] = []
+    for p in code_periods or []:
+        if p.get("state_start") is None:
+            continue
+        v = _enum_value(p)
+        if not v or v <= 0 or v in _na_values(cfg, p.get("addr")):
+            continue
+        if abs((_tz(p["state_start"]) - t).total_seconds()) > tol:
+            continue
+        if any(c["code"] == v for c in codes):
+            continue
+        name, kind = split_code_label(p.get("label"))
+        codes.append({"code": v, "name": name, "kind": kind})
+    masks: list[str] = []
+    for fp in fault_periods or []:
+        if cfg.bitmap_severity(fp.get("severity") or "none") != "SHUTDOWN":
+            continue
+        if abs((_tz(fp["fault_start"]) - t).total_seconds()) > tol:
+            continue
+        nm = fp.get("fault_name_ru") or fp.get("fault_name")
+        if nm and nm not in masks:
+            masks.append(nm)
+    return {"t": t.isoformat(), "codes": codes, "masks": masks}
+
+
+def _trip_mark(
+    run_state: int, seg_start: datetime, seg_end: datetime,
+    shutdown_iv: list[tuple[datetime, datetime]], next_period: dict | None,
+    used: set, code_periods: list[dict], fault_periods: list[dict], cfg,
+) -> dict[str, Any] | None:
+    """Отметка нестопового сегмента, оборванного аварийным остановом (v5.1.22, P1-3).
+
+    #35939 (16.10, «Работа» 20 с, затем 234) получила «🟢 НОРМА» и заключение
+    «все параметры в норме»: разгон до рабочих оборотов — переходная часть без
+    детекторов, а о следующем аварийном стопе вход не знал. Отметка ставится,
+    если на конце сегмента началась авария панели (интервал shutdown_intervals:
+    маска аварийной тяжести или 40013 = Shutdown / Shutdown with Cooldown;
+    начало ∈ (t_start, t_end] и не дальше code_onset_tol_sec от конца, за концом
+    — с тем же допуском: маска приходит кадром позже 40011) или следом идёт
+    аварийный стоп.
+    Одна авария — одна отметка (used): «Работа» → «Охлаждение» при 40013 = 3
+    отмечает только «Работу», управляемое охлаждение не оборвано. Плашки
+    попыток (стоп-сегменты со своей подписью «· Авария») не отмечаются, и
+    сегмент перед плашкой её аварией тоже.
+
+    v5.1.22, ревью:
+    - verdict-5: следом ПРОСТОЙ стоп — отметки нет. Допуск за концом (маска
+      кадром позже 40011) у отметки, а вид стопа строгий (авария держится в
+      момент начала стопа): «прервана аварийным остановом» стояла рядом с
+      простым стопом без акта и совета. Поздняя доработка движком ждёт, пока
+      стоп станет аварийным;
+    - verdict-4: в записи — начало интервала аварии (iv); used сеется из
+      звеньев контекста (отметки сегментов, закрытых прошлыми вызовами), и
+      правило «одна авария — одна отметка» не зависит от разбиения на вызовы
+      (живой движок закрывает «Работу» и «Охлаждение» разными циклами).
+    """
+    if run_state == 0:
+        return None
+    if (next_period is not None and _enum_value(next_period) == 0
+            and not next_period.get("attempt")
+            and next_period.get("stop_kind") != "EMERGENCY"):
+        return None
+    t0, t1 = _tz(seg_start), _tz(seg_end)
+    try:
+        tol = float(cfg.det("CONTROLLER_FAULT", "code_onset_tol_sec", default=15.0) or 15.0)
+    except (TypeError, ValueError, AttributeError):
+        tol = 15.0
+    # Начало аварии — у конца сегмента: допуск за концом — на запаздывание маски
+    # после смены 40011, до конца — на обратный порядок строк в кадре (за 60
+    # дней 23 из 23 — одним кадром). Маска аварийной тяжести посреди долгой
+    # работы без останова сегмент не обрывает. Следом плашка неудачной попытки —
+    # её авария случилась на попытке, а не здесь (задержка пуска → прогрев 10 с
+    # → 1438): допуска за концом нет
+    lo = max(t0, t1 - timedelta(seconds=tol))
+    hi = t1 if (next_period or {}).get("attempt") else t1 + timedelta(seconds=tol)
+
+    def _taken(s: datetime) -> bool:
+        # Начало из прошлого вызова — из ISO звена контекста: сверка в кадр
+        return any(abs((s - u).total_seconds()) <= _SAME_FRAME_SEC for u in used)
+
+    onset = next((s for s, _e in shutdown_iv if lo < s <= hi and not _taken(s)), None)
+    nxt_emerg = bool(
+        next_period is not None and _enum_value(next_period) == 0
+        and next_period.get("stop_kind") == "EMERGENCY" and not next_period.get("attempt")
+        and abs((_tz(next_period["state_start"]) - t1).total_seconds()) <= _SAME_FRAME_SEC)
+    cover = None
+    if onset is None and nxt_emerg:
+        # Аварийность стопа — от интервала, начавшегося раньше: если его уже
+        # отдали предыдущему сегменту («Работа» при 40013 = 3), «Охлаждение»
+        # перед стопом не оборвано
+        t_next = _tz(next_period["state_start"])
+        cover = next((s for s, e in shutdown_iv if s <= t_next < e), None)
+        if cover is not None and _taken(cover):
+            return None
+        if cover is not None:
+            used.add(cover)
+    elif onset is None:
+        return None
+    if onset is not None:
+        used.add(onset)
+    moment = min(onset, t1) if onset is not None else t1
+    rec = trip_record(moment, code_periods, fault_periods, cfg)
+    rec["run_state"] = int(run_state)
+    rec["next_stop_kind"] = (next_period or {}).get("stop_kind")
+    rec["by"] = "onset" if onset is not None else "next_emergency"
+    _iv = onset if onset is not None else cover
+    if _iv is not None:
+        rec["iv"] = _iv.isoformat()       # начало интервала аварии (ревью verdict-4)
+    return rec
+
+
+def _fall_trace(
+    by_addr: dict[int, list[dict]], enum_periods: list[dict], cfg,
+    seg_start: datetime, seg_end: datetime, stop: datetime, data_to: datetime,
+    run_state: Any, label: str | None, held: dict[str, tuple[datetime, float]] | None,
+) -> dict[str, Any] | None:
+    """Лента отсчётов сегмента падения (v5.1.22, P1-4, решение В2): от
+    max(начала сегмента, останов − act_trace_before_sec) до останов +
+    act_trace_after_sec, но не дальше истории окна. Из уже загруженной истории —
+    без чтения; акт следующего стопа берёт её отсюда (engine._build_act)."""
+    from .reconstructor import build_analog_trace, trace_params
+    prm = trace_params(cfg)
+    stop = _tz(stop)
+    t_from = max(_tz(seg_start), stop - timedelta(seconds=prm["before"]))
+    t_to = min(stop + timedelta(seconds=prm["after"]), _tz(data_to))
+    if t_to < t_from:
+        t_to = stop
+    try:
+        rs = int(run_state) if run_state is not None else None
+    except (TypeError, ValueError):
+        rs = None
+    if not label:
+        # Подпись режима — как в отчёте («Работа»), а не метка каталога панели
+        # («Номин. частота/напряжение»)
+        from .serializer import RUN_STATE_RU
+        label = RUN_STATE_RU.get(rs, str(rs) if rs is not None else None)
+    return build_analog_trace(
+        by_addr, enum_periods, cfg, t_from, stop, t_to,
+        segment={"run_state": rs, "label": label, "t_start": _tz(seg_start).isoformat(),
+                 "t_end": _tz(seg_end).isoformat()},
+        held=held)
+
+
+def _engine_hours_at(all_by_addr: dict[int, list[dict]], cfg, t: datetime,
+                     held: dict[str, tuple[datetime, float]] | None) -> float | None:
+    """Наработка по счётчику на момент t (v5.1.22): последняя строка ENGINE_HOURS
+    до t в окне истории (единицы карты — часы, _apply_scale), иначе удержанное
+    значение посева перед окном (engine._load_seed). Счётчик пишется по
+    изменению и «пульсом» раз в 15 мин: у сегментов короче пульса строки нет, и
+    модель выдумывала наработку — «680 ч» (длительность бита «Не в автомате»)
+    при 13 643 ч у ДГУ №1, «955 моточасов» (счётчик пусков) у ДЭС №3."""
+    addr = cfg.role_to_addr("ENGINE_HOURS")
+    t = _tz(t)
+    if addr is not None:
+        best = None
+        for r in all_by_addr.get(addr) or []:
+            if _tz(r["ts"]) >= t:
+                break
+            if r.get("value") is not None and not r.get("is_carried_forward"):
+                best = r
+        if best is not None:
+            return _fv(best)
+    h = (held or {}).get("ENGINE_HOURS")
+    if h is not None and _tz(h[0]) < t:
+        return float(h[1])
+    return None
+
+
 def _confirm_attempts(
     periods: list[dict],
     all_by_addr: dict[int, list[dict]],
@@ -2320,6 +2652,9 @@ def segment(
 
     # Индексируем историю по адресу; единицы — как в карте (наработка: с → ч)
     all_by_addr = _apply_scale(_build_by_addr(history), cfg)
+    # Лента отсчётов акта (v5.1.22, P1-4) — записи панели как есть: фильтры
+    # сбоев ниже возвращают новый словарь, этот остаётся сырым
+    _trace_by_addr = all_by_addr
     # Одиночные нули источника — до всего остального (v5.1.17); ноль у
     # настоящего останова (40011 → 0) — не сбой
     _stops = [(_tz(p["state_start"]), _tz(p["state_end"]) if p.get("state_end") else tt)
@@ -2354,14 +2689,20 @@ def segment(
     # получают одинаковые границы — правило детерминировано из history.
     # Новая модель (v4.9.68): один рез вместо двух сплиттеров, у стопа два вида.
     # Пока флаг выключен — поведение байт-в-байт прежнее.
-    if bool(cfg.seg("stop_kind", "enabled", default=False)):
+    _stop_kind_on = bool(cfg.seg("stop_kind", "enabled", default=False))
+    # Интервалы аварии панели — один расчёт на вид стопа и отметку сегмента,
+    # оборванного аварией (v5.1.22, P1-3)
+    _shutdown_iv: list[tuple[datetime, datetime]] = []
+    if _stop_kind_on:
         # Горизонт — тот же, что у исхода попытки (confirm_to): открытая
         # авария, поднявшаяся на падении за суточным резом, иначе обрезалась
         # бы по tt, и голова плашки вышла бы «Стоп», а перечитка — «Авария»
         # (ревью v5.1.16). Сегменты всё равно режутся по tt
+        _horizon = max(tt, _tz(confirm_to)) if confirm_to else tt
+        _shutdown_iv = shutdown_intervals(fault_periods, cfg, _horizon, enum_periods)
         run_state_periods = _classify_stop_periods(
-            run_state_periods, fault_periods, cfg,
-            max(tt, _tz(confirm_to)) if confirm_to else tt, enum_periods,
+            run_state_periods, fault_periods, cfg, _horizon, enum_periods,
+            shutdown_iv=_shutdown_iv,
         )
     else:
         run_state_periods = _split_stop_on_fault_cleared(
@@ -2400,6 +2741,25 @@ def segment(
     accumulators = RiskAccumulators()
     if initial_coking_risk is not None:
         accumulators.coking_risk = _copy.deepcopy(initial_coking_risk)
+    # Код 40012 (без NA) — для записи «код на закрытии» и отметки обрыва (v5.1.22)
+    _code_periods = state_periods.get(cfg.role_to_addr("LAST_FAULT_CODE")) or []
+    # Начала аварий, уже отданных сегменту: одна авария — одна отметка. v5.1.22,
+    # ревью verdict-4: и отданных сегментам, закрытым прошлыми вызовами (звенья
+    # контекста, стыкующиеся с окном): живой движок закрывает «Работу» и
+    # «Охлаждение» разными циклами, а отметка должна быть одна
+    _trip_used: set = set()
+    if transition_ctx:
+        try:
+            from .transitions import ctx_for_window as _cfw
+            for _lk in _cfw(transition_ctx, tf,
+                            float(cfg.seg("transitions", "joint_tol_sec", default=2.0))):
+                _iv0 = getattr(_lk, "trip_iv", None)
+                if _iv0 is not None:
+                    _trip_used.add(_tz(_iv0))
+        except Exception:
+            logger.warning("Отметки обрыва аварией прошлых сегментов не прочитаны", exc_info=True)
+    # Докуда есть история (лента отсчётов акта: «останов + after, сколько есть»)
+    _data_to = max(tt, _tz(confirm_to)) if confirm_to else tt
 
     for k_period, period in enumerate(run_state_periods):
         p_start = _tz(period["state_start"])
@@ -2459,8 +2819,19 @@ def segment(
             f"_{_tz(seg_start).strftime('%Y%m%dT%H%M%SZ')}"
         )
 
-        # Мото-часы на начало сегмента
+        # Мото-часы на начало сегмента. v5.1.22: строки счётчика в сегменте нет
+        # (короче пульса 15 мин) — последняя до начала в окне, иначе удержанная
+        # перед окном; и на конец — для строки шапки заключения
         engine_hours_start = _get_engine_hours(seg_by_addr, seg_start, cfg)
+        engine_hours_end: float | None = None
+        try:
+            if engine_hours_start is None:
+                engine_hours_start = _engine_hours_at(all_by_addr, cfg, seg_start, _held)
+            engine_hours_end = _engine_hours_at(all_by_addr, cfg, seg_end, _held)
+            if engine_hours_end is None:
+                engine_hours_end = engine_hours_start
+        except Exception:
+            logger.warning("Наработка сегмента не определена", exc_info=True)
 
         # Причины открытия/закрытия (FAULT_CLEARED проставляет сплит СТОП-периодов)
         cause_open = period.get("cause_open") or (
@@ -2474,11 +2845,58 @@ def segment(
         cause_close: str | None = (
             (period.get("cause_close") or "RUN_STATE_CHANGE") if _cut_inside else None
         )
+        _next_period = (run_state_periods[k_period + 1]
+                        if k_period + 1 < len(run_state_periods) and _cut_inside else None)
+
+        # Код 40012 на закрытии (v5.1.22, P1-2): снят ли на резе — «сброшен /
+        # снят / сменился» вместо ложной «Несброшенной». Только рез внутри окна
+        fault_code_close_rec: dict[str, Any] | None = None
+        closed_by_trip: dict[str, Any] | None = None
+        if _cut_inside:
+            # Сегмент, оборванный аварийным остановом (v5.1.22, P1-3, решение В3):
+            # любой режим, кроме стопа, — только при модели двух видов стопа.
+            # До кода на закрытии: у оборванного сегмента сброс после кадра
+            # снятия — уже нового кода (ревью verdict-2)
+            if _stop_kind_on and run_state != 0 and not attempt:
+                try:
+                    closed_by_trip = _trip_mark(
+                        run_state, seg_start, seg_end, _shutdown_iv, _next_period,
+                        _trip_used, _code_periods, fault_periods, cfg)
+                except Exception:
+                    logger.warning("Отметка обрыва сегмента аварией не определена", exc_info=True)
+            try:
+                fault_code_close_rec = fault_code_close(
+                    _code_periods, enum_periods, cfg, seg_start, seg_end,
+                    next_state=_enum_value(_next_period) if _next_period is not None else None,
+                    run_state=run_state, tripped=closed_by_trip is not None)
+            except Exception:
+                logger.warning("Код 40012 на закрытии сегмента не определён", exc_info=True)
+            # Лента отсчётов сегмента падения для акта следующего стопа
+            # (v5.1.22, P1-4, В2): история окна уже в памяти — без чтения
+            if closed_by_trip is not None:
+                try:
+                    _tr = _fall_trace(_trace_by_addr, enum_periods, cfg, seg_start, seg_end,
+                                      seg_end, _data_to, run_state, None, _held)
+                    if _tr is not None:
+                        closed_by_trip["trace"] = _tr
+                except Exception:
+                    logger.warning("Лента отсчётов сегмента падения не снята", exc_info=True)
+        # Плашка неудачной попытки с аварией — сама сегмент падения (v5.1.22, P1-4)
+        fall_trace: dict[str, Any] | None = None
+        if (_stop_kind_on and attempt and attempt.get("outcome") == "EMERGENCY"
+                and attempt.get("t_fall")):
+            try:
+                _a0 = _tz(datetime.fromisoformat(attempt.get("t_start"))) if attempt.get("t_start") \
+                    else _tz(seg_start)
+                _af = _tz(datetime.fromisoformat(attempt["t_fall"]))
+                fall_trace = _fall_trace(_trace_by_addr, enum_periods, cfg, _a0, _af, _af, _data_to,
+                                         attempt.get("from_state"), run_state_label, _held)
+            except Exception:
+                logger.warning("Лента отсчётов попытки не снята", exc_info=True)
 
         # L2-подсегменты
         if run_state == 3:
-            _nxt = (int(run_state_periods[k_period + 1]["value"])
-                    if k_period + 1 < len(run_state_periods) and _cut_inside else None)
+            _nxt = int(_next_period["value"]) if _next_period is not None else None
             _steady = _steady_window(all_by_addr, cfg, seg_start, seg_end, _nxt,
                                      attempt_pending)
             # Удержанные значения на начало сегмента (v5.1.21): последняя строка
@@ -2586,6 +3004,10 @@ def segment(
             coking_start=coking_start,
             attempt=attempt,
             attempt_pending=attempt_pending,
+            fault_code_close=fault_code_close_rec,
+            closed_by_trip=closed_by_trip,
+            engine_hours_end=engine_hours_end,
+            fall_trace=fall_trace,
         )
         segments.append(seg)
 

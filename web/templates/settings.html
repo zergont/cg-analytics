@@ -717,6 +717,7 @@
                 <style>
                     .route-row[data-provider="api"] .route-gw { visibility: hidden; }
                     .route-row[data-provider="llm"] .route-claude { visibility: hidden; }
+                    .route-row[data-provider="system"] .route-claude { visibility: hidden; }
                 </style>
                 <div class="table-responsive">
                 <table class="table table-sm align-middle mb-3">
@@ -741,7 +742,13 @@
                                     onchange="this.closest('tr').dataset.provider = this.value">
                                 <option value="llm" {% if prov == 'llm' %}selected{% endif %}>{{ 'Горыныч' if gorynych_in_use else 'LLM (' ~ llm.provider ~ ')' }}</option>
                                 <option value="api" {% if prov == 'api' %}selected{% endif %}>Claude API</option>
+                                {% if d.kind == 'seg_shutdown' %}
+                                <option value="system" {% if prov == 'system' %}selected{% endif %}>Система (без ИИ)</option>
+                                {% endif %}
                             </select>
+                            {% if d.kind == 'seg_shutdown' %}
+                            <div class="text-muted" style="font-size:0.7rem">«Система» — факты из акта; без акта, по кнопке «Анализ» и при сбое совета — Горыныч строки</div>
+                            {% endif %}
                             {% endif %}
                         </td>
                         <td class="route-gw"><input type="text" name="depth_{{ d.kind }}_model" list="gorynych_models"

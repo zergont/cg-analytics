@@ -583,10 +583,12 @@ class OnlineManager:
 
         Условия те же, что у гейта (gate_can_cancel); если хеш снятия строки уже
         этот — ничего не делаем (защита от повтора на каждом тике).
+        v5.1.22: запись вида repeat с источником — исходным разбором этого
+        состава в строке, хешем снятия и id помеченных эпизодов.
         """
         from online.status_assembler import (
             GATE_RULES_VERSION, UNCANCELLABLE_SCENARIOS, compute_analytics_hash, gate_can_cancel,
-            passport_hard_seen,
+            gate_hash_source, passport_hard_seen,
         )
         if struct.get("analytics_suppressed") or not gate_can_cancel(struct):
             return
@@ -596,21 +598,30 @@ class OnlineManager:
             return
         r, e, p = engine.router_sn, engine.equip_type, engine.panel_id
         now = datetime.now(timezone.utc)
+        # Источник повтора — исходный разбор этого состава в строке (v5.1.22:
+        # #35891 — разбор 09:01:59, а не повтор 09:41)
+        _src = gate_hash_source(_gate_log(seg), fault_hash) or {"ts": now.isoformat()}
+        _source = {"ts": _src.get("ts"), "segment_id": _src.get("segment_id")}
         try:
             if not await online_db.set_segment_gate_suppression(
                     r, e, p, suppressed_hash=supp, segment_id=seg.get("id"), ts=now):
                 return
-            await online_db.set_episodes_gate_suppressed(
+            _ids = await online_db.set_episodes_gate_suppressed(
                 r, e, p,
                 [a.get("scenario") for a in alarms
                  if a.get("scenario") and a.get("scenario") not in UNCANCELLABLE_SCENARIOS
                  and not passport_hard_seen(a)],
+                src={**_source, "kind": "repeat"},
             )
             await online_db.append_segment_gate_event(
                 r, e, p, segment_id=seg.get("id"), ts=now,
                 event={
                     "ts":                 now.isoformat(),
+                    "kind":               "repeat",
                     "fault_hash":         fault_hash,
+                    "suppressed_hash":    supp,
+                    "source":             _source,
+                    "episodes":           list(_ids or []),
                     "severity_level":     struct.get("severity_level"),
                     "panel_severity":     struct.get("panel_severity"),
                     "analytics_severity": struct.get("analytics_severity"),
@@ -655,6 +666,7 @@ class OnlineManager:
                         engine.router_sn, engine.equip_type, engine.panel_id,
                         struct, fault_hash,
                         **({"analytics_since": _since} if _since is not None else {}),
+                        engine=engine,
                     ),
                     _GATE_TIMEOUT_SEC,
                 )
@@ -731,12 +743,107 @@ def _gate_log(seg: dict) -> list:
 
 def _cancelled_hashes(seg: dict) -> set[str]:
     """Составы, по которым в этой строке был применён вердикт «отменить» (gate_log).
-    Только по нынешним правилам гейта (v5.1.12): старые снятия заново не применяются."""
-    from online.status_assembler import GATE_RULES_VERSION
+    Только по нынешним правилам гейта (v5.1.12): старые снятия заново не применяются.
+    v5.1.22: основание повтора — только своё решение строки (разбор моделью и
+    повтор от него); наследование, перенос и поздний вердикт — нет (критика 1:
+    иначе перенос стал бы основанием для повтора и вошёл в счётчики)."""
+    from online.status_assembler import GATE_OWN_KINDS, GATE_RULES_VERSION, gate_entry_kind
     return {e.get("fault_hash") for e in _gate_log(seg)
             if isinstance(e, dict) and e.get("decision") == "cancel"
             and e.get("decision_applied") and e.get("fault_hash")
-            and e.get("rules") == GATE_RULES_VERSION}
+            and e.get("rules") == GATE_RULES_VERSION
+            and gate_entry_kind(e) in GATE_OWN_KINDS}
+
+
+def _gate_mark_event(kind: str, ts: datetime, fault_hash: str | None, suppressed_hash: str | None,
+                     source: dict, episodes: list[int], scenarios: list[str],
+                     reason: str) -> dict:
+    """Запись журнала гейта без модели (v5.1.22): наследование или поздний
+    вердикт — со ссылкой на исходный разбор и id помеченных эпизодов. fault_hash
+    — исходного разбора: состав панели здесь не строится."""
+    from online.status_assembler import GATE_RULES_VERSION
+    return {
+        "ts": ts.isoformat(), "kind": kind,
+        "fault_hash": fault_hash, "suppressed_hash": suppressed_hash,
+        "alarms": [{"scenario": sc} for sc in sorted(set(scenarios or []))],
+        "decision": "cancel", "decision_applied": True,
+        "reason": reason, "rules": GATE_RULES_VERSION,
+        "provider": kind, "model": None, "tokens_in": 0, "tokens_out": 0,
+        "source": {"ts": (source or {}).get("ts"), "segment_id": (source or {}).get("segment_id")},
+        "episodes": list(episodes or []),
+    }
+
+
+def _inherit_allowed(cur_row: dict | None, supp_hash: str | None) -> tuple[bool, list[str]]:
+    """Снятие действует для эпизодов, открытых во время разбора (v5.1.22, ревью
+    gate-1): тот же предикат suppression_active, что у статуса и движка, по уже
+    прочитанной открытой строке — её детекциям на момент ответа и хешу этого
+    решения. (действует, запреты панели / вид стопа)."""
+    if not cur_row or not supp_hash:
+        return False, []
+    from online.status_assembler import _parse_json, _without_state, suppression_active, suppression_bans
+    dets = _without_state(_parse_json(cur_row.get("active_detections_json")) or [])
+    row = dict(cur_row, gate_suppressed_hash=supp_hash)
+    return suppression_active(row, dets), suppression_bans(row, dets)
+
+
+def _refuse_after(engine, scenarios: list[str], gate_ts: datetime) -> list[int]:
+    """Эпизоды движка этих сценариев, открытые после момента разбора, — в
+    отказанные наследованию (engine._supp_refused, v5.1.22, ревью gate-1), как
+    отказывает сам движок: повтор — когда запрет снимется и состав совпадёт.
+    Подпись прошлой попытки сбрасывается — первая же смена условий даст повтор
+    (иначе после ухода сигнала подпись совпала бы с той, что была до него).
+    Без запроса: id и начало — из памяти эпизодов движка."""
+    if engine is None:
+        return []
+    out: list[int] = []
+    try:
+        eps = getattr(engine, "_episodes", None) or {}
+        refused = getattr(engine, "_supp_refused", None)
+        if refused is None:
+            refused = engine._supp_refused = {}
+        g = gate_ts if gate_ts.tzinfo else gate_ts.replace(tzinfo=timezone.utc)
+        for sc in scenarios or []:
+            m = eps.get(sc) or {}
+            t_open, ep_id = m.get("t_open"), m.get("id")
+            if ep_id is None or not isinstance(t_open, datetime):
+                continue
+            t = t_open if t_open.tzinfo else t_open.replace(tzinfo=timezone.utc)
+            if t > g:
+                refused[ep_id] = (sc, ep_id, t)
+                out.append(ep_id)
+        if out:
+            engine._supp_refused_sig = None
+    except Exception:
+        logger.warning("WarningGate: отказанные эпизоды движку не переданы", exc_info=True)
+    return out
+
+
+def _late_carry_ok(landed_row: dict | None, cur_row: dict | None) -> bool:
+    """Поздний вердикт — в текущую открытую строку (v5.1.22, P1-1 п. 3, В5):
+    закрытый сегмент с вердиктом закрыт суточным резом или сменой режима, ни он,
+    ни текущая строка не стоп, и текущая начинается ровно в его конце (между
+    ними ничего нет). Проверять по continued_from нельзя: у посевной строки он
+    пуст (engine._close_window)."""
+    if not landed_row or not cur_row or landed_row.get("t_end") is None:
+        return False
+    if landed_row.get("cause_close") not in ("DAILY_BOUNDARY", "RUN_STATE_CHANGE"):
+        return False
+    if landed_row.get("run_state") == 0 or cur_row.get("run_state") == 0:
+        return False
+    a, b = landed_row.get("t_end"), cur_row.get("t_start")
+    try:
+        if not isinstance(a, datetime):
+            a = datetime.fromisoformat(str(a))
+        if not isinstance(b, datetime):
+            b = datetime.fromisoformat(str(b))
+    except (TypeError, ValueError):
+        return False
+    if a.tzinfo is None:
+        a = a.replace(tzinfo=timezone.utc)
+    if b.tzinfo is None:
+        b = b.replace(tzinfo=timezone.utc)
+    return a == b
 
 
 def _analyzed_hashes(seg: dict) -> set[str]:
@@ -920,8 +1027,12 @@ async def _analyze_warning_claude(
     router_sn: str, equip_type: str, panel_id: int,
     struct: dict, fault_hash: str,
     analytics_since: "datetime | None" = None,
+    engine=None,
 ) -> str:
     """Гейт предупреждений: анализирует сигнал и выносит вердикт cancel/pass.
+
+    engine — движок машины (v5.1.22, ревью gate-1): эпизоды, открытые во время
+    разбора, которым наследование снятия запрещено, передаются ему в отказанные.
 
     Кто разбирает — строка таблицы «Кто и как разбирает» (llm.router.get_route:
     gate_caution / gate_warning по уровню, v5.1.11); системный промпт единый.
@@ -1058,9 +1169,8 @@ async def _analyze_warning_claude(
         # а не имя из маршрута уровня)
         from llm.client import gateway_label
         model = gateway_label(_gw_meta, model)
-        if analysis:
-            from llm.router import format_ai_signature
-            analysis = analysis + format_ai_signature(model)
+        # Подпись — после прохода проверки языка (ниже, после записи снятия)
+        _lang = None
 
         # Отмена допустима только при отсутствии запретов (панель, свежая
         # «Общая авария», несимметрия, нарушение паспорта — решает код, v5.1.12)
@@ -1071,6 +1181,11 @@ async def _analyze_warning_claude(
                            "; ".join(r["text"] for r in reasons),
                            router_sn, equip_type, panel_id)
         _supp_written = False
+        _supp_hash = None
+        _own_ids: list[int] = []
+        # Вид записи журнала (v5.1.22): разбор шлюзом или локальной моделью —
+        # llm, Claude API — api
+        _entry_kind = provider if provider in ("llm", "api") else "llm"
         if applied:
             _supp_hash = compute_analytics_hash(struct.get("analytics_alarms", []))
             # Окно цикла закрытия (строка снята, закрытая ещё не вставлена) —
@@ -1088,50 +1203,6 @@ async def _analyze_warning_claude(
                 logger.warning("WarningGate: вердикт «отменить» не записан — сегмент "
                                "на %s не найден (%s/%s/%s)",
                                _gate_ts.isoformat(), router_sn, equip_type, panel_id)
-            # Пока шёл разбор, сегмент мог закрыться: вердикт лёг в закрытый, а
-            # новая открытая строка подавления не получила (хвост переносится при
-            # закрытии, до ответа) — повторной проверки тоже не будет, состав
-            # разобран. Дописываем вердикт в текущую открытую строку.
-            try:
-                _cur = await online_db.get_open_segment(router_sn, equip_type, panel_id)
-                if _cur and _cur.get("id") != _seg_id:
-                    # Куда легли (лягут) разбор и журнал этого вызова — по тому же
-                    # (сегмент, момент); уже текущая строка — отметка «перенос» дублировала бы
-                    _landed = await online_db.resolve_segment_id(
-                        router_sn, equip_type, panel_id, _seg_id, _gate_ts)
-                    _now = datetime.now(timezone.utc)
-                    if await online_db.set_segment_gate_suppression(
-                        router_sn, equip_type, panel_id,
-                        suppressed_hash=_supp_hash, segment_id=_cur["id"], ts=_now,
-                    ):
-                        _supp_written = True
-                    # И отметку в журнал новой строки: повтор этого состава в ней
-                    # должен снова применить снятие (_cancelled_hashes), а сама
-                    # запись разбора легла в закрытый кусок (ревью v5.1.9)
-                    if _landed != _cur.get("id"):
-                        await online_db.append_segment_gate_event(
-                            router_sn, equip_type, panel_id, segment_id=_cur["id"], ts=_now,
-                            event={
-                                "ts": _now.isoformat(), "fault_hash": fault_hash,
-                                "severity_level": struct.get("severity_level"),
-                                "panel_severity": struct.get("panel_severity"),
-                                "analytics_severity": struct.get("analytics_severity"),
-                                "alarms": [{"scenario": a.get("scenario"), "severity": a.get("severity"),
-                                            "fault_codes": a.get("fault_codes"),
-                                            "description": a.get("description")}
-                                           for a in struct.get("panel_alarms", [])
-                                           + struct.get("analytics_alarms", [])],
-                                "decision": "cancel", "decision_applied": True,
-                                "reason": "вердикт разбора, вернувшегося после закрытия сегмента, "
-                                          "перенесён в новую открытую строку",
-                                "rules": GATE_RULES_VERSION,
-                                "provider": "carried", "model": None,
-                                "tokens_in": 0, "tokens_out": 0,
-                            },
-                        )
-            except Exception:
-                logger.warning("WarningGate: вердикт не перенесён в новую открытую строку",
-                               exc_info=True)
             # Снятие, которое не удалось записать ни в одну строку, — не применено:
             # журнал и разбор не врут, эпизоды не помечаются, состав разберут
             # снова после паузы (v5.1.13)
@@ -1141,31 +1212,99 @@ async def _analyze_warning_claude(
                 reasons = reasons + [{"code": "not_written",
                                       "text": "снятие не записано — сегмент не найден"}]
             if _supp_written:
-                # Эпизод живёт и меряется, но помечен: из severity исключён,
-                # копим статистику ложных срабатываний для тюнинга порогов
+                _hard_seen = {a.get("scenario") for a in struct.get("analytics_alarms", [])
+                              if passport_hard_seen(a)}
+                _cancel_sc = [sc for sc in _alarm_scenarios
+                              if sc not in UNCANCELLABLE_SCENARIOS and sc not in _hard_seen]
+                # Куда лёг вердикт: открытая строка (разбор успел) или закрытый
+                # сегмент (строку закрыли, пока шёл разбор) — по тому же
+                # (сегмент, момент), что разбор и журнал этого вызова
+                _cur, _landed = None, None
                 try:
-                    _hard_seen = {a.get("scenario") for a in struct.get("analytics_alarms", [])
-                                  if passport_hard_seen(a)}
-                    await online_db.set_episodes_gate_suppressed(
-                        router_sn, equip_type, panel_id,
-                        [sc for sc in _alarm_scenarios
-                         if sc not in UNCANCELLABLE_SCENARIOS and sc not in _hard_seen],
-                    )
+                    _cur = await online_db.get_open_segment(router_sn, equip_type, panel_id)
+                    _landed = (_seg_id if _cur and _cur.get("id") == _seg_id
+                               else await online_db.resolve_segment_id(
+                                   router_sn, equip_type, panel_id, _seg_id, _gate_ts))
+                except Exception:
+                    logger.warning("WarningGate: строка вердикта не определена", exc_info=True)
+                _in_open = _cur is not None and _landed is not None and _landed == _cur.get("id")
+                # Источник снятия (v5.1.22): момент разбора и, если он уже в
+                # закрытом сегменте, его номер
+                _src = {"ts": _gate_ts.isoformat(),
+                        "segment_id": None if _in_open else _landed}
+                # Эпизод живёт и меряется, но помечен: из severity исключён,
+                # копим статистику ложных срабатываний для тюнинга порогов.
+                # v5.1.22 (P1-1 п. 1): снятие — эпизодам, открытым на момент
+                # разбора; открытые позже в этой же строке наследуют (п. 2)
+                try:
+                    _own_ids = await online_db.set_episodes_gate_suppressed(
+                        router_sn, equip_type, panel_id, _cancel_sc,
+                        until=_gate_ts, src={**_src, "kind": _entry_kind},
+                    ) or []
+                    # v5.1.22, ревью gate-1: эпизоды, открытые, пока шёл разбор,
+                    # наследуют снятие тем же предикатом, что статус и движок, — по
+                    # уже прочитанной строке (_cur, без запроса): за время разбора
+                    # мог прийти сигнал панели (#35944: просадка внутри 1464) или
+                    # смениться состав. Запрет — не метим, id движку в отказанные:
+                    # повтор наследования — по общему правилу, когда запрет снимется
+                    _inherit_ok, _bans = (_inherit_allowed(_cur, _supp_hash)
+                                          if _in_open else (False, []))
+                    if _in_open and _inherit_ok:
+                        _inh_ids = await online_db.set_episodes_gate_suppressed(
+                            router_sn, equip_type, panel_id, _cancel_sc,
+                            after=_gate_ts, src={**_src, "kind": "inherited"},
+                        ) or []
+                        if _inh_ids:
+                            _now = datetime.now(timezone.utc)
+                            await online_db.append_segment_gate_event(
+                                router_sn, equip_type, panel_id, segment_id=_cur["id"], ts=_now,
+                                event=_gate_mark_event(
+                                    "inherited", _now, fault_hash, _supp_hash, _src, _inh_ids,
+                                    _cancel_sc, "эпизоды того же состава, открытые в этой строке, "
+                                    "пока шёл разбор, — снятие по нему"))
+                    elif _in_open:
+                        _refused = _refuse_after(engine, _cancel_sc, _gate_ts)
+                        if _refused:
+                            logger.info("WarningGate: %s/%s/%s — эпизоды %s, открытые во время "
+                                        "разбора, снятие не наследуют (%s); повтор, когда запрет "
+                                        "снимется", router_sn, equip_type, panel_id, _refused,
+                                        ", ".join(_bans) or "состав сменился")
                 except Exception:
                     logger.warning("WarningGate: не удалось пометить эпизоды gate_suppressed",
                                    exc_info=True)
+                # Пока шёл разбор, строку закрыли: вердикт лёг в закрытый сегмент.
+                # В текущую открытую он попадает, только если граница без стопа —
+                # суточный рез или смена режима (В5) — и снятый эпизод ещё идёт
+                # (P1-1 п. 3; до v5.1.22 переносился всегда, и ответ, пришедший
+                # после стопа и пуска, снимал новый пуск)
+                if not _in_open and _cur is not None and _landed is not None and _own_ids:
+                    try:
+                        _lrow = await online_db.get_segment_by_id(_landed)
+                        if _late_carry_ok(_lrow, _cur):
+                            _now = datetime.now(timezone.utc)
+                            if await online_db.set_segment_gate_suppression(
+                                router_sn, equip_type, panel_id,
+                                suppressed_hash=_supp_hash, segment_id=_cur["id"], ts=_now,
+                            ):
+                                await online_db.append_segment_gate_event(
+                                    router_sn, equip_type, panel_id, segment_id=_cur["id"], ts=_now,
+                                    event=_gate_mark_event(
+                                        "late", _now, fault_hash, _supp_hash, _src, _own_ids,
+                                        _cancel_sc, "вердикт разбора, вернувшегося после закрытия "
+                                        "сегмента: снятый эпизод продолжается в новой строке"))
+                    except Exception:
+                        logger.warning("WarningGate: вердикт не перенесён в новую открытую строку",
+                                       exc_info=True)
                 # Вердикт лёг в уже закрытый сегмент — пересчитать его сводку: её
                 # части (единый вердикт) заморожены при закрытии. Только после
                 # пометки эпизодов: сегмент, закрывшийся между ними, собрал сводку
                 # по непомеченным; закрывшийся после — уже по помеченным (пересчёт
-                # тогда ничего не меняет)
-                try:
-                    _cur = await online_db.get_open_segment(router_sn, equip_type, panel_id)
-                    _landed = await online_db.resolve_segment_id(
-                        router_sn, equip_type, panel_id, _seg_id, _gate_ts)
-                    if _landed is not None and (_cur is None or _landed != _cur.get("id")):
+                # тогда ничего не меняет). v5.1.22: только эпизоды, начавшиеся не
+                # позже момента разбора, с подписью источника
+                if _landed is not None and not _in_open:
+                    try:
                         _changed, _lvl_changed = await online_db.apply_late_gate_suppression(
-                            _landed, _alarm_scenarios)
+                            _landed, _alarm_scenarios, until=_gate_ts, src=_src)
                         if _changed:
                             logger.info("WarningGate: сводка закрытого сегмента %s пересчитана "
                                         "после поздней отмены%s", _landed,
@@ -1173,9 +1312,92 @@ async def _analyze_warning_claude(
                                         if _lvl_changed else "")
                         if _lvl_changed:
                             _enqueue_segment(_landed, again=True)
-                except Exception:
-                    logger.warning("WarningGate: сводка закрытого сегмента не пересчитана",
+                    except Exception:
+                        logger.warning("WarningGate: сводка закрытого сегмента не пересчитана",
+                                       exc_info=True)
+
+        # Обязательный журнал гейта — пишется при любом исходе; окно цикла
+        # закрытия — повтор записи (v5.1.13). v5.1.22, ревью gate-2 / incident-2:
+        # сразу после записи хеша и пометки эпизодов, до прохода языка (до 240 с)
+        # и сохранения разбора — перенос и наследование опираются на «своё
+        # решение» строки в журнале; в окне «хеш есть, записи нет» движок снимал
+        # свежий хеш как перенесённый, а рез его не переносил. Отметка проверки
+        # языка — в записи разбора (extra.lang_check)
+        _gate_event = {
+                "ts":                 _gate_ts.isoformat(),
+                "fault_hash":         fault_hash,
+                "severity_level":     struct.get("severity_level"),
+                "panel_severity":     struct.get("panel_severity"),
+                "analytics_severity": struct.get("analytics_severity"),
+                "alarms": [
+                    {"scenario": a.get("scenario"), "severity": a.get("severity"),
+                     "fault_codes": a.get("fault_codes"), "description": a.get("description")}
+                    for a in struct.get("panel_alarms", []) + struct.get("analytics_alarms", [])
+                ],
+                # v5.1.22: вид записи, хеш снятия и снятые эпизоды — основание
+                # повтора, наследования и переноса (P1-1)
+                "kind":             _entry_kind,
+                "suppressed_hash":  _supp_hash if applied else None,
+                "episodes":         list(_own_ids) if applied else [],
+                "decision":         decision,
+                "decision_applied": applied,
+                "reason":           reason,
+                "rules":            GATE_RULES_VERSION,
+                "rejected_by":      rejected_by,
+                "panel_caution":    [{"codes": a.get("fault_codes"), "since": a.get("since"),
+                                      "fresh": a.get("fresh")}
+                                     for a in struct.get("panel_alarms", [])
+                                     if a.get("severity") == "CAUTION"],
+                "provider":         provider,
+                "model":            model,
+                "tokens_in":        tokens_in,
+                "tokens_out":       tokens_out,
+        }
+        _logged = False
+        for _i in range(_GATE_SAVE_RETRIES + 1):
+            _logged = await online_db.append_segment_gate_event(
+                router_sn, equip_type, panel_id,
+                segment_id=_seg_id, ts=_gate_ts, event=_gate_event,
+            )
+            if _logged or _i == _GATE_SAVE_RETRIES:
+                break
+            await asyncio.sleep(_GATE_SAVE_RETRY_SEC)
+
+        # Чужой язык в разборе (иероглифы, английские фразы; v5.1.22, решение
+        # В4): один проход «очистка / перевод» быстрой моделью, до подписи. После
+        # записи снятия и журнала: вердикт уже извлечён, применён и записан,
+        # проход его не меняет
+        if analysis:
+            try:
+                from llm.lang_check import clean_text
+                from llm.router import get_depth
+                analysis, _lang = await clean_text(analysis, user_prompt,
+                                                   priority=get_depth(kind).get("priority"))
+            except asyncio.CancelledError:
+                # v5.1.22, перепроверка: снятие и журнал уже записаны, после рестарта
+                # гейт по этому составу молчит — разбор не теряем: исходник без
+                # очистки одной записью, затем отмена
+                try:
+                    from llm.router import format_ai_signature as _sig
+                    await asyncio.shield(online_db.save_segment_warning(
+                        router_sn, equip_type, panel_id,
+                        analysis_md=gate_facts_md(struct, decision, applied, reasons)
+                        + analysis + _sig(model),
+                        fault_hash=fault_hash, alarm_text=extract_alarm_text(struct),
+                        segment_id=_seg_id, ts=_gate_ts,
+                        extra={"rules": GATE_RULES_VERSION, "decision": decision, "applied": applied,
+                               "lang_check": {"cleaned": False, "accepted": False,
+                                              "error": "остановка сервиса во время очистки — сохранён исходник"}},
+                    ))
+                except BaseException:
+                    logger.warning("WarningGate: исходник разбора при остановке не сохранён",
                                    exc_info=True)
+                raise
+            except Exception:
+                logger.warning("WarningGate: проверка языка не выполнена", exc_info=True)
+        if analysis:
+            from llm.router import format_ai_signature
+            analysis = analysis + format_ai_signature(model)
 
         # Факты рядом с мнением: панель, паспорт, применён ли вердикт (после
         # записи снятия — «применён» значит записан, v5.1.13)
@@ -1187,6 +1409,8 @@ async def _analyze_warning_claude(
             _wa_extra = {"rules": GATE_RULES_VERSION, "decision": decision, "applied": applied}
             if "not_written" in rejected_by:
                 _wa_extra["not_written"] = True
+            if _lang:
+                _wa_extra["lang_check"] = _lang
             saved = await online_db.save_segment_warning(
                 router_sn, equip_type, panel_id,
                 analysis_md=analysis,
@@ -1213,42 +1437,6 @@ async def _analyze_warning_claude(
                                _gate_ts.isoformat(), router_sn, equip_type, panel_id,
                                len(analysis))
 
-        # Обязательный журнал гейта — пишется при любом исходе; окно цикла
-        # закрытия — повтор записи (v5.1.13)
-        _gate_event = {
-                "ts":                 _gate_ts.isoformat(),
-                "fault_hash":         fault_hash,
-                "severity_level":     struct.get("severity_level"),
-                "panel_severity":     struct.get("panel_severity"),
-                "analytics_severity": struct.get("analytics_severity"),
-                "alarms": [
-                    {"scenario": a.get("scenario"), "severity": a.get("severity"),
-                     "fault_codes": a.get("fault_codes"), "description": a.get("description")}
-                    for a in struct.get("panel_alarms", []) + struct.get("analytics_alarms", [])
-                ],
-                "decision":         decision,
-                "decision_applied": applied,
-                "reason":           reason,
-                "rules":            GATE_RULES_VERSION,
-                "rejected_by":      rejected_by,
-                "panel_caution":    [{"codes": a.get("fault_codes"), "since": a.get("since"),
-                                      "fresh": a.get("fresh")}
-                                     for a in struct.get("panel_alarms", [])
-                                     if a.get("severity") == "CAUTION"],
-                "provider":         provider,
-                "model":            model,
-                "tokens_in":        tokens_in,
-                "tokens_out":       tokens_out,
-        }
-        _logged = False
-        for _i in range(_GATE_SAVE_RETRIES + 1):
-            _logged = await online_db.append_segment_gate_event(
-                router_sn, equip_type, panel_id,
-                segment_id=_seg_id, ts=_gate_ts, event=_gate_event,
-            )
-            if _logged or _i == _GATE_SAVE_RETRIES:
-                break
-            await asyncio.sleep(_GATE_SAVE_RETRY_SEC)
         logger.info("WarningGate: %s/%s/%s — decision=%s applied=%s (%d симв. анализа, "
                     "разбор=%s, журнал=%s)",
                     router_sn, equip_type, panel_id, decision, applied, len(analysis or ""),

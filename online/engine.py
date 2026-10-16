@@ -297,24 +297,80 @@ def _bridge_only(ep: dict, live_episodes: dict[str, dict] | None, t_from: dateti
             and (mem.get("id") is None or ep.get("id") is None or mem["id"] == ep["id"]))
 
 
-def _gate_suppressed_scenarios(gate_state: dict | None, seg) -> set[str]:
-    """Сценарии аналитики, снятые гейтом на составе, активном на конец сегмента.
+def _ban_row(open_row: dict | None, seg, h: str) -> dict:
+    """Строка для проверки запретов снятия на конце закрываемого сегмента: начало
+    и код 40012 на начало — снятой открытой строки (свежесть «Общей аварии»),
+    вид стопа — самого сегмента."""
+    chars = (open_row or {}).get("characteristics_json")
+    if isinstance(chars, str):
+        try:
+            chars = json.loads(chars)
+        except Exception:
+            chars = None
+    chars = dict(chars) if isinstance(chars, dict) else {}
+    chars["stop_kind"] = getattr(seg, "stop_kind", None)
+    return {"gate_suppressed_hash": h, "t_start": (open_row or {}).get("t_start"),
+            "characteristics_json": chars}
+
+
+def _stop_between(src_ts: datetime | None, seg, closed: list | None) -> bool:
+    """Стоп-сегмент между решением гейта (src_ts) и сегментом seg среди
+    закрываемых этим циклом (v5.1.22, ревью gate-3; то же правило, что у
+    _gate_carry): стоп раньше seg, кончившийся после решения, или сам seg — стоп,
+    начавшийся после решения. Решение без времени — любой стоп."""
+    try:
+        s0 = _as_utc(getattr(seg, "t_start", None))
+    except Exception:
+        s0 = None
+    for s in closed or []:
+        if getattr(s, "run_state", None) != 0:
+            continue
+        a, b = _as_utc(getattr(s, "t_start", None)), _as_utc(getattr(s, "t_end", None))
+        if s is seg:
+            if src_ts is None or (a is not None and a > src_ts):
+                return True
+            continue
+        if src_ts is None:
+            return True
+        if b is not None and b > src_ts and (s0 is None or b <= s0):
+            return True
+    return False
+
+
+def _gate_suppressed_scenarios(gate_state: dict | None, seg,
+                               open_row: dict | None = None,
+                               closed: list | None = None) -> set[str]:
+    """Сценарии новых тревог закрываемого сегмента, которые сводка помечает
+    снятыми (синтетика _live_new_episodes: живой эпизод по ним заведётся после
+    закрытия).
 
     Хеш снятия — из записей гейта открытой строки, которую цикл закрытия удаляет.
+    v5.1.22 (P1-1 п. 2, 4): только от своего решения этой строки (разбор моделью
+    или повтор — от перенесённого снятия новые тревоги не наследуют) и тем же
+    предикатом, что статус: состав на конец совпал и запретов нет (сигнал
+    панели, свежая «Общая авария», аварийный стоп, несимметрия, паспорт).
+    closed — все сегменты, закрываемые этим циклом (ревью gate-3): при догонке
+    [Работа (решение) → Стоп → Работа] стоп между решением и сегментом снятие
+    не пропускает, как и перенос (_gate_carry).
     """
     h = (gate_state or {}).get("suppressed_hash")
     if not h:
         return set()
     from online.status_assembler import (
-        GATE_EXCLUDED_SCENARIOS, UNCANCELLABLE_SCENARIOS, is_analytics_suppressed,
-        passport_hard_seen,
+        GATE_EXCLUDED_SCENARIOS, UNCANCELLABLE_SCENARIOS, gate_decision_source,
+        passport_hard_seen, suppression_active,
     )
+    _src = gate_decision_source((gate_state or {}).get("gate_log"), h)
+    if _src is None:
+        return set()
+    if closed and _stop_between(_as_utc(_src.get("ts")), seg, closed):
+        return set()
     try:
         _, dets = _extract_open_segment_data(seg)
     except Exception:
         logger.warning("Не удалось снять активные тревоги сегмента", exc_info=True)
         return set()
-    if not is_analytics_suppressed({"gate_suppressed_hash": h}, dets):
+    if not suppression_active(_ban_row(open_row, seg, h), dets):
         return set()
     # Режимные замечания гейт не снимает (решение 12.10)
     return ({d.get("scenario") for d in dets
@@ -323,8 +379,137 @@ def _gate_suppressed_scenarios(gate_state: dict | None, seg) -> set[str]:
             - UNCANCELLABLE_SCENARIOS - GATE_EXCLUDED_SCENARIOS)
 
 
+def _gate_own_src(gate_state: dict | None) -> dict | None:
+    """Источник своего снятия снятой строки {ts, segment_id, kind: inherited} —
+    для подписи синтетических эпизодов сводки (v5.1.22)."""
+    try:
+        from online.status_assembler import gate_decision_source
+        src = gate_decision_source((gate_state or {}).get("gate_log"),
+                                   (gate_state or {}).get("suppressed_hash"))
+    except Exception:
+        return None
+    if not src:
+        return None
+    return {"ts": src.get("ts"), "segment_id": src.get("segment_id"), "kind": "inherited"}
+
+
+def _gate_carry(gate_state: dict | None, closed: list[tuple], episodes: dict[str, dict],
+                live_end: set[str], live_open: set[str] | None, open_run_state: int | None,
+                boundary: datetime, dets_end: list[dict] | None = None,
+                supp_sc: set[str] | None = None) -> dict | None:
+    """Хеш снятия для новой открытой строки при закрытии (v5.1.22, P1-1 п. 3).
+
+    closed — закрытые этим циклом сегменты [(seg, db_id, t_start, t_end)];
+    episodes — память эпизодов движка; live_end — ключи тревог на конце
+    последнего закрытого, live_open — в остающемся открытом (путь смены режима:
+    пересечение, В5); boundary — начало новой строки.
+
+    - Своё решение принято уже в новой строке (хвост записей после границы) —
+      хеш остаётся как есть: {"hash"}.
+    - Иначе переходит снятие только снятых эпизодов, которые ещё идут на
+      границе (id из записей гейта с этим хешем есть в памяти, ключ жив на
+      конце), и только если между решением и границей нет стоп-сегмента —
+      проверяются ВСЕ закрываемые (догонка после рестарта даёт [Работа → Стоп →
+      Работа]) — и новая строка не стоп. Запись carry с исходным разбором и
+      номером его закрытого сегмента: {"hash", "record", "ids", "segment_id"}.
+    - Иначе None: хеш не переходит, новые эпизоды разбирает гейт.
+    Журнал до v5.1.22 без списков эпизодов — по составу на конце (dets_end).
+    supp_sc — сценарии новых тревог, которые сводка закрытого сегмента пометила
+    снятыми (синтетика, _gate_suppressed_scenarios): в записи carry ключом
+    synthetic — их живой эпизод, заведённый после закрытия, получает снятие
+    переносом; прочие тревоги, появившиеся до границы, — нет (ревью gate-4).
+    """
+    from online.status_assembler import (
+        GATE_CARRY_KINDS, GATE_RULES_VERSION, gate_decision_source, gate_record_episodes,
+        is_analytics_suppressed,
+    )
+    h = (gate_state or {}).get("suppressed_hash")
+    if not h:
+        return None
+    log = (gate_state or {}).get("gate_log") or []
+    src = gate_decision_source(log, h) or gate_decision_source(log, h, GATE_CARRY_KINDS)
+    if src is None:
+        return None
+    b = _tz_utc(boundary)
+    src_ts = _as_utc(src.get("ts"))
+    if src_ts is not None and src_ts >= b:
+        return {"hash": h, "record": None, "ids": [], "segment_id": None}
+    if open_run_state == 0:
+        return None
+    for seg, _id, _t0, t1 in closed or []:
+        if getattr(seg, "run_state", None) == 0 and (src_ts is None or _tz_utc(t1) > src_ts):
+            return None
+    ids = gate_record_episodes(log, h)
+    if ids is None:
+        # Журнал до v5.1.22: снятые — эпизоды состава на конце, если он тот же
+        if not is_analytics_suppressed({"gate_suppressed_hash": h}, dets_end or []):
+            return None
+        _sc = {d.get("scenario") for d in dets_end or []
+               if isinstance(d, dict) and d.get("scenario") != "CONTROLLER_FAULT"}
+        ids = {m.get("id") for k, m in (episodes or {}).items() if k in _sc}
+    ongoing = sorted(m["id"] for k, m in (episodes or {}).items()
+                     if m.get("id") in ids and k in (live_end or set())
+                     and (live_open is None or k in live_open))
+    if not ongoing:
+        return None
+    seg_id = src.get("segment_id")
+    if seg_id is None and src_ts is not None:
+        seg_id = next((_id for _s, _id, t0, t1 in closed or []
+                       if _id is not None and _tz_utc(t0) <= src_ts < _tz_utc(t1)), None)
+    source = {"ts": src.get("ts"), "segment_id": seg_id}
+    record = {
+        "ts": b.isoformat(), "kind": "carry",
+        "fault_hash": src.get("fault_hash"), "suppressed_hash": h,
+        "decision": "cancel", "decision_applied": True,
+        "reason": "снятый эпизод продолжается через границу сегмента — снятие перенесено "
+                  "по исходному разбору",
+        "rules": GATE_RULES_VERSION,
+        "provider": "carry", "model": None, "tokens_in": 0, "tokens_out": 0,
+        "source": source, "episodes": ongoing,
+        # Тревоги закрытого сегмента, снятые в его сводке без живого эпизода
+        # (ревью gate-4): только их продолжение наследует перенос
+        "synthetic": sorted(supp_sc or []),
+    }
+    return {"hash": h, "record": record, "ids": ongoing, "segment_id": seg_id}
+
+
+def _carry_scope(gate_log: list | None, h: str | None) -> tuple[set[int], set[str], dict[str, datetime]]:
+    """Что защищает перенесённое снятие строки (v5.1.22, ревью gate-4): id
+    эпизодов из записей carry / late с этим хешем; сценарии тревог, снятых в
+    сводке закрытого сегмента без живого эпизода (synthetic у carry); у позднего
+    вердикта — сценарии записи с моментом разбора (снимал начавшиеся не позже).
+    Тревога, которую закрытая карточка не снимала, сюда не входит."""
+    from online.status_assembler import gate_entry_kind
+    ids: set[int] = set()
+    synth: set[str] = set()
+    late: dict[str, datetime] = {}
+    for e in gate_log or []:
+        if not (isinstance(e, dict) and e.get("decision") == "cancel" and e.get("decision_applied")
+                and e.get("suppressed_hash") == h):
+            continue
+        kind = gate_entry_kind(e)
+        if kind not in ("carry", "late"):
+            continue
+        for i in e.get("episodes") or []:
+            try:
+                ids.add(int(i))
+            except (TypeError, ValueError):
+                pass
+        if kind == "carry":
+            synth |= {s for s in e.get("synthetic") or [] if isinstance(s, str)}
+        else:
+            _t = _as_utc(((e.get("source") or {}) if isinstance(e.get("source"), dict) else {}).get("ts")
+                         or e.get("ts"))
+            for a in e.get("alarms") or []:
+                sc = a.get("scenario") if isinstance(a, dict) else None
+                if sc and _t is not None and (sc not in late or _t > late[sc]):
+                    late[sc] = _t
+    return ids, synth, late
+
+
 def _live_new_episodes(segments: list, eps: list[dict], live_keys: set[str],
-                       t_end: datetime, suppressed_sc: set[str] | None = None) -> list[dict]:
+                       t_end: datetime, suppressed_sc: set[str] | None = None,
+                       supp_src: dict | None = None) -> list[dict]:
     """Тревоги, появившиеся в закрываемом сегменте и продолжающиеся в открытом.
 
     Живой эпизод по ним заведётся только после закрытия (_process_episodes идёт
@@ -339,6 +524,9 @@ def _live_new_episodes(segments: list, eps: list[dict], live_keys: set[str],
     alive_detections, как живой состав движка), а не t_detected первого
     подсегмента с детекцией: иначе «появилось» в 09:00 при нарушении с 08:57.
     Сбой — по t_detected, как раньше.
+
+    v5.1.22: supp_src — источник снятия (своё решение строки) для подписи
+    «снято ИИ (разбор ЧЧ:ММ)».
     """
     if not live_keys:
         return []
@@ -394,6 +582,9 @@ def _live_new_episodes(segments: list, eps: list[dict], live_keys: set[str],
                     "active_sec": max(0.0, (_tz_utc(t_end) - t_open).total_seconds()),
                     "blind_sec": float((same or {}).get("blind_sec") or 0.0),
                     "gate_suppressed": not panel and dd.get("scenario") in (suppressed_sc or ()),
+                    "gate_suppressed_src": (supp_src if not panel
+                                            and dd.get("scenario") in (suppressed_sc or ())
+                                            else None),
                     "open_values_json": {"fault_name": v.get("fault_name")} if panel else None,
                 }
     return list(out.values())
@@ -473,8 +664,16 @@ def _make_seg_hint(db_row: dict):
     # Segment, и обращение к отсутствующему полю дало бы AttributeError в первом
     # же цикле — то есть ровно тогда, когда движок только поднялся.
     kind = (chars.get("stop_kind") if isinstance(chars, dict) else None)
+    # v5.1.22 (P1-4): границы и отметка обрыва аварией с лентой отсчётов — акт
+    # стопа, открытого до рестарта, берёт ленту сегмента падения отсюда, без чтения
+    trip = chars.get("closed_by_trip") if isinstance(chars, dict) else None
+
+    def _iso(v):
+        return v.isoformat() if hasattr(v, "isoformat") else v
     return SimpleNamespace(run_state=db_row.get("run_state"),
-                           run_state_label=label, stop_kind=kind)
+                           run_state_label=label, stop_kind=kind,
+                           t_start=_iso(db_row.get("t_start")), t_end=_iso(db_row.get("t_end")),
+                           closed_by_trip=trip if isinstance(trip, dict) else None)
 
 
 def _parse_gate_state(open_row: dict | None) -> dict:
@@ -1047,8 +1246,13 @@ async def _load_data(
 
 
 # Удержанные значения на голове окна (v5.1.21, П10): частота — сверке оборотов,
-# остальное — переносу участков аналитики через начало окна
-_HELD_ROLES = ("RPM", "FREQUENCY", "OIL_TEMP", "COOLANT_TEMP", "OIL_PRESS")
+# остальное — переносу участков аналитики через начало окна. v5.1.22: счётчик
+# наработки — тем же запросом; у сегментов короче его «пульса» (15 мин) строки
+# нет, и модель выдумывала наработку из событий журнала («680 ч»)
+_HELD_ROLES = ("RPM", "FREQUENCY", "OIL_TEMP", "COOLANT_TEMP", "OIL_PRESS", "ENGINE_HOURS")
+# Сколько ждать аварийности следующего стопа после закрытия сегмента сменой
+# режима (v5.1.22, P1-3): 40013 и маски приходят тем же кадром или следующим
+_TRIP_WATCH_SEC = 600
 # _run_segment: посев не передан — прочитать самому
 _SEED_UNSET: Any = object()
 
@@ -1166,6 +1370,7 @@ async def _run_segment(
     transition_ctx: list | None = None,
     confirm_to: datetime | None = None,
     load_seed: Any = _SEED_UNSET,
+    prev_hint: Any = None,
 ) -> tuple[list, dict[str, dict], list[dict], dict[str, dict]]:
     """Загрузить данные и запустить segment() в отдельном потоке.
 
@@ -1182,6 +1387,10 @@ async def _run_segment(
 
     load_seed — удержанные значения перед окном (_load_seed), если уже прочитаны:
     рез берёт их из кэша курсора, повторный прогон с confirm_to — тоже (v5.1.21).
+
+    prev_hint — сегмент перед окном (подсказка предка движка): если окно
+    начинается с аварийного стопа, лента отсчётов акта — из его отметки обрыва
+    (v5.1.22, P1-4).
     """
     import functools
     from analytics.segmenter import segment as _segment
@@ -1222,7 +1431,6 @@ async def _run_segment(
     # Ключ — seg.t_start.
     incidents: dict[str, dict] = {}
     chronologies: dict[str, dict] = {}
-    from analytics import classifier as _clf
     from analytics.reconstructor import build_segment_chronology as _chrono
     tl_enum, tl_faults = await _timeline_for(
         segments, router_sn, equip_type, panel_id, ts_from, ts_to, cfg,
@@ -1242,22 +1450,13 @@ async def _run_segment(
             # Падение плашки за суточным резом — акт строит её продолжение
             if (getattr(seg, "stop_kind", None) == "EMERGENCY" and _stop < _te
                     and _is_stop_head(enum_periods, _stop)):
-                _ctx = await _load_incident_context(
-                    router_sn, equip_type, panel_id, _stop, ts_to, cfg,
-                    skip_stops=_plates,
-                )
-                _ep, _fp, _tlf, _anc = (
-                    _ctx if _ctx else (tl_enum, fault_periods, tl_faults, None)
-                )
-                inc = _clf.build_stop_incident(
-                    _ep, _fp, _stop, _te, cfg,
-                    stop_kind="EMERGENCY",
-                    stabilization_sec=_stab_sec(cfg),
-                    detail_events=_act_detail_events(cfg),
-                    timeline_faults=_tlf,
-                    anchor=_anc,
-                    min_window_sec=_act_min_window_sec(cfg),
-                    attempt=getattr(seg, "attempt", None),
+                # Общий построитель (v5.1.22): лента — из сегмента падения окна
+                # или подсказки предка (окно начинается со стопа)
+                inc = await _build_act(
+                    router_sn, equip_type, panel_id, seg, _te, ts_to, cfg,
+                    tl_enum=tl_enum, fault_periods=fault_periods, tl_faults=tl_faults,
+                    skip_stops=_plates, segments=segments, prev=prev_hint,
+                    key=f"{router_sn}/{equip_type}/{panel_id}",
                 )
                 if inc is not None:
                     incidents[seg.t_start] = inc
@@ -1321,6 +1520,108 @@ def _stop_ts_of(seg) -> datetime:
     raw = att.get("t_fall") if isinstance(att, dict) else None
     raw = raw or get("t_start")
     return _tz_utc(datetime.fromisoformat(raw) if isinstance(raw, str) else raw)
+
+
+def _fall_segment(seg, segments: list | None, prev=None):
+    """Нестоповый сегмент, из которого машина упала в стоп seg (v5.1.22, P1-4):
+    предшествующий в окне, иначе подсказка предка (закрыт прошлым циклом; после
+    рестарта — из строки БД, _make_seg_hint). Конец — ровно на начале стопа.
+    None — не найден (окно начинается со стопа без подсказки, режим другой)."""
+    def _get(s, k):
+        return s.get(k) if isinstance(s, dict) else getattr(s, k, None)
+    try:
+        t0 = _tz_utc(datetime.fromisoformat(_get(seg, "t_start")))
+    except (TypeError, ValueError):
+        return None
+    cand = None
+    segs = list(segments or [])
+    idx = next((i for i, s in enumerate(segs) if s is seg), None)
+    if idx is not None and idx > 0:
+        cand = segs[idx - 1]
+    elif prev is not None:
+        cand = prev
+    if cand is None or _get(cand, "run_state") in (0, None):
+        return None
+    te = _get(cand, "t_end")
+    try:
+        if te is not None and _tz_utc(datetime.fromisoformat(te) if isinstance(te, str) else te) != t0:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return cand
+
+
+def _act_trace(seg, segments: list | None, prev=None) -> tuple[dict | None, dict | None, bool]:
+    """(лента отсчётов, сведения о сегменте падения, есть ли отметка обрыва) для
+    акта стопа seg (v5.1.22, P1-4, решение В2). Лента снята нарезкой при
+    закрытии сегмента падения: у плашки неудачной попытки — Segment.fall_trace
+    (плашка сама сегмент падения), у прочих — closed_by_trip["trace"]
+    предшествующего нестопового сегмента. Запросов нет."""
+    def _get(s, k):
+        return s.get(k) if isinstance(s, dict) else getattr(s, k, None)
+    att = _get(seg, "attempt")
+    if isinstance(att, dict):
+        tr = _get(seg, "fall_trace")
+        fall = {"run_state": att.get("from_state"), "label": _get(seg, "run_state_label"),
+                "t_start": att.get("t_start"), "t_end": att.get("t_fall"), "attempt": True}
+        return (tr if isinstance(tr, dict) else None), fall, True
+    fs = _fall_segment(seg, segments, prev)
+    if fs is None:
+        return None, None, False
+    trip = _get(fs, "closed_by_trip")
+    tr = trip.get("trace") if isinstance(trip, dict) else None
+    from analytics.serializer import RUN_STATE_RU
+    rs = _get(fs, "run_state")
+    # Режим — как в отчёте («Работа»), а не метка каталога панели
+    fall = {"run_state": rs, "label": RUN_STATE_RU.get(rs) or _get(fs, "run_state_label"),
+            "t_start": _get(fs, "t_start"), "t_end": _get(fs, "t_end")}
+    return (tr if isinstance(tr, dict) else None), fall, isinstance(trip, dict)
+
+
+async def _build_act(
+    router_sn: str, equip_type: str, panel_id: int, seg, t_end: datetime | None,
+    ts_to: datetime, cfg, *, tl_enum: list[dict], fault_periods: list[dict],
+    tl_faults: list[dict], skip_stops: set[datetime] | None,
+    segments: list | None = None, prev=None, key: str = "",
+) -> dict | None:
+    """Акт аварийного стопа — один на все три пути (v5.1.22, P1-4): открытый стоп
+    по лагу стабилизации, закрытие сменой режима и прогон окна (_run_segment:
+    суточный рез, догонка). Было три почти одинаковые копии — забытая копия уже
+    стоила NameError до v4.9.94.
+
+    Контекст от якоря (_load_incident_context, как раньше), лента отсчётов и
+    сведения о сегменте падения (_act_trace — из нарезки, без чтения), начало
+    выхода из стопа — по уже загруженным enum-периодам. Сегмент падения без
+    отметки обрыва аварией (P1-3: «Работа» закрылась раньше, чем аварийность
+    стопа пришла в данные) — предупреждение в журнал. None — не аварийный стоп.
+    """
+    from analytics import classifier as _clf
+    stop = _stop_ts_of(seg)
+    ctx = await _load_incident_context(router_sn, equip_type, panel_id, stop, ts_to, cfg,
+                                       skip_stops=skip_stops)
+    ep, fp, tlf, anc = ctx if ctx else (tl_enum, fault_periods, tl_faults, None)
+    trace, fall, marked = None, None, True
+    try:
+        trace, fall, marked = _act_trace(seg, segments, prev)
+        if fall is not None:
+            chain = _clf.exit_chain_before(ep, stop)
+            fall["chain_start"] = chain[0].isoformat() if chain else None
+    except Exception:
+        logger.warning("OnlineEngine[%s]: лента отсчётов акта не собрана", key, exc_info=True)
+    if not marked:
+        logger.warning("OnlineEngine[%s]: акт аварии %s — у сегмента падения нет отметки "
+                       "обрыва аварией (P1-3) и ленты отсчётов", key, stop.isoformat())
+    return _clf.build_stop_incident(
+        ep, fp, stop, t_end, cfg,
+        stop_kind="EMERGENCY",
+        stabilization_sec=_stab_sec(cfg),
+        detail_events=_act_detail_events(cfg),
+        timeline_faults=tlf,
+        anchor=anc,
+        min_window_sec=_act_min_window_sec(cfg),
+        attempt=getattr(seg, "attempt", None),
+        trace=trace, fall=fall,
+    )
 
 
 def _attempt_stops(segments: list) -> set[datetime]:
@@ -2094,8 +2395,17 @@ class OnlinePollEngine:
         # База начисления живого времени эпизодов (тикает только по времени с данными)
         self._episode_accrual_ts: datetime | None = None
         # Новые аналитические эпизоды, чью проверку на снятие гейтом пришлось
-        # отложить: цикл смены режима удалил открытую строку до _process_episodes
-        self._supp_recheck: tuple[list[str], list[dict]] | None = None
+        # отложить: цикл смены режима удалил открытую строку до _process_episodes.
+        # v5.1.22: [(сценарий, id эпизода, начало)] и детекции
+        self._supp_recheck: tuple[list[tuple], list[dict]] | None = None
+        # Эпизоды, которым отказано в наследовании снятия по запрету (сигнал
+        # панели, свежая «Общая авария», аварийный стоп): id → (сценарий, id,
+        # начало). Когда запрет снимется, а эпизод ещё идёт, наследование
+        # повторяется (v5.1.22, критика 4: иначе статус «снято», гейт молчит, а
+        # в сводке живое 🟡). Подпись панели и строки на момент отказа — чтобы не
+        # спрашивать строку каждый цикл, пока запрет тот же
+        self._supp_refused: dict[int, tuple] = {}
+        self._supp_refused_sig: tuple | None = None
         # id открытого сегмента с прошлого цикла — справочная ссылка новых эпизодов
         self._last_open_seg_id: int | None = None
         # Подпись ленты открытого сегмента (t_start, число событий) — чтобы не
@@ -2110,6 +2420,10 @@ class OnlinePollEngine:
         self._act_done_for: datetime | None = None
         # Когда последний раз оценивали шаг показаний датчиков (v5.1.12)
         self._sensor_steps_at: datetime | None = None
+        # Сегмент, закрытый сменой режима в стоп без отметки обрыва аварией:
+        # {id, t_start, t_end, run_state}. Если аварийность стопа придёт кадром
+        # позже, отметка дописывается в закрытую сводку (v5.1.22, P1-3)
+        self._trip_watch: dict | None = None
 
     @property
     def key(self) -> str:
@@ -2381,27 +2695,159 @@ class OnlinePollEngine:
                 return gaps
         return (cache.get("head") or []) + gaps
 
-    async def _inherit_gate_suppression(self, scenarios: list[str], curr_dets: list[dict]) -> bool:
-        """Пометить новые эпизоды снятыми, если гейт уже снял их состав.
+    @staticmethod
+    def _panel_sig(curr_dets: list[dict]) -> frozenset:
+        """Подпись сигналов панели в детекциях: запрет снятия по ним меняется
+        только вместе с ней (или со строкой)."""
+        return frozenset(
+            (_alert_key(d), d.get("severity"), tuple(d.get("fault_codes") or []))
+            for d in curr_dets or []
+            if isinstance(d, dict) and d.get("scenario") == "CONTROLLER_FAULT")
+
+    def _retry_sig(self, curr_dets: list[dict]) -> tuple:
+        """Подпись условий наследования: панель, строка (начало окна), состав
+        аналитики. Пока она та же, повтор дал бы тот же отказ."""
+        try:
+            from online.status_assembler import _without_state, compute_analytics_hash, gate_dets
+            comp = compute_analytics_hash(gate_dets(_without_state(curr_dets)))
+        except Exception:
+            comp = None
+        return (self._panel_sig(curr_dets), getattr(self, "cursor_ts", None), comp)
+
+    def _refused_retry_due(self, curr_dets: list[dict]) -> bool:
+        """Повторить наследование отказанным эпизодам (v5.1.22) — без запроса:
+        только если сигнала панели WARNING/SHUTDOWN нет и подпись условий
+        (панель, строка, состав) сменилась с прошлой попытки."""
+        if any(isinstance(d, dict) and d.get("scenario") == "CONTROLLER_FAULT"
+               and d.get("severity") in ("WARNING", "SHUTDOWN") for d in curr_dets or []):
+            return False
+        return self._retry_sig(curr_dets) != getattr(self, "_supp_refused_sig", None)
+
+    async def _inherit_gate_suppression(self, new_eps: list[tuple], curr_dets: list[dict],
+                                        ts: datetime | None = None) -> bool:
+        """Пометить новые эпизоды снятыми, если гейт уже снял их состав в этой строке.
 
         False — открытой строки нет (проверку надо повторить после upsert).
+
+        v5.1.22 (P1-1 п. 2–4). new_eps — [(сценарий, id эпизода, начало)].
+        - Снятие действует (suppression_active: состав совпал, запретов нет) и
+          решение принято в этой строке (разбор моделью или повтор) — помечаются
+          только эти id (и отказанные раньше, ещё идущие), запись inherited со
+          ссылкой на исходный разбор.
+        - Хеш строки перенесён (carry/late), своего решения нет — помечается
+          только продолжение снятого эпизода через границу (начался до начала
+          строки: тревога появилась в закрытом сегменте, живой эпизод заведён
+          после закрытия), запись carry. Новый эпизод в этой строке снятие не
+          наследует: хеш с строки снимается, его разберёт гейт (иначе статус
+          «снято», гейт молчит, а в сводке живое 🟡).
+        - Запрет (сигнал панели, свежая «Общая авария», аварийный стоп) — отказ:
+          id в памяти, повтор при снятии запрета (_refused_retry_due).
+        Строка — тот же запрос, что раньше; запись в БД — только при пометке.
         """
         try:
             from online.status_assembler import (
-                GATE_EXCLUDED_SCENARIOS, UNCANCELLABLE_SCENARIOS, is_analytics_suppressed,
-                passport_hard_seen,
+                GATE_CARRY_KINDS, GATE_EXCLUDED_SCENARIOS, GATE_RULES_VERSION,
+                UNCANCELLABLE_SCENARIOS, gate_decision_source, is_analytics_suppressed,
+                passport_hard_seen, suppression_bans,
             )
             _row = await online_db.get_open_segment(
                 self.router_sn, self.equip_type, self.panel_id)
             if not _row:
                 return False
-            if is_analytics_suppressed(_row, curr_dets):
-                await online_db.set_episodes_gate_suppressed(
+            refused = getattr(self, "_supp_refused", None)
+            if refused is None:
+                refused = self._supp_refused = {}
+            # Отказанные раньше и ещё идущие — повтор вместе с новыми
+            _alive = {m.get("id") for m in (self._episodes or {}).values()}
+            for _i in [i for i in refused if i not in _alive]:
+                refused.pop(_i, None)
+            _hard = {d.get("scenario") for d in curr_dets or []
+                     if isinstance(d, dict) and passport_hard_seen(d)}
+            cand: dict[int, tuple] = {}
+            for c in list(new_eps or []) + list(refused.values()):
+                sc, ep_id = c[0], c[1]
+                if (ep_id is None or sc in UNCANCELLABLE_SCENARIOS
+                        or sc in GATE_EXCLUDED_SCENARIOS or sc in _hard):
+                    continue
+                cand[ep_id] = c
+            # Подпись условий этой попытки — повтор отказанных только при её смене
+            self._supp_refused_sig = self._retry_sig(curr_dets)
+            h = _row.get("gate_suppressed_hash")
+            if not cand or not h or not is_analytics_suppressed(_row, curr_dets):
+                return True
+            _log = _row.get("gate_log")
+            if isinstance(_log, str):
+                try:
+                    _log = json.loads(_log)
+                except Exception:
+                    _log = []
+            _log = _log if isinstance(_log, list) else []
+            src = gate_decision_source(_log, h)
+            kind = "inherited"
+            take = list(cand.values())
+            if src is None:
+                # Перенесённое снятие: только продолжение через границу того, что
+                # закрытая карточка сняла (эпизоды записи, синтетика, снятая в её
+                # сводке, поздний вердикт — до момента разбора; ревью gate-4: новая
+                # тревога за цикл до реза, в закрытой карточке живая, снималась
+                # без разбора гейтом)
+                src = gate_decision_source(_log, h, GATE_CARRY_KINDS)
+                kind = "carry"
+                _t0 = _as_utc(_row.get("t_start"))
+                _ids, _synth, _late = _carry_scope(_log, h)
+
+                def _carried(c: tuple) -> bool:
+                    if c[1] in _ids or c[0] in _synth:
+                        return True
+                    _u = _late.get(c[0])
+                    return _u is not None and _tz_utc(c[2]) <= _u
+
+                take = [c for c in cand.values()
+                        if src is not None and _t0 is not None and len(c) > 2
+                        and c[2] is not None and _tz_utc(c[2]) < _t0 and _carried(c)]
+                fresh = [c for c in cand.values() if c not in take]
+                if fresh:
+                    if await online_db.clear_open_gate_suppression_hash(
+                            self.router_sn, self.equip_type, self.panel_id, h):
+                        logger.info("OnlineEngine[%s]: новый эпизод %s в строке с перенесённым "
+                                    "снятием — хеш снят, состав разберёт гейт", self.key,
+                                    [c[1] for c in fresh])
+            if not take or src is None:
+                return True
+            bans = suppression_bans(_row, curr_dets)
+            if bans:
+                for c in take:
+                    refused[c[1]] = c
+                logger.info("OnlineEngine[%s]: снятие на эпизоды %s не перенесено — %s; "
+                            "повтор, когда запрет снимется", self.key,
+                            [c[1] for c in take], ", ".join(bans))
+                return True
+            _source = {"ts": src.get("ts"), "segment_id": src.get("segment_id")}
+            marked = await online_db.set_episodes_gate_suppressed(
+                self.router_sn, self.equip_type, self.panel_id,
+                [c[0] for c in take], ids=[c[1] for c in take],
+                src={**_source, "kind": kind},
+            )
+            for c in take:
+                refused.pop(c[1], None)
+            if marked:
+                _ts = _tz_utc(ts) if ts is not None else datetime.now(timezone.utc)
+                await online_db.append_segment_gate_event(
                     self.router_sn, self.equip_type, self.panel_id,
-                    [s for s in scenarios if s not in UNCANCELLABLE_SCENARIOS
-                     and s not in GATE_EXCLUDED_SCENARIOS
-                     and not any(passport_hard_seen(d) and d.get("scenario") == s
-                                 for d in curr_dets)],
+                    segment_id=_row.get("id"), ts=_ts,
+                    event={
+                        "ts": _ts.isoformat(), "kind": kind,
+                        "fault_hash": src.get("fault_hash"), "suppressed_hash": h,
+                        "alarms": [{"scenario": sc} for sc in sorted({c[0] for c in take})],
+                        "decision": "cancel", "decision_applied": True,
+                        "reason": ("новый эпизод того же состава в этой строке — снятие "
+                                   "по исходному разбору" if kind == "inherited" else
+                                   "тревога продолжается через границу сегмента — снятие "
+                                   "по исходному разбору"),
+                        "rules": GATE_RULES_VERSION,
+                        "provider": kind, "model": None, "tokens_in": 0, "tokens_out": 0,
+                        "source": _source, "episodes": list(marked),
+                    },
                 )
         except Exception:
             logger.warning("OnlineEngine[%s]: не удалось перенести снятие гейтом "
@@ -2480,7 +2926,8 @@ class OnlinePollEngine:
         self._episode_accrual_ts = now_ts
 
         # Открытие новых / обновление живущих
-        _new_analytics: list[str] = []
+        # Новые эпизоды аналитики: (сценарий, id, начало) — наследование снятия по id (v5.1.22)
+        _new_analytics: list[tuple] = []
         _hc: dict = {}    # кэш разрывов до окна (голова эпизода)
         for key, d in curr_map.items():
             ep = self._episodes.get(key)
@@ -2566,7 +3013,7 @@ class OnlinePollEngine:
                                            "miss": 0, "first_miss_ts": None,
                                            "t_open": t_open, **_mem_live}
                     if sc != "CONTROLLER_FAULT":
-                        _new_analytics.append(sc)
+                        _new_analytics.append((sc, ep_id, t_open))
                     continue
                 # Время от фронта неисправности до конца этого окна. Дальше
                 # тикают поцикловые приращения от той же базы, так что
@@ -2594,7 +3041,7 @@ class OnlinePollEngine:
                                        "miss": 0, "first_miss_ts": None,
                                        "t_open": t_open, **_mem_live}
                 if sc != "CONTROLLER_FAULT":
-                    _new_analytics.append(sc)
+                    _new_analytics.append((sc, ep_id, t_open))
                 logger.info("OnlineEngine[%s]: эпизод открыт — %s (severity=%s%s)",
                             self.key, key, sev,
                             f", с {t_open.isoformat()}" if li is not None else "")
@@ -2640,11 +3087,19 @@ class OnlinePollEngine:
 
         # Новый аналитический эпизод того состава, который гейт уже снял: живой
         # статус по хешу открытой строки — «норма», гейт не перезапустится, и
-        # флаг эпизоду иначе не поставит никто — в сводке выйдет живое замечание
-        if _new_analytics and not await self._inherit_gate_suppression(_new_analytics, curr_dets):
-            # Открытую строку цикл смены режима уже удалил, новая ещё не записана —
-            # проверить после upsert (хвост гейта с хешем переносится туда же)
-            self._supp_recheck = (_new_analytics, curr_dets)
+        # флаг эпизоду иначе не поставит никто — в сводке выйдет живое замечание.
+        # v5.1.22: по id, с запретами и источником; отказанным по запрету —
+        # повтор, когда запрет снимется (без запроса, пока запрет тот же)
+        _refused = getattr(self, "_supp_refused", None) or {}
+        if _refused and not _new_analytics:
+            _alive = {m.get("id") for m in self._episodes.values()}
+            for _i in [i for i in _refused if i not in _alive]:
+                _refused.pop(_i, None)
+        if _new_analytics or (_refused and self._refused_retry_due(curr_dets)):
+            if not await self._inherit_gate_suppression(_new_analytics, curr_dets, ts=now_ts):
+                # Открытую строку цикл смены режима уже удалил, новая ещё не записана —
+                # проверить после upsert (хвост гейта с хешем переносится туда же)
+                self._supp_recheck = (_new_analytics, curr_dets)
 
         # Дебаунс закрытия — только когда данные реально шли (в дыре всё замирает)
         if live_sec <= 0:
@@ -2942,6 +3397,7 @@ class OnlinePollEngine:
         self, segments: list, t_from: datetime, t_to: datetime,
         closing: bool = False, live_keys: set[str] | None = None,
         suppressed_sc: set[str] | None = None,
+        supp_src: dict | None = None,
     ) -> tuple[str | None, dict | None]:
         """Сводка сегмента: (report_summary_md, части) — вердикт, замечания, показатели.
 
@@ -2965,7 +3421,7 @@ class OnlinePollEngine:
                 # Точный эпизод, не живой на конец, — до конца нарушения (v5.1.21)
                 eps = _drop_debounce_tails(eps, segments, self._episodes, live_keys or set())
                 _syn = _live_new_episodes(segments, eps, live_keys or set(), _tz_utc(t_to),
-                                          suppressed_sc)
+                                          suppressed_sc, supp_src)
                 eps = _drop_same_onset(eps, _syn) + _syn
             else:
                 # Мост после реза (v5.1.21): точный эпизод, чьё нарушение кончилось
@@ -3199,6 +3655,7 @@ class OnlinePollEngine:
                 self.inherited_coking_risk,
                 transition_ctx=self._transition_ctx,
                 load_seed=_seed,
+                prev_hint=self._prev_seg_hint,
             )
             if (close_reason == "DAILY_BOUNDARY" and segments
                     and getattr(segments[-1], "attempt_pending", False)
@@ -3211,6 +3668,7 @@ class OnlinePollEngine:
                     confirm_to=min(_tz_utc(lookahead_to),
                                    _tz_utc(t_to) + timedelta(seconds=_CONFIRM_LOOKAHEAD_SEC)),
                     load_seed=_seed,
+                    prev_hint=self._prev_seg_hint,
                 )
         except Exception:
             logger.exception("OnlineEngine[%s]: ошибка анализа [%s, %s]", self.key, t_from, t_to)
@@ -3288,10 +3746,20 @@ class OnlinePollEngine:
         # Тревоги, активные на конец окна: живой эпизод по ним заведётся на
         # следующем цикле, поэтому «эфемерными» их считать нельзя
         _live_keys = _live_alert_keys(segments[-1])
-        _supp_sc = _gate_suppressed_scenarios(_gate_state, segments[-1])
+        # Стоп между решением и сегментом (догонка) — снятие не переходит (ревью gate-3)
+        try:
+            _supp_sc = _gate_suppressed_scenarios(_gate_state, segments[-1], _open_row,
+                                                  closed=segments)
+        except Exception:
+            logger.warning("OnlineEngine[%s]: снятые сценарии сводки не определены — без снятия",
+                           self.key, exc_info=True)
+            _supp_sc = set()
         # Уже засеянные в этом окне — одна тревога на несколько сегментов
         # должна дать один эпизод, а не по одному на сегмент
         _seeded: set[str] = set()
+        # Закрытые этим циклом: (сегмент, id, начало, конец) — правило переноса
+        # снятия проверяет их все (v5.1.22)
+        _closed_info: list[tuple] = []
 
         for i, seg in enumerate(segments):
             is_last = (i == len(segments) - 1)
@@ -3412,6 +3880,7 @@ class OnlinePollEngine:
                     [seg], datetime.fromisoformat(seg.t_start), seg_t_end, closing=True,
                     live_keys=_live_keys if is_last else None,
                     suppressed_sc=_supp_sc,
+                    supp_src=_gate_own_src(_gate_state) if _supp_sc else None,
                 )
 
             db_id = await online_db.insert_closed_segment({
@@ -3447,6 +3916,8 @@ class OnlinePollEngine:
                     _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end,
                 ),
             })
+            _closed_info.append((seg, db_id, _tz_utc(datetime.fromisoformat(seg.t_start)),
+                                 seg_t_end))
             # ← await выше = event loop обслужил API. Сигналим прогресс сразу.
             if _seg_no_data:
                 logger.info(
@@ -3531,12 +4002,45 @@ class OnlinePollEngine:
 
         # Хвост записей гейта — в пересеянную открытую строку: они сделаны позже
         # конца последнего закрытого сегмента и принадлежат уже новому сегменту.
+        # v5.1.22 (P1-1 п. 3): хеш снятия переходит, только если снятый эпизод
+        # ещё идёт на границе и стопа между решением и границей не было
+        # (_gate_carry); ни один сегмент не закрыт (рез пропущен в переходном
+        # режиме) — строка та же, хеш остаётся
         if _seed_open_id:
             _tail = _slice_gate_state(_gate_state, last_committed_t_end)
+            _carry = None
             if _gate_state.get("suppressed_hash"):
-                _tail["gate_suppressed_hash"] = _gate_state["suppressed_hash"]
+                if not _closed_info:
+                    _tail["gate_suppressed_hash"] = _gate_state["suppressed_hash"]
+                else:
+                    try:
+                        _last_closed = _closed_info[-1][0]
+                        _open_side = None if _last_closed is segments[-1] else segments[-1]
+                        _, _dets_end = _extract_open_segment_data(_last_closed)
+                        _carry = _gate_carry(
+                            _gate_state, _closed_info, self._episodes,
+                            live_end=(_live_keys if _open_side is None
+                                      else _live_alert_keys(_last_closed)),
+                            live_open=_live_keys if _open_side is not None else None,
+                            open_run_state=segments[-1].run_state,
+                            boundary=last_committed_t_end, dets_end=_dets_end,
+                            supp_sc=_supp_sc)
+                    except Exception:
+                        logger.warning("OnlineEngine[%s]: правило переноса снятия не проверено — "
+                                       "хеш не переносится", self.key, exc_info=True)
+                        _carry = None
+                    if _carry:
+                        _tail["gate_suppressed_hash"] = _carry["hash"]
+                        if _carry.get("record"):
+                            _tail["gate_log"] = list(_tail.get("gate_log") or []) + [_carry["record"]]
+                    logger.info("OnlineEngine[%s]: снятие гейтом %s в новую строку %s",
+                                self.key,
+                                ("перенесено (эпизоды %s)" % _carry["ids"]) if _carry and _carry.get("ids")
+                                else "остаётся" if _carry else "не переносится", _seed_open_id)
             try:
                 await online_db.append_segment_gate_state(_seed_open_id, _tail)
+                if _carry and _carry.get("ids") and _carry.get("segment_id"):
+                    await online_db.set_episodes_gate_src_segment(_carry["ids"], _carry["segment_id"])
             except Exception:
                 logger.warning("OnlineEngine[%s]: хвост записей гейта не восстановлен",
                                self.key, exc_info=True)
@@ -3547,6 +4051,94 @@ class OnlinePollEngine:
             "OnlineEngine[%s]: закрыто %d сегментов до %s (%s)",
             self.key, len(segments), t_to, close_reason,
         )
+
+    # ── Поздняя отметка обрыва сегмента аварией (v5.1.22, P1-3) ───────────────
+
+    def _watch_trip(self, closed: list[tuple], segments: list) -> None:
+        """Запомнить сегмент, закрытый сменой режима в ещё открытый стоп, если
+        нарезка не отметила его обрыв аварией: аварийность стопа (40013, маска)
+        может прийти кадром позже 40011. closed — [(сегмент, id, начало, конец)]
+        этого цикла. По данным 60 дней 23 из 23 приходили одним кадром — это
+        страховка, а не основной путь."""
+        self._trip_watch = None
+        if not closed or not segments:
+            return
+        seg, db_id, t0, t1 = closed[-1]
+        open_seg = segments[-1]
+        if (not db_id or seg is open_seg or getattr(seg, "run_state", 0) == 0
+                or getattr(seg, "closed_by_trip", None)
+                or getattr(seg, "cause_close", None) != "RUN_STATE_CHANGE"
+                or getattr(open_seg, "run_state", None) != 0
+                or getattr(open_seg, "attempt", None)
+                or getattr(open_seg, "stop_kind", None) == "EMERGENCY"):
+            return
+        try:
+            if _tz_utc(datetime.fromisoformat(open_seg.t_start)) != t1:
+                return
+        except (TypeError, ValueError):
+            return
+        self._trip_watch = {"id": db_id, "t_start": t0, "t_end": t1,
+                            "run_state": int(seg.run_state)}
+
+    async def _late_run_trip(self, segments: list, enum_periods: list[dict],
+                             fault_periods: list[dict], t_to: datetime) -> None:
+        """Стоп, в который закрылся отслеживаемый сегмент, стал аварийным —
+        дописать в его закрытую сводку «… прервана аварийным остановом».
+
+        Тем же правилом и той же подписью, что нарезка (segmenter._trip_mark /
+        trip_record), по данным открытого окна — оно начинается ровно на конце
+        закрытого сегмента, периоды 40012/40013 и маски уже загружены: запросов
+        к БД нет, пока отметки нет. Запись — одна, как поздняя отмена гейтом;
+        заключение перезаказывается при любой дописке (ревью verdict-6). Пока
+        стоп простой — ждём (_trip_mark простому стопу отметку не даёт, ревью
+        verdict-5).
+        """
+        w = getattr(self, "_trip_watch", None)
+        if not w or not segments:
+            return
+        head = segments[0]
+        try:
+            h_start = _tz_utc(datetime.fromisoformat(head.t_start))
+        except (TypeError, ValueError, AttributeError):
+            self._trip_watch = None
+            return
+        if (h_start != w["t_end"] or getattr(head, "run_state", None) != 0
+                or getattr(head, "attempt", None)
+                or _tz_utc(t_to) > w["t_end"] + timedelta(seconds=_TRIP_WATCH_SEC)):
+            self._trip_watch = None      # стоп сменился или ждать больше нечего
+            return
+        from analytics.segmenter import _state_periods, _trip_mark, shutdown_intervals
+        try:
+            iv = shutdown_intervals(fault_periods, self.cfg, _tz_utc(t_to), enum_periods)
+            codes = (_state_periods(enum_periods, self.cfg)
+                     .get(self.cfg.role_to_addr("LAST_FAULT_CODE")) or [])
+            nxt = {"value": 0, "state_start": h_start,
+                   "stop_kind": getattr(head, "stop_kind", None), "attempt": None}
+            trip = _trip_mark(w["run_state"], w["t_start"], w["t_end"], iv, nxt, set(),
+                              codes, fault_periods, self.cfg)
+        except Exception:
+            logger.warning("OnlineEngine[%s]: поздняя отметка обрыва аварией не проверена",
+                           self.key, exc_info=True)
+            return
+        if not trip:
+            return
+        self._trip_watch = None
+        try:
+            changed, lvl_changed = await online_db.apply_late_run_trip(w["id"], trip, self.tz)
+        except Exception:
+            logger.warning("OnlineEngine[%s]: отметка обрыва аварией в сегмент %s не дописана",
+                           self.key, w["id"], exc_info=True)
+            return
+        if changed:
+            logger.info("OnlineEngine[%s]: сегмент %s оборван аварийным остановом — отметка "
+                        "дописана поздно (аварийность стопа пришла после закрытия)%s — "
+                        "заключение перезаказано", self.key, w["id"],
+                        ", вердикт сменился" if lvl_changed else "")
+            # v5.1.22, ревью verdict-6: перезаказ при любой дописке, а не только при
+            # смене уровня — у CAUTION / WARNING уровень прежний, а заключение,
+            # заказанное при закрытии, написано без факта обрыва и без запрета
+            # «штатный» в шапке
+            _enqueue_segment(w["id"], again=True)
 
     # ── Обновление открытого окна ─────────────────────────────────────────────
 
@@ -3701,6 +4293,15 @@ class OnlinePollEngine:
         if not segments:
             return
 
+        # Аварийность стопа пришла после закрытия сегмента сменой режима — отметка
+        # обрыва дописывается в его закрытую сводку (v5.1.22, P1-3)
+        if getattr(self, "_trip_watch", None):
+            try:
+                await self._late_run_trip(segments, enum_periods, fault_periods, ts_to_utc)
+            except Exception:
+                logger.warning("OnlineEngine[%s]: поздняя отметка обрыва аварией", self.key,
+                               exc_info=True)
+
         # Вычислить начало текущего непрерывного запуска (для счётчика «с пуска»):
         # по накопленному времени режима, запасной путь — цепочка continued_from
         chain_origin_ts: datetime | None = (
@@ -3721,6 +4322,9 @@ class OnlinePollEngine:
             if s.cause_close in ("RUN_STATE_CHANGE", "FAULT_CLEARED", "SHUTDOWN_CLEARED")
         ]
         _rs_gate_state: dict | None = None
+        # Закрытые этим циклом: (сегмент, id, начало, конец) — для правила
+        # переноса снятия (v5.1.22)
+        _rs_closed_info: list[tuple] = []
         _win_plates = _attempt_stops(segments)
         if closed_segs:
             # Снять открытую строку одним запросом (v5.1.13, см. _close_window)
@@ -3752,7 +4356,17 @@ class OnlinePollEngine:
             # Тревоги, активные в остающемся открытом сегменте: по ним ниже в
             # этом же цикле заведётся живой эпизод (память движка отстаёт)
             _live_keys = _live_alert_keys(segments[-1])
-            _rs_supp_sc = _gate_suppressed_scenarios(_rs_gate_state, segments[-1])
+            # Новые тревоги закрываемого сегмента, продолжающиеся в открытом, —
+            # по составу на конце последнего закрытого (до v5.1.22 — по
+            # остающемуся открытому, то есть уже по новому режиму после пуска);
+            # синтетика строится только по живым в открытом — пересечение
+            try:
+                _rs_supp_sc = _gate_suppressed_scenarios(_rs_gate_state, closed_segs[-1], _rs_open_row,
+                                                         closed=closed_segs)
+            except Exception:
+                logger.warning("OnlineEngine[%s]: снятые сценарии сводки не определены — без снятия",
+                               self.key, exc_info=True)
+                _rs_supp_sc = set()
             # Уже засеянные в этом окне — см. тот же накопитель в _close_window
             _seeded: set[str] = set()
             for ci, seg in enumerate(closed_segs):
@@ -3809,6 +4423,7 @@ class OnlinePollEngine:
                         closing=True,
                         live_keys=_live_keys if ci == len(closed_segs) - 1 else None,
                         suppressed_sc=_rs_supp_sc,
+                        supp_src=_gate_own_src(_rs_gate_state) if _rs_supp_sc else None,
                     )
 
                 _rs_seg_dict = seg.to_dict()
@@ -3817,7 +4432,6 @@ class OnlinePollEngine:
                 # Пустой сегмент не исключение — см. суточный путь
                 if seg.run_state == 0:
                     try:
-                        from analytics import classifier as _clf
                         from analytics.reconstructor import (
                             build_segment_chronology as _chrono,
                         )
@@ -3834,24 +4448,14 @@ class OnlinePollEngine:
                         if (_rs_incident is None
                                 and getattr(seg, "stop_kind", None) == "EMERGENCY"
                                 and _is_stop_head(enum_periods, _rs_stop)):
-                            _rs_ctx = await _load_incident_context(
+                            # Общий построитель (v5.1.22): сегмент падения —
+                            # предыдущий закрываемый или подсказка предка
+                            _rs_incident = await _build_act(
                                 self.router_sn, self.equip_type, self.panel_id,
-                                _rs_stop, ts_to_utc, self.cfg, skip_stops=_win_plates,
-                            )
-                            _rs_ep, _rs_fp, _rs_tlf, _rs_anc = (
-                                _rs_ctx if _rs_ctx
-                                else (tl_enum, fault_periods, tl_faults, None)
-                            )
-                            _rs_incident = _clf.build_stop_incident(
-                                _rs_ep, _rs_fp,
-                                _rs_stop, seg_t_end_rs, self.cfg,
-                                stop_kind="EMERGENCY",
-                                stabilization_sec=_stab_sec(self.cfg),
-                                detail_events=_act_detail_events(self.cfg),
-                                timeline_faults=_rs_tlf,
-                                anchor=_rs_anc,
-                                min_window_sec=_act_min_window_sec(self.cfg),
-                                attempt=getattr(seg, "attempt", None),
+                                seg, seg_t_end_rs, ts_to_utc, self.cfg,
+                                tl_enum=tl_enum, fault_periods=fault_periods,
+                                tl_faults=tl_faults, skip_stops=_win_plates,
+                                segments=closed_segs, prev=ps_rs, key=self.key,
                             )
                             # Авария короче лага: акта на открытой строке не
                             # было, значит разбор заказывается отсюда
@@ -3893,6 +4497,8 @@ class OnlinePollEngine:
                         _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end_rs,
                     ),
                 })
+                _rs_closed_info.append((seg, _rs_db_id,
+                                        _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end_rs))
                 # ← await выше = прогресс обновляется на каждой смене RUN_STATE
                 if _rs_no_data:
                     logger.info(
@@ -3949,6 +4555,14 @@ class OnlinePollEngine:
                 self.forward_fill_memory = None
                 self._open_history_cache = None
                 self._open_history_cache_ts = None
+
+            # Закрыт сменой режима в ещё не аварийный стоп без отметки обрыва —
+            # ждать аварийности стопа (v5.1.22, P1-3)
+            try:
+                self._watch_trip(_rs_closed_info, segments)
+            except Exception:
+                logger.warning("OnlineEngine[%s]: ожидание отметки обрыва не заведено",
+                               self.key, exc_info=True)
 
         # Открытый сегмент = последний в списке
         open_seg = segments[-1]
@@ -4047,7 +4661,6 @@ class OnlinePollEngine:
         _open_chronology = None
         if open_seg.run_state == 0:
             try:
-                from analytics import classifier as _clf
                 from analytics.reconstructor import (
                     build_segment_chronology as _chrono,
                 )
@@ -4061,24 +4674,14 @@ class OnlinePollEngine:
                         and _lag_done
                         and self._act_done_for != _op_stop
                         and _is_stop_head(enum_periods, _op_stop)):
-                    _op_ctx = await _load_incident_context(
+                    # Общий построитель (v5.1.22): окно начинается со стопа —
+                    # сегмент падения закрыт прошлым циклом, это подсказка предка
+                    _open_incident = await _build_act(
                         self.router_sn, self.equip_type, self.panel_id,
-                        _op_stop, ts_to_utc, self.cfg,
-                        skip_stops=_attempt_stops(segments),
-                    )
-                    _op_ep, _op_fp, _op_tlf, _op_anc = (
-                        _op_ctx if _op_ctx
-                        else (tl_enum, fault_periods, tl_faults, None)
-                    )
-                    _open_incident = _clf.build_stop_incident(
-                        _op_ep, _op_fp, _op_stop, None, self.cfg,
-                        stop_kind="EMERGENCY",
-                        stabilization_sec=_stab_sec(self.cfg),
-                        detail_events=_act_detail_events(self.cfg),
-                        timeline_faults=_op_tlf,
-                        anchor=_op_anc,
-                        min_window_sec=_act_min_window_sec(self.cfg),
-                        attempt=getattr(open_seg, "attempt", None),
+                        open_seg, None, ts_to_utc, self.cfg,
+                        tl_enum=tl_enum, fault_periods=fault_periods, tl_faults=tl_faults,
+                        skip_stops=_attempt_stops(segments), segments=segments,
+                        prev=self._prev_seg_hint, key=self.key,
                     )
                     if _open_incident is not None:
                         self._act_done_for = _op_stop
@@ -4138,13 +4741,42 @@ class OnlinePollEngine:
 
         self._last_open_seg_id = _open_seg_id
 
-        # Хвост записей гейта удалённой строки — в новую открытую (см. _close_window)
+        # Хвост записей гейта удалённой строки — в новую открытую (см. _close_window).
+        # v5.1.22 (P1-1 п. 3, В5): хеш снятия — только если снятый эпизод идёт и
+        # на конце последнего закрытого, и в остающемся открытом, а стопа между
+        # решением и границей нет (смена режима без стопа — как суточный рез)
         if _rs_gate_state is not None and _open_seg_id:
             _rs_tail = _slice_gate_state(_rs_gate_state, self.cursor_ts)
+            _rs_carry_st = None
             if _rs_gate_state.get("suppressed_hash"):
-                _rs_tail["gate_suppressed_hash"] = _rs_gate_state["suppressed_hash"]
+                try:
+                    _rs_last = _rs_closed_info[-1][0] if _rs_closed_info else closed_segs[-1]
+                    _, _rs_dets_end = _extract_open_segment_data(_rs_last)
+                    _rs_carry_st = _gate_carry(
+                        _rs_gate_state, _rs_closed_info, self._episodes,
+                        live_end=_live_alert_keys(_rs_last), live_open=_live_keys,
+                        open_run_state=open_seg.run_state,
+                        boundary=self.cursor_ts, dets_end=_rs_dets_end,
+                        supp_sc=_rs_supp_sc)
+                except Exception:
+                    logger.warning("OnlineEngine[%s]: правило переноса снятия не проверено — "
+                                   "хеш не переносится", self.key, exc_info=True)
+                    _rs_carry_st = None
+                if _rs_carry_st:
+                    _rs_tail["gate_suppressed_hash"] = _rs_carry_st["hash"]
+                    if _rs_carry_st.get("record"):
+                        _rs_tail["gate_log"] = (list(_rs_tail.get("gate_log") or [])
+                                                + [_rs_carry_st["record"]])
+                logger.info("OnlineEngine[%s]: снятие гейтом %s в новую строку %s",
+                            self.key,
+                            ("перенесено (эпизоды %s)" % _rs_carry_st["ids"])
+                            if _rs_carry_st and _rs_carry_st.get("ids")
+                            else "остаётся" if _rs_carry_st else "не переносится", _open_seg_id)
             try:
                 await online_db.append_segment_gate_state(_open_seg_id, _rs_tail)
+                if _rs_carry_st and _rs_carry_st.get("ids") and _rs_carry_st.get("segment_id"):
+                    await online_db.set_episodes_gate_src_segment(
+                        _rs_carry_st["ids"], _rs_carry_st["segment_id"])
             except Exception:
                 logger.warning("OnlineEngine[%s]: хвост записей гейта не восстановлен",
                                self.key, exc_info=True)
@@ -4153,7 +4785,7 @@ class OnlinePollEngine:
         if self._supp_recheck:
             _sc, _dets = self._supp_recheck
             self._supp_recheck = None
-            await self._inherit_gate_suppression(_sc, _dets)
+            await self._inherit_gate_suppression(_sc, _dets, ts=t_to)
 
         # Записать события жизненного цикла тревог (segment_id теперь известен)
         if _alert_events:

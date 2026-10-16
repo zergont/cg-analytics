@@ -276,11 +276,12 @@ cyc = [{"run_state": s.run_state, "t_start": datetime.fromisoformat(s.t_start),
        if datetime.fromisoformat(s.t_start) < T(7, 45, 7)]
 pr = build_incident_prompt(inc, None, cyc, {"code_name": lambda c: {1438: "Отказ прокрутки стартером"}.get(c)})
 check(pr.startswith("Разбери отказ пуска"), f"10: заголовок — отказ пуска: {pr[:60]}")
-check("Последний штатный останов: " + T(5, 16, 56).isoformat() in pr and "Окно данных: с" in pr
+# v5.1.22 (P1-6): время во входе — МСК (T — UTC: 05:16:56 → 08:16:56)
+check("Последний штатный останов: 13.10 08:16:56" in pr and "Окно данных: с" in pr
       and "фон" in pr, "10б: якорь и окно ≥ 12 ч размечены")
 ser = pr.split("Предыдущие аварии этой серии", 1)[-1].split("\n\n", 1)[0]
-check("2026-10-13 07:40:11 — Неудачный прогрев · Авария; код: 1438 «Отказ прокрутки стартером»" in ser
-      and "07:44:13 — Неудачная работа · Авария" in ser and "сброшена через" in ser
+check("13.10 10:40:11 — Неудачный прогрев · Авария; код: 1438 «Отказ прокрутки стартером»" in ser
+      and "10:44:13 — Неудачная работа · Авария" in ser and "сброшена через" in ser
       and "Коротко" not in ser, f"10в: предыдущие аварии серии — факты:\n{ser}")
 check("Характер по детерминированному гейту" not in pr, "10г: гейт «падения с работы» для отказа пуска не печатается")
 
@@ -368,7 +369,8 @@ check(cut0[-1].attempt_pending, "16б: без взгляда за границу
 cyc_open = [c for c in cyc if c["t_start"] < T(7, 45, 7)]   # своя плашка ещё открыта
 pr3 = build_incident_prompt(inc, None, cyc_open, {})
 blk = [ln for ln in pr3.splitlines() if ln.startswith("Сегмент, из которого машина остановилась")]
-check(blk and "07:45:07" in blk[0] and "07:44:04" not in blk[0],
+# v5.1.22 (P1-6): время — МСК
+check(blk and "10:45:07" in blk[0] and "10:44:04" not in blk[0],
       f"17: сегмент падения — эта попытка: {blk}")
 
 # 18. Серия: продолжение после суточного реза — не новая авария; коды — свои
@@ -390,7 +392,8 @@ rows = [
                                                "cause_open": "REPORT_START", "subsegments": _lfc(1438, 0)}),
 ]
 sf = series_facts(rows, T(1, 0), T(17, 0, d=12))
-check(len(sf) == 1 and "20:30:00" in sf[0] and "сброшена через 2 ч" in sf[0] and "падение с работы" in sf[0],
+# v5.1.22 (P1-6): время серии — МСК с датой (12.10 20:30 UTC → 12.10 23:30)
+check(len(sf) == 1 and "12.10 23:30:00" in sf[0] and "сброшена через 2 ч" in sf[0] and "падение с работы" in sf[0],
       f"18: продолжение после реза не стало второй аварией: {sf}")
 plate_ch = {"stop_kind": "EMERGENCY", "cause_close": "SHUTDOWN_CLEARED",
             "attempt": {"from_state": 3, "outcome": "EMERGENCY", "t_start": T(10, 20).isoformat(),

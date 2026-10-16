@@ -188,10 +188,27 @@ async def get_unhumanized_segments(limit: int = 500) -> list[int]:
     return [r["auto_segment_id"] for r in rows]
 
 
-async def set_humanized_md(auto_segment_id: int, humanized_md: str) -> None:
-    """Сохранить результат Qwen-обработки в существующую запись анализа."""
+async def set_humanized_md(auto_segment_id: int, humanized_md: str,
+                           lang_check: dict | None = None) -> None:
+    """Сохранить результат Qwen-обработки в существующую запись анализа.
+
+    lang_check — отметка прохода «очистка / перевод» пересказа (v5.1.22, В4):
+    дописывается в debug_json ключом lang_check_humanize."""
     conn = await _connect()
     try:
+        if lang_check:
+            await conn.execute(
+                """
+                UPDATE segment_analyses
+                SET humanized_md = $2,
+                    debug_json = COALESCE(debug_json, '{}'::jsonb)
+                                 || jsonb_build_object('lang_check_humanize', $3::jsonb),
+                    updated_at = now()
+                WHERE auto_segment_id = $1
+                """,
+                auto_segment_id, humanized_md, json.dumps(lang_check, ensure_ascii=False),
+            )
+            return
         await conn.execute(
             """
             UPDATE segment_analyses
@@ -224,6 +241,12 @@ async def get_segment_row(seg_id: int) -> dict | None:
                    -- Причина закрытия (MTTR в заключении) и сводка — для
                    -- единого входа модели; без них строка MTTR не выводилась
                    cause_close, report_summary_md, report_summary_json,
+                   -- Журнал гейта: отметки совета по аварии (failed / save_failed —
+                   -- заключение аварийного стопа пишет ИИ, v5.1.22)
+                   gate_log,
+                   -- Версия аналитики строки: до 5.1.6 запасные поля наработки —
+                   -- секунды (v5.1.22, ревью verdict-1)
+                   analytics_version,
                    t_start, t_end
             FROM auto_segments
             WHERE id = $1

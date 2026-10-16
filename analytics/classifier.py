@@ -410,7 +410,9 @@ def standing_faults(
     return out
 
 
-_INVESTIGATOR_VERSION = "1.0"
+# 1.1 (v5.1.22, P1-4): лента аналоговых отсчётов сегмента падения (trace) и
+# сведения о нём (fall); акты 1.0 — без них, читаются как раньше
+_INVESTIGATOR_VERSION = "1.1"
 
 
 def build_stop_incident(
@@ -427,6 +429,8 @@ def build_stop_incident(
     anchor: tuple[datetime, str] | None = None,
     min_window_sec: int = 0,
     attempt: dict[str, Any] | None = None,
+    trace: dict[str, Any] | None = None,
+    fall: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """incident_json для аварийного стоп-сегмента; иначе None.
 
@@ -457,6 +461,12 @@ def build_stop_incident(
     после него возможные предвестники. attempt — неудачная попытка выхода из
     стопа, если авария случилась на ней: акт тогда об отказе пуска, а не о
     падении с работы.
+
+    trace — лента аналоговых отсчётов сегмента падения (v5.1.22, P1-4, решение
+    В2: reconstructor.build_analog_trace, снята при закрытии этого сегмента из
+    уже загруженной истории); fall — {run_state, label, t_start, t_end,
+    chain_start}: из какого режима упала машина и когда начался выход из
+    стопа (заключение-факты аварийного стопа, P1-5). Нет — ключей в акте нет.
     """
     verdict = classify_stop_character(
         enum_periods, stop_ts, cfg, fault_periods=fault_periods
@@ -501,7 +511,7 @@ def build_stop_incident(
     )
     _all = serialize_chronology(chrono)
     summary, events = summarize_events(_all, stop_ts, detail_events)
-    return {
+    inc: dict[str, Any] = {
         "kind": "stop_incident",
         "stop_ts": stop_ts.isoformat(),
         "stop_kind": stop_kind,
@@ -526,3 +536,9 @@ def build_stop_incident(
         "investigator_version": _INVESTIGATOR_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    # Сегмент падения и его лента (v5.1.22, P1-4) — только если есть
+    if fall:
+        inc["fall"] = fall
+    if trace:
+        inc["trace"] = trace
+    return inc
