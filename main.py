@@ -59,6 +59,10 @@ if not any(isinstance(h, _BufHandler) for h in _root_logger.handlers):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("═══ cg-analytics запуск ═══")
+    if settings.source_statement_timeout_fixed:
+        logger.warning("databases.source_statement_timeout не меньше source_query_timeout (%d с) — "
+                       "поправлен до %d с: сервер должен снимать запрос раньше клиента",
+                       settings.source_query_timeout, settings.source_statement_timeout)
     await init_db()
     await init_source_pool()
     # Загружаем сохранённый часовой пояс из БД (если пользователь менял через UI)
@@ -272,19 +276,30 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("qwen: авто-анализ выключен (включить в Настройки → ИИ-конвейер)")
     yield
+    # Остановка за ограниченное время (v5.1.24): 22.10 Pool.close() ждал зависшее
+    # соединение без срока — через 90 с SIGKILL, строка «остановлен» не дошла
+    # до журнала. Каждое ожидание — со сроком, независимые — параллельно
+    from db.remote import wait_bounded as _bounded
+    _t_stop = _asyncio.get_running_loop().time()
     stop_scheduler()
-    await _online_mgr.stop_manager()
+    await _bounded(_online_mgr.stop_manager(), 45, "онлайн-движки")
     # После движков: иначе ещё работающий движок закажет новый разбор
     from online.incident_gate import cancel_all as _cancel_incidents
-    _n_inc = await _cancel_incidents()
-    if _n_inc:
-        logger.info("Сняты разборы аварий в работе: %d (закажет восстановление)", _n_inc)
-    await _corpus_worker.stop()
-    await _qwen_worker.stop()
-    await close_source_pool()
+    try:
+        _n_inc = await _cancel_incidents()
+        if _n_inc:
+            logger.info("Сняты разборы аварий в работе: %d (закажет восстановление)", _n_inc)
+    except Exception:
+        logger.warning("Остановка: разборы аварий не сняты", exc_info=True)
+    await _asyncio.gather(
+        _bounded(_corpus_worker.stop(), 15, "corpus-воркер"),
+        _bounded(_qwen_worker.stop(), 15, "qwen-воркер"),
+    )
     from db.pool import close_pools
-    await close_pools()
-    logger.info("═══ cg-analytics остановлен ═══")
+    # Пулы — параллельно, каждый не дольше pool_close_timeout, затем обрыв
+    await _asyncio.gather(close_source_pool(), close_pools(), return_exceptions=True)
+    logger.info("═══ cg-analytics остановлен (за %.1f с) ═══",
+                _asyncio.get_running_loop().time() - _t_stop)
 
 
 app = FastAPI(
@@ -305,4 +320,7 @@ if __name__ == "__main__":
         port=settings.web_port,
         reload=False,
         log_level=settings.log_level.lower(),
+        # Зависший HTTP-запрос не держит остановку дольше 10 с (v5.1.24): иначе
+        # lifespan не начнётся раньше TimeoutStopSec (90 с) → SIGKILL
+        timeout_graceful_shutdown=10,
     )

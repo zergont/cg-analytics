@@ -247,6 +247,43 @@ if [[ -d /etc/systemd/system ]] && command -v systemctl &>/dev/null; then
             cg-analytics.service \
             | sudo tee /etc/systemd/system/cg-analytics.service > /dev/null
 
+        # Порядок к кластеру PostgreSQL аналитической БД (v5.1.24). На Ubuntu
+        # postgresql.service — обёртка, кластер — postgresql@<версия>-<имя>.service;
+        # версия берётся из pg_lsclusters, в репозитории не зашита. Только если
+        # аналитическая БД локальная (localhost / 127.0.0.1 / сокет).
+        # Wants=, а не Requires=: перезапуск PostgreSQL не должен останавливать
+        # сервис — пулы переподключаются сами
+        # Хост и порт через «|» (пробел схлопывался: пустой хост сокета давал
+        # AN_HOST=5432); сокет — и в query (?host=/var/run/postgresql), и пустой
+        # хост; python упал — адрес не определён, локальной БД не считаем
+        AN_LOC=$("$VENV_PYTHON" - 2>/dev/null <<'PY' || echo "?"
+from urllib.parse import parse_qs, unquote, urlparse
+from config import settings
+u = urlparse(settings.analytics_db_url)
+h = unquote(u.hostname or "") or (parse_qs(u.query).get("host") or [""])[0]
+print(f"{h}|{u.port or 5432}")
+PY
+)
+        AN_HOST=""
+        AN_PORT=""
+        IFS='|' read -r AN_HOST AN_PORT <<< "$AN_LOC"
+        AN_PORT="${AN_PORT:-5432}"
+        if [[ "$AN_LOC" == "?" ]]; then
+            info "Адрес аналитической БД не определён (config.yml) — порядок к кластеру PostgreSQL не задан"
+        elif [[ -z "$AN_HOST" || "$AN_HOST" == "localhost" || "$AN_HOST" == "127.0.0.1" || "$AN_HOST" == "::1" || "$AN_HOST" == /* ]]; then
+            PG_UNIT=$(pg_lsclusters --no-header 2>/dev/null | awk -v p="$AN_PORT" '$3==p {print "postgresql@"$1"-"$2".service"; exit}')
+            if [[ -n "$PG_UNIT" ]]; then
+                sudo mkdir -p /etc/systemd/system/cg-analytics.service.d
+                printf '[Unit]\nAfter=%s\nWants=%s\n' "$PG_UNIT" "$PG_UNIT" \
+                    | sudo tee /etc/systemd/system/cg-analytics.service.d/10-postgresql.conf > /dev/null
+                ok "Порядок запуска: после ${PG_UNIT}"
+            else
+                info "Кластер PostgreSQL на порту ${AN_PORT} не найден (pg_lsclusters) — порядок только к postgresql.service"
+            fi
+        else
+            info "Аналитическая БД не локальная (${AN_HOST}) — порядок к кластеру PostgreSQL не задаётся"
+        fi
+
         sudo systemctl daemon-reload
         sudo systemctl enable cg-analytics
         sudo systemctl start cg-analytics

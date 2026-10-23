@@ -22,6 +22,50 @@ class Settings:
         self.source_db_url: str = db["source"]
         self.analytics_db_url: str = db["analytics"]
         self.source_query_timeout: int = int(db.get("source_query_timeout", 120))
+        # ── Ожидания у удалённой БД телеметрии — только со сроком (v5.1.24) ──
+        # 17–22.10 движок ДГУ №2 висел 4 сут 20 ч: после срыва запроса соединение
+        # возвращалось в пул и ждало подтверждения отмены без срока
+        # Ожидание свободного слота пула (= один command_timeout: дольше ждать
+        # бессмысленно — запрос впереди уже был бы снят)
+        self.source_acquire_timeout: float = float(
+            db.get("source_acquire_timeout", self.source_query_timeout))
+        # Подключение нового соединения (TLS через VPN, RTT 3–27 мс)
+        self.source_connect_timeout: float = float(db.get("source_connect_timeout", 30))
+        # Возврат соединения после успешного запроса (сброс сессии ≈ 1 RTT)
+        self.source_release_timeout: float = float(db.get("source_release_timeout", 10))
+        # statement_timeout сессии: сервер снимает запрос сам раньше клиента
+        # (0 — не ставить). Не меньше command_timeout — поправляется вниз
+        _st_def = max(0, self.source_query_timeout - 10)
+        _st = int(db.get("source_statement_timeout", _st_def))
+        self.source_statement_timeout_fixed: bool = _st >= self.source_query_timeout > 0
+        self.source_statement_timeout: int = _st_def if self.source_statement_timeout_fixed else max(0, _st)
+        # TCP keepalive сокетов удалённых пулов: простаивающее полуоткрытое
+        # соединение рвётся через ≈ 2 мин, а не через 2 ч 11 мин (ядро: 7200 + 75×9)
+        self.source_keepalive_idle: int = int(db.get("source_keepalive_idle", 60))
+        self.source_keepalive_interval: int = int(db.get("source_keepalive_interval", 10))
+        self.source_keepalive_count: int = int(db.get("source_keepalive_count", 6))
+        # TCP_USER_TIMEOUT (только Linux; 0 — не ставить): неподтверждённые данные
+        # висят не дольше, а не ~15 мин (tcp_retries2 = 15)
+        self.source_tcp_user_timeout: int = int(db.get("source_tcp_user_timeout", 120))
+        # Закрытие пула при остановке сервиса; затем — обрыв соединений
+        self.pool_close_timeout: float = float(db.get("pool_close_timeout", 10))
+
+        # ── Сторож движков онлайн-наблюдения (v5.1.24) ──
+        wd = data.get("watchdog", {}) or {}
+        # false — сторож только пишет ERROR со стеком, ничего не отменяет (откат без кода)
+        self.watchdog_enabled: bool = bool(wd.get("enabled", True))
+        self.watchdog_tick_sec: float = float(wd.get("tick_sec", 30))
+        # Нет продвижения (пульса) дольше — движок завис (не меньше 3 × опрос + 60)
+        self.watchdog_stall_sec: float = float(wd.get("stall_sec", 600))
+        # Ожидание конца отменённой задачи движка
+        self.watchdog_cancel_wait_sec: float = float(wd.get("cancel_wait_sec", 15))
+        # Перезапусков зависшего движка не больше max_restarts за restart_window_sec
+        self.watchdog_max_restarts: int = int(wd.get("max_restarts", 3))
+        self.watchdog_restart_window_sec: float = float(wd.get("restart_window_sec", 3600))
+        # Цикл движка дольше — WARNING (штатно < 1 с, догонка 4,9 сут — 57 с)
+        self.watchdog_cycle_warn_sec: float = float(wd.get("cycle_warn_sec", 120))
+        # Тик синхронизации history дольше — прерывается (вставка и курсор — одна транзакция)
+        self.history_sync_tick_timeout: float = float(wd.get("history_sync_tick_timeout", 300))
 
         ant = data.get("anthropic", {})
         self.anthropic_api_key: str = ant["api_key"]

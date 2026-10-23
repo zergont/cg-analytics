@@ -28,6 +28,7 @@ from typing import Any
 import asyncpg
 
 from config import settings
+from db import remote
 
 logger = logging.getLogger(__name__)
 
@@ -36,21 +37,27 @@ _QUERY_TIMEOUT_SEC: int = 120  # переопределяется из config п
 
 
 async def init_source_pool() -> None:
+    """Пул source-БД: 3 соединения на движки, гейт, ночной прогон и API.
+
+    v5.1.24: через db/remote — command_timeout, statement_timeout сессии,
+    keepalive на сокет; min_size=0 — старт сервиса от VPN не зависит (первое
+    соединение откроет первый запрос). Все выдачи — remote.connection (сроки)."""
     global _pool, _QUERY_TIMEOUT_SEC
     _QUERY_TIMEOUT_SEC = settings.source_query_timeout
-    _pool = await asyncpg.create_pool(
+    _pool = await remote.create_pool(
         settings.source_db_url,
-        min_size=1,
+        min_size=0,
         max_size=3,
-        command_timeout=_QUERY_TIMEOUT_SEC,
+        label="source-БД",
     )
 
 
 async def close_source_pool() -> None:
+    """Закрыть пул со сроком; не закрылся — соединения обрываются (v5.1.24)."""
     global _pool
     if _pool:
-        await _pool.close()
-        _pool = None
+        pool, _pool = _pool, None
+        await remote.close_pool(pool, "source-БД")
 
 
 def _get_pool() -> asyncpg.Pool:
@@ -75,7 +82,7 @@ async def get_whitelist_history(
     if not whitelist_addrs:
         return []
 
-    async with _get_pool().acquire() as conn:
+    async with remote.connection(_get_pool()) as conn:
         rows = await conn.fetch(
             """
             SELECT addr, ts, value, raw, name_ru, unit
@@ -148,7 +155,7 @@ async def get_enum_periods(
     if addrs is None:
         addrs = [40011, 40010]
 
-    async with _get_pool().acquire() as conn:
+    async with remote.connection(_get_pool()) as conn:
         rows = await conn.fetch(
             """
             SELECT
@@ -218,7 +225,7 @@ async def get_fault_periods(
     if fault_addrs is None:
         fault_addrs = frozenset(range(40400, 40429))
 
-    async with _get_pool().acquire() as conn:
+    async with remote.connection(_get_pool()) as conn:
         rows = await conn.fetch(
             """
             SELECT
@@ -271,7 +278,7 @@ async def get_catalog_addrs(equip_type: str) -> list[int]:
     hit = _catalog_cache.get(equip_type)
     if hit and time.monotonic() - hit[0] < _CATALOG_TTL_SEC:
         return hit[1]
-    async with _get_pool().acquire() as conn:
+    async with remote.connection(_get_pool()) as conn:
         rows = await conn.fetch(
             "SELECT addr FROM register_catalog WHERE equip_type = $1", equip_type,
         )
@@ -309,7 +316,8 @@ async def get_timeline_periods(
     kb_fault = set(cfg.whitelist_fault) if cfg is not None else set()
     enum_addrs = sorted(set(addrs) | kb_enum) or None
     fault_addrs = frozenset(set(addrs) | kb_fault) or None
-    enum_periods, fault_periods = await asyncio.gather(
+    # Первая ошибка отменяет соседа — его слот пула свободен сразу (v5.1.24)
+    enum_periods, fault_periods = await remote.gather_or_cancel(
         get_enum_periods(router_sn, equip_type, panel_id, ts_from, ts_to,
                          addrs=enum_addrs),
         get_fault_periods(router_sn, equip_type, panel_id, ts_from, ts_to,
@@ -328,7 +336,7 @@ async def get_last_value_before(
     значение держится до следующего замера, и без этого замера окно не знает,
     что было на его начале (v5.1.10, нагрузка перед остановом)."""
     from datetime import timedelta as _TD
-    async with _get_pool().acquire() as conn:
+    async with remote.connection(_get_pool()) as conn:
         row = await conn.fetchrow(
             """
             SELECT ts, value FROM history_rich
@@ -352,7 +360,7 @@ async def get_last_values_before(
     from datetime import timedelta as _TD
     if not addrs:
         return {}
-    async with _get_pool().acquire() as conn:
+    async with remote.connection(_get_pool()) as conn:
         rows = await conn.fetch(
             """
             SELECT DISTINCT ON (addr) addr, ts, value FROM history_rich
@@ -373,7 +381,7 @@ async def get_value_histogram(
     """Распределение положительных показаний регистра с ts_from: [(значение, число)].
 
     Для оценки шага показаний датчика машины (v5.1.12): раз в сутки на машину."""
-    async with _get_pool().acquire() as conn:
+    async with remote.connection(_get_pool()) as conn:
         rows = await conn.fetch(
             """
             SELECT value, count(*) AS n FROM history_rich
@@ -396,11 +404,13 @@ async def get_data_gaps(
     """Пропуски связи из data_gaps, пересекающиеся с [ts_from, ts_to).
 
     Колонки: gap_start, gap_end (gap_end IS NULL → активен).
-    При таймауте — пробрасывает RuntimeError с просьбой уменьшить интервал.
-    При других ошибках (таблица недоступна и т.п.) возвращает [].
+    При таймауте запроса — пробрасывает RuntimeError с просьбой уменьшить интервал.
+    Таймаут ожидания слота пула (remote.PoolBusy) и ошибки соединения уходят
+    как есть (v5.1.24): пустой список пропусков молча дал бы анализ «без дыр».
+    [] — только когда таблицы нет или нет прав на неё.
     """
     try:
-        async with _get_pool().acquire() as conn:
+        async with remote.connection(_get_pool()) as conn:
             rows = await conn.fetch(
                 """
                 SELECT gap_start, gap_end
@@ -416,12 +426,15 @@ async def get_data_gaps(
                 ts_from, ts_to,
             )
         return [dict(r) for r in rows]
+    except remote.PoolBusy:
+        raise
     except asyncio.TimeoutError:
         raise RuntimeError(
             f"Запрос пропусков связи превысил {_QUERY_TIMEOUT_SEC} с. "
             "Уменьшите временной интервал анализа."
         )
-    except Exception:
+    except (asyncpg.UndefinedTableError, asyncpg.InsufficientPrivilegeError):
+        logger.warning("data_gaps недоступна — пропуски связи не учтены", exc_info=True)
         return []
 
 

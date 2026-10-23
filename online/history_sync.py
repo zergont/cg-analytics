@@ -26,10 +26,10 @@ _BATCH_LIMIT         = 50_000
 _BUFFER_SEC          = 2       # не трогаем строки моложе N сек (защита от частичных батчей)
 
 
-async def _src():
-    """Соединение с source-БД из пула (тёплое между циклами, conn.close() вернёт в пул)."""
-    from db.pool import acquire_sync_source
-    return await acquire_sync_source()
+async def _src_pool():
+    """Пул source-БД history_sync (тёплый между циклами; выдача — remote.connection)."""
+    from db.pool import sync_source_pool
+    return await sync_source_pool()
 
 
 async def _local():
@@ -62,8 +62,9 @@ async def _sync_device(
     """Копирует одну пачку истории для устройства. Возвращает число скопированных строк."""
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=_BUFFER_SEC)
 
-    src_conn = await _src()
-    try:
+    # Сроки на всё: слот, запрос, возврат; при ошибке соединение обрывается (v5.1.24)
+    from db import remote
+    async with remote.connection(await _src_pool(), label="history_sync") as src_conn:
         rows = await src_conn.fetch(
             """
             SELECT router_sn, equip_type, panel_id, addr, ts, received_at, value, raw
@@ -78,8 +79,6 @@ async def _sync_device(
             """,
             router_sn, equip_type, panel_id, last_sync_at, cutoff, _BATCH_LIMIT,
         )
-    finally:
-        await src_conn.close()
 
     if not rows:
         return 0
@@ -130,17 +129,30 @@ class HistorySyncWorker:
         logger.info("HistorySyncWorker: запущен (интервал %d сек)", self._interval_sec)
 
     async def stop(self) -> None:
+        """Остановить воркер — ожидание со сроком (v5.1.24)."""
+        from config import settings
+        from db.remote import cancel_and_wait
         if self._task and not self._task.done():
-            self._task.cancel()
-            try:
-                await self._task
-            except (asyncio.CancelledError, Exception):
-                pass
+            if not await cancel_and_wait(self._task, settings.watchdog_cancel_wait_sec):
+                logger.warning("HistorySyncWorker: задача не завершилась за %.0f с после отмены",
+                               settings.watchdog_cancel_wait_sec)
 
     async def _run(self) -> None:
+        from config import settings
         while True:
+            # Тик со сроком (v5.1.24): обычно доли секунды, в обрыве VPN 17.10 —
+            # минуты. Отмена тика безопасна: вставка и курсор — одна транзакция
+            limit = settings.history_sync_tick_timeout
+            cm = asyncio.timeout(limit)
             try:
-                await self._tick()
+                async with cm:
+                    await self._tick()
+            except TimeoutError:
+                if cm.expired():
+                    logger.warning("HistorySyncWorker: тик синхронизации не уложился в %.0f с — "
+                                   "прерван", limit)
+                else:
+                    logger.exception("HistorySyncWorker: ошибка тика")
             except Exception:
                 logger.exception("HistorySyncWorker: ошибка тика")
             await asyncio.sleep(self._interval_sec)

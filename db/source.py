@@ -8,11 +8,14 @@
 # без письменного разрешения правообладателя запрещено.
 
 """Чтение данных из основной БД телеметрии (TimescaleDB)."""
-import asyncpg
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 
+import asyncpg
+
 from config import settings
+from db import remote
 
 # "external" → settings.source_db_url (10.10.10.1)
 # "local"    → settings.analytics_db_url (локальная реплика)
@@ -29,15 +32,30 @@ def get_source_mode() -> str:
 
 
 async def _connect() -> asyncpg.Connection:
+    """Соединение со сроками (v5.1.24): подключение, запросы; к удалённой БД —
+    ещё statement_timeout сессии и keepalive на сокет."""
     if _source_mode == "local":
-        return await asyncpg.connect(settings.analytics_db_url)
-    return await asyncpg.connect(settings.source_db_url)
+        return await remote.connect(settings.analytics_db_url, label="analytics", remote=False)
+    return await remote.connect(settings.source_db_url, label="source-БД (реестр)")
+
+
+@asynccontextmanager
+async def _session():
+    """Соединение на одну операцию: ошибка или отмена — обрыв (ждать
+    подтверждения отмены через мёртвый VPN некому), успех — закрытие со сроком."""
+    conn = await _connect()
+    try:
+        yield conn
+    except BaseException:
+        conn.terminate()
+        raise
+    else:
+        await remote.close_connection(conn)
 
 
 async def get_active_equipment() -> list[dict[str, Any]]:
     """Всё оборудование из основной БД для синхронизации реестра."""
-    conn = await _connect()
-    try:
+    async with _session() as conn:
         rows = await conn.fetch("""
             SELECT
                 router_sn, equip_type, panel_id,
@@ -47,16 +65,13 @@ async def get_active_equipment() -> list[dict[str, Any]]:
             ORDER BY router_sn, equip_type, panel_id
         """)
         return [dict(r) for r in rows]
-    finally:
-        await conn.close()
 
 
 async def get_equipment_info(
     router_sn: str, equip_type: str, panel_id: int
 ) -> dict[str, Any] | None:
     """Метаданные одного устройства."""
-    conn = await _connect()
-    try:
+    async with _session() as conn:
         row = await conn.fetchrow("""
             SELECT router_sn, equip_type, panel_id,
                    name, manufacturer, model, engine_sn,
@@ -65,8 +80,6 @@ async def get_equipment_info(
             WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
         """, router_sn, equip_type, panel_id)
         return dict(row) if row else None
-    finally:
-        await conn.close()
 
 
 async def get_history_range(
@@ -82,8 +95,7 @@ async def get_history_range(
     Фильтр: register_kind = 'analog'.
     Колонки: addr, ts, value, raw, name_ru, unit.
     """
-    conn = await _connect()
-    try:
+    async with _session() as conn:
         rows = await conn.fetch("""
             SELECT addr, ts, value, raw, name_ru, unit
             FROM history_rich
@@ -96,8 +108,6 @@ async def get_history_range(
             ORDER BY addr, ts
         """, router_sn, equip_type, panel_id, ts_from, ts_to)
         return [dict(r) for r in rows]
-    finally:
-        await conn.close()
 
 
 async def get_enum_history_range(
@@ -114,8 +124,7 @@ async def get_enum_history_range(
     duration_sec считается до ts_to для незакрытых (активных) периодов.
     state_end IS NULL — состояние активно прямо сейчас.
     """
-    conn = await _connect()
-    try:
+    async with _session() as conn:
         rows = await conn.fetch("""
             SELECT
                 e.addr,
@@ -142,8 +151,6 @@ async def get_enum_history_range(
             ORDER BY e.addr, e.state_start
         """, router_sn, equip_type, panel_id, ts_from, ts_to)
         return [dict(r) for r in rows]
-    finally:
-        await conn.close()
 
 
 async def get_fault_history_range(
@@ -159,8 +166,7 @@ async def get_fault_history_range(
     Колонки: addr, bit, fault_start, fault_end, fault_name_ru, fault_name, severity, duration_sec.
     fault_end IS NULL — неисправность активна прямо сейчас.
     """
-    conn = await _connect()
-    try:
+    async with _session() as conn:
         rows = await conn.fetch("""
             SELECT
                 f.addr,
@@ -184,8 +190,6 @@ async def get_fault_history_range(
             ORDER BY f.fault_start
         """, router_sn, equip_type, panel_id, ts_from, ts_to)
         return [dict(r) for r in rows]
-    finally:
-        await conn.close()
 
 
 async def get_events_range(
@@ -196,8 +200,7 @@ async def get_events_range(
     ts_to: datetime,
 ) -> list[dict[str, Any]]:
     """Системные события / аварии за произвольный UTC-диапазон."""
-    conn = await _connect()
-    try:
+    async with _session() as conn:
         rows = await conn.fetch("""
             SELECT id,
                    type        AS event_type,
@@ -213,5 +216,3 @@ async def get_events_range(
             ORDER BY created_at
         """, router_sn, equip_type, panel_id, ts_from, ts_to)
         return [dict(r) for r in rows]
-    finally:
-        await conn.close()

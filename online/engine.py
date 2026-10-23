@@ -28,10 +28,12 @@ import asyncio
 import copy
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from analytics.contract import CokingRisk, EVENT_SCENARIOS, STATE_SCENARIOS
+from db import remote
 from online import db as online_db
 
 logger = logging.getLogger(__name__)
@@ -652,7 +654,8 @@ def _enqueue_segment(seg_id: int | None, again: bool = False) -> None:
 
         loop = _aio.get_event_loop()
         if loop.is_running():
-            _aio.ensure_future(_check_and_enqueue())
+            # Без метки движка: очередь заключений не продлевает его пульс (v5.1.24)
+            loop.create_task(_check_and_enqueue(), context=remote.detached_context())
     except Exception:
         logger.warning("Автопостановка сегмента %s в очередь Claude-анализа не удалась", seg_id, exc_info=True)
 
@@ -1301,7 +1304,8 @@ async def _load_data(
             ts_from_utc, ts_to_utc,
         )
     )
-    history, enum_periods, fault_periods, gaps = await asyncio.gather(
+    # Первая ошибка отменяет соседей — их слоты пула source свободны сразу (v5.1.24)
+    history, enum_periods, fault_periods, gaps = await remote.gather_or_cancel(
         history_task, enum_task, fault_task, gaps_task
     )
     # 40012/40013 — состояния из enum_history: характеристики подсегментов
@@ -1442,8 +1446,9 @@ async def _run_segment(
 ) -> tuple[list, dict[str, dict], list[dict], dict[str, dict]]:
     """Загрузить данные и запустить segment() в отдельном потоке.
 
-    segment() — CPU-bound синхронная функция. asyncio.to_thread() выносит её
-    в ThreadPoolExecutor, освобождая event loop для обработки веб-запросов.
+    segment() — CPU-bound синхронная функция. Поток (remote.to_thread_beating —
+    с пульсом движка, v5.1.24) выносит её в ThreadPoolExecutor, освобождая
+    event loop для обработки веб-запросов.
 
     Третьим возвращает дыры связи окна (уже с синтетическим хвостовым гэпом):
     они нужны вызывающему, чтобы посчитать слепую долю воздействия тревог.
@@ -1472,7 +1477,8 @@ async def _run_segment(
     synth_gap = _synth_connectivity_gap(history, ts_from, ts_to, cfg)
     if synth_gap is not None:
         gaps = gaps + [synth_gap]
-    segments = await asyncio.to_thread(
+    # Нарезка длинного окна — CPU в потоке: пульс движка, пока поток жив (v5.1.24)
+    segments = await remote.to_thread_beating(
         functools.partial(
             _segment,
             enum_periods=enum_periods,
@@ -1828,7 +1834,7 @@ async def _load_incident_context(
     _ft_addr, _ = fault_type_shutdown(cfg)
     _anchor_addrs = [_clf._ADDR_RUN_STATE] + ([_ft_addr] if _ft_addr else [])
     try:
-        rs_periods, fault_periods = await asyncio.gather(
+        rs_periods, fault_periods = await remote.gather_or_cancel(
             _src.get_enum_periods(
                 router_sn, equip_type, panel_id, horizon, ts_to,
                 addrs=_anchor_addrs,
@@ -1856,7 +1862,7 @@ async def _load_incident_context(
                 _c0, _c1 = _chain
                 if (_c1 - _c0).total_seconds() > prm["anchor_check_sec"]:
                     break   # долгая цепочка — машина работала, якорь честный
-                _hist, _gaps = await asyncio.gather(
+                _hist, _gaps = await remote.gather_or_cancel(
                     _src.get_whitelist_history(
                         router_sn, equip_type, panel_id,
                         _c0 - timedelta(seconds=prm["carry_sec"]), _c1, _addrs,
@@ -1892,7 +1898,7 @@ async def _load_incident_context(
                 "Акт %s/%s/%s: полная лента от якоря не прочитана — по KB",
                 router_sn, equip_type, panel_id, exc_info=True,
             )
-            enum_periods, timeline_faults = await asyncio.gather(
+            enum_periods, timeline_faults = await remote.gather_or_cancel(
                 _src.get_enum_periods(
                     router_sn, equip_type, panel_id, load_from, ts_to,
                     addrs=_src.enum_read_addrs(cfg),
@@ -2409,6 +2415,16 @@ async def _enrich_open_seg_detections(
 class OnlinePollEngine:
     """Движок непрерывного онлайн-мониторинга для одной машины."""
 
+    # Учёт цикла (v5.1.24): умолчания на классе — объекты, собранные в обход
+    # __init__ (тесты), не падают на счётчиках закрытых окон
+    _open_failed = False
+    _open_ok = False
+    _close_failed = False
+    _cycle_windows = 0
+    last_cycle_error: str | None = None
+    beat_mono: float = 0.0
+    live_ok_real = False
+
     def __init__(
         self,
         router_sn: str,
@@ -2452,6 +2468,30 @@ class OnlinePollEngine:
 
         self._running = False
         self._task: asyncio.Task | None = None
+        # ── Учёт цикла и пульс (v5.1.24, только память; читает сторож и API) ──
+        self.started_at: datetime = datetime.now(timezone.utc)
+        # Последний признак продвижения: начало/конец цикла, закрытое окно,
+        # завершённый запрос к БД (remote.touch_owner по метке _tag)
+        self.beat_mono: float = time.monotonic()
+        self.cycle_started_mono: float | None = None   # идёт цикл с … (None — между циклами)
+        self.last_cycle_sec: float | None = None
+        self.max_cycle_sec: float = 0.0
+        self.cycles: int = 0
+        self.cycles_failed_streak: int = 0
+        self.last_cycle_error: str | None = None
+        # Когда живой анализ (открытое окно) последний раз обновлён без ошибки.
+        # До первого такого цикла — момент старта движка; перезапуск сторожем
+        # переносит значение старого движка (UI: «Аналитика не обновляется N мин»)
+        self.live_ok_at: datetime = self.started_at
+        # live_ok_at — от настоящего обновления (этим движком или перенесённое
+        # от прежнего), а не момент старта или ПУСК: пока False, data_stale
+        # недостоверен — last_data_ts ещё не обновлялся (ревью v5.1.24, W7)
+        self.live_ok_real: bool = False
+        self._open_failed = False      # открытое окно этого цикла упало
+        self._open_ok = False          # открытое окно этого цикла обработано
+        self._close_failed = False     # анализ закрываемого окна этого цикла упал
+        self._cycle_windows = 0        # закрыто окон в этом цикле
+        self._tag = remote.EngineTag(self.key, self._touch_beat)
         # Кэш аналоговых данных открытого окна (обнуляется при смене cursor_ts)
         self._open_history_cache: list[dict] | None = None
         self._open_history_cache_ts: datetime | None = None
@@ -3529,32 +3569,82 @@ class OnlinePollEngine:
 
     # ── Главный цикл ──────────────────────────────────────────────────────────
 
+    def _touch_beat(self) -> None:
+        """Пульс: движок продвигается (сторож отличает догонку от зависания)."""
+        self.beat_mono = time.monotonic()
+
+    def _note_cycle_error(self, e: BaseException) -> None:
+        self.last_cycle_error = f"{type(e).__name__}: {e}"[:200]
+
     async def run(self) -> None:
         self._running = True
         logger.info(
             "OnlineEngine[%s] запущен, интервал=%ds",
             self.key, self.poll_interval_sec,
         )
-        while self._running:
-            try:
-                await self._poll_cycle()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("OnlineEngine[%s]: ошибка цикла", self.key)
-            if self._running:
-                await asyncio.sleep(self.poll_interval_sec)
+        # Метка движка: её наследуют дочерние задачи цикла (gather, shield),
+        # каждый завершённый запрос к source продлевает пульс (db/remote, v5.1.24)
+        token = remote.bind_owner(self._tag)
+        try:
+            while self._running:
+                t0 = time.monotonic()
+                self.cycle_started_mono = t0
+                self._touch_beat()
+                # Флаги этого цикла (их же сбрасывает _poll_cycle)
+                self._open_failed = self._open_ok = self._close_failed = False
+                self._cycle_windows = 0
+                ok = True
+                try:
+                    await self._poll_cycle()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    ok = False
+                    self._note_cycle_error(e)
+                    logger.exception("OnlineEngine[%s]: ошибка цикла", self.key)
+                finally:
+                    dur = time.monotonic() - t0
+                    self.cycle_started_mono = None
+                    self._touch_beat()
+                    self.cycles += 1
+                    self.last_cycle_sec = dur
+                    self.max_cycle_sec = max(self.max_cycle_sec, dur)
+                # Живой анализ обновлён — только цикл, где открытое окно отработало
+                # без ошибки; N+1-цикл и «нечего обрабатывать» — живы, но не
+                # обновили (критика v5.1.24, К6: иначе после перезапуска UI ~90 с
+                # показывал «Нет связи» вместо «Аналитика не обновляется»)
+                if ok and self._open_ok and not self._open_failed:
+                    self.live_ok_at = datetime.now(timezone.utc)
+                    self.live_ok_real = True
+                # Ошибка анализа закрываемого окна — тоже ошибка цикла (окно
+                # повторится следующим циклом), но живое окно при ней обработано
+                ok = ok and not self._open_failed and not self._close_failed
+                self.cycles_failed_streak = 0 if ok else self.cycles_failed_streak + 1
+                if ok:
+                    self.last_cycle_error = None
+                from config import settings as _settings
+                if dur > _settings.watchdog_cycle_warn_sec:
+                    logger.warning(
+                        "OnlineEngine[%s]: цикл шёл %.0f с (закрыто окон %d, курсор %s, "
+                        "обработано по %s)", self.key, dur, self._cycle_windows,
+                        self.cursor_ts.isoformat() if self.cursor_ts else "—",
+                        self.last_processed_to.isoformat() if self.last_processed_to else "—")
+                if self._running:
+                    await asyncio.sleep(self.poll_interval_sec)
+        finally:
+            remote.reset_owner(token)
 
     async def stop(self) -> None:
+        """Остановить цикл. Ожидание конца задачи — со сроком (v5.1.24): задача,
+        которая не реагирует на отмену, не держит СТОП/ПУСК и остановку сервиса."""
+        from config import settings as _settings
         self._running = False
         self._open_history_cache = None
         self._open_history_cache_ts = None
         if self._task and not self._task.done():
-            self._task.cancel()
-            try:
-                await self._task
-            except (asyncio.CancelledError, Exception):
-                pass
+            if not await remote.cancel_and_wait(self._task, _settings.watchdog_cancel_wait_sec):
+                logger.warning("OnlineEngine[%s]: задача движка не завершилась за %.0f с после "
+                               "отмены", self.key, _settings.watchdog_cancel_wait_sec)
 
     # ── Один цикл опроса ──────────────────────────────────────────────────────
 
@@ -3592,6 +3682,11 @@ class OnlinePollEngine:
             self.cfg.set_sensor_step(role, step, "history")
 
     async def _poll_cycle(self) -> None:
+        # Учёт цикла (v5.1.24): флаги этого цикла — для live_ok_at и счёта ошибок
+        self._open_failed = False
+        self._open_ok = False
+        self._close_failed = False
+        self._cycle_windows = 0
         now = datetime.now(timezone.utc)
         await self._refresh_sensor_steps(now)
 
@@ -3758,7 +3853,9 @@ class OnlinePollEngine:
                     load_seed=_seed,
                     prev_hint=self._prev_seg_hint,
                 )
-        except Exception:
+        except Exception as e:
+            self._close_failed = True
+            self._note_cycle_error(e)
             logger.exception("OnlineEngine[%s]: ошибка анализа [%s, %s]", self.key, t_from, t_to)
             return
 
@@ -4049,6 +4146,9 @@ class OnlinePollEngine:
                     logger.warning("OnlineEngine[%s]: не удалось записать detection_events", self.key)
 
             self.last_processed_to = seg_t_end
+            # Пульс и учёт: окно закрыто — движок продвигается (v5.1.24)
+            self._touch_beat()
+            self._cycle_windows += 1
             self._prev_seg_hint = seg
             self._transition_ctx = _push_transition(self._transition_ctx, seg)
             last_committed_t_end = seg_t_end
@@ -4301,7 +4401,7 @@ class OnlinePollEngine:
             # БД — три соединения на весь парк, а резерв стоит неделями)
             tl_pre: tuple[list, list] | None = None
             if self._last_open_run_state == 0:
-                (tl_e, tl_f), gaps = await asyncio.gather(
+                (tl_e, tl_f), gaps = await remote.gather_or_cancel(
                     _src.get_timeline_periods(
                         self.router_sn, self.equip_type, self.panel_id,
                         ts_from_utc, ts_to_utc, self.cfg,
@@ -4314,7 +4414,7 @@ class OnlinePollEngine:
                 tl_pre = (tl_e, tl_f)
                 enum_periods, fault_periods = _src.kb_slice(tl_e, tl_f, self.cfg)
             else:
-                enum_periods, fault_periods, gaps = await asyncio.gather(
+                enum_periods, fault_periods, gaps = await remote.gather_or_cancel(
                     _src.get_enum_periods(
                         self.router_sn, self.equip_type, self.panel_id,
                         ts_from_utc, ts_to_utc, addrs=_src.enum_read_addrs(self.cfg),
@@ -4341,7 +4441,7 @@ class OnlinePollEngine:
 
             # 40012/40013 — состояния: сегментатор берёт их из enum_periods (v5.1.1)
 
-            segments = await asyncio.to_thread(
+            segments = await remote.to_thread_beating(
                 functools.partial(
                     _segment_fn,
                     enum_periods=enum_periods,
@@ -4377,11 +4477,15 @@ class OnlinePollEngine:
             self._last_open_run_state = (
                 segments[-1].run_state if segments else self._last_open_run_state
             )
-        except Exception:
+        except Exception as e:
+            self._open_failed = True
+            self._note_cycle_error(e)
             logger.exception("OnlineEngine[%s]: ошибка анализа открытого окна", self.key)
             return
 
         if not segments:
+            # Окно прочитано и разобрано, нарезать нечего — живой анализ текущий
+            self._open_ok = True
             return
 
         # Аварийность стопа пришла после закрытия сегмента сменой режима — отметка
@@ -4636,6 +4740,9 @@ class OnlinePollEngine:
                         ref_chars=_rs_seg_dict,
                     )
                 self.last_processed_to = seg_t_end_rs
+                # Пульс и учёт: сегмент закрыт сменой режима (v5.1.24)
+                self._touch_beat()
+                self._cycle_windows += 1
                 self.cursor_ts = _tz_utc(datetime.fromisoformat(seg.t_end))
                 self.inherited_coking_risk = coking_risk
                 self.inherited_run_state_sec = {}  # смена RS — счётчик сбрасывается
@@ -4842,6 +4949,8 @@ class OnlinePollEngine:
         )
 
         self._last_open_seg_id = _open_seg_id
+        # Живой анализ обновлён (открытая строка записана) — для live_ok_at (v5.1.24)
+        self._open_ok = True
 
         # Хвост записей гейта удалённой строки — в новую открытую (см. _close_window).
         # v5.1.22 (P1-1 п. 3, В5): хеш снятия — только если снятый эпизод идёт и

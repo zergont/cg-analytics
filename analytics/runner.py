@@ -241,7 +241,9 @@ async def _load_data(
         )
     )
 
-    history, enum_periods, fault_periods, gaps = await asyncio.gather(
+    # Первая ошибка отменяет соседей — их слоты пула source свободны сразу (v5.1.24)
+    from db.remote import gather_or_cancel
+    history, enum_periods, fault_periods, gaps = await gather_or_cancel(
         history_task, enum_task, fault_task, gaps_task
     )
     # Коды неисправностей (40012/40013) — состояния из enum_history: сегментатор

@@ -1,5 +1,14 @@
 [Unit]
 Description=cg-analytics — интеллектуальная аналитика телеметрии ГУ
+# Ubuntu: postgresql.service — обёртка (oneshot /bin/true), сам кластер —
+# postgresql@<версия>-<имя>.service (Before=postgresql.service). При загрузке
+# After=postgresql.service ждёт кластер транзитивно, но в одной транзакции, где
+# перезапускаются cg-analytics и postgresql@16-main без обёртки (так делал
+# needrestart 22.10 и 23.10), порядка нет. Порядок к кластеру задаёт drop-in
+# /etc/systemd/system/cg-analytics.service.d/10-postgresql.conf — его пишет
+# install.sh по pg_lsclusters, версия в репозитории не зашита (v5.1.24).
+# network.target, а не network-online.target: с v5.1.24 пул source-БД стартует
+# без соединений (min_size=0), старт сервиса от сети и VPN не зависит.
 After=network.target postgresql.service
 
 [Service]
@@ -9,6 +18,8 @@ WorkingDirectory=/opt/cg-analytics
 ExecStart=/opt/cg-analytics/.venv/bin/python main.py
 Restart=on-failure
 RestartSec=10
+# Остановка укладывается в TimeoutStopSec по умолчанию (90 с): все ожидания
+# при остановке со сроком — движки 15 с, пулы 10 с (v5.1.24)
 
 # Конфигурация берётся из config.yml в рабочей директории
 

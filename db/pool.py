@@ -19,6 +19,9 @@
         await conn.close()   # ← возвращает соединение в пул, не закрывает
 
 Обёртка PooledConnection перехватывает close() и делает pool.release().
+
+Здесь же — пул source-БД для history_sync (v5.1.24: через db/remote — сроки
+запросов, keepalive, обрыв при ошибке; выдача — remote.connection).
 """
 from __future__ import annotations
 
@@ -28,6 +31,7 @@ import logging
 import asyncpg
 
 from config import settings
+from db import remote
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +58,9 @@ class PooledConnection:
         conn, self._conn = self._conn, None
         if conn is not None:
             await self._pool.release(conn)
+            # Завершённая работа с локальной БД — тоже продвижение движка
+            # (медленная, но живая БД не выглядит зависанием, v5.1.24)
+            remote.touch_owner()
 
 
 async def acquire_analytics() -> PooledConnection:
@@ -69,32 +76,40 @@ async def acquire_analytics() -> PooledConnection:
     return PooledConnection(_analytics_pool, await _analytics_pool.acquire())
 
 
-async def acquire_sync_source() -> PooledConnection:
-    """Соединение с удалённой БД телеметрии для history_sync.
+async def sync_source_pool() -> asyncpg.Pool:
+    """Пул удалённой БД телеметрии для history_sync.
 
     Отдельный маленький пул: держит соединения тёплыми между циклами
-    синхронизации (реконнект через WAN дорогой). При обрыве VPN мёртвые
-    соединения отбрасываются пулом, следующий acquire откроет новое.
+    синхронизации (реконнект через WAN дорогой). v5.1.24: command_timeout
+    (раньше не было вовсе — запрос на полуоткрытом соединении мог висеть
+    ~15 мин или вечно, а с ним весь воркер), keepalive, statement_timeout;
+    min_size=0 — при лежащем VPN создание пула не падает на каждом тике.
+    Соединения берутся только через remote.connection(pool).
     """
     global _sync_source_pool
     if _sync_source_pool is None:
         async with _sync_source_lock:
             if _sync_source_pool is None:
-                _sync_source_pool = await asyncpg.create_pool(
-                    settings.source_db_url, min_size=1, max_size=4
+                _sync_source_pool = await remote.create_pool(
+                    settings.source_db_url, min_size=0, max_size=4,
+                    label="history_sync (source-БД)",
                 )
-                logger.info("Пул source-БД для history_sync создан (min=1, max=4)")
-    return PooledConnection(_sync_source_pool, await _sync_source_pool.acquire())
+                logger.info("Пул source-БД для history_sync создан (min=0, max=4)")
+    return _sync_source_pool
 
 
 async def close_pools() -> None:
-    """Закрыть все пулы при остановке приложения."""
+    """Закрыть пулы при остановке приложения — параллельно и со сроком.
+
+    Pool.close() ждёт выданные соединения без срока (22.10: 90 с → SIGKILL):
+    не закрылся за pool_close_timeout — соединения обрываются (v5.1.24)."""
     global _analytics_pool, _sync_source_pool
-    if _analytics_pool is not None:
-        await _analytics_pool.close()
-        _analytics_pool = None
-        logger.info("Пул аналитической БД закрыт")
-    if _sync_source_pool is not None:
-        await _sync_source_pool.close()
-        _sync_source_pool = None
-        logger.info("Пул source-БД для history_sync закрыт")
+    an, _analytics_pool = _analytics_pool, None
+    ss, _sync_source_pool = _sync_source_pool, None
+    jobs = []
+    if an is not None:
+        jobs.append(remote.close_pool(an, "аналитической БД"))
+    if ss is not None:
+        jobs.append(remote.close_pool(ss, "source-БД для history_sync"))
+    if jobs:
+        await asyncio.gather(*jobs, return_exceptions=True)

@@ -444,15 +444,62 @@ async function refreshStatus() {
       const progFill    = progBar ? progBar.querySelector('.progress-bar') : null;
       const progLabel   = row.querySelector('.progress-label');
 
+      // Надзор за движком (v5.1.24): «аналитика не обновляется» — отдельно от «нет связи»
+      const lastRestart = item.last_engine_restart && item.last_engine_restart.ts
+        ? ' · перезапуск ' + fmtTs(item.last_engine_restart.ts)
+          + (item.last_engine_restart.reason ? ' (' + item.last_engine_restart.reason + ')' : '')
+        : '';
+      if (item.engine_state === 'stalled' || item.engine_state === 'zombie'
+          || item.engine_state === 'restart_limit') {
+        // «перезапуск сторожем» — только если сторож его действительно сделает
+        // (выключен, долгая нарезка в потоке, потолок при лимите — не сделает)
+        const what = item.engine_state === 'restart_limit'
+          ? '⚠ Движок — лимит перезапусков'
+          : item.engine_auto_restart ? '⚠ Движок завис — перезапуск сторожем'
+          : '⚠ Движок завис — сторож не перезапускает';
+        if (statusBadge) { statusBadge.className = 'badge bg-danger status-badge'; statusBadge.textContent = what; }
+        if (cursorLabel) cursorLabel.textContent = item.analytics_updated_at
+          ? 'аналитика обновлялась: ' + fmtTs(item.analytics_updated_at) : '';
+        if (progBar) progBar.style.display = 'none';
+        if (progLabel) progLabel.textContent = 'перезапусков: ' + (item.engine_restarts || 0) + lastRestart
+          + (item.engine_down_reason ? ' · ' + item.engine_down_reason : '');
+        return;
+      }
+
       if (!item.engine_live) {
-        if (statusBadge) { statusBadge.className = 'badge bg-warning text-dark status-badge'; statusBadge.textContent = '⚠ Движок не запущен'; }
+        const notLive = item.engine_state === 'restarting' ? '⏳ Движок перезапускается'
+          : item.engine_state === 'needs_start' ? '⚠ Движок не запущен — нужен ПУСК'
+          : '⚠ Движок не запущен';
+        if (statusBadge) { statusBadge.className = 'badge bg-warning text-dark status-badge'; statusBadge.textContent = notLive; }
+        if (progLabel) progLabel.textContent = (item.engine_down_reason || '') + lastRestart;
+        return;
+      }
+
+      // Догонка после простоя: пульс есть, живой анализ ещё не обновлён — прогресс,
+      // а не «не обновляется» (ветка «⏳ Исторические данные» ниже). Пульс — свежий:
+      // зависший цикл или висящий запрос дают ту же картину «цикл идёт, processed_to
+      // стоит», но пульс у них стареет. Порог 120 с (watchdog.cycle_warn_sec) — с
+      // запасом на один законно долгий запрос догонки. Циклы перед этим падали
+      // (VPN лежит) — тоже не догонка: иначе бейдж мигал бы каждым циклом
+      const beatFresh = item.engine_beat_age_sec != null && item.engine_beat_age_sec < 120
+        && !item.cycles_failed_streak;
+      const catchingUp = item.analytics_stale && item.cycle_running_sec != null && beatFresh
+        && lagSec !== null && lagSec > onlineThreshold && processedMs !== null && startMs !== null;
+
+      if (item.analytics_stale && !catchingUp) {
+        const lag = item.analytics_lag_sec;
+        if (statusBadge) { statusBadge.className = 'badge bg-danger status-badge'; statusBadge.textContent = '⚠ Аналитика не обновляется' + (lag != null ? ' ' + fmtDur(lag) : ''); }
+        if (cursorLabel) cursorLabel.textContent = item.analytics_updated_at
+          ? 'аналитика обновлялась: ' + fmtTs(item.analytics_updated_at) : 'аналитика ещё не обновлялась';
+        if (progBar) progBar.style.display = 'none';
+        if (progLabel) progLabel.textContent = (item.last_cycle_error ? 'ошибка цикла: ' + item.last_cycle_error : '') + lastRestart;
         return;
       }
 
       // Нет свежих данных дольше порога — связь с оборудованием потеряна.
       // «Онлайн»/отставание считаются по обработке пустых окон, поэтому
       // data_stale имеет приоритет: показываем реальную слепоту, а не зелёный.
-      if (item.data_stale) {
+      if (item.data_stale && !catchingUp) {
         const lastMs = item.last_data_ts ? new Date(item.last_data_ts).getTime() : null;
         if (statusBadge) { statusBadge.className = 'badge bg-danger status-badge'; statusBadge.textContent = '⚠ Нет связи'; }
         if (cursorLabel) cursorLabel.textContent = lastMs

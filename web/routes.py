@@ -2088,6 +2088,25 @@ async def online_clear(
     )
 
 
+def _engine_health_fields(mgr, key: str, obs: dict, now, stale_sec: int,
+                          diagnostics: bool = False, data_stale: bool = False) -> dict:
+    """«Аналитика не обновляется» отдельно от «нет связи» (v5.1.24).
+
+    Только память менеджера (online.manager.health_fields), без запросов к БД.
+    data_stale — уже посчитанный маршрутом: при недостоверном data_stale
+    (аналитика не обновлялась дольше порога телеметрии) analytics_stale
+    наступает раньше своего порога. Сбой — полей нет (UI ведёт себя как со
+    старым сервисом), ответ API не роняем."""
+    try:
+        from online.manager import health_fields
+        return health_fields(mgr, key, obs.get("status"), now, stale_sec,
+                             poll_interval_sec=obs.get("poll_interval_sec"),
+                             diagnostics=diagnostics, data_stale=data_stale)
+    except Exception:
+        logger.warning("API: поля надзора за движком %s не посчитаны", key, exc_info=True)
+        return {}
+
+
 @router.get("/api/online/status", response_class=JSONResponse)
 async def api_online_status():
     """Текущий статус всех наблюдений + открытых сегментов (для JS-поллинга)."""
@@ -2192,6 +2211,10 @@ async def api_online_status():
             except Exception:
                 logger.warning("api_online_status: не удалось вычислить severity", exc_info=True)
 
+        # Аналитика не обновляется ≠ нет связи (v5.1.24): только память менеджера
+        _health = _engine_health_fields(mgr, key, obs, now_utc, _stale_sec, diagnostics=True,
+                                        data_stale=data_stale)
+
         result.append({
             "key":              key,
             "router_sn":        obs["router_sn"],
@@ -2220,6 +2243,9 @@ async def api_online_status():
             "panel_severity":    panel_severity,
             "analytics_severity": analytics_severity,
             "status_updated":    status_updated,
+            # Надзор за движком (v5.1.24): analytics_* / engine_* и диагностика
+            # цикла (engine_beat_age_sec, cycle_running_sec, last_cycle_sec, …)
+            **_health,
         })
     return JSONResponse(result)
 
@@ -2250,6 +2276,11 @@ async def api_machines():
     except Exception:
         _stale_sec = 90
     _now = datetime.now(timezone.utc)
+    try:
+        from online.manager import get_manager
+        _mgr = get_manager()
+    except RuntimeError:
+        _mgr = None
     result = []
 
     for obs in observations:
@@ -2345,6 +2376,12 @@ async def api_machines():
             # last_data_ts. История и календарь ретроспективны и доступны всегда.
             "last_data_ts":    _last_data.isoformat() if _last_data else None,
             "data_stale":      data_stale,
+            # Аналитика не обновляется ≠ нет связи (v5.1.24): analytics_updated_at,
+            # analytics_lag_sec, analytics_stale, engine_state, engine_stalled,
+            # engine_restarts, last_engine_restart, engine_auto_restart,
+            # engine_down_reason. При analytics_stale=true data_stale
+            # недостоверен — last_data_ts пишет сам движок
+            **_engine_health_fields(_mgr, key, obs, _now, _stale_sec, data_stale=data_stale),
             # Открытые эпизоды тревог: висят с t_open, duration_sec не тикает в дырах
             "active_alarms": [
                 {

@@ -737,9 +737,13 @@ def order_incident_analysis(
         logger.info("IncidentGate: разбор аварии %s/%s/%s на %s уже в работе — дубль отброшен",
                     router_sn, equip_type, panel_id, _utc(stop_ts).isoformat())
         return False
+    # Без метки движка (v5.1.24): разбор — часы ожидания совета; его чтения
+    # source не должны продлевать пульс движка, а сам он — шуметь в стеке сторожа
+    from db.remote import detached_context
     task = asyncio.create_task(
         _run_incident(router_sn, equip_type, int(panel_id), incident, _utc(stop_ts), segment_id),
         name=f"incident:{router_sn}/{equip_type}/{panel_id}",
+        context=detached_context(),
     )
     _inflight[key] = task
     task.add_done_callback(lambda t, k=key: _task_done(k, t))

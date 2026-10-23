@@ -179,6 +179,8 @@ def fire_verify(
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            asyncio.ensure_future(_run())
+            # Без метки движка: фоновая проверка не продлевает его пульс (v5.1.24)
+            from db.remote import detached_context
+            loop.create_task(_run(), context=detached_context())
     except Exception:
         pass

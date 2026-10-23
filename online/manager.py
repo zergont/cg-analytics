@@ -26,15 +26,24 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from datetime import datetime, timezone
+import time
+from collections import deque
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from analytics.contract import CokingRisk
+from config import settings
+from db import remote
 from online import db as online_db
 from online.engine import OnlinePollEngine, _coking_from_json, _enqueue_segment, _tz_utc
 
 logger = logging.getLogger(__name__)
+
+# Класс datetime на момент импорта: тесты подменяют manager.datetime своим
+# подклассом, а проверки типа надзора должны принимать настоящие метки
+_DT = datetime
 
 _manager: "OnlineManager | None" = None
 
@@ -85,6 +94,53 @@ class OnlineManager:
         # паузы, а не каждые 2 мин
         self._gate_failed: dict[str, dict[str, datetime]] = {}
 
+        # ── Надзор за движками (v5.1.24, только память) ──
+        # 17.10 движок ДГУ №2 завис в asyncpg и молчал 4 сут 20 ч: надзора не
+        # было, отмену задачи писали в DEBUG. Сторож поднимает ТОЛЬКО зависшую
+        # машину тем же путём, что старт сервиса
+        # Машины, у которых должен работать движок (status='running')
+        self._wanted: set[str] = set()
+        # СТОП / ПУСК / перезапуск одной машины — по очереди
+        self._key_locks: dict[str, asyncio.Lock] = {}
+        self._lock_since: dict[str, tuple[float, str]] = {}   # monotonic взятия, кто держит
+        # Перезапуски зависших движков (monotonic) — лимит max_restarts за окно
+        self._restart_times: dict[str, deque] = {}
+        # Для API: {count, last_ts, last_reason}
+        self._restart_info: dict[str, dict] = {}
+        # Почему движка нет при running: (вид, текст). Вид: failed — старт или
+        # подъём упал (повтор с растущей паузой); dead — задача завершилась сама;
+        # limit — исчерпан лимит перезапусков; zombie — старая задача жива
+        self._down: dict[str, tuple[str, str]] = {}
+        # Неудачные подъёмы подряд и когда можно повторить (monotonic)
+        self._fail_streak: dict[str, int] = {}
+        self._next_try: dict[str, float] = {}
+        # Старая задача не завершилась после отмены: новый движок — только после неё
+        self._zombies: dict[str, asyncio.Task] = {}
+        # live_ok_at последнего движка машины — переживает перезапуск и окно ПУСК
+        self._last_live_ok: dict[str, datetime] = {}
+        # Он же — от настоящего обновления живого анализа, а не момент ПУСК / старта (W7)
+        self._live_real: dict[str, bool] = {}
+        # Эпоха памяти гейта: +1 при СТОП / ПУСК (сторож её не трогает)
+        self._mem_epoch: dict[str, int] = {}
+        # Журнал сторожа без повторов: (ключ, вид) → monotonic последней записи
+        self._logged: dict[tuple[str, str], float] = {}
+        # Долгий цикл, пока идёт (К8): ключ → (начало цикла, последний WARNING)
+        self._cycle_warned: dict[str, tuple[float, float]] = {}
+        # Жёсткий потолок (Р6): ключ → (курсор, обработано по, цикл, с какого момента)
+        self._progress_mark: dict[str, tuple] = {}
+        # Устаревшие данные в статус-тике: ключ → с какого момента (одно WARNING)
+        self._stale_since: dict[str, datetime] = {}
+        # Машины, у которых идёт перезапуск сторожем (повтор не создаётся)
+        self._restarting: set[str] = set()
+        # Эпизод, уже описанный в журнале, когда сторож движок не трогает (выключен;
+        # потолок при исчерпанном лимите; долгая нарезка в потоке): ключ →
+        # (вид, метка продвижения). Раз на эпизод: эпизод «stall» закрывает свежий
+        # пульс, эпизод потолка — продвижение или конец цикла (ревью v5.1.24, W5)
+        self._diag_open: dict[str, tuple] = {}
+        self._watchdog_task: asyncio.Task | None = None
+        self._restart_tasks: set[asyncio.Task] = set()
+        self._stopping = False
+
     # ── Запуск всех активных наблюдений ───────────────────────────────────────
 
     async def start_all_running(self) -> None:
@@ -99,15 +155,22 @@ class OnlineManager:
                 logger.warning("OnlineManager: пропуск дублирующейся записи %s", key)
                 continue
             seen.add(key)
+            # Движок должен работать, даже если старт упадёт — в том числе в
+            # _build_engine (локальная БД перезапускается вместе с сервисом, как
+            # 22–23.10): такую машину поднимет сторож (ревью v5.1.24, W4)
+            self._wanted.add(key)
             try:
                 engine = await self._build_engine(obs)
                 if engine is None:
+                    self._wanted.discard(key)
+                    self._down[key] = ("needs_start", _NO_BINDING_TEXT)
                     continue
                 await engine.initialize(obs["start_date"], allow_gap_fill=False)
                 self._launch(engine)
-            except Exception:
+            except Exception as e:
+                self._mark_failed(key, f"ошибка старта: {type(e).__name__}: {e}"[:200])
                 logger.exception(
-                    "OnlineManager: ошибка старта движка %s/%s/%s",
+                    "OnlineManager: ошибка старта движка %s/%s/%s — сторож повторит",
                     obs["router_sn"], obs["equip_type"], obs["panel_id"],
                 )
 
@@ -136,6 +199,9 @@ class OnlineManager:
         self._history_sync = HistorySyncWorker(interval_sec=30)
         self._history_sync.start()
 
+        # Сторож движков (v5.1.24)
+        self._start_watchdog()
+
     # ── ПУСК ОНЛАЙН ───────────────────────────────────────────────────────────
 
     async def start_machine(
@@ -154,10 +220,46 @@ class OnlineManager:
         - Иначе: обычное возобновление (initialize из последнего закрытого).
         """
         key = f"{router_sn}|{equip_type}|{panel_id}"
+        if self._stopping:
+            raise RuntimeError("Сервис останавливается — ПУСК не выполнен, повторите после старта")
+        # Под замком машины и со сроком (v5.1.24): ПУСК, СТОП и перезапуск
+        # сторожем — по очереди; зависание локальной БД не держит замок вечно
+        try:
+            async with self._key_section(key, "ПУСК"):
+                await self._start_machine_locked(key, router_sn, equip_type, panel_id,
+                                                 start_date, poll_interval_sec)
+        except BaseException as e:
+            # Машина вне надзора (Р8) — до нового ПУСК: API скажет «нужен ПУСК», а
+            # не «сторож перезапускает» (ревью v5.1.24, W9)
+            if key not in self._wanted and not isinstance(e, asyncio.CancelledError):
+                self._down[key] = ("needs_start",
+                                   f"ПУСК не выполнен: {type(e).__name__}: {e}"[:200])
+            raise
 
-        # Остановить уже работающий движок если есть
-        if key in self._engines:
-            await self._stop_engine(key)
+    async def _start_machine_locked(self, key: str, router_sn: str, equip_type: str,
+                                    panel_id: int, start_date: datetime,
+                                    poll_interval_sec: int) -> None:
+        # Старая задача машины не завершилась после отмены — второй движок на ту
+        # же машину не запускаем (две записи в одну строку)
+        zombie = self._zombies.get(key)
+        if zombie is not None and not zombie.done():
+            raise RuntimeError(
+                f"Предыдущий движок {key} не завершился за "
+                f"{settings.watchdog_cancel_wait_sec:.0f} с после отмены — повторите позже")
+        # Ошибка ПУСК должна дойти до оператора, а не подниматься сторожем молча
+        # через initialize без перечитки (Р8): ключ — в «должен работать» только
+        # после удачного запуска
+        self._wanted.discard(key)
+        self._last_live_ok[key] = datetime.now(timezone.utc)
+        self._live_real[key] = False
+
+        # Остановить уже работающий движок, если есть. Память гейта и эпоха —
+        # сбрасываются всегда, даже если движка нет (лимит, зомби, упал старт):
+        # перечитка удаляет строки, по которым помнили разбор (К5)
+        if not await self._stop_engine(key):
+            raise RuntimeError(
+                f"Движок {key} не завершился за {settings.watchdog_cancel_wait_sec:.0f} с "
+                "после отмены — повторите позже")
 
         # batch_end_ts = момент нажатия «Пуск» (фиксируется один раз, не обновляется при resume)
         await online_db.upsert_observation({
@@ -208,7 +310,10 @@ class OnlineManager:
         else:
             await engine.initialize(_tz_utc(start_date), allow_gap_fill=True)
 
-        self._launch(engine)
+        if not self._launch(engine):
+            raise RuntimeError("Сервис останавливается — движок не запущен")
+        self._wanted.add(key)
+        self._clear_down(key)
         logger.info("OnlineManager[%s]: движок запущен", key)
 
     # ── СТОП ОНЛАЙН ───────────────────────────────────────────────────────────
@@ -221,48 +326,82 @@ class OnlineManager:
     ) -> None:
         """СТОП ОНЛАЙН: закрыть открытый сегмент как OPERATOR_STOP, остановить движок."""
         key = f"{router_sn}|{equip_type}|{panel_id}"
-        now = datetime.now(timezone.utc)
+        # Сторож машину больше не поднимает — до замка: перезапуск, ждущий
+        # замок, увидит это и выйдет (v5.1.24)
+        was_wanted = key in self._wanted
+        self._wanted.discard(key)
+        async with self._key_section(key, "СТОП"):
+            now = datetime.now(timezone.utc)
 
-        from analytics.runner import ANALYTICS_VERSION
+            from analytics.runner import ANALYTICS_VERSION
 
-        # Принудительно закрыть открытый сегмент
-        await online_db.close_open_as_operator_stop(
-            router_sn, equip_type, panel_id,
-            t_end=now,
-            analytics_version=ANALYTICS_VERSION,
-        )
+            try:
+                # Принудительно закрыть открытый сегмент
+                await online_db.close_open_as_operator_stop(
+                    router_sn, equip_type, panel_id,
+                    t_end=now,
+                    analytics_version=ANALYTICS_VERSION,
+                )
 
-        # Обновить статус в БД
-        await online_db.set_observation_status(router_sn, equip_type, panel_id, "stopped")
+                # Обновить статус в БД
+                await online_db.set_observation_status(router_sn, equip_type, panel_id, "stopped")
+            except BaseException:
+                # СТОП не прошёл — движок работает дальше и остаётся под надзором
+                if was_wanted:
+                    self._wanted.add(key)
+                raise
 
-        # Остановить движок
-        if key in self._engines:
-            await self._stop_engine(key)
+            # Остановить движок. Память гейта и эпоха — всегда, даже без движка (К5)
+            if not await self._stop_engine(key):
+                logger.error("OnlineManager[%s]: СТОП — задача движка не завершилась за %.0f с "
+                             "после отмены (остаётся до завершения; новый ПУСК — после неё)",
+                             key, settings.watchdog_cancel_wait_sec)
+            self._clear_down(key)
 
         logger.info("OnlineManager[%s]: остановлен (OPERATOR_STOP)", key)
 
     # ── Остановка всех ────────────────────────────────────────────────────────
 
     async def stop_all(self) -> None:
-        # Остановить планировщик статус-строк
-        if self._status_task and not self._status_task.done():
-            self._status_task.cancel()
-            try:
-                await self._status_task
-            except (asyncio.CancelledError, Exception):
-                pass
-        self._status_task = None
+        """Остановка сервиса за ограниченное время (v5.1.24): сначала сторож и
+        идущие перезапуски — чтобы ни один движок не поднялся посреди остановки,
+        затем всё остальное параллельно, каждое ожидание со сроком."""
+        t0 = time.monotonic()
+        self._stopping = True
+        wait = settings.watchdog_cancel_wait_sec
 
-        # Остановить синхронизацию history
-        if self._history_sync:
-            await self._history_sync.stop()
-            self._history_sync = None
+        # Сторож и перезапуски, которые он уже начал (К5: задача, ждущая
+        # initialize, иначе запустила бы движок после обхода _engines)
+        await remote.cancel_and_wait(self._watchdog_task, wait)
+        self._watchdog_task = None
+        restarts = [t for t in self._restart_tasks if not t.done()]
+        if restarts:
+            for t in restarts:
+                t.cancel()
+            await asyncio.wait(restarts, timeout=wait)
 
-        for key in list(self._engines.keys()):
+        async def _stop_status() -> None:
+            if not await remote.cancel_and_wait(self._status_task, wait):
+                logger.warning("OnlineManager: планировщик статус-строк не завершился за %.0f с",
+                               wait)
+
+        async def _stop_sync() -> None:
+            if self._history_sync:
+                await self._history_sync.stop()
+
+        async def _stop_one(key: str) -> None:
             try:
                 await self._stop_engine(key)
             except Exception:
                 logger.exception("OnlineManager: ошибка остановки %s", key)
+
+        keys = list(self._engines.keys())
+        await asyncio.gather(_stop_status(), _stop_sync(), *(_stop_one(k) for k in keys),
+                             return_exceptions=True)
+        self._status_task = None
+        self._history_sync = None
+        logger.info("Онлайн-движки остановлены за %.1f с (движков %d)", time.monotonic() - t0,
+                    len(keys))
 
     # ── Внутренние методы ─────────────────────────────────────────────────────
 
@@ -337,47 +476,111 @@ class OnlineManager:
             engine.last_data_ts = obs["last_data_ts"]
         return engine
 
-    def _launch(self, engine: OnlinePollEngine) -> None:
+    def _launch(self, engine: OnlinePollEngine) -> bool:
+        """Запустить задачу движка. False — сервис останавливается (К5: движок,
+        поднятый посреди остановки, работал бы на закрытых пулах)."""
+        if self._stopping:
+            logger.warning("OnlineManager[%s]: сервис останавливается — движок не запущен",
+                           engine.key)
+            return False
         key = engine.key
+        # Второй движок на машину — никогда (две записи в одну строку): прежняя
+        # задача должна быть снята до запуска (СТОП / ПУСК / сторож — под замком)
+        old = self._tasks.get(key)
+        zombie = self._zombies.get(key)
+        if (old is not None and not old.done()) or (zombie is not None and not zombie.done()):
+            logger.error("OnlineManager[%s]: прежняя задача движка жива — второй движок не "
+                         "запускаю", key)
+            return False
         self._engines[key] = engine
         task = asyncio.create_task(engine.run(), name=f"online_{key}")
-        task.add_done_callback(lambda t: self._on_task_done(key, t))
+        # Колбэк знает СВОЙ движок: колбэк старой задачи не снимет новый
+        task.add_done_callback(lambda t, e=engine: self._on_task_done(key, t, e))
         self._tasks[key] = task
         engine._task = task
+        return True
 
-    def _on_task_done(self, key: str, task: asyncio.Task) -> None:
-        self._tasks.pop(key, None)
-        self._engines.pop(key, None)
+    def _on_task_done(self, key: str, task: asyncio.Task, engine=None) -> None:
+        """Задача движка завершилась. Снимаем записи, только если это всё ещё
+        задача машины; неожиданный конец — в журнал громко (v5.1.24: отмену
+        писали в DEBUG — 17.10 зависание не оставило следа), сторож поднимет."""
+        if self._tasks.get(key) is task:
+            self._tasks.pop(key, None)
+            if engine is None or self._engines.get(key) is engine:
+                self._engines.pop(key, None)
+        elif engine is not None and self._engines.get(key) is engine:
+            self._engines.pop(key, None)
+        if engine is not None:
+            self._remember_live_ok(key, engine)
+        expected = (engine is None or not getattr(engine, "_running", False)
+                    or self._stopping)
         if task.cancelled():
-            logger.debug("OnlineEngine[%s] задача отменена", key)
-        elif task.exception():
-            logger.error("OnlineEngine[%s] задача завершилась с ошибкой: %s", key, task.exception())
+            if expected:
+                logger.debug("OnlineEngine[%s] задача отменена", key)
+            else:
+                self._down.setdefault(key, ("dead", "задача движка отменена неожиданно"))
+                logger.warning("OnlineEngine[%s] задача движка отменена неожиданно — сторож "
+                               "поднимет её", key)
+            return
+        exc = task.exception()
+        if exc is not None:
+            if not self._stopping and key in self._wanted:
+                self._down[key] = ("dead", f"задача завершилась с ошибкой: "
+                                           f"{type(exc).__name__}: {exc}"[:200])
+            logger.error("OnlineEngine[%s] задача движка завершилась с ошибкой — сторож "
+                         "поднимет её", key, exc_info=exc)
+        elif not expected:
+            self._down.setdefault(key, ("dead", "задача движка завершилась без остановки"))
+            logger.warning("OnlineEngine[%s] задача движка завершилась без остановки — сторож "
+                           "поднимет её", key)
 
-    async def _stop_engine(self, key: str) -> None:
+    async def _stop_engine(self, key: str) -> bool:
+        """Снять движок машины. True — задачи больше нет (False — не завершилась
+        за срок после отмены: она в _zombies, новый движок только после неё).
+
+        Память гейта и эпоха сбрасываются ВСЕГДА — даже если движка нет."""
         engine = self._engines.pop(key, None)
         task   = self._tasks.pop(key, None)
         # СТОП / ПУСК с перечиткой: сегменты, по которым помним разбор, удаляются
         # и строятся заново — память гейта по машине больше не про них. Разбор,
-        # который сейчас в работе, забываем: вернувшись, он увидит другой движок
+        # который сейчас в работе, забываем: вернувшись, он увидит другую эпоху
         # и память не тронет (_run_gate), а составы новой машины не держит
+        self._mem_epoch[key] = self._mem_epoch.get(key, 0) + 1
         self._gate_done.pop(key, None)
         self._gate_failed.pop(key, None)
         self._warning_tracker.pop(key, None)
         for _ik in [k for k in self._gate_inflight if k[0] == key]:
             self._gate_inflight.pop(_ik, None)
         if engine:
-            await engine.stop()
-        if task and not task.done():
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+            self._remember_live_ok(key, engine)
+            await engine.stop()             # ожидание со сроком (OnlinePollEngine.stop)
+        if task is None:
+            task = getattr(engine, "_task", None) if engine is not None else None
+        # Второе ожидание — тоже со сроком (К5): задача, глотающая отмену, не
+        # держит СТОП / ПУСК / остановку сервиса
+        if task is not None and not task.done():
+            # Не завершилась после отмены: оборвать соединения source этого
+            # движка (обрыв снимает и ожидания asyncpg вне помощника) и подождать ещё
+            tag = getattr(engine, "_tag", None) if engine is not None else None
+            if tag is not None:
+                remote.terminate_stale(tag, 0)
+            if not await remote.cancel_and_wait(task, settings.watchdog_cancel_wait_sec):
+                self._zombies[key] = task
+                return False
+        zombie = self._zombies.get(key)
+        if zombie is not None:
+            if not zombie.done():
+                return False
+            self._zombies.pop(key, None)
+        return True
 
     # ── Публичные методы опроса состояния ────────────────────────────────────
 
     def is_running(self, router_sn: str, equip_type: str, panel_id: int) -> bool:
-        return f"{router_sn}|{equip_type}|{panel_id}" in self._engines
+        """Движок работает или должен работать (окно перезапуска сторожем):
+        удаление и очистка сегментов в routes не должны проскочить без СТОПа."""
+        key = f"{router_sn}|{equip_type}|{panel_id}"
+        return key in self._engines or key in self._wanted
 
     def running_keys(self) -> list[str]:
         return list(self._engines.keys())
@@ -393,6 +596,542 @@ class OnlineManager:
         key = f"{router_sn}|{equip_type}|{panel_id}"
         engine = self._engines.get(key)
         return engine.last_processed_to if engine else None
+
+    # ── Надзор за движками (v5.1.24) ─────────────────────────────────────────
+    #
+    # 17.10 ~13:40 движок ДГУ №2 завис в asyncpg (возврат соединения ждал
+    # подтверждения отмены без срока) и молчал до 22.10 09:25. Сторож смотрит
+    # только память: пульс движка (начало и конец цикла, закрытое окно, каждый
+    # завершённый запрос к БД). Нет пульса дольше stall_sec — ERROR со стеками
+    # задач движка (где висит), отмена и подъём ТОЛЬКО этой машины тем же путём,
+    # что при старте сервиса; не чаще max_restarts за окно. Потолок — на время
+    # без продвижения, а не на длительность цикла: догонка месяца законно идёт
+    # минуты и пульсирует.
+
+    def _key_lock(self, key: str) -> asyncio.Lock:
+        lock = self._key_locks.get(key)
+        if lock is None:
+            lock = self._key_locks[key] = asyncio.Lock()
+        return lock
+
+    @asynccontextmanager
+    async def _key_section(self, key: str, who: str):
+        """Замок машины и срок на всё, что под ним (критика v5.1.24, К4): зависшая
+        локальная БД не должна держать замок вечно — иначе ПУСК и СТОП из UI
+        ждали бы его без конца, а сторож пропускал бы машину навсегда."""
+        lock = self._key_lock(key)
+        async with lock:
+            self._lock_since[key] = (time.monotonic(), who)
+            limit = settings.watchdog_stall_sec
+            cm = asyncio.timeout(limit)
+            try:
+                async with cm:
+                    yield
+            except TimeoutError:
+                if not cm.expired():
+                    raise
+                logger.error("OnlineManager[%s]: %s не уложился в %.0f с — прерван (замок машины "
+                             "освобождён)", key, who, limit)
+                raise RuntimeError(f"{who} {key}: не уложился в {limit:.0f} с") from None
+            finally:
+                self._lock_since.pop(key, None)
+
+    @staticmethod
+    def _stall_limit(engine) -> float:
+        poll = float(getattr(engine, "poll_interval_sec", 30) or 30)
+        return max(settings.watchdog_stall_sec, 3 * poll + 60)
+
+    def _log_due(self, key: str, kind: str, every: float) -> bool:
+        """Запись сторожа не чаще раза в every секунд на (машину, вид)."""
+        now_m = time.monotonic()
+        last = self._logged.get((key, kind))
+        if last is not None and now_m - last < every:
+            return False
+        self._logged[(key, kind)] = now_m
+        return True
+
+    def _limit_left(self, key: str, now_m: float | None = None) -> int:
+        now_m = time.monotonic() if now_m is None else now_m
+        dq = self._restart_times.get(key)
+        if dq is None:
+            return settings.watchdog_max_restarts
+        while dq and now_m - dq[0] > settings.watchdog_restart_window_sec:
+            dq.popleft()
+        return settings.watchdog_max_restarts - len(dq)
+
+    def _mark_failed(self, key: str, text: str) -> float:
+        """Старт или подъём не удался: повтор с растущей паузой (Р7), без лимита
+        перезапусков — тот для зависших движков."""
+        n = self._fail_streak.get(key, 0) + 1
+        self._fail_streak[key] = n
+        delay = _RETRY_BACKOFF_SEC[min(n - 1, len(_RETRY_BACKOFF_SEC) - 1)]
+        self._next_try[key] = time.monotonic() + delay
+        self._down[key] = ("failed", text)
+        return delay
+
+    def _clear_down(self, key: str) -> None:
+        for d in (self._down, self._fail_streak, self._next_try, self._cycle_warned,
+                  self._progress_mark, self._diag_open):
+            d.pop(key, None)
+
+    def _remember_live_ok(self, key: str, engine) -> None:
+        lok = getattr(engine, "live_ok_at", None)
+        if isinstance(lok, _DT):
+            cur = self._last_live_ok.get(key)
+            if cur is None or lok > cur:
+                self._last_live_ok[key] = lok
+                self._live_real[key] = bool(getattr(engine, "live_ok_real", False))
+
+    def _start_watchdog(self) -> None:
+        if self._watchdog_task is not None and not self._watchdog_task.done():
+            return
+        self._watchdog_task = asyncio.create_task(self._run_watchdog(), name="engine_watchdog")
+        self._watchdog_task.add_done_callback(self._on_watchdog_done)
+
+    def _on_watchdog_done(self, task: asyncio.Task) -> None:
+        """Надзор за самим сторожем (Р18): конец не при остановке — ERROR."""
+        if self._stopping:
+            return
+        if task.cancelled():
+            logger.error("Сторож движков: задача отменена не при остановке — надзора за "
+                         "движками нет")
+            return
+        exc = task.exception()
+        logger.error("Сторож движков: задача завершилась — надзора за движками нет",
+                     exc_info=exc)
+
+    async def _run_watchdog(self) -> None:
+        logger.info(
+            "Сторож движков: запущен (нет продвижения дольше %.0f с → %s, не чаще %d раз за "
+            "%.0f мин; проверка раз в %.0f с)",
+            settings.watchdog_stall_sec,
+            "перезапуск" if settings.watchdog_enabled else "только запись в журнал (выключен)",
+            settings.watchdog_max_restarts, settings.watchdog_restart_window_sec / 60,
+            settings.watchdog_tick_sec)
+        while True:
+            await asyncio.sleep(settings.watchdog_tick_sec)
+            try:
+                self._watch_tick()
+            except Exception:
+                logger.exception("Сторож движков: ошибка тика")
+
+    def _watch_tick(self) -> None:
+        """Один тик сторожа — только память, без запросов (100 машин — доли мс)."""
+        if self._stopping:
+            return
+        now_m = time.monotonic()
+        stall = settings.watchdog_stall_sec
+        # Уборщик (Р9): соединение source у любого владельца, выданное дольше,
+        # чем возможно законно (слот + запрос + возврат + 60 с), — обрыв.
+        # Сторож выключен — только запись в журнал
+        if settings.watchdog_enabled:
+            for c in remote.terminate_stale(None, remote.stale_conn_sec()):
+                logger.error("Сторож движков: соединение %s (владелец %s) выдано %.0f с назад — "
+                             "оборвано", c["label"], c["owner"] or "—", c["age_sec"])
+        else:
+            for c in remote.held(None):
+                if (c["age_sec"] > remote.stale_conn_sec()
+                        and self._log_due(f"{c['owner']}|{c['task']}", "conn", stall)):
+                    logger.error("Сторож движков: соединение %s (владелец %s) выдано %.0f с назад "
+                                 "(сторож выключен — не обрываю)", c["label"], c["owner"] or "—",
+                                 c["age_sec"])
+        for key in list(self._wanted):
+            if key in self._restarting:
+                continue
+            lock = self._key_locks.get(key)
+            if lock is not None and lock.locked():
+                since = self._lock_since.get(key)
+                if since and now_m - since[0] > stall and self._log_due(key, "lock", stall):
+                    logger.error("Сторож[%s]: замок машины держит «%s» уже %.0f с", key, since[1],
+                                 now_m - since[0])
+                continue
+            zombie = self._zombies.get(key)
+            if zombie is not None:
+                if not zombie.done():
+                    if self._log_due(key, "zombie", stall):
+                        th = remote.threads(key)
+                        logger.error("Сторож[%s]: старая задача движка всё ещё не завершилась "
+                                     "после отмены — новый движок не запускаю, пока она жива "
+                                     "(две записи в одну машину)%s", key,
+                                     f"; ждёт поток нарезки, считающий "
+                                     f"{max(t['age_sec'] for t in th):.0f} с" if th else "")
+                    continue
+                if settings.watchdog_enabled and self._limit_left(key, now_m) > 0:
+                    self._spawn_restart(key, "zombie", "старая задача движка завершилась",
+                                        None, zombie)
+                continue
+            eng = self._engines.get(key)
+            if eng is None:
+                if not settings.watchdog_enabled:
+                    continue
+                kind, text = self._down.get(key, ("dead", "движок не работает"))
+                if kind == "zombie":
+                    # Записи о зомби уже нет (снята СТОП / ПУСК) — просто движка нет
+                    kind = "dead"
+                if kind == "failed":
+                    if now_m < self._next_try.get(key, 0.0):
+                        continue
+                elif self._limit_left(key, now_m) <= 0:
+                    continue
+                self._spawn_restart(key, kind, text, None, None)
+                continue
+            idle = now_m - float(getattr(eng, "beat_mono", now_m))
+            if idle > self._stall_limit(eng):
+                self._on_stall(key, eng, "stall", f"нет продвижения {idle:.0f} с")
+                continue
+            # Пульс свежий — закрыт только эпизод «нет пульса»; эпизод потолка
+            # (пульс есть по определению) закрывает продвижение (W5)
+            self._close_episode(key, "stall")
+            self._watch_cycle(key, eng, now_m)
+
+    def _close_episode(self, key: str, *kinds: str) -> None:
+        ep = self._diag_open.get(key)
+        if ep is not None and ep[0] in kinds:
+            self._diag_open.pop(key, None)
+
+    def _log_episode(self, key: str, eng, episode: tuple, reason: str, action: str) -> None:
+        """ERROR со стеком — один раз на эпизод: сторож движок не трогает."""
+        if self._diag_open.get(key) == episode:
+            return
+        self._diag_open[key] = episode
+        logger.error("%s", self._diag_text(key, eng, reason, action=action))
+
+    def _on_stall(self, key: str, eng, kind: str, reason: str, mark: tuple | None = None) -> None:
+        if not settings.watchdog_enabled:
+            # Откат без кода: только ERROR со стеком — один раз на эпизод
+            self._log_episode(key, eng, (kind, mark), reason,
+                              "сторож выключен — движок не трогаю")
+            return
+        if kind == "ceiling" and self._limit_left(key) <= 0:
+            # Пульс есть — движок жив; снять его при исчерпанном лимите хуже, чем
+            # оставить: нового до конца окна не будет (ревью v5.1.24, W3)
+            self._log_episode(key, eng, (kind, mark), reason, _CEILING_LIMIT_ACTION)
+            return
+        self._spawn_restart(key, kind, reason, eng, self._tasks.get(key), mark=mark)
+
+    def _watch_cycle(self, key: str, eng, now_m: float) -> None:
+        """Долгий цикл, пока он идёт (К8), и жёсткий потолок «пульс есть, а
+        продвижения нет» (Р6). Только память.
+
+        Продвижение — курсор, обработанное «по» или завершённый удалённый вызов
+        (ревью v5.1.24, W3): холодный цикл на деградировавшем VPN законно идёт
+        дольше stall_sec, курсор не двигая, — его снимал потолок, а новый движок
+        начинал тот же цикл с пустым кэшем. Потолок ловит цикл, где нет ни
+        курсора, ни ответов source (крутится на локальной БД). Пульс только от
+        потока нарезки — не перезапуск: поток не прерывается, перезапуск лишь
+        поставил бы ту же нарезку вторым потоком (W6)."""
+        cs = getattr(eng, "cycle_started_mono", None)
+        if cs is None:
+            self._cycle_warned.pop(key, None)
+            self._progress_mark.pop(key, None)
+            self._close_episode(key, "ceiling", "thread")
+            return
+        running = now_m - cs
+        stall = settings.watchdog_stall_sec
+        if running > settings.watchdog_cycle_warn_sec:
+            prev = self._cycle_warned.get(key)
+            if prev is None or prev[0] != cs or now_m - prev[1] >= stall:
+                self._cycle_warned[key] = (cs, now_m)
+                logger.warning(
+                    "Сторож[%s]: цикл идёт %.0f с (закрыто окон %d, курсор %s, обработано по %s, "
+                    "пульс %.0f с назад)", key, running, getattr(eng, "_cycle_windows", 0),
+                    _fmt_ts(getattr(eng, "cursor_ts", None)),
+                    _fmt_ts(getattr(eng, "last_processed_to", None)),
+                    now_m - float(getattr(eng, "beat_mono", now_m)))
+        mark = _progress_of(eng)
+        pm = self._progress_mark.get(key)
+        if pm is None or pm[0] != mark:
+            self._progress_mark[key] = (mark, now_m)
+            self._close_episode(key, "ceiling", "thread")
+            return
+        still = now_m - pm[1]
+        if running > max(stall, _catchup_estimate_sec(eng)) and still > stall:
+            tag = getattr(eng, "_tag", None)
+            th = remote.threads(tag) if tag is not None else []
+            if th:
+                self._log_episode(
+                    key, eng, ("thread", mark),
+                    f"цикл идёт {running:.0f} с, нарезка в потоке считает "
+                    f"{max(t['age_sec'] for t in th):.0f} с, курсор не двигается {still:.0f} с",
+                    "поток не прервать, перезапуск лишь поставил бы ту же нарезку вторым "
+                    "потоком — движок не трогаю, нужен разбор")
+                return
+            self._on_stall(key, eng, "ceiling",
+                           f"цикл идёт {running:.0f} с, нет продвижения {still:.0f} с — ни "
+                           f"курсора, ни ответов source (пульс есть)", mark=mark)
+
+    def _spawn_restart(self, key: str, kind: str, reason: str, engine, task,
+                       mark: tuple | None = None) -> None:
+        if key in self._restarting or self._stopping:
+            return
+        self._restarting.add(key)
+        t = asyncio.create_task(self._restart_engine(key, kind, reason, engine, task, mark),
+                                name=f"watchdog_{key}")
+        self._restart_tasks.add(t)
+
+        def _done(t: asyncio.Task, key: str = key) -> None:
+            self._restart_tasks.discard(t)
+            self._restarting.discard(key)
+            if not t.cancelled() and t.exception() is not None:
+                logger.error("Сторож[%s]: перезапуск упал", key, exc_info=t.exception())
+
+        t.add_done_callback(_done)
+
+    async def _restart_engine(self, key: str, kind: str, reason: str, engine=None,
+                              task: asyncio.Task | None = None, mark: tuple | None = None) -> None:
+        """Перезапуск одной машины под её замком (СТОП/ПУСК — по очереди)."""
+        try:
+            async with self._key_section(key, "перезапуск сторожем"):
+                await self._restart_locked(key, kind, reason, engine, task, mark)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            if self._stopping or key not in self._wanted:
+                return
+            delay = self._mark_failed(key, f"подъём не удался: {type(e).__name__}: {e}"[:200])
+            logger.error("Сторож[%s]: подъём движка не удался — повтор через %.0f с", key, delay,
+                         exc_info=True)
+
+    async def _restart_locked(self, key: str, kind: str, reason: str, engine,
+                              task: asyncio.Task | None, mark: tuple | None) -> None:
+        if self._stopping or key not in self._wanted:
+            return
+        now_m = time.monotonic()
+        hung = kind in ("stall", "ceiling")
+        # Причина ещё в силе? Тик решал по снимку, а замок взят позже: ПУСК мог
+        # успеть раньше — свежий движок не трогаем (критика v5.1.24, К3)
+        if hung:
+            if self._engines.get(key) is not engine:
+                return
+            if kind == "stall" and now_m - engine.beat_mono <= self._stall_limit(engine):
+                return
+            if kind == "ceiling" and (mark != _progress_of(engine)
+                                      or remote.threads(getattr(engine, "_tag", None) or key)):
+                return
+        elif kind == "zombie":
+            if (task is None or self._zombies.get(key) is not task or not task.done()
+                    or key in self._engines):
+                return
+        else:
+            if key in self._engines:
+                return
+            z = self._zombies.get(key)
+            if z is not None and not z.done():
+                return
+        counted = kind != "failed"
+        if counted and self._limit_left(key, now_m) <= 0:
+            if kind == "ceiling":
+                # Живой (пульс есть) движок при лимите не снимаем (W3)
+                self._log_episode(key, engine, (kind, mark), reason, _CEILING_LIMIT_ACTION)
+                return
+            if hung:
+                # Лимит: стек — один раз на окно, зависшую задачу снимаем, новый
+                # движок не строим. Освободится окно — тик поднимет машину
+                dq = self._restart_times.get(key)
+                left = (settings.watchdog_restart_window_sec - (now_m - dq[0])) if dq else 0.0
+                until = datetime.now(timezone.utc) + timedelta(seconds=max(0.0, left))
+                if self._log_due(key, "limit", settings.watchdog_restart_window_sec):
+                    logger.error("%s", self._diag_text(
+                        key, engine, reason,
+                        action=(f"перезапусков {settings.watchdog_max_restarts} за "
+                                f"{settings.watchdog_restart_window_sec / 60:.0f} мин — больше не "
+                                f"перезапускаю до {_fmt_ts(until)}, нужен разбор")))
+                if await self._teardown(key, engine, task):
+                    self._down[key] = ("limit", f"исчерпан лимит перезапусков ({reason})")
+            return
+        carried = None
+        if hung:
+            logger.error("%s", self._diag_text(key, engine, reason, action="перезапуск движка"))
+            carried = getattr(engine, "live_ok_at", None)
+            if not await self._teardown(key, engine, task):
+                return
+        elif kind == "zombie":
+            self._zombies.pop(key, None)
+            logger.warning("Сторож[%s]: старая задача движка завершилась — поднимаю машину", key)
+        if counted:
+            self._restart_times.setdefault(key, deque()).append(now_m)
+            info = self._restart_info.setdefault(key, {"count": 0, "last_ts": None,
+                                                       "last_reason": None})
+            info["count"] += 1
+            info["last_ts"] = datetime.now(timezone.utc)
+            info["last_reason"] = reason
+        if self._stopping or key not in self._wanted:
+            return
+        if not await self._rise(key, carried):
+            return
+        if counted:
+            logger.warning("Сторож[%s]: движок перезапущен (%s), перезапуск №%d с запуска сервиса",
+                           key, reason, self._restart_info[key]["count"])
+        else:
+            logger.warning("Сторож[%s]: движок запущен после неудачного старта (%s)", key, reason)
+
+    async def _teardown(self, key: str, engine, task: asyncio.Task | None) -> bool:
+        """Снять зависший движок: отмена, ожидание со сроком; не завершился —
+        обрыв его соединений и ещё одно ожидание; всё ещё жив — зомби (новый
+        движок только после его конца). True — задачи больше нет."""
+        wait = settings.watchdog_cancel_wait_sec
+        engine._running = False
+        task = task or getattr(engine, "_task", None)
+        done = await remote.cancel_and_wait(task, wait)
+        tag = getattr(engine, "_tag", None)
+        if not done and tag is not None:
+            remote.terminate_stale(tag, 0)
+            done = await remote.cancel_and_wait(task, wait)
+        if self._engines.get(key) is engine:
+            self._engines.pop(key, None)
+        if task is not None and self._tasks.get(key) is task:
+            self._tasks.pop(key, None)
+        self._remember_live_ok(key, engine)
+        if not done:
+            self._zombies[key] = task
+            self._down[key] = ("zombie", "задача движка не завершилась после отмены")
+            logger.error("Сторож[%s]: задача движка не завершилась за %.0f с после отмены — новый "
+                         "движок не запускаю, пока старая жива (две записи в одну машину)",
+                         key, 2 * wait)
+            return False
+        if tag is not None:
+            stale = remote.terminate_stale(tag, remote.stale_conn_sec())
+            if stale:
+                logger.warning("Сторож[%s]: оборвано соединений source, державшихся дольше "
+                               "%.0f с: %d", key, remote.stale_conn_sec(), len(stale))
+        return True
+
+    async def _rise(self, key: str, carried: datetime | None) -> bool:
+        """Подъём — тот же путь, что start_all_running: строка наблюдения из БД,
+        _build_engine, initialize(allow_gap_fill=False), _launch."""
+        r, e, p = key.rsplit("|", 2)
+        obs = await online_db.get_observation(r, e, int(p))
+        if not obs or obs.get("status") != "running":
+            # Оператор нажал СТОП (или строки нет) — машину не поднимаем
+            self._wanted.discard(key)
+            self._clear_down(key)
+            logger.info("Сторож[%s]: наблюдение не в работе (%s) — машину не поднимаю", key,
+                        (obs or {}).get("status") or "нет строки")
+            return False
+        new = await self._build_engine(obs)
+        if new is None:
+            self._wanted.discard(key)
+            self._clear_down(key)
+            self._down[key] = ("needs_start", _NO_BINDING_TEXT)
+            logger.warning("Сторож[%s]: нет привязки конфига — машину не поднимаю, снята с "
+                           "надзора", key)
+            return False
+        lok = carried or self._last_live_ok.get(key)
+        if isinstance(lok, _DT):
+            new.live_ok_at = lok
+            new.live_ok_real = self._live_real.get(key, False)
+        await new.initialize(obs["start_date"], allow_gap_fill=False)
+        # Остановка или СТОП, пока шёл подъём (К5) — не запускаем
+        if self._stopping or key not in self._wanted:
+            return False
+        if not self._launch(new):
+            return False
+        self._clear_down(key)
+        return True
+
+    def _diag_text(self, key: str, engine, reason: str, action: str) -> str:
+        """Одна запись ERROR: что видно по памяти + цепочки await всех задач движка."""
+        now_m = time.monotonic()
+        cs = getattr(engine, "cycle_started_mono", None)
+        tag = getattr(engine, "_tag", None)
+        conns = remote.held(tag) if tag is not None else []
+        tasks = remote.tasks_of(tag)
+        main = self._tasks.get(key) or getattr(engine, "_task", None)
+        if main is not None and main not in tasks and not main.done():
+            tasks.insert(0, main)
+        conn_txt = (f"соединений source у машины {len(conns)}"
+                    + (f" (старейшее {max(c['age_sec'] for c in conns):.0f} с)" if conns else ""))
+        th = remote.threads(tag) if tag is not None else []
+        if th:
+            conn_txt += f", поток нарезки считает {max(t['age_sec'] for t in th):.0f} с"
+        return (f"Сторож[{key}]: {reason} — {action}. "
+                f"Цикл {'идёт %.0f с' % (now_m - cs) if cs is not None else 'не идёт'}, "
+                f"курсор {_fmt_ts(getattr(engine, 'cursor_ts', None))}, "
+                f"обработано по {_fmt_ts(getattr(engine, 'last_processed_to', None))}, "
+                f"{conn_txt}. Задачи движка:\n{remote.format_task_stacks(tasks)}")
+
+    def _engine_progress_text(self, key: str, engine, now: datetime) -> str:
+        """«аналитика обновлялась 95 с назад; движок: продвигается» — для журнала
+        статус-тика (только память)."""
+        parts = []
+        lok = getattr(engine, "live_ok_at", None)
+        if isinstance(lok, _DT):
+            parts.append(f"аналитика обновлялась {_fmt_dur((now - lok).total_seconds())} назад")
+        beat = getattr(engine, "beat_mono", None)
+        if isinstance(beat, (int, float)) and beat:
+            idle = time.monotonic() - beat
+            parts.append("движок: продвигается" if idle <= self._stall_limit(engine)
+                         else f"движок: нет продвижения {idle:.0f} с")
+        return "; ".join(parts) or "движок без учёта цикла"
+
+    def engine_health(self, key: str) -> dict:
+        """Состояние движка машины для API — только память, без БД (v5.1.24).
+
+        state: running | restarting | stalled | zombie | restart_limit |
+        not_started | stopped (Р12: один флаг engine_stalled смешивал бы их)."""
+        now_m = time.monotonic()
+        eng = self._engines.get(key)
+        if eng is not None:
+            self._remember_live_ok(key, eng)
+        lock = self._key_locks.get(key)
+        restarting = key in self._restarting or (lock is not None and lock.locked())
+        down = self._down.get(key)
+        zombie = self._zombies.get(key)
+        if eng is not None:
+            idle = now_m - float(getattr(eng, "beat_mono", now_m))
+            state = "stalled" if (idle > self._stall_limit(eng) or key in self._diag_open) \
+                else "running"
+        elif zombie is not None and not zombie.done():
+            state = "zombie"
+        elif restarting:
+            state = "restarting"
+        elif down is not None and down[0] == "limit":
+            state = "restart_limit"
+        elif down is not None and down[0] == "failed":
+            state = "not_started"
+        elif key in self._wanted:
+            if not settings.watchdog_enabled:
+                state = "not_started"
+            elif self._limit_left(key, now_m) <= 0:
+                # Задача умерла или зомби завершился при исчерпанном лимите — тик
+                # ждёт окна, никто не перезапускает (ревью v5.1.24, W9)
+                state = "restart_limit"
+            else:
+                state = "restarting"
+        else:
+            state = "stopped"
+        info = self._restart_info.get(key) or {}
+        cs = getattr(eng, "cycle_started_mono", None) if eng is not None else None
+        if eng is not None and getattr(eng, "live_ok_at", None) is not None:
+            live_real = bool(getattr(eng, "live_ok_real", False))
+        else:
+            live_real = self._live_real.get(key, False)
+        return {
+            "state":          state,
+            # Сторож поднимет машину сам: включён, машина под надзором и это не
+            # эпизод, где он сознательно не трогает движок (W9)
+            "auto_restart":   (settings.watchdog_enabled and key in self._wanted
+                               and key not in self._diag_open),
+            "live_ok_real":   live_real,
+            "live_ok_at":     (getattr(eng, "live_ok_at", None) if eng is not None else None)
+                              or self._last_live_ok.get(key),
+            "restarts":       int(info.get("count") or 0),
+            "last_restart":   ({"ts": info["last_ts"].isoformat() if info.get("last_ts") else None,
+                                "reason": info.get("last_reason")} if info else None),
+            "down_reason":    down[1] if down else None,
+            "beat_age_sec":   (round(now_m - float(eng.beat_mono), 1)
+                               if eng is not None and getattr(eng, "beat_mono", None) else None),
+            "cycle_running_sec": round(now_m - cs, 1) if cs is not None else None,
+            "last_cycle_sec": (round(eng.last_cycle_sec, 2)
+                               if eng is not None and getattr(eng, "last_cycle_sec", None) is not None
+                               else None),
+            "max_cycle_sec":  (round(eng.max_cycle_sec, 2)
+                               if eng is not None and getattr(eng, "max_cycle_sec", None) is not None
+                               else None),
+            "cycles_failed_streak": getattr(eng, "cycles_failed_streak", None) if eng else None,
+            "last_cycle_error": getattr(eng, "last_cycle_error", None) if eng else None,
+            "poll_interval_sec": getattr(eng, "poll_interval_sec", None) if eng else None,
+        }
 
     # ── Планировщик статусов и детектор предупреждений ───────────────────────
 
@@ -437,9 +1176,22 @@ class OnlineManager:
                 if engine.last_data_ts is not None and (
                     (now - engine.last_data_ts).total_seconds() > stale_sec
                 ):
-                    logger.debug("StatusScheduler[%s]: данные устарели (%.0fс) — пропуск",
-                                 key, (now - engine.last_data_ts).total_seconds())
+                    _age = (now - engine.last_data_ts).total_seconds()
+                    if key not in self._stale_since:
+                        # Вход в «устарело» — одно WARNING (v5.1.24: 17.10 было
+                        # только DEBUG каждую минуту — 4 сут тишины в журнале)
+                        self._stale_since[key] = now
+                        logger.warning("StatusScheduler[%s]: данные устарели %.0f с — статус и "
+                                       "гейт заморожены (%s)", key, _age,
+                                       self._engine_progress_text(key, engine, now))
+                    else:
+                        logger.debug("StatusScheduler[%s]: данные устарели (%.0fс) — пропуск",
+                                     key, _age)
                     continue
+                _since_stale = self._stale_since.pop(key, None)
+                if _since_stale is not None:
+                    logger.info("StatusScheduler[%s]: данные снова свежие (перерыв %s)", key,
+                                _fmt_dur((now - _since_stale).total_seconds()))
 
                 seg = await online_db.get_open_segment(
                     engine.router_sn, engine.equip_type, engine.panel_id
@@ -682,6 +1434,17 @@ class OnlineManager:
         """
         # Счётчики аналитики — с даты выкладки v5.1.21 (ключ пуст — без фильтра)
         _since = _counts_since_of(engine)
+        # Эпоха памяти машины на момент заказа (v5.1.24): СТОП / ПУСК её меняют,
+        # перезапуск сторожем — нет (открытая строка та же, память гейта цела)
+        epoch = self._mem_epoch.get(key, 0)
+
+        def _engine_now():
+            """Отказы наследования — в текущий движок машины той же эпохи (Р11):
+            после перезапуска сторожем старый объект уже не работает."""
+            if self._mem_epoch.get(key, 0) != epoch:
+                return None
+            return self._engines.get(key) or engine
+
         try:
             try:
                 outcome = await asyncio.wait_for(
@@ -689,7 +1452,7 @@ class OnlineManager:
                         engine.router_sn, engine.equip_type, engine.panel_id,
                         struct, fault_hash,
                         **({"analytics_since": _since} if _since is not None else {}),
-                        engine=engine,
+                        engine=_engine_now,
                     ),
                     _GATE_TIMEOUT_SEC,
                 )
@@ -698,9 +1461,10 @@ class OnlineManager:
                                "повторно не шлём до смены состава",
                                key, fault_hash, _GATE_TIMEOUT_SEC // 60)
                 outcome = GATE_REMOVED
-            # Машину остановили или перезапустили, пока шёл разбор: её память
-            # сброшена, сегменты перестраиваются — старый ответ её не трогает
-            if self._engines.get(key) is not engine:
+            # Машину остановили или нажали ПУСК, пока шёл разбор: её память
+            # сброшена, сегменты перестраиваются — старый ответ её не трогает.
+            # Перезапуск сторожем эпоху не меняет: итог разбора засчитывается
+            if self._mem_epoch.get(key, 0) != epoch:
                 return
             now = datetime.now(timezone.utc)
             failed = self._gate_failed.setdefault(key, {})
@@ -751,6 +1515,159 @@ _GATE_TIMEOUT_SEC = 3 * 3600
 _GATE_RETRY_AFTER_SEC = 15 * 60
 # Сколько разобранных составов помнить на машину
 _GATE_DONE_KEEP = 32
+
+
+# ── Надзор за движками: вспомогательные (v5.1.24) ─────────────────────────────
+
+# Повтор неудачного старта или подъёма: растущая пауза, без лимита (Р7)
+_RETRY_BACKOFF_SEC = (30, 60, 120, 300, 600)
+
+# Состояния движка, при которых UI показывает «движок завис / не запущен».
+# needs_start — running, но вне надзора (ПУСК не выполнен, нет привязки KB):
+# сам не поднимется, нужен ПУСК (ревью v5.1.24, W9)
+ENGINE_STALLED_STATES = frozenset({"stalled", "zombie", "restart_limit", "not_started",
+                                   "needs_start"})
+
+_NO_BINDING_TEXT = "нет привязки или конфига KB (см. журнал) — после настройки нужен ПУСК"
+_NEEDS_START_TEXT = "движок не запущен и сторож его не поднимет — нужен ПУСК"
+_CEILING_LIMIT_ACTION = ("лимит перезапусков исчерпан — живой движок (пульс есть) не снимаю, "
+                         "нужен разбор")
+
+
+def _progress_of(engine) -> tuple:
+    """Метка продвижения для потолка: курсор, обработано «по», цикл и число
+    завершённых удалённых вызовов (W3)."""
+    tag = getattr(engine, "_tag", None)
+    return (getattr(engine, "cursor_ts", None), getattr(engine, "last_processed_to", None),
+            getattr(engine, "cycle_started_mono", None), getattr(tag, "calls", None))
+
+
+def _fmt_dur(sec: float) -> str:
+    """Длительность для журнала: «45 с», «11 мин», «2 ч 05 мин», «4 сут 20 ч»."""
+    sec = max(0.0, float(sec))
+    if sec < 90:
+        return f"{sec:.0f} с"
+    if sec < 3600:
+        return f"{sec / 60:.0f} мин"
+    if sec < 86400:
+        return f"{int(sec // 3600)} ч {int(sec % 3600 // 60):02d} мин"
+    return f"{int(sec // 86400)} сут {int(sec % 86400 // 3600)} ч"
+
+
+def _fmt_ts(ts: "datetime | None") -> str:
+    """dd.mm HH:MM:SS в часовом поясе приложения — для журнала сторожа."""
+    if not isinstance(ts, _DT):
+        return "—"
+    try:
+        from config import get_tz
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(get_tz()).strftime("%d.%m %H:%M:%S")
+    except Exception:
+        return ts.isoformat()
+
+
+def _catchup_estimate_sec(engine) -> float:
+    """Законная длительность догонки: число суточных рубежей от курсора × 60 с
+    (4,9 сут — 57 с за 10 сегментов, 22.10)."""
+    cur = getattr(engine, "cursor_ts", None)
+    if not isinstance(cur, _DT):
+        return 0.0
+    if cur.tzinfo is None:
+        cur = cur.replace(tzinfo=timezone.utc)
+    days = max(0.0, (_DT.now(timezone.utc) - cur).total_seconds() / 86400)
+    return (int(days) + 1) * 60.0
+
+
+def analytics_stale_threshold(data_stale_sec: float, poll_interval_sec: float | None = None) -> int:
+    """Порог «аналитика не обновляется» (критика v5.1.24, К7).
+
+    live_ok_at ставится в конце цикла: перед обновлением лаг = сон + цикл.
+    Цикл реза 09:00 бывает дольше штатного (2 из 84 резов закрыты позже
+    121 с после t_end) — с порогом 90 с UI скрывал бы живой статус как раз в
+    09:00. Цикл короче cycle_warn_sec «не обновляется» не считается, а длиннее
+    уже даёт WARNING — журнал и UI согласованы. При опросе 30 с — 180 с."""
+    poll = float(poll_interval_sec or 30)
+    return int(max(float(data_stale_sec or 0), poll + settings.watchdog_cycle_warn_sec + 30))
+
+
+def health_fields(mgr: "OnlineManager | None", key: str, monitoring_status: str | None,
+                  now: datetime, data_stale_sec: float, poll_interval_sec: float | None = None,
+                  diagnostics: bool = False, data_stale: bool = False) -> dict:
+    """Поля «аналитика не обновляется» для /api/machines и /api/online/status
+    (v5.1.24) — только память менеджера, без БД.
+
+    analytics_stale ≠ data_stale: первое — живой статус не текущий по вине
+    аналитики (движок завис, циклы падают, БД телеметрии недоступна), второе —
+    нет свежей телеметрии по last_data_ts, который пишет сам движок. При
+    analytics_stale значение data_stale недостоверно.
+
+    data_stale — уже посчитанный маршрутом признак: при нём analytics_stale
+    наступает раньше порога (ревью v5.1.24, W7) — движок не подтверждал живой
+    анализ дольше порога телеметрии, либо ещё ни разу не обновил его с запуска
+    сервиса / ПУСК. Иначе первые ~2 мин любого простоя аналитики и вся догонка
+    после рестарта UI писал бы «Нет связи — данные на …» при панели на связи."""
+    running = monitoring_status == "running"
+    h = mgr.engine_health(key) if mgr is not None else None
+    threshold = analytics_stale_threshold(
+        data_stale_sec, (h or {}).get("poll_interval_sec") or poll_interval_sec)
+    restarts = int((h or {}).get("restarts") or 0)
+    last_restart = (h or {}).get("last_restart")
+    out: dict[str, Any] = {
+        "analytics_updated_at": None,
+        "analytics_lag_sec":    None,
+        "analytics_stale":      False,
+        "engine_state":         "stopped",
+        "engine_stalled":       False,
+        "engine_auto_restart":  False,
+        "engine_down_reason":   None,
+        "engine_restarts":      restarts,
+        "last_engine_restart":  last_restart,
+    }
+    if running:
+        state = (h or {}).get("state") or "not_started"
+        reason = (h or {}).get("down_reason")
+        if state == "stopped":
+            # running без движка и без надзора: ПУСК упал, нет привязки KB — сам
+            # не поднимется, нужен ПУСК (W9: не «сторож повторяет»)
+            state = "needs_start"
+            reason = reason or _NEEDS_START_TEXT
+        lok = (h or {}).get("live_ok_at")
+        lag = None
+        if isinstance(lok, _DT):
+            if lok.tzinfo is None:
+                lok = lok.replace(tzinfo=timezone.utc)
+            lag = max(0, int((now - lok).total_seconds()))
+        # data_stale при аналитике, которая не подтверждала живой анализ дольше
+        # порога телеметрии или ни разу с запуска / ПУСК, — недостоверен (W7)
+        stale_by_data = bool(data_stale) and (
+            lag is None or lag > float(data_stale_sec or 0)
+            or not (h or {}).get("live_ok_real", False))
+        out.update({
+            "analytics_updated_at": lok.isoformat() if isinstance(lok, _DT) else None,
+            "analytics_lag_sec":    lag,
+            # Окно ПУСК / перезапуска (движка в _engines нет) считается по лагу
+            # от live_ok_at прежнего движка, а не «сразу stale» — иначе мигало бы
+            # при каждом ПУСК (К7). Движка нет и не будет — stale сразу
+            "analytics_stale":      (lag is None or lag > threshold or stale_by_data
+                                     or state in ("not_started", "restart_limit", "zombie",
+                                                  "needs_start")),
+            "engine_state":         state,
+            "engine_stalled":       state in ENGINE_STALLED_STATES,
+            "engine_auto_restart":  bool((h or {}).get("auto_restart")),
+            "engine_down_reason":   reason,
+        })
+    if diagnostics:
+        out.update({
+            "analytics_stale_threshold_sec": threshold,
+            "engine_beat_age_sec":   (h or {}).get("beat_age_sec"),
+            "cycle_running_sec":     (h or {}).get("cycle_running_sec"),
+            "last_cycle_sec":        (h or {}).get("last_cycle_sec"),
+            "max_cycle_sec":         (h or {}).get("max_cycle_sec"),
+            "cycles_failed_streak":  (h or {}).get("cycles_failed_streak"),
+            "last_cycle_error":      (h or {}).get("last_cycle_error"),
+        })
+    return out
 
 
 def _gate_log(seg: dict) -> list:
@@ -1056,6 +1973,8 @@ async def _analyze_warning_claude(
 
     engine — движок машины (v5.1.22, ревью gate-1): эпизоды, открытые во время
     разбора, которым наследование снятия запрещено, передаются ему в отказанные.
+    v5.1.24: может быть поставщиком (вызываемым) — текущий движок машины на
+    момент ответа (после перезапуска сторожем — новый).
 
     Кто разбирает — строка таблицы «Кто и как разбирает» (llm.router.get_route:
     gate_caution / gate_warning по уровню, v5.1.11); системный промпт единый.
@@ -1307,7 +2226,8 @@ async def _analyze_warning_claude(
                                     _cancel_sc, "эпизоды того же состава, открытые в этой строке, "
                                     "пока шёл разбор, — снятие по нему"))
                     elif _in_open:
-                        _refused = _refuse_after(engine, _cancel_sc, _gate_ts)
+                        _refused = _refuse_after(engine() if callable(engine) else engine,
+                                                 _cancel_sc, _gate_ts)
                         if _refused:
                             logger.info("WarningGate: %s/%s/%s — эпизоды %s, открытые во время "
                                         "разбора, снятие не наследуют (%s); повтор, когда запрет "
