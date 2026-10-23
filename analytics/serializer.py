@@ -54,6 +54,7 @@ SCENARIO_RU: dict[str, str] = {
     "LIMIT_PROXIMITY":    "Приближение к уставке останова панели",
     "STOP_PROFILE":       "Отклонение профиля останова",
     "RPM_UNDERSPEED":     "Просадка оборотов",
+    "RPM_OVERSPEED":      "Заброс оборотов",
     "DETECTION_COUNTER":  "Повторные срабатывания за период",
     "CONTROLLER_FAULT":   "Неисправность по данным контроллера",
 }
@@ -525,6 +526,7 @@ def build_summary_parts(
     trip_roles: list[str] | None = None,
     t_from: datetime | None = None,
     t_to: datetime | None = None,
+    code_name=None,
 ) -> dict[str, Any]:
     """Сводка сегмента частями — единый источник вердикта (v5.1.0).
 
@@ -550,6 +552,9 @@ def build_summary_parts(
     «⏱ Авария снята» и шапка заключения говорят «сброшен / снят», а не
     «несброшенная». P1-3: замечание RUN_TRIP — сегмент оборван аварийным
     остановом (CAUTION [панель], разовое событие, +1 вид, гейт не снимает).
+    v5.1.23 (решение В5): имя замечания панели с привязанным кодом — имя кода
+    из справочника KB и «(код N)» (labels.panel_fault_name); code_name(код) —
+    справочник для эпизодов, открытых до v5.1.23 (движок: cfg.fault_code_name).
     """
     # Риск нагара — состояние, у него своя часть (старые эпизоды до v5.1.3 не в счёт)
     from .contract import STATE_SCENARIOS
@@ -660,6 +665,20 @@ def build_summary_parts(
             return ("panel", e.get("addr"), e.get("bit"))
         return ("analytics", e.get("scenario"))
 
+    # Код панели фронта по детекциям сегментов (v5.1.23, решение В5): эпизод,
+    # открытый до привязки кода (код встал циклом позже) или синтетический
+    # (_live_new_episodes — в open_values только имя), берёт код и его имя у
+    # детекции того же фронта — addr, bit и начала
+    _front_code: dict[tuple, dict] = {}
+    for s in segments:
+        for sub in (getattr(s, "subsegments", None) or []):
+            for d in (getattr(sub, "detections", None) or []):
+                dd = _as_dict(d)
+                v = dd.get("values") or {}
+                if dd.get("scenario") == "CONTROLLER_FAULT" and v.get("panel_code") is not None \
+                        and _dt(v.get("fault_start")) is not None:
+                    _front_code.setdefault((v.get("addr"), v.get("bit"), _dt(v["fault_start"])), v)
+
     def _group_name(e: dict) -> str:
         if e.get("source") == "panel":
             vals = e.get("open_values_json")
@@ -668,7 +687,22 @@ def build_summary_parts(
                     vals = json.loads(vals)
                 except Exception:
                     vals = {}
-            name = (vals or {}).get("fault_name")
+            vals = dict(vals or {})
+            if vals.get("panel_code") is None:
+                fv = _front_code.get((e.get("addr"), e.get("bit"), _dt(e.get("t_open"))))
+                if fv:
+                    for k in ("panel_code", "code_name", "bit_name"):
+                        if fv.get(k) is not None:
+                            vals[k] = fv[k]
+                    vals.setdefault("fault_name", fv.get("fault_name"))
+            try:
+                from .labels import panel_fault_name
+                name = panel_fault_name(vals, code_name)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning("Имя неисправности панели по коду не построено",
+                                                    exc_info=True)
+                name = vals.get("fault_name")
             return name or f"Неисправность панели (addr={e.get('addr')}, bit={e.get('bit')})"
         sc = e.get("scenario") or "?"
         return SCENARIO_RU.get(sc, sc)
@@ -731,6 +765,9 @@ def build_summary_parts(
         if _SEV_RANK_MD.get(e.get("severity") or "", 0) > _SEV_RANK_MD.get(cur.get("severity") or "", 0):
             cur["severity"] = e.get("severity")
     episodes = list(_by_onset.values())
+    # Просадка и заброс, начавшиеся в окне неустойчивого пуска, — не «снято ИИ»,
+    # даже если пометка в эпизоде осталась (ревью v5.1.23, R4)
+    _drop_start_bans(episodes, segments)
 
     # Подтверждение итоговым расчётом (решение 11.10, а): эпизод аналитики рождается
     # в живой обработке на подсегменте, который итоговая нарезка сегмента считает
@@ -899,6 +936,10 @@ def build_summary_parts(
                 g["before"] = True
             else:
                 g["appeared"] = True
+    # Пометка «на пуске» (v5.1.23, п.3, В1): просадка и заброс оборотов, эпизод
+    # которых начался в окне пуска сегмента сводки, — факты пуска рядом с
+    # замечанием. Отдельного замечания «неустойчивый пуск» нет: вид и цвет те же
+    _mark_start_notes(groups, episodes, segments, _group_key, tz)
     # Подпись снятия гейтом (v5.1.22, P1-1 п. 5): решение в этой карточке —
     # «снято ИИ (разбор 09:59)», раньше — «снято по разбору от 14.10 03:36 (#35876)»
     for g in groups.values():
@@ -985,7 +1026,8 @@ def build_summary_parts(
     from .labels import attempt_facts_ru, attempt_label
     _att = next((getattr(s, "attempt", None) for s in segments
                  if isinstance(getattr(s, "attempt", None), dict)), None)
-    attempt_part = ({"label": attempt_label(_att), "facts": attempt_facts_ru(_att)}
+    # v5.1.23 (В4): факты — наблюдаемое, с кодами попытки (в этой строке их нет)
+    attempt_part = ({"label": attempt_label(_att), "facts": attempt_facts_ru(_att, tz, codes=True)}
                     if _att else None)
 
     # Код 40012 на закрытии карточки (v5.1.22, P1-2): только у последнего
@@ -1031,6 +1073,105 @@ _NO_VERDICT_CHECKS = _DATA_QUALITY_CHECKS | _INFO_CHECKS
 # Только в данных (characteristics_json): маску на конце уже показывают блок отчёта
 # «⚠ Активные неисправности» и панельное замечание сводки «активен на конец»
 _HIDDEN_CHECKS = frozenset({"no_active_shutdown_fault"})
+# Роли, которых нет в таблице характеристик стоп-сегмента (v5.1.23): задание
+# частоты регулятора на стоянке — не показание машины
+_STOP_HIDDEN_ROLES = frozenset({"FREQ_REFERENCE"})
+
+
+def _seg_start_profile(s) -> dict | None:
+    """Профиль пуска сегмента сводки: свой, иначе профиль «Работы»-предка через
+    суточный рез (start_profile_prev, ревью v5.1.23, R1)."""
+    for k in ("start_profile", "start_profile_prev"):
+        sp = getattr(s, k, None)
+        if isinstance(sp, dict):
+            return sp
+    return None
+
+
+def _start_windows(segments) -> list[tuple]:
+    """Окна пуска сегментов сводки: [(начало прокрутки, конец окна | None, профиль)]."""
+    from .labels import start_window
+    wins = []
+    for s in segments or []:
+        sp = _seg_start_profile(s)
+        w = start_window(sp)
+        if w is not None and _dt(w[0]) is not None:
+            wins.append((_dt(w[0]), _dt(w[1]), sp))
+    return wins
+
+
+def _in_start_window(t, wins, unstable_only: bool = False) -> dict | None:
+    """Профиль окна пуска, в которое попал момент t (None — ни в одно)."""
+    for a, b, sp in wins:
+        if t is not None and a <= t and (b is None or t < b) and (not unstable_only or sp.get("unstable")):
+            return sp
+    return None
+
+
+def _drop_start_bans(episodes: list[dict], segments) -> None:
+    """Пометка «снято ИИ» не действует на просадку и заброс оборотов, начавшиеся
+    в окне неустойчивого пуска (ревью v5.1.23, R4): гейт их снимать не вправе
+    (В1, В3), а профиль окна растёт до номинал + 5 мин — снятие, применённое,
+    пока пуск ещё выглядел устойчивым, иначе дало бы «снято ИИ» и НОРМА при
+    статусе CAUTION. Эпизоды — копии сводки (на месте). Сбой — как есть."""
+    from .labels import START_SCENARIOS
+    try:
+        wins = [w for w in _start_windows(segments) if w[2].get("unstable")]
+        if not wins:
+            return
+        for e in episodes or []:
+            if (e.get("gate_suppressed") and e.get("source") != "panel"
+                    and e.get("scenario") in START_SCENARIOS
+                    and _in_start_window(_dt(e.get("t_open")), wins) is not None):
+                e["gate_suppressed"] = False
+                e["gate_suppressed_src"] = None
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning("Запрет снятия на неустойчивом пуске в сводке не проверен",
+                                            exc_info=True)
+
+
+def _mark_start_notes(groups: dict, episodes: list[dict], segments, group_key, tz=None) -> None:
+    """Пометка «на пуске: …» группам «Просадка оборотов» и «Заброс оборотов»,
+    если эпизод начался в окне пуска сегмента сводки (v5.1.23, п.3): поле
+    start_note (текст labels.start_note_text) и start_unstable. Сбой — без
+    пометки, сводка строится.
+
+    Ревью R9: группа — сценарий целиком, а в окне пуска могли начаться не все
+    её эпизоды (провал под нагрузкой позже гейт снимать вправе) — тогда
+    «из них на пуске N: …»; start_n — сколько их. start_ban_t — начала
+    эпизодов в окне неустойчивого пуска: поздний вердикт гейта их не снимает
+    (apply_gate_suppression, ревью R4)."""
+    from .labels import START_SCENARIOS, start_note_text
+    try:
+        wins = _start_windows(segments)
+        if not wins:
+            return
+        hits: dict[Any, list[tuple]] = {}
+        for e in sorted(episodes or [], key=lambda x: str(x.get("t_open") or "")):
+            if e.get("source") == "panel" or e.get("scenario") not in START_SCENARIOS:
+                continue
+            t = _dt(e.get("t_open"))
+            k = group_key(e)
+            sp = _in_start_window(t, wins)
+            if sp is not None and k in groups:
+                hits.setdefault(k, []).append((t, sp))
+        for k, lst in hits.items():
+            g = groups[k]
+            g["start_n"] = len(lst)
+            g["start_unstable"] = any(bool(sp.get("unstable")) for _, sp in lst)
+            _ban = [t.isoformat() for t, sp in lst if sp.get("unstable")]
+            if _ban:
+                g["start_ban_t"] = _ban
+        for k, lst in hits.items():
+            g = groups[k]
+            note = start_note_text(lst[0][1], tz)
+            if note and len(lst) < (g.get("count") or 0) and note.startswith("на пуске: "):
+                note = f"из них на пуске {len(lst)}: " + note[len("на пуске: "):]
+            g["start_note"] = note
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning("Пометка «на пуске» в сводке не поставлена", exc_info=True)
 
 
 def _event_groups(segments, event_eps, w0, w1, tz) -> list[dict]:
@@ -1267,8 +1408,12 @@ def apply_gate_suppression(parts: dict[str, Any], scenarios, until=None,
             n = g.get("open_live")
             if n is None:
                 n = _remark_live(g)
-            if _u is not None and isinstance(g.get("open_live_t"), list):
-                _hit = [t for t in g["open_live_t"] if _dt(t) is not None and _dt(t) <= _u]
+            # Эпизоды, начавшиеся в окне неустойчивого пуска, гейт не снимает
+            # (ревью v5.1.23, R4: профиль стал неустойчивым, пока шёл разбор)
+            _ban = set(g.get("start_ban_t") or [])
+            if (_u is not None or _ban) and isinstance(g.get("open_live_t"), list):
+                _hit = [t for t in g["open_live_t"]
+                        if t not in _ban and (_u is None or (_dt(t) is not None and _dt(t) <= _u))]
                 n = len(_hit)
                 g["open_live_t"] = [t for t in g["open_live_t"] if t not in _hit]
                 g["open_live"] = len(g["open_live_t"])
@@ -1384,6 +1529,9 @@ def render_summary_md(parts: dict[str, Any]) -> str:
                 if g["blind_sec"] >= 1:
                     line += (f" (из них {_fmt_duration(g['blind_sec'])} без связи — "
                              f"снятие могло произойти раньше)")
+            if g.get("start_note"):
+                # v5.1.23 (п.3): эпизод начался в окне пуска — факты пуска рядом
+                line += f" — {g['start_note']}"
             _nc = g["count"] - (_u if _v3u else 0)
             if g["suppressed"]:
                 # С источником (v5.1.22): «снято ИИ (разбор 09:59)» / «снято по
@@ -1500,14 +1648,18 @@ def build_summary_md(
     episodes: list[dict[str, Any]] | None = None,
     tz=None,
     trip_roles: list[str] | None = None,
+    code_name=None,
 ) -> str:
     """Верхняя часть отчёта (report_summary_md): вердикт → замечания → показатели.
 
     Полные таблицы остаются в report_md — UI сворачивает его как «Технические
     данные». Отдельное поле вместо HTML <details>: react-markdown в
     UI-telemetry вырезает сырой HTML. Собирается из частей (build_summary_parts).
+    code_name(код) — справочник кодов KB (cfg.fault_code_name): имена панели «имя
+    кода (код N)» у эпизодов до v5.1.23, как у движка (В5).
     """
-    return render_summary_md(build_summary_parts(segments, episodes, tz, trip_roles))
+    return render_summary_md(build_summary_parts(segments, episodes, tz, trip_roles,
+                                                 code_name=code_name))
 
 
 def no_data_summary_parts() -> dict[str, Any]:
@@ -1589,11 +1741,17 @@ def _rs_time_label(rs: int) -> str:
 
 def _det_name(d: dict) -> str:
     """Русское имя обнаружения вместо ключа сценария (OIL_DILUTION читалось как
-    «разжижение масла», хотя это давление ниже паспорта; ключ в KB не меняется)."""
+    «разжижение масла», хотя это давление ниже паспорта; ключ в KB не меняется).
+    v5.1.23 (решение В5): панель с привязанным кодом — имя кода и «(код N)»."""
     sc = d.get("scenario") or "?"
     v = d.get("values") or {}
     if sc == "CONTROLLER_FAULT":
-        return (v.get("fault_name") or (d.get("trigger") or "").split(" (addr=")[0].strip()
+        try:
+            from .labels import panel_fault_name
+            nm = panel_fault_name(v)
+        except Exception:
+            nm = v.get("fault_name")
+        return (nm or (d.get("trigger") or "").split(" (addr=")[0].strip()
                 or SCENARIO_RU.get(sc, sc))
     if sc == "LIMIT_PROXIMITY" and ":" in (d.get("trigger") or ""):
         return f"{SCENARIO_RU.get(sc, sc)} ({d['trigger'].split(':', 1)[0].strip()})"
@@ -1639,6 +1797,7 @@ def _fmt_sub_ranges(idxs: list[int], seg_idx: int) -> str:
 _WORST_KEY = {
     "OIL_DILUTION": ("oil_press_min", min),
     "RPM_UNDERSPEED": ("rpm_min", min),
+    "RPM_OVERSPEED": ("rpm_max", max),
     "LIMIT_PROXIMITY": ("value", max),
     "COOLING_FAILURE": ("coolant_temp_max", max),
     "PHASE_CURRENT_SPREAD": ("pct_max", max),
@@ -1975,7 +2134,7 @@ def _append_segment(
     _att = getattr(seg, "attempt", None)
     if isinstance(_att, dict):
         from .labels import attempt_facts_ru
-        a(f"- **Неудачная попытка выхода из стопа:** {attempt_facts_ru(_att)}; "
+        a(f"- **Неудачная попытка выхода из стопа:** {attempt_facts_ru(_att, tz, codes=True)}; "
           f"останов {fmt_ts(_att.get('t_fall'))}")
     elif getattr(seg, "attempt_pending", False):
         a("- **Выход из стопа ещё не подтверждён:** оборотов выше 250, частоты и "
@@ -2010,6 +2169,19 @@ def _append_segment(
               f"{fmt_ts(_trip['t'])}, {run_trip_text(_trip)}")
         else:
             a(f"- **Причина закрытия:** {seg.cause_close}")
+    # v5.1.23 (п.3, В1): профиль пуска — у каждого подтверждённого пуска,
+    # у неустойчивого с пометкой и причинами
+    _sp = getattr(seg, "start_profile", None)
+    if isinstance(_sp, dict):
+        try:
+            from .labels import start_profile_text
+            _st = start_profile_text(_sp, tz)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning("Строка «Пуск» отчёта не собрана", exc_info=True)
+            _st = None
+        if _st:
+            a(f"- **Пуск:** {_st}")
     if seg.preamble_included:
         a(f"- **Преамбула включена:** да")
     a("")
@@ -2204,12 +2376,15 @@ def _append_segment(
         a(f"**Подсегментов:** {len(seg.subsegments)}")
         a("")
 
-    # Состояния (код и тип неисправности) — только при смене значения
+    # Состояния (код и тип неисправности) — только при смене значения.
+    # Задание частоты в стоп-сегменте не печатается (v5.1.23): «0» или «30 Гц»
+    # у стоящей машины модель прочла бы как аномалию
+    stop_skip = set(_STOP_HIDDEN_ROLES) if seg.run_state == 0 else set()
     prev_state: dict[str, Any] = {}
     for sub_idx, sub in enumerate(seg.subsegments, 1):
         skip = {r for r, ch in sub.characteristics.items()
                 if isinstance(ch, dict) and ch.get("kind") == "state" and sub_idx > 1
-                and ch.get("min") == ch.get("max") == prev_state.get(r)}
+                and ch.get("min") == ch.get("max") == prev_state.get(r)} | stop_skip
         _append_subsegment(lines, sub, idx, sub_idx, fmt_ts, short=(len(seg.subsegments) == 1),
                            skip_roles=skip)
         prev_state.update({r: ch.get("value_end") for r, ch in sub.characteristics.items()

@@ -204,6 +204,17 @@ def _group_worst(scenario: str, values_list: list[dict]) -> str | None:
             thr = _nums("threshold_rpm")
             base = f"мин. {min(mins):.0f} об/мин"
             return base + (f" — на {thr[0] - min(mins):.0f} ниже порога {thr[0]:.0f}" if thr else "")
+    elif scenario == "RPM_OVERSPEED":
+        # v5.1.23: запас до уставки разноса панели (код 234), а не до порога аналитики
+        maxs = _nums("rpm_max")
+        if maxs:
+            ovs = _nums("overspeed_rpm")
+            base = f"макс. {max(maxs):.0f} об/мин"
+            if not ovs:
+                return base
+            left = ovs[0] - max(maxs)
+            return base + (f" — до уставки разноса {ovs[0]:.0f} осталось {left:.0f}" if left > 0
+                           else f" — выше уставки разноса {ovs[0]:.0f} на {-left:.0f}")
     elif scenario == "COKING_RISK":
         secs = _nums("low_load_zone_sec")
         if secs:
@@ -292,6 +303,14 @@ def _fmt_detections_hierarchy(chars_json: Any) -> str:
                 "count": 0, "dur_sec": 0.0, "values": [],
                 "fault_codes": set(), "live": {},
             })
+            if is_panel and not g.get("by_code"):
+                # Имя панели с привязанным кодом — имя кода из справочника KB, как
+                # в сводке и отчёте (v5.1.23, В5; ревью R10); группа — та же (по
+                # биту), «(код N)» допишет строка из fault_codes. Старые записи без
+                # code_name — имя бита, как было
+                _cn = (d.get("values") or {}).get("code_name") if isinstance(d.get("values"), dict) else None
+                if _cn and (d.get("values") or {}).get("panel_code") is not None:
+                    g["name"], g["by_code"] = str(_cn), True
             if _SEV_RANK.get(severity, 0) > g["sev_rank"]:
                 g["sev_rank"] = _SEV_RANK.get(severity, 0)
                 g["severity"] = severity
@@ -532,6 +551,9 @@ def _remarks_from_summary(segment_row: dict) -> str | None:
             continue
         tags = [cap_severity(g.get("scenario"), g.get("severity")) or "?",
                 "панель" if g.get("source") == "panel" else "аналитика"]
+        if g.get("start_note"):
+            # v5.1.23 (п.3): эпизод начался в окне пуска — факты пуска
+            tags.append(g["start_note"])
         k, n = g.get("suppressed") or 0, g.get("count") or 0
         # Подпись с источником (v5.1.22): «снято по разбору от 14.10 03:36
         # (#35876)» — решение принято в другом сегменте, модель не должна писать,

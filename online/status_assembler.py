@@ -230,12 +230,107 @@ def has_uncancellable(dets: list[dict]) -> bool:
                for d in dets or [])
 
 
+# Неустойчивый пуск (v5.1.23, п.4, решения В1 и В3): просадку и заброс
+# оборотов, первый кластер которых начался в окне пуска, гейт не снимает, если
+# профиль пуска неустойчив (ДГУ №2 15.10 12:42: заброс 1606, раскачка 70 с,
+# задание до 42,3 Гц — гейт снял эпизод как «переходный процесс»). Заброс при
+# сбросе нагрузки и провал под нагрузкой после окна пуска снимать можно (В3)
+from analytics.labels import START_SCENARIOS as START_UNSTABLE_SCENARIOS  # noqa: E402
+
+
+def first_cluster_start(d: dict) -> datetime | None:
+    """Начало эпизода, который сейчас в составе: первое нарушение его кластера.
+
+    У детекции — values.live.onset (начало последнего, живого кластера; тот же
+    момент движок пишет в t_open эпизода), у тревоги статуса — её поле onset;
+    без участков — t_detected. Не clusters[0]: в длинном подсегменте без смены
+    зоны там остаётся давно остывший кластер пуска, и провал под нагрузкой
+    через полчаса считался бы «на пуске» (кластеры уже разделены свежестью
+    600 с: разные кластеры — разные эпизоды)."""
+    if not isinstance(d, dict):
+        return None
+    if d.get("onset"):
+        return _as_dt(d.get("onset"))
+    lv = (d.get("values") or {}).get("live") if isinstance(d.get("values"), dict) else None
+    if isinstance(lv, dict):
+        if lv.get("onset"):
+            return _as_dt(lv.get("onset"))
+        cl = [c for c in lv.get("clusters") or [] if isinstance(c, dict) and c.get("start")]
+        if cl:
+            return _as_dt(cl[-1]["start"])
+    return _as_dt(d.get("t_detected"))
+
+
+def start_profile_of(chars: dict | None) -> dict | None:
+    """Профиль пуска строки для запрета снятия: свой (characteristics_json.
+    start_profile), иначе профиль пуска «Работы»-предка, закрытой суточным
+    резом (start_profile_prev, v5.1.23, ревью R1: эпизод, начавшийся в окне
+    пуска до 09:00, после реза не теряет запрет). None — профиля нет."""
+    if not isinstance(chars, dict):
+        return None
+    for k in ("start_profile", "start_profile_prev"):
+        sp = chars.get(k)
+        if isinstance(sp, dict):
+            return sp
+    return None
+
+
+def start_unstable_scenarios(profile: dict | None, items: list[dict] | None) -> list[str]:
+    """Сценарии просадки и заброса оборотов, эпизод которых начался в окне
+    неустойчивого пуска (v5.1.23, п.4): [] — запрета нет. Общий расчёт для
+    запрета снятия (start_unstable_reason) и снятия пометки «снято» с таких
+    эпизодов (manager, ревью R4). Начало эпизода — first_cluster_start (у
+    эпизода, продолжившегося мостом через суточный рез, — его начало, поле
+    onset детекции). Окно пуска — [начало прокрутки, конец окна); окно ещё
+    идёт — без конца."""
+    if not isinstance(profile, dict) or not profile.get("unstable"):
+        return []
+    from analytics.labels import start_window
+    win = start_window(profile)
+    if win is None:
+        return []
+    t0, t1 = _as_dt(win[0]), _as_dt(win[1])
+    if t0 is None:
+        return []
+    out: list[str] = []
+    for it in items or []:
+        if not isinstance(it, dict) or it.get("scenario") not in START_UNSTABLE_SCENARIOS:
+            continue
+        t = first_cluster_start(it)
+        if t is None or t < t0 or (t1 is not None and t >= t1):
+            continue
+        if it["scenario"] not in out:
+            out.append(it["scenario"])
+    return out
+
+
+def start_unstable_reason(profile: dict | None, items: list[dict] | None) -> dict | None:
+    """Запрет снятия на неустойчивом пуске (v5.1.23, п.4): {code, text} или None.
+
+    ОДИН помощник для обоих мест (до v5.1.22 две независимые проверки уже
+    расходились): uncancellable_reasons (вызов модели, строка «отмена
+    НЕДОСТУПНА») и suppression_bans (статус, наследование движка,
+    manager._inherit_allowed). profile — профиль пуска строки (start_profile_of);
+    items — детекции (values.live) или тревоги статуса (onset). Текст идёт во
+    вход гейта и в «Факты (система, не ИИ)» — время с поясом (v5.1.22, P1-6)."""
+    if not start_unstable_scenarios(profile, items):
+        return None
+    from analytics.labels import fmt_local, start_reasons_ru, tz_label
+    why = start_reasons_ru(profile)
+    _t = fmt_local(profile.get("crank_at"))
+    return {"code": "start_unstable",
+            "text": "просадка или заброс оборотов на неустойчивом пуске"
+                    + (f" {_t} {tz_label()}" if _t else "")
+                    + (f" ({'; '.join(why)})" if why else "")}
+
+
 def uncancellable_reasons(s: dict) -> list[dict]:
     """Почему гейт не вправе снять состав: [{code, text}] (пусто — вправе).
 
     panel — сигнал панели WARNING/SHUTDOWN; panel_fresh — «Общая авария» с кодом,
     появившаяся в этом сегменте (решение 12.10: висевшая на начало — сведения);
-    asymmetry — несимметрия (v5.0.1); passport — нарушение паспорта (v5.1.12).
+    asymmetry — несимметрия (v5.0.1); passport — нарушение паспорта (v5.1.12);
+    start_unstable — просадка или заброс оборотов на неустойчивом пуске (v5.1.23).
     """
     out: list[dict] = []
     if s.get("panel_severity", "норма") != "норма":
@@ -251,6 +346,13 @@ def uncancellable_reasons(s: dict) -> list[dict]:
     for i, a in enumerate(alarms, 1):
         if passport_hard(a):
             out.append({"code": "passport", "text": f"A{i}: нарушение паспорта двигателя"})
+    try:
+        su = start_unstable_reason(s.get("start"), alarms)
+    except Exception:
+        logger.warning("Запрет снятия на неустойчивом пуске не проверен", exc_info=True)
+        su = None
+    if su:
+        out.append(su)
     return out
 
 
@@ -407,12 +509,20 @@ def _caution_fresh(since_raw, fault_codes, seg_t0, code_at_start) -> bool:
 def suppression_bans(seg_row: dict, dets: list[dict]) -> list[str]:
     """Запреты действия снятия по детекциям и виду стопа (v5.1.22): panel —
     сигнал панели WARNING/SHUTDOWN, panel_fresh — свежая «Общая авария» с кодом,
-    emergency — аварийный стоп. Несимметрию и паспорт проверяет
-    is_analytics_suppressed. Тот же расчёт свежести, что у статуса."""
+    emergency — аварийный стоп; start_unstable — просадка или заброс оборотов на
+    неустойчивом пуске (v5.1.23, тот же помощник, что у uncancellable_reasons).
+    Несимметрию и паспорт проверяет is_analytics_suppressed. Тот же расчёт
+    свежести, что у статуса."""
     chars = _parse_json(seg_row.get("characteristics_json")) or {}
     out: list[str] = []
     if isinstance(chars, dict) and chars.get("stop_kind") == "EMERGENCY":
         out.append("emergency")
+    try:
+        if isinstance(chars, dict) and start_unstable_reason(start_profile_of(chars), dets):
+            out.append("start_unstable")
+    except Exception:
+        # Сбой профиля пуска не роняет проверку запретов панели
+        logger.warning("Запрет снятия на неустойчивом пуске не проверен", exc_info=True)
     seg_t0 = _as_dt(seg_row.get("t_start"))
     code0 = _code_at_segment_start(chars if isinstance(chars, dict) else {})
     for d in dets or []:
@@ -620,6 +730,11 @@ def build_structural_status(
                                   if not str(r).startswith(("FAULT_MASK", "LAST_FAULT"))],
             "limit":             _limit(d) or None,
         }
+        if scenario in START_UNSTABLE_SCENARIOS:
+            # v5.1.23 (п.4): начало эпизода (первое нарушение его кластера,
+            # values.live) — запрет снятия на пуске
+            _on = first_cluster_start(d)
+            alarm["onset"] = _on.isoformat() if _on is not None else None
         if scenario == "CONTROLLER_FAULT":
             alarm["since"] = det_vals.get("fault_start")
             # «Общая авария» с кодом висела на начало сегмента (и код тот же) —
@@ -672,8 +787,10 @@ def build_structural_status(
         "analytics_alarms":   analytics_alarms,
         "regime_alarms":      regime_alarms,
         "key_params":         key_params,
-        # Все параметры подсегмента — гейту (решение 12.10: не 2–3 ключевых)
-        "params":             _all_params(values),
+        # Все параметры подсегмента — гейту (решение 12.10: не 2–3 ключевых).
+        # У стоящей машины без задания частоты регулятора (v5.1.23, как в
+        # отчёте стоп-сегмента): «0» или «30 Гц» модель прочла бы как аномалию
+        "params":             _all_params(values, skip=_STOP_HIDDEN_PARAMS if run_state == 0 else ()),
         "last_fault_code":    last_code or None,
         # Вид стопа нарезки: аварийность здесь не только по маскам, но и по
         # типу последней неисправности (40013), которого нет в детекциях
@@ -681,6 +798,10 @@ def build_structural_status(
         "emergency_text":     (_emergency_text(panel_alarms, values, fault_ref)
                                if _stop_kind == "EMERGENCY" else None),
         "coking":             _coking_state(seg_row),
+        # Профиль пуска открытой строки (v5.1.23, п.4): запрет снятия на
+        # неустойчивом пуске и строка «Пуск» во входе гейта; после суточного
+        # реза посреди «Работы» — профиль предка (ревью R1)
+        "start":              start_profile_of(chars),
     }
 
 
@@ -733,10 +854,19 @@ def _num(v) -> float | None:
     return round(f, 1)
 
 
-def _all_params(values: dict) -> list[dict]:
-    """Все параметры открытой строки: роль, группа, сейчас / мин / макс, единица."""
+# Параметры, которых нет во входе гейта у стоящей машины (v5.1.23): задание
+# частоты регулятора — не показание машины (то же, что в отчёте стоп-сегмента,
+# serializer._STOP_HIDDEN_ROLES)
+_STOP_HIDDEN_PARAMS = frozenset({"FREQ_REFERENCE"})
+
+
+def _all_params(values: dict, skip=()) -> list[dict]:
+    """Все параметры открытой строки: роль, группа, сейчас / мин / макс, единица.
+    skip — роли, которых во входе нет (стоп: задание частоты, v5.1.23)."""
     out: list[dict] = []
     for role, v in (values or {}).items():
+        if role in skip:
+            continue
         grp = _param_group(role)
         if grp is None or not isinstance(v, dict):
             continue
@@ -1032,6 +1162,25 @@ def build_warning_prompt(
     dur = s.get("time_in_mode_sec", 0)
     if dur > 60:
         lines.append(f"Время в режиме: {_fmt_duration(dur)}")
+
+    # Профиль пуска этой «Работы» (v5.1.23, п.4): факты окна пуска — время МСК
+    sp = s.get("start")
+    if isinstance(sp, dict):
+        try:
+            from analytics.labels import fmt_local as _fls, start_profile_text, tz_label as _tzs
+            _st = start_profile_text(sp)
+            # Профиль «Работы»-предка через суточный рез (ревью R1): факты окна
+            # пуска — до реза; строка — только пока окно пуска идёт или действует
+            # запрет снятия по нему (иначе пуск вчерашнего дня — шум для модели)
+            _cut = (f" (до суточного реза {_fls(sp.get('cut_at')) or '?'})"
+                    if sp.get("carried") else "")
+            if _cut and not sp.get("open") and not start_unstable_scenarios(
+                    sp, s.get("analytics_alarms")):
+                _st = None
+            if _st:
+                lines.append(f"Пуск {_fls(sp.get('crank_at')) or '?'} {_tzs()}{_cut}: {_st}")
+        except Exception:
+            logger.warning("Строка профиля пуска во входе гейта не собрана", exc_info=True)
 
     lines.append(f"Итоговый уровень: {s['severity_level']}")
     panel_caution = [a for a in s.get("panel_alarms") or [] if a.get("severity") == "CAUTION"]

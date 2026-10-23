@@ -14,15 +14,20 @@
 """
 from __future__ import annotations
 
+import logging
 import math
 from datetime import datetime, timezone
 from typing import Any
 
 from .contract import Detection, DerivedMetrics, RiskAccumulators
 from .config import AnalyticsConfig
+from .labels import fmt_number
 from .live import (
     LIVE_RECENT_SEC, cooling_proximity, limit_checks, live_values, sub_hits, sub_samples,
 )
+from .rpm_freq import overspeed_params
+
+logger = logging.getLogger(__name__)
 
 
 def _tz(ts: datetime) -> datetime:
@@ -83,7 +88,7 @@ def run_all_detectors(
     cfg: AnalyticsConfig,
     state_periods: dict[int, list[dict]] | None = None,
     onset_faults: list[dict[str, Any]] | None = None,
-    live_spans: dict[str, list[dict]] | None = None,
+    live_spans: dict[str, list[dict] | None] | None = None,
 ) -> list[Detection]:
     """Запустить все включённые детекторы, вернуть список сработавших Detection.
 
@@ -96,13 +101,21 @@ def run_all_detectors(
     (по роли), близость COOLING_FAILURE и паспорт OIL_DILUTION срабатывают,
     только если участок их ключа пересекает [seg_start, seg_end). Ключа нет —
     детекции нет: срабатывание по строке преамбулы или копии forward-fill ушло.
+    Ключ со значением None — сбой расчёта его участков (v5.1.23, п.7): этот
+    детектор идёт по подсегменту, как при live_spans=None, соседи — по участкам.
+    RPM_OVERSPEED (v5.1.23, п.2) — только по участкам: без них (None, сбой
+    ключа) детекции нет.
     t_detected — начало первого пересекающего кластера (одно во всех
     подсегментах кластера), values.live — кластеры, onset, first.
     """
     detections: list[Detection] = []
 
     def _lv(key: str) -> list[dict] | None:
-        return None if live_spans is None else (live_spans.get(key) or [])
+        if live_spans is None:
+            return None
+        if key in live_spans and live_spans[key] is None:
+            return None
+        return live_spans.get(key) or []
 
     # LOAD_STEP: Класс A (быстрые/электрические) — только в RUN_STATE=3
     if cfg.det("LOAD_STEP", "enabled", default=True) and run_state == 3:
@@ -170,6 +183,16 @@ def run_all_detectors(
     if cfg.det("RPM_UNDERSPEED", "enabled", default=True) and run_state == 3:
         detections.extend(_detect_rpm_underspeed(characteristics, derived, seg_start, cfg,
                                                  live=_lv("RPM_UNDERSPEED"), seg_end=seg_end))
+
+    # Заброс оборотов (v5.1.23, п.2) — в своём try: новый детектор не роняет
+    # подсегмент (сегментатор перезапустил бы все детекторы без участков)
+    if cfg.det("RPM_OVERSPEED", "enabled", default=True) and run_state == 3:
+        try:
+            detections.extend(_detect_rpm_overspeed(seg_start, cfg, live=_lv("RPM_OVERSPEED"),
+                                                    seg_end=seg_end))
+        except Exception:
+            logger.warning("Заброс оборотов [%s, %s) не оценён", _iso(seg_start), _iso(seg_end),
+                           exc_info=True)
 
     lfc = (state_periods or {}).get(cfg.role_to_addr("LAST_FAULT_CODE")) or []
     confirm_panel_codes(detections, panel_codes_in(lfc, seg_start, seg_end))
@@ -692,7 +715,13 @@ def _combined_oil_detection(
     рабочих оборотах без останова панели — не замер (нулевой кадр), ветка в
     этом подсегменте не оценивается. ДЭС №3 13.10 14:59:56: давление 300 → 0 →
     316 дало строку «разжижения» на 22 мин 37 с (14902). Ветка — без участков
-    (по событию — v5.1.22)."""
+    (по событию — v5.1.22).
+
+    Выключатель combined_enabled (v5.1.23, решение В6 = А): в KB false — все
+    срабатывания за 60 дней были прогревом после холодного пуска или нулевым
+    кадром; паспортная ветка работает. Ключа нет — ветка включена, как раньше."""
+    if not cfg.det("OIL_DILUTION", "combined_enabled", default=True):
+        return None
     oil_press_char = chars.get("OIL_PRESS")
     oil_temp_char = chars.get("OIL_TEMP")
     if not oil_press_char or not oil_temp_char:
@@ -1031,6 +1060,9 @@ def _detect_controller_faults(
                 "addr": addr,
                 "bit": bit,
                 "fault_name": name,
+                # Имя бита из каталога (v5.1.23, решение В5): с привязанным
+                # кодом имя замечания — по коду (labels.panel_fault_name)
+                "bit_name": name,
                 "fault_start": _iso(fs),
                 "fault_end": _iso(fe) if fe_raw else None,
                 "duration_sec": fp.get("duration_sec"),
@@ -1069,6 +1101,15 @@ def _detect_controller_faults(
             if best is not None and cfg.code_fits_bit(best[1], d.values.get("raw_severity")):
                 d.fault_codes = [best[1]]
                 d.values["panel_code"] = best[1]
+                # Имя кода из справочника KB (v5.1.23, решение В5): «Разнос
+                # двигателя — превышение частоты вращения (код 234)» вместо
+                # имени бита каталога «Скорость/положение КВ: выше нормы»
+                try:
+                    _cn = cfg.fault_code_name(best[1])
+                except Exception:
+                    _cn = None
+                if _cn:
+                    d.values["code_name"] = _cn
 
     # Несброшенная неисправность: CommonAlarm активен, остальные не-INFO биты в
     # это время молчат, код 40012 не сброшен (сбрасывается только кнопкой после
@@ -1221,5 +1262,76 @@ def _detect_rpm_underspeed(
         related_roles=["RPM", "ACTIVE_POWER_TOTAL"],
         fault_codes=[fault_code],
         description_key="RPM_UNDERSPEED.below_threshold",
+        values=values,
+    )]
+
+
+# ── RPM_OVERSPEED ─────────────────────────────────────────────────────────────
+
+def _detect_rpm_overspeed(
+    seg_start: datetime,
+    cfg: AnalyticsConfig,
+    live: list[dict] | None = None,
+    seg_end: datetime | None = None,
+) -> list[Detection]:
+    """Заброс оборотов (v5.1.23, п.2, решения владельца В2′, В3 17.10.2026).
+
+    Панель глушит разнос на уставке overspeed_rpm (код 234), аналитика
+    предупреждает раньше: порог 1575 об/мин = уставка 1725 − 150 (91,3 %
+    уставки, В2′; прежние 1552,5 «на 10 % строже» давали у ДЭС №3 десятки
+    одиночных эпизодов на скачках нагрузки), строго «выше». ДГУ №1
+    16.10 09:26:03 — 1696 об/мин при 56,8 Гц на пуске с заданием 30,6 → 55 Гц,
+    через минуты — разнос 234; ДГУ №2 15.10 12:42:19 — 1606 при 53,6 Гц, гейт
+    тогда снял состав как переходный процесс.
+
+    Только по участкам (live — кластеры RPM_OVERSPEED сегмента, analytics/live.py):
+    отсчёт в заборе, если выше порога и обороты, и k·f_max опроса
+    (rpm_freq.over_marks). None — участков нет (сбой ключа, расчёт без
+    участков) — детекции нет: по максимуму подсегмента заброс ловился бы по
+    строке преамбулы. Код 234 справочный — в fault_codes остаётся, только если
+    панель его выставила (confirm_panel_codes). Gate: RUN_STATE=3 (в
+    run_all_detectors). Вне пуска (сброс нагрузки) гейт снимать вправе (В3)."""
+    if live is None or seg_end is None:
+        return []
+    prm = overspeed_params(cfg)
+    if prm is None:
+        return []
+    hits = sub_hits(live, seg_start, seg_end)
+    spans = [s for _, sp in hits for s in sp]
+    pts = sub_samples(spans, seg_start, seg_end) if spans else []
+    if not pts:
+        return []
+    rpm_max = max(p[1] for p in pts)
+    kfs = [p[2] for p in pts if p[2] is not None]
+    freq_rpm_max = round(max(kfs), 1) if kfs else None
+    hz_max = round(freq_rpm_max / prm["k"], 2) if freq_rpm_max is not None and prm["k"] else None
+    thr, ovs, pct = prm["threshold_rpm"], prm["overspeed_rpm"], prm["proximity_pct"]
+    margin = ovs - rpm_max
+    values = {
+        "rpm_max": rpm_max,
+        "freq_rpm_max": freq_rpm_max,
+        "freq_hz_max": hz_max,
+        "threshold_rpm": round(thr, 1),
+        "overspeed_rpm": ovs,
+        "proximity_pct": pct,
+        "margin_rpm": round(margin, 1),
+        "front_count": len(spans),
+        "live": live_values(hits, seg_start),
+    }
+    return [Detection(
+        scenario="RPM_OVERSPEED",
+        severity=cfg.det("RPM_OVERSPEED", "severity_default", default="CAUTION"),
+        t_detected=hits[0][0]["start"],
+        source="METRIC_RULE",
+        trigger=(
+            f"Обороты макс. {rpm_max:.0f} об/мин"
+            + (f" ({fmt_number(hz_max, 1)} Гц, по частоте ≈ {freq_rpm_max:.0f})" if hz_max is not None else "")
+            + f" — выше порога {fmt_number(thr, 1)} ({fmt_number(100 - pct, 1)} % уставки разноса {ovs:.0f}), "
+            + (f"до уставки осталось {margin:.0f}" if margin > 0 else f"выше уставки на {-margin:.0f}")
+            + f", фронтов: {len(spans)}"
+        ),
+        related_roles=["RPM", "FREQUENCY"],
+        fault_codes=[prm["fault_code"]],
+        description_key="RPM_OVERSPEED.above_threshold",
         values=values,
     )]

@@ -803,11 +803,18 @@ check(_passport_detection(dm_lim, S(L0, 250), CFG3, live=live_pp["OIL_DILUTION"]
       "4в: участок не пересекает подсегмент — детекции нет")
 
 # ── 4г. Комбинированная ветка OIL_DILUTION — без участков, с полом давления (В3) ──
+# v5.1.23 (В6 = А): в KB ветка выключена (combined_enabled: false) — логику
+# пола проверяем на копии конфига с включённой веткой; выключатель —
+# scripts/test_rpm_start_v5123.py, раздел 10
+CFG3_COMB = copy.copy(CFG3)
+CFG3_COMB.detectors = dict(CFG3.detectors,
+                           OIL_DILUTION=dict(CFG3.detectors["OIL_DILUTION"], combined_enabled=True))
 ch_zero = {"OIL_PRESS": {"min": 0.0, "median": 300.0}, "OIL_TEMP": {"max": 104.0, "median": 92.0}}
 ch_real = {"OIL_PRESS": {"min": 200.0, "median": 300.0}, "OIL_TEMP": {"max": 104.0, "median": 92.0}}
-check(_combined_oil_detection(ch_zero, L0, CFG3) is None, "4г: минимум ниже уставки останова — ветка молчит (14902)")
-check(_combined_oil_detection(ch_real, L0, CFG3) is not None, "4г: настоящее падение давления — ветка работает")
-d_comb = [d for d in run_det(ch_real, L0, S(L0, 300), {}) if d.scenario == "OIL_DILUTION"]
+check(_combined_oil_detection(ch_zero, L0, CFG3_COMB) is None,
+      "4г: минимум ниже уставки останова — ветка молчит (14902)")
+check(_combined_oil_detection(ch_real, L0, CFG3_COMB) is not None, "4г: настоящее падение давления — ветка работает")
+d_comb = [d for d in run_det(ch_real, L0, S(L0, 300), {}, cfg=CFG3_COMB) if d.scenario == "OIL_DILUTION"]
 check(len(d_comb) == 1 and d_comb[0].description_key.endswith("combined_pressure_temp_anomaly")
       and "live" not in d_comb[0].values, f"4г: комбинированная ветка при участках — без live: {d_comb}")
 

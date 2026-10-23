@@ -309,6 +309,14 @@ def _ban_row(open_row: dict | None, seg, h: str) -> dict:
             chars = None
     chars = dict(chars) if isinstance(chars, dict) else {}
     chars["stop_kind"] = getattr(seg, "stop_kind", None)
+    # Профиль пуска (v5.1.23, п.4): запрет снятия на неустойчивом пуске — по
+    # профилю самого закрываемого сегмента (детекции тоже его), не строки
+    if hasattr(seg, "start_profile"):
+        _sp = getattr(seg, "start_profile", None)
+        chars["start_profile"] = _sp if isinstance(_sp, dict) else None
+        # Продолжение «Работы» через суточный рез — профиль предка (ревью R1)
+        _spp = getattr(seg, "start_profile_prev", None)
+        chars["start_profile_prev"] = _spp if isinstance(_spp, dict) else None
     return {"gate_suppressed_hash": h, "t_start": (open_row or {}).get("t_start"),
             "characteristics_json": chars}
 
@@ -667,13 +675,70 @@ def _make_seg_hint(db_row: dict):
     # v5.1.22 (P1-4): границы и отметка обрыва аварией с лентой отсчётов — акт
     # стопа, открытого до рестарта, берёт ленту сегмента падения отсюда, без чтения
     trip = chars.get("closed_by_trip") if isinstance(chars, dict) else None
+    # v5.1.23 (п.3): профиль пуска — подсказка повторяет поле Segment: после
+    # рестарта предок окна — она, и getattr(…, "start_profile") не расходится.
+    # Его читает окно после суточного реза посреди «Работы» (_start_carry,
+    # ревью R1): запрет снятия эпизода, начавшегося в окне пуска до реза
+    sprof = chars.get("start_profile") if isinstance(chars, dict) else None
 
     def _iso(v):
         return v.isoformat() if hasattr(v, "isoformat") else v
     return SimpleNamespace(run_state=db_row.get("run_state"),
                            run_state_label=label, stop_kind=kind,
                            t_start=_iso(db_row.get("t_start")), t_end=_iso(db_row.get("t_end")),
-                           closed_by_trip=trip if isinstance(trip, dict) else None)
+                           closed_by_trip=trip if isinstance(trip, dict) else None,
+                           start_profile=sprof if isinstance(sprof, dict) else None)
+
+
+def _start_carry(prev_hint) -> dict | None:
+    """Профиль пуска предка окна для «Работы», идущей через суточный рез (ревью
+    v5.1.23, R1): предок — «Работа» (Segment или подсказка _make_seg_hint) со
+    своим профилем; иначе None. Сегментатор сам проверит, что «Работа» на
+    голове окна — продолжение (segmenter.start_profile_carry)."""
+    if prev_hint is None or getattr(prev_hint, "run_state", None) != 3:
+        return None
+    sp = getattr(prev_hint, "start_profile", None)
+    return sp if isinstance(sp, dict) else None
+
+
+def _mark_episode_onsets(dets: list[dict] | None, episodes: dict | None,
+                         since: datetime | None = None) -> None:
+    """Начало эпизода у просадки и заброса оборотов (ревью v5.1.23, R1).
+
+    Эпизод, продолжившийся мостом через суточный рез, начался в прежней
+    строке, а кластер нового окна — после реза. Запрет снятия на неустойчивом
+    пуске (status_assembler.start_unstable_scenarios) сравнивает с окном пуска
+    начало эпизода: оно — в поле onset детекции (его первым берёт
+    first_cluster_start). Только если эпизод памяти движка начался раньше
+    кластера (мост); иначе поля нет. Без запросов — память движка.
+
+    since — не раньше этого момента (прокрутка «Работы», идущей через рез,
+    _carry_onset_floor): эпизод, продолжившийся с прежней «Работы» через стоп
+    и быстрый повторный пуск, начался до этого пуска — его начало окну пуска
+    не родня, остаётся кластер нового окна (перепроверка R1)."""
+    from analytics.labels import START_SCENARIOS
+    for d in dets or []:
+        if not isinstance(d, dict) or d.get("scenario") not in START_SCENARIOS:
+            continue
+        ep = (episodes or {}).get(_alert_key(d))
+        t0 = _as_utc(ep.get("t_open")) if isinstance(ep, dict) else None
+        lv = (d.get("values") or {}).get("live")
+        on = _as_utc(lv.get("onset")) if isinstance(lv, dict) else None
+        if t0 is not None and on is not None and t0 < on and (since is None or t0 >= since):
+            d["onset"] = t0.isoformat()
+
+
+def _carry_onset_floor(carried) -> datetime | None:
+    """Нижняя граница начала эпизода для _mark_episode_onsets: прокрутка пуска
+    «Работы», идущей через суточный рез (Segment.start_profile_prev), минус
+    стык кадра. None — открытая «Работа» профиль предка не несёт (свой пуск в
+    окне, стоп, не «Работа»): начало эпизода не отмечается — запрет снятия по
+    кластеру окна, как без моста (перепроверка R1: быстрый повторный пуск после
+    стопа продолжал эпизод прежней «Работы», и запрет нового пуска терялся)."""
+    if not isinstance(carried, dict):
+        return None
+    c = _as_utc(carried.get("crank_at"))
+    return c - timedelta(seconds=2.0) if c is not None else None
 
 
 def _parse_gate_state(open_row: dict | None) -> dict:
@@ -1249,7 +1314,10 @@ async def _load_data(
 # остальное — переносу участков аналитики через начало окна. v5.1.22: счётчик
 # наработки — тем же запросом; у сегментов короче его «пульса» (15 мин) строки
 # нет, и модель выдумывала наработку из событий журнала («680 ч»)
-_HELD_ROLES = ("RPM", "FREQUENCY", "OIL_TEMP", "COOLANT_TEMP", "OIL_PRESS", "ENGINE_HOURS")
+# v5.1.23, ревью R7: задание частоты — профилю пуска (значение на начало
+# прокрутки, когда прогрев цепочки 0→2→3 длиннее преамбулы окна); тем же запросом
+_HELD_ROLES = ("RPM", "FREQUENCY", "OIL_TEMP", "COOLANT_TEMP", "OIL_PRESS", "ENGINE_HOURS",
+               "FREQ_REFERENCE")
 # Сколько ждать аварийности следующего стопа после закрытия сегмента сменой
 # режима (v5.1.22, P1-3): 40013 и маски приходят тем же кадром или следующим
 _TRIP_WATCH_SEC = 600
@@ -1422,6 +1490,8 @@ async def _run_segment(
             transition_ctx=list(transition_ctx or []),
             load_seed=load_seed,
             confirm_to=_tz_utc(confirm_to) if confirm_to else None,
+            # «Работа» через суточный рез — профиль пуска предка (ревью R1)
+            start_carry=_start_carry(prev_hint),
         )
     )
     # Стоп-сегменты получают ДВА артефакта, и они не исключают друг друга:
@@ -2859,8 +2929,13 @@ class OnlinePollEngine:
         cleared_at: dict[str, datetime] | None = None,
         gaps_from: datetime | None = None,
         run_state: int | None = None,
+        start_carry: dict | None = None,
     ) -> None:
         """Материализовать эпизоды тревог из снимка активных детекций.
+
+        start_carry — профиль пуска «Работы»-предка у открытой «Работы», идущей
+        через суточный рез (Segment.start_profile_prev, v5.1.23, R1): только
+        тогда детекциям оборотов ставится начало эпизода (_mark_episode_onsets).
 
         Открытие — сразу; закрытие — после N циклов подряд «чисто»
         (ALARM_EPISODES.close_debounce_cycles в detectors.yaml, default 3 —
@@ -3090,6 +3165,16 @@ class OnlinePollEngine:
         # флаг эпизоду иначе не поставит никто — в сводке выйдет живое замечание.
         # v5.1.22: по id, с запретами и источником; отказанным по запрету —
         # повтор, когда запрет снимется (без запроса, пока запрет тот же)
+        # Начало эпизода у просадки и заброса, идущих мостом через рез, — для
+        # запрета снятия на неустойчивом пуске (ревью v5.1.23, R1); только у
+        # «Работы», несущей профиль предка (start_carry)
+        try:
+            _since = _carry_onset_floor(start_carry)
+            if _since is not None:
+                _mark_episode_onsets(curr_dets, self._episodes, since=_since)
+        except Exception:
+            logger.warning("OnlineEngine[%s]: начало эпизодов оборотов не отмечено", self.key,
+                           exc_info=True)
         _refused = getattr(self, "_supp_refused", None) or {}
         if _refused and not _new_analytics:
             _alive = {m.get("id") for m in self._episodes.values()}
@@ -3430,9 +3515,12 @@ class OnlinePollEngine:
                 eps = [e for e in eps
                        if not _bridge_only(e, getattr(self, "_episodes", None), _tz_utc(t_from))]
             from analytics.serializer import build_summary_parts, render_summary_md
+            # Имя кода панели — справочник KB (v5.1.23, В5): эпизоду, открытому до
+            # v5.1.23, имя кода из детекции не досталось
             parts = build_summary_parts(segments, episodes=eps, tz=self.tz,
                                         trip_roles=self.cfg.trip_snapshot_roles,
-                                        t_from=_tz_utc(t_from), t_to=_tz_utc(t_to))
+                                        t_from=_tz_utc(t_from), t_to=_tz_utc(t_to),
+                                        code_name=getattr(self.cfg, "fault_code_name", None))
             return render_summary_md(parts), parts
         except Exception:
             logger.warning("OnlineEngine[%s]: не удалось построить summary-отчёт",
@@ -4273,6 +4361,9 @@ class OnlinePollEngine:
                     # Открытое окно: ts_to — живой край (правило B ждёт следующего
                     # отсчёта только здесь; рез и перечитка — нет, ревью v5.1.21)
                     live_edge=True,
+                    # «Работа» через суточный рез — профиль пуска предка: запрет
+                    # снятия эпизода, начавшегося в окне пуска до реза (ревью R1)
+                    start_carry=_start_carry(self._prev_seg_hint),
                 )
             )
             if tl_pre is not None:
@@ -4591,7 +4682,8 @@ class OnlinePollEngine:
                                          cleared_at={**_panel_cleared_at(segments),
                                                      **_analytics_cleared_at(segments, self._episodes)},
                                          gaps_from=ts_from_utc,
-                                         run_state=open_seg.run_state)
+                                         run_state=open_seg.run_state,
+                                         start_carry=getattr(open_seg, "start_profile_prev", None))
         except Exception:
             logger.warning("OnlineEngine[%s]: ошибка обработки эпизодов тревог",
                            self.key, exc_info=True)
@@ -4614,6 +4706,16 @@ class OnlinePollEngine:
         )
 
         current_values, _curr_dets = _extract_open_segment_data(open_seg)
+        # Начало эпизода у просадки и заброса, идущих мостом через рез, — в
+        # активные тревоги строки: запрет снятия гейтом и статус (ревью v5.1.23, R1);
+        # только у «Работы», несущей профиль предка через рез
+        try:
+            _since = _carry_onset_floor(getattr(open_seg, "start_profile_prev", None))
+            if _since is not None:
+                _mark_episode_onsets(_curr_dets, self._episodes, since=_since)
+        except Exception:
+            logger.warning("OnlineEngine[%s]: начало эпизодов оборотов не отмечено", self.key,
+                           exc_info=True)
         coking_risk = _extract_coking_risk_from_segments(segments)
 
         # Диффузия живых тревог: вычисляем diff до upsert; segment_id подставим после

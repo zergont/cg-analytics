@@ -298,12 +298,22 @@ def _format_cycle_params(
     if attempt:
         out += ["", f"Сегмент, из которого машина остановилась — {attempt_label(attempt)}, "
                     f"{_span(attempt.get('t_start'), attempt.get('t_fall'))}: "
-                    f"{attempt_facts_ru(attempt) or ''}".rstrip(": ")]
+                    f"{attempt_facts_ru(attempt, tz) or ''}".rstrip(": ")]
         fell = None
     else:
         fell = next((g for g in reversed(groups) if g[0].get("run_state") != 0), None)
     if fell is not None:
         _detail(fell, "Сегмент, из которого машина остановилась")
+        # Профиль пуска сегмента падения (v5.1.23, п.3): #35939 — «на разгоне
+        # задание 55 Гц при 1294 об/мин» за секунды до разноса 234
+        try:
+            from analytics.labels import start_profile_text
+            _sp = (_chars_json(fell[0]) or {}).get("start_profile")
+            _st = start_profile_text(_sp, tz) if isinstance(_sp, dict) else None
+            if _st:
+                out += ["", f"Пуск {_t(_sp.get('crank_at'))}: {_st}"]
+        except Exception:
+            logger.warning("IncidentGate: строка профиля пуска не напечатана", exc_info=True)
     # Лента отсчётов — сразу за сегментом падения (v5.1.22, P1-4)
     try:
         from analytics.reconstructor import format_analog_trace_ru
@@ -429,7 +439,7 @@ def series_facts(
         else:
             reset = "до конца сегмента не сброшена"
         line = f"  - {_day(fall, tz)} — {what}; код: {code_txt}; {reset}"
-        facts = attempt_facts_ru(att)
+        facts = attempt_facts_ru(att, tz)
         if facts:
             line += f"; {facts}"
         out.append(line)
@@ -500,7 +510,7 @@ def build_incident_prompt(
         # Гейт характера писан для падения с работы: у отказа пуска «без
         # охлаждения» и «прямой аварийный» — не признаки, а свойство попытки
         out.append(f"Попытка: {attempt_label(att)}, с {_ts(att.get('t_start'), tz, stop_raw)}; "
-                   f"{attempt_facts_ru(att) or ''}".rstrip("; "))
+                   f"{attempt_facts_ru(att, tz) or ''}".rstrip("; "))
     else:
         out.append(f"Характер по детерминированному гейту: {ch.get('character', '?')} "
                    f"(уверенность {ch.get('confidence', '?')})")

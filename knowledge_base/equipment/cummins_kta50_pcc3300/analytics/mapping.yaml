@@ -2,6 +2,13 @@
 # Whitelist регистров для аналитического блока KTA50/PCC3300
 # Источник: ТЗ аналитики, раздел 2.3
 # Изменение: только через веб-морду (раздел 9 ТЗ)
+# Legacy-монолит: заменяет весь стек слоёв, поэтому повторяет ключи
+# controllers/pcc3300 (паритет — scripts/test_layered_config.py, v5.1.23)
+
+# Имя контроллера для текстов (разбор аварии: поиск шлюза находит руководства по
+# марке и коду, v5.1.14)
+controller:
+  name: Cummins PowerCommand PCC3300
 
 registers:
 
@@ -11,6 +18,7 @@ registers:
 
   40034:
     role: ACTIVE_POWER_TOTAL
+    incident_trace: 3
     trip_snapshot: true
     group: LOAD
     unit: kW
@@ -44,6 +52,7 @@ registers:
 
   40025:
     role: VOLTAGE_LL_AVG
+    incident_trace: 5
     group: LOAD
     unit: Vac
     kind: analog
@@ -100,6 +109,7 @@ registers:
 
   40029:
     role: CURRENT_AVG
+    incident_trace: 4
     group: LOAD
     unit: A
     kind: analog
@@ -132,6 +142,11 @@ registers:
 
   40068:
     role: RPM
+    # Колонка ленты отсчётов акта аварийного стопа (v5.1.22, P1-4, решение В2):
+    # номер — порядок колонки; значения берутся из уже загруженной истории
+    # сегмента падения (аналог) и enum-периодов (положение автомата), без
+    # повторного чтения. Лимиты — stop_kind.act_trace_* в segmentation.yaml
+    incident_trace: 1
     trip_snapshot: true
     group: LOAD
     unit: rpm
@@ -202,6 +217,7 @@ registers:
 
   40062:
     role: OIL_PRESS
+    incident_trace: 6
     trip_snapshot: true
     group: HYDRAULIC
     unit: kPa
@@ -215,6 +231,7 @@ registers:
 
   40044:
     role: FREQUENCY
+    incident_trace: 2
     trip_snapshot: true
     group: HEALTH
     unit: Hz
@@ -222,8 +239,23 @@ registers:
     description: Частота генератора
     _source: PASSPORT_РЭ
 
+  40595:
+    role: FREQ_REFERENCE
+    # Итоговое задание частоты регулятора (v5.1.23): куда регулятор ведёт
+    # обороты — на пуске ДГУ №1 16.10 задание 30,6 → 55 Гц перед разносом. В БД
+    # уже в Гц (u32, raw × 0,001: 49866 → 49,866), на номинале ~50, на стоянке 0.
+    # Колонка ленты акта сразу за частотой (порядок дробный); в стоп-сегментах
+    # отчёта не печатается
+    incident_trace: 2.5
+    group: HEALTH
+    unit: Hz
+    kind: analog
+    description: Итоговое задание частоты регулятора
+    _source: PASSPORT_РЭ
+
   40061:
     role: BATTERY_V
+    incident_trace: 7
     trip_snapshot: true
     group: HEALTH
     unit: Vdc
@@ -322,6 +354,91 @@ registers:
     # кадре опроса с 40011 и уходит ровно на сбросе — по нему же и рез.
     # Нет ключа — аварию определяют одни маски (segmenter.shutdown_intervals).
     shutdown_states: [3, 4]
+    _source: PASSPORT_РЭ
+
+  # ── Командные/исполнительные регистры — реконструкция действий (Следователь) ──
+  # kind: enum → периоды из enum_history. Пока читаются только 40010/40011;
+  # роли заведены для будущего широкого ридера и классификатора причины.
+  40599:
+    role: RUN_COMMAND
+    group: STATE
+    unit: ~
+    kind: enum
+    # v5.1.23 (решение В5): по данным 0 — «нет команды» (после Стопа 1 → 0 и
+    # при аварийном снятии «Работы» 3 → 0), а не нажатая кнопка аварийного
+    # останова, как в каталоге «EmergencyStop». Метка KB — поверх каталога
+    # (labels.enum_label, лента акта); каталог декодер поправил 17.10
+    description: "Команда работы панели (0 — нет команды, 1 — Стоп, 2 — останов по Load Demand, 3 — Работа)"
+    labels_ru: {0: "нет команды (0)"}
+    _source: PASSPORT_РЭ
+
+  40598:
+    role: FUEL_SOLENOID
+    group: STATE
+    unit: ~
+    kind: enum
+    description: Команда топливного электромагнита (Active = подача топлива есть)
+    _source: PASSPORT_РЭ
+
+  40586:
+    role: EXCITATION
+    group: STATE
+    unit: ~
+    kind: enum
+    description: Состояние возбуждения генератора (Disabled/Enabled)
+    _source: PASSPORT_РЭ
+
+  40563:
+    role: ESTOP_EVENT
+    group: STATE
+    unit: ~
+    kind: enum
+    description: Событие общего аварийного останова (Inactive/Active)
+    _source: PASSPORT_РЭ
+
+  40569:
+    role: FAULT_RESET
+    group: STATE
+    unit: ~
+    kind: enum
+    description: Сброс детектирования неисправностей (маркер действий восстановления)
+    _source: PASSPORT_РЭ
+
+  40584:
+    role: PARALLEL_READY
+    group: STATE
+    unit: ~
+    kind: enum
+    description: Индикатор готовности к параллельной работе (Inactive/Active)
+    _source: PASSPORT_РЭ
+
+  43560:
+    role: GENSET_CB_CLOSE_CMD
+    # Во вход разбора аварии — состояние на момент останова, даже если в окне
+    # не менялось (в ленту акта попадают только смены), v5.1.14
+    incident_state: true
+    group: STATE
+    unit: ~
+    kind: enum
+    description: Команда на включение выключателя генераторной установки
+    _source: PASSPORT_РЭ
+
+  43562:
+    role: GENSET_CB_POS
+    incident_trace: 8
+    incident_state: true
+    group: STATE
+    unit: ~
+    kind: enum
+    description: Положение выключателя генераторной установки (Open/Closed)
+    _source: PASSPORT_РЭ
+
+  46109:
+    role: ENGINE_OP_STATE
+    group: STATE
+    unit: ~
+    kind: enum
+    description: Рабочее состояние двигателя (enum, справочно)
     _source: PASSPORT_РЭ
 
   # ═══════════════════════════════════════════════════════════════

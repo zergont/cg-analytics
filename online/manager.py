@@ -479,6 +479,29 @@ class OnlineManager:
                         logger.warning("WarningGate[%s]: пометка «снято» не снята", key,
                                        exc_info=True)
 
+                # Просадка или заброс в окне пуска, ставшего неустойчивым после
+                # снятия (окно растёт до номинал + 5 мин): снятие на них больше не
+                # действует — снять пометку «снято» с их открытых эпизодов, как у
+                # паспорта (ревью v5.1.23, R4). Тот же расчёт, что у запрета
+                try:
+                    from online.status_assembler import start_unstable_scenarios
+                    _su = start_unstable_scenarios(struct.get("start"),
+                                                   struct.get("analytics_alarms"))
+                except Exception:
+                    logger.warning("WarningGate[%s]: запрет снятия на неустойчивом пуске не "
+                                   "проверен", key, exc_info=True)
+                    _su = []
+                if _su:
+                    try:
+                        _n = await online_db.clear_episodes_gate_suppressed(
+                            engine.router_sn, engine.equip_type, engine.panel_id, _su)
+                        if _n:
+                            logger.info("WarningGate[%s]: неустойчивый пуск — снята пометка "
+                                        "«снято гейтом» с %d эпизод(ов) %s", key, _n, _su)
+                    except Exception:
+                        logger.warning("WarningGate[%s]: пометка «снято» не снята", key,
+                                       exc_info=True)
+
                 # ── Детектор предупреждений → Claude ──
                 severity = struct["severity_level"]
                 if severity == "норма":
@@ -1232,6 +1255,27 @@ async def _analyze_warning_claude(
                 # закрытом сегменте, его номер
                 _src = {"ts": _gate_ts.isoformat(),
                         "segment_id": None if _in_open else _landed}
+                # Профиль окна пуска растёт, пока шёл разбор (ревью v5.1.23, R4):
+                # просадку и заброс, начавшиеся в окне ставшего неустойчивым
+                # пуска, не метим — по свежей открытой строке или по закрытому
+                # сегменту, куда лёг вердикт (чтение — только в позднем пути)
+                try:
+                    from online.status_assembler import (
+                        _parse_json as _pj, start_profile_of, start_unstable_scenarios,
+                    )
+                    _vrow = (_cur if _in_open else
+                             await online_db.get_segment_by_id(_landed) if _landed is not None else None)
+                    _su_now = start_unstable_scenarios(
+                        start_profile_of(_pj((_vrow or {}).get("characteristics_json"))),
+                        struct.get("analytics_alarms"))
+                except Exception:
+                    logger.warning("WarningGate: запрет снятия на неустойчивом пуске не проверен — "
+                                   "снятие как есть", exc_info=True)
+                    _su_now = []
+                if _su_now:
+                    _cancel_sc = [sc for sc in _cancel_sc if sc not in _su_now]
+                    logger.info("WarningGate: %s/%s/%s — пуск стал неустойчивым, пока шёл разбор: "
+                                "%s не снимаются", router_sn, equip_type, panel_id, _su_now)
                 # Эпизод живёт и меряется, но помечен: из severity исключён,
                 # копим статистику ложных срабатываний для тюнинга порогов.
                 # v5.1.22 (P1-1 п. 1): снятие — эпизодам, открытым на момент

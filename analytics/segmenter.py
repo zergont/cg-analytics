@@ -866,7 +866,8 @@ def _build_subsegments_for_running(
     удержанные значения на начало сегмента (live.held_before): частота —
     опросу оборотов, остальное — переносу через начало окна, только при
     продолжении режима (cause_open REPORT_START без разгона). Сбой расчёта —
-    предупреждение и прежнее поведение (live_spans=None).
+    предупреждение и прежнее поведение (live_spans=None); сбой одного ключа —
+    по подсегменту только его детектор (v5.1.23, п.7: ключ — None в словаре).
     """
     seg_t0 = _tz(seg_start)
     seg_t1 = _tz(seg_end)
@@ -910,10 +911,11 @@ def _build_subsegments_for_running(
     t_end_tz = tail_start
 
     # Участки и кластеры нарушений рабочей части — один раз на сегмент (v5.1.21).
-    # None, а не {}: пустой словарь молча погасил бы четыре детектора.
+    # None, а не {}: пустой словарь молча погасил бы детекторы участков.
     # Горизонт правила B — только живой край открытого окна; у закрытого (рез,
-    # смена режима) будущих строк не будет (ревью v5.1.21, analytics-3)
-    live_spans: dict[str, list[dict]] | None = None
+    # смена режима) будущих строк не будет (ревью v5.1.21, analytics-3).
+    # Ключи изолированы внутри segment_spans (v5.1.23); этот try — страховка
+    live_spans: dict[str, list[dict] | None] | None = None
     try:
         live_spans = segment_spans(
             seg_by_addr, None, cfg, head_end, tail_start, gaps, held or {},
@@ -1902,6 +1904,10 @@ def _check_cooldown_transition(
 #     состояние не подтвердилось, показываем устойчивое;
 #   - охлаждение (4/5) не трогаем: машина, вставшая при входе в него, упала
 #     с работы — это ведёт логика аварийного стопа.
+# v5.1.23 (решение В4, пересмотр 13.10): подпись плашки — по прокрутке, а не
+# по режиму панели: «Неудачный пуск · Стоп/Авария» / «Отменённый пуск · Стоп»
+# (labels.attempt_label); в записи — наблюдаемое: прокрутка, АКБ, 40010 и
+# 40599 в кадре падения (_attempt_observed).
 
 def confirm_params(cfg) -> dict[str, Any]:
     """Пороги подтверждения (KB: segmentation.yaml → transition_confirm).
@@ -1930,6 +1936,8 @@ def confirm_params(cfg) -> dict[str, Any]:
     return {
         "enabled": bool(g("enabled", True)),
         "rpm_min": float(g("rpm_min", 250.0)),
+        # Прокрутка стартером на плашке попытки (v5.1.23, решение В4)
+        "crank_rpm_min": float(g("crank_rpm_min", 50.0)),
         "freq_min": float(g("freq_min_hz", 5.0)),
         "ready_bits": frozenset(bits),
         "carry_sec": float(g("carry_sec", 120.0)),
@@ -2036,17 +2044,21 @@ def confirm_exit(
 
 
 def _attempt_codes(code_periods: list[dict], t0: datetime, t_fall: datetime,
-                   lag_sec: float) -> list[int]:
+                   lag_sec: float, until: datetime | None = None) -> list[int]:
     """Коды 40012, которые панель выставила на попытке и в лаг после падения.
 
     Не агрегат плашки: та тянется весь стоп после попытки, и в неё попадали бы
     и код, висевший до попытки (1248 после сброса), и кнопка через час.
+    until — конец стопа после попытки (следующий выход из стопа): код, вставший
+    уже на следующей попытке, не её (v5.1.23: перепрогон #35937 брал 234 разноса
+    09:28:53 следующей попытки — 51 с после падения 09:28:02, в пределах лага;
+    коды теперь в фактах и в подписи плашки).
     """
     out: list[int] = []
     hi = t_fall + timedelta(seconds=lag_sec)
     for p in code_periods or []:
         s = _tz(p["state_start"])
-        if s < t0 or s > hi:
+        if s < t0 or s > hi or (until is not None and s >= until):
             continue
         try:
             v = int(p.get("value") or 0)
@@ -2057,10 +2069,93 @@ def _attempt_codes(code_periods: list[dict], t0: datetime, t_fall: datetime,
     return out
 
 
+def _enum_at_fall(enum_periods: list[dict] | None, addr: int | None, t_fall: datetime,
+                  cfg) -> dict[str, Any] | None:
+    """Значение enum-регистра в кадре падения попытки: {value, label, at}; at —
+    момент смены, если регистр сменился в этом кадре (± _SAME_FRAME_SEC), иначе
+    None — значение держалось. None — регистра нет, значение неизвестно или NA."""
+    if addr is None:
+        return None
+    hi = t_fall + timedelta(seconds=_SAME_FRAME_SEC)
+    cur = None
+    for p in enum_periods or []:
+        if p.get("addr") != addr or p.get("state_start") is None:
+            continue
+        s = _tz(p["state_start"])
+        if s <= hi and (cur is None or s >= _tz(cur["state_start"])):
+            cur = p
+    if cur is None:
+        return None
+    if cur.get("state_end") is not None and \
+            _tz(cur["state_end"]) < t_fall - timedelta(seconds=_SAME_FRAME_SEC):
+        return None                     # период кончился до падения — значение не знаем
+    v = _enum_value(cur)
+    if v is None or v in _na_values(cfg, addr):
+        return None
+    from .labels import enum_label
+    s = _tz(cur["state_start"])
+    return {
+        "value": v,
+        "label": enum_label(cfg.register_map.get(addr), v, cur.get("label")),
+        "at": s.isoformat() if abs((s - t_fall).total_seconds()) <= _SAME_FRAME_SEC else None,
+    }
+
+
+def _attempt_observed(
+    t0: datetime, t_fall: datetime, rpm: list[tuple[datetime, float]],
+    all_by_addr: dict[int, list[dict]], enum_periods: list[dict] | None,
+    code_periods: list[dict] | None, codes: list[int], cfg, prm: dict,
+) -> dict[str, Any]:
+    """Наблюдаемое на неудачной попытке (v5.1.23, решение В4) — для фактов без
+    выводов: длительность прокрутки — с первого отсчёта оборотов выше
+    crank_rpm_min (и удержанного перед попыткой, как в confirm_exit: #35937 —
+    187 об/мин в 09:27:52 при «Работе» с 09:27:55) до падения; минимум АКБ за
+    прокрутку (без неё — за попытку); переключатель 40010 и команда работы
+    40599 в кадре падения; подписи кодов попытки из каталога. Всё из уже
+    загруженных строк и enum-периодов окна — запросов нет.
+    """
+    crank_min = prm["crank_rpm_min"]
+    crank_from: datetime | None = None
+    carried = None
+    for ts, v in rpm:
+        if ts < t0:
+            carried = (ts, v) if (t0 - ts).total_seconds() <= prm["carry_sec"] else None
+            continue
+        if ts >= t_fall:
+            break
+        if crank_from is None and v > crank_min:
+            crank_from = ts
+    if carried is not None and carried[1] > crank_min:
+        crank_from = carried[0]
+    lo = crank_from or t0
+    bat = [v for ts, v in value_series(all_by_addr, cfg.role_to_addr("BATTERY_V"))
+           if lo <= ts <= t_fall]
+    from .labels import split_code_label
+    names: dict[str, str] = {}
+    for p in code_periods or []:
+        v = _enum_value(p)
+        if v in codes and str(v) not in names:
+            nm = split_code_label(p.get("label"))[0]
+            if nm:
+                names[str(v)] = nm
+    return {
+        "crank_from": crank_from.isoformat() if crank_from else None,
+        "crank_sec": max(0.0, (t_fall - crank_from).total_seconds()) if crank_from else None,
+        "battery_min_v": min(bat) if bat else None,
+        "switch": _enum_at_fall(enum_periods, cfg.role_to_addr("SWITCH_POS"), t_fall, cfg),
+        "run_command": _enum_at_fall(enum_periods, cfg.role_to_addr("RUN_COMMAND"), t_fall, cfg),
+        "code_names": names,
+    }
+
+
 def _attempt_record(chain: list[dict], stop: dict, res: list[tuple],
                     code_periods: list[dict] | None = None,
-                    lag_sec: float = 60.0) -> dict[str, Any]:
-    """Что было на неудачной попытке — для подписи, отчёта и акта."""
+                    lag_sec: float = 60.0, observe: dict | None = None) -> dict[str, Any]:
+    """Что было на неудачной попытке — для подписи, отчёта и акта.
+
+    observe — что нужно для наблюдаемого (v5.1.23): {rpm, all_by_addr,
+    enum_periods, cfg, prm}; без него или при сбое — запись как до v5.1.23
+    (подпись тогда по rpm_max фактов)."""
     path = [int(c["value"]) for c in chain]
     t0 = _tz(chain[0]["state_start"])
     t_fall = _tz(stop["state_start"])
@@ -2069,7 +2164,7 @@ def _attempt_record(chain: list[dict], stop: dict, res: list[tuple],
         vals = [r[2].get(key) for r in res if r[2].get(key) is not None]
         return max(vals) if vals else None
 
-    return {
+    rec = {
         "from_state": 3 if 3 in path else (2 if 2 in path else path[-1]),
         "path": path,
         "t_start": t0.isoformat(),
@@ -2081,8 +2176,24 @@ def _attempt_record(chain: list[dict], stop: dict, res: list[tuple],
             "freq_max": _mx("freq_max"),
             "ready": any(r[2].get("ready") for r in res),
         },
-        "codes": _attempt_codes(code_periods or [], t0, t_fall, lag_sec),
+        "codes": _attempt_codes(code_periods or [], t0, t_fall, lag_sec,
+                                _tz(stop["state_end"]) if stop.get("state_end") else None),
     }
+    if observe:
+        try:
+            # Прокрутка — rpm_max попытки выше crank_rpm_min (план §2.1 п.5);
+            # оборотов нет — None: что пуск отменили, не видно
+            _rm = rec["facts"]["rpm_max"]
+            obs = {"cranked": (float(_rm) > observe["prm"]["crank_rpm_min"]
+                               if isinstance(_rm, (int, float)) else None)}
+            obs.update(_attempt_observed(
+                t0, t_fall, observe["rpm"], observe["all_by_addr"], observe.get("enum_periods"),
+                code_periods, rec["codes"], observe["cfg"], observe["prm"]))
+            rec.update(obs)
+        except Exception:
+            logger.warning("Наблюдаемое на попытке %s не собрано — запись без него",
+                           t0.isoformat(), exc_info=True)
+    return rec
 
 
 # ── Код 40012 на закрытии и обрыв сегмента аварией (v5.1.22, P1-2, P1-3) ────
@@ -2423,6 +2534,7 @@ def _confirm_attempts(
     confirm_to: datetime | None = None,
     code_periods: list[dict] | None = None,
     carry_glue: bool = False,
+    enum_periods: list[dict] | None = None,
 ) -> list[dict]:
     """Выходы из стопа без подтверждения — в плашку стопа-исхода.
 
@@ -2448,6 +2560,8 @@ def _confirm_attempts(
     (иначе в начале суток вылезал «Прогрев» между двумя «Работами»).
     Вызывается после _classify_stop_periods: вид стопа решается по началу
     стопа (там панель держит аварию), а не по началу попытки.
+    enum_periods — переключатель 40010 и команда 40599 в кадре падения
+    попытки (v5.1.23, решение В4), только для записи плашки.
     """
     prm = confirm_params(cfg)
     if not prm["enabled"] or not periods:
@@ -2537,7 +2651,10 @@ def _confirm_attempts(
                 plate["cause_open"] = chain[0]["cause_open"]
             else:
                 plate.pop("cause_open", None)
-            plate["attempt"] = _attempt_record(chain, stop, res, code_periods, lag)
+            plate["attempt"] = _attempt_record(
+                chain, stop, res, code_periods, lag,
+                observe={"rpm": rpm, "all_by_addr": all_by_addr, "enum_periods": enum_periods,
+                         "cfg": cfg, "prm": prm})
             out.append(plate)
             last = 0
             j += 1
@@ -2614,6 +2731,556 @@ def _steady_window(
     return steady_from, steady_to
 
 
+# ── Профиль пуска (v5.1.23, п.3, решение владельца В1 17.10.2026) ──────────────
+# ДГУ №1 16.10: заброс 1696 об/мин при задании 30,6 → 55 Гц, через три минуты —
+# раскачка ±1,5 Гц почти две минуты; ДГУ №2 15.10 12:42 — заброс 1606 и провал
+# 1310 при задании до 42,3 Гц, а гейт снял эпизод как переходный процесс. Пуск
+# без нагрузки, автомат разомкнут — аналитика работы видела только «просадку».
+# Профиль — факты окна пуска одной записью: строка «Пуск» в отчёте, пометка
+# «на пуске» в сводке и акте, запрет снятия гейтом (status_assembler,
+# start_unstable). Отдельного замечания нет: цвет и число видов он не меняет.
+
+def _joint_tol(cfg) -> float:
+    try:
+        return float(cfg.seg("transitions", "joint_tol_sec", default=2.0) or 2.0)
+    except Exception:
+        return 2.0
+
+
+def start_profile_params(cfg) -> dict[str, Any]:
+    """Пороги профиля пуска (KB: segmentation.yaml → start_profile). «Схватил» и
+    выход на номинал — пороги подтверждения выхода из стопа (confirm_params),
+    номинал — как у сверки оборотов с частотой (RPM_UNDERSPEED.rated_rpm,
+    LOAD_STEP.freq_nominal_hz): один источник."""
+    def g(key: str, default: Any) -> Any:
+        try:
+            v = cfg.seg("start_profile", key, default=default)
+        except Exception:
+            v = default
+        return default if v is None else v
+
+    def d(scen: str, key: str, default: float) -> float:
+        try:
+            v = cfg.det(scen, key, default=default)
+            return float(default if v is None else v)
+        except Exception:
+            return float(default)
+
+    cp = confirm_params(cfg)
+    return {
+        "enabled": bool(g("enabled", True)),
+        "after_rated_sec": float(g("after_rated_sec", 300.0)),
+        "rundown_rpm": float(g("rundown_rpm", 1000.0)),
+        "swing_out_hz": float(g("swing_out_hz", 1.0)),
+        "swing_in_hz": float(g("swing_in_hz", 0.5)),
+        "swing_rpm_tol": float(g("swing_rpm_tol", 30.0)),
+        "swing_pair_sec": float(g("swing_pair_sec", 10.0)),
+        "unstable_swing_sec": float(g("unstable_swing_sec", 30.0)),
+        "unstable_flips": int(g("unstable_flips", 2)),
+        "fref_low_hz": float(g("fref_low_hz", 48.5)),
+        "fref_high_hz": float(g("fref_high_hz", 51.5)),
+        "fref_valid_min_hz": float(g("fref_valid_min_hz", 40.0)),
+        "fref_hold_max_sec": float(g("fref_hold_max_sec", 1800.0)),
+        # Один кадр опроса — стык переходов (номинал в кадре смены режима, ревью R14)
+        "frame_tol_sec": _joint_tol(cfg),
+        "rpm_min": cp["rpm_min"],
+        "freq_min": cp["freq_min"],
+        "carry_sec": cp["carry_sec"],
+        "rated_rpm": cp["rated_rpm"],
+        "rated_freq": cp["rated_freq"],
+        "rundown_max_sec": cp["rundown_max_sec"],
+        "nominal_rpm": d("RPM_UNDERSPEED", "rated_rpm", 1500.0),
+        "nominal_hz": d("LOAD_STEP", "freq_nominal_hz", 50.0),
+    }
+
+
+def _start_origin(
+    periods: list[dict], k: int, ctx_links: list | None, tf: datetime, tol: float = 2.0,
+) -> tuple[datetime, datetime | None] | None:
+    """(начало прокрутки, «схватил») пуска, которым начинается «Работа»
+    periods[k]; None — «Работа» не пуск.
+
+    Пуск — выход из стопа, подтверждённый фактом (_confirm_attempts):
+    - сама «Работа» подтвердила выход (confirmed_at; со склеенным куском
+      прогрева — начало прокрутки у склейки);
+    - «Работа» сразу за прогревом (ХХ), которым машина вышла из стопа: ДГУ №2
+      20.09 16:34 — 5 мин на 900 об/мин, затем номинал. Прогрев ищется в
+      периодах окна, а на голове окна — в звеньях контекста (живой движок
+      открывает окно на начале «Работы», прогрев уже закрыт); «схватил» тогда
+      ищется по оборотам с начала прогрева (преамбула окна).
+    Режим, начавшийся до окна (суточный рез), — не пуск: окно пуска через рез
+    не дописывается."""
+    p = periods[k]
+    if p.get("attempt") or p.get("attempt_pending"):
+        return None
+    p0 = _tz(p["state_start"])
+    if p0 < tf - timedelta(seconds=tol):
+        return None
+    if p.get("confirmed_at") is not None:
+        return p0, _tz(p["confirmed_at"])
+    chain: list[tuple[int | None, datetime, datetime | None, Any]] = []
+    for q in reversed(periods[:k]):
+        chain.append((int(q["value"]), _tz(q["state_start"]),
+                      _tz(q["state_end"]) if q.get("state_end") else None, q.get("confirmed_at")))
+    for lk in reversed(ctx_links or []):
+        chain.append((lk.run_state, _tz(lk.t_start), _tz(lk.t_end), None))
+    crank: datetime | None = None
+    fire: datetime | None = None
+    t_next = p0
+    for v, a, b, conf in chain:
+        if b is None or abs((b - t_next).total_seconds()) > tol:
+            return None
+        if v == 0:
+            return (crank, fire) if crank is not None else None
+        if v == 2:
+            crank, fire = a, (_tz(conf) if conf is not None else None)
+        elif v != 1:
+            return None
+        t_next = a
+    return None
+
+
+def _row_at(rows: list[dict], t: datetime) -> int:
+    """Индекс первой строки не раньше t. Строки адреса в окне идут по метке
+    (сортирует БД; на этом же стоят срезы _slice_by_addr)."""
+    return bisect.bisect_left(rows, _tz(t), key=lambda r: _tz(r["ts"]))
+
+
+def _iter_values(by_addr: dict[int, list[dict]], addr: int | None, a: datetime,
+                 b: datetime | None = None):
+    """Реальные показания регистра (ts, value) в [a, b) по порядку — без
+    forward-fill. Срез по метке: профиль пуска не разбирает всю историю окна
+    (живой движок пересчитывает его каждый цикл по окну до суток)."""
+    rows = (by_addr.get(addr) or []) if addr else []
+    j = len(rows) if b is None else _row_at(rows, b)
+    for k in range(_row_at(rows, a), j):
+        r = rows[k]
+        if r.get("is_carried_forward"):
+            continue
+        v = _fv(r)
+        if v is not None:
+            yield _tz(r["ts"]), v
+
+
+def _last_value(by_addr: dict[int, list[dict]], addr: int | None, t: datetime,
+                max_age: float | None = None) -> tuple[datetime, float] | None:
+    """Последнее реальное показание не позже t (не старше max_age)."""
+    rows = (by_addr.get(addr) or []) if addr else []
+    t = _tz(t)
+    k = bisect.bisect_right(rows, t, key=lambda r: _tz(r["ts"])) - 1
+    while k >= 0:
+        r = rows[k]
+        v = None if r.get("is_carried_forward") else _fv(r)
+        if v is not None:
+            ts = _tz(r["ts"])
+            if max_age is not None and (t - ts).total_seconds() > max_age:
+                return None
+            return ts, v
+        k -= 1
+    return None
+
+
+def _value_at(by_addr: dict[int, list[dict]], addr: int | None, t: datetime,
+              max_age: float | None = None,
+              held: tuple[datetime, float] | None = None) -> tuple[datetime, float] | None:
+    """Значение в силе на момент t: последнее реальное показание не позже t (не
+    старше max_age); строк до t в окне истории нет — удержанное перед окном
+    (посев движка, held), если оно не позже t и не старше max_age.
+
+    Ревью v5.1.23 (R7): живой движок открывает окно «Работы» на её начале, а
+    история — с преамбулой 300 с; у цепочки 0→2→3 прокрутка — начало прогрева,
+    и задание 30 Гц, записанное за секунду до неё, в окно не попадало."""
+    rows = (by_addr.get(addr) or []) if addr else []
+    t = _tz(t)
+    k = bisect.bisect_right(rows, t, key=lambda r: _tz(r["ts"])) - 1
+    while k >= 0:
+        r = rows[k]
+        v = None if r.get("is_carried_forward") else _fv(r)
+        if v is not None:
+            ts = _tz(r["ts"])
+            if max_age is not None and (t - ts).total_seconds() > max_age:
+                return None
+            return ts, v
+        k -= 1
+    if held is not None:
+        try:
+            ts, v = _tz(held[0]), float(held[1])
+        except (TypeError, ValueError, IndexError):
+            return None
+        if ts <= t and (max_age is None or (t - ts).total_seconds() <= max_age):
+            return ts, v
+    return None
+
+
+class _Series:
+    """Показания регистра по времени (value_series) с поиском по метке."""
+
+    def __init__(self, series: list[tuple[datetime, float]]):
+        self.s = series
+        self.ts = [t for t, _ in series]
+
+    @classmethod
+    def window(cls, by_addr: dict[int, list[dict]], addr: int | None,
+               a: datetime, b: datetime | None = None) -> "_Series":
+        """Показания в [a, b) — срез истории окна, а не вся она."""
+        return cls(list(_iter_values(by_addr, addr, a, b)))
+
+    def near(self, t: datetime, within: float) -> float | None:
+        """Ближайшее по времени показание в пределах ± within секунд."""
+        best: tuple[float, float] | None = None
+        i = bisect.bisect_left(self.ts, t - timedelta(seconds=within))
+        while i < len(self.s) and self.ts[i] <= t + timedelta(seconds=within):
+            dt = abs((self.ts[i] - t).total_seconds())
+            if best is None or dt < best[0]:
+                best = (dt, self.s[i][1])
+            i += 1
+        return best[1] if best else None
+
+    def span(self, a: datetime, b: datetime) -> list[tuple[datetime, float]]:
+        """Показания в [a, b)."""
+        return self.s[bisect.bisect_left(self.ts, a):bisect.bisect_left(self.ts, b)]
+
+
+# Оценка сверху времени разгона, который прошёл между отсчётами (ревью R14):
+# последний отсчёт до прокрутки дальше минуты — «пульс» регистра, не опрос
+_RATED_BOUND_MAX_SEC = 60.0
+
+
+def _start_window_end(
+    all_by_addr: dict[int, list[dict]], enum_periods: list[dict], cfg, prm: dict[str, Any],
+    crank: datetime, fire: datetime, rated: datetime | None, seg_end: datetime,
+    steady_to: datetime | None = None, low_from: datetime | None = None,
+) -> tuple[datetime, str, datetime | None]:
+    """Конец окна пуска — самое раннее из: выход на номинал (нет — «схватил»)
+    + after_rated_sec; замыкание автомата (GENSET_CB_POS = 1) после начала
+    прокрутки; конец режима seg_end; первый отсчёт оборотов ниже rundown_rpm
+    после номинала; сброс оборотов перед охлаждением (steady_to). low_from —
+    откуда искать выбег (продолжение после суточного реза: строки окна).
+    → (конец окна, причина, момент замыкания автомата или None)."""
+    rpm_a = cfg.role_to_addr("RPM")
+    base = rated or fire
+    t_cap = base + timedelta(seconds=prm["after_rated_sec"])
+    ends: list[tuple[datetime, str]] = [(t_cap, "rated_300"), (seg_end, "state_end")]
+    cb_addr = cfg.role_to_addr("GENSET_CB_POS")
+    cb_closed: datetime | None = None
+    if cb_addr is not None:
+        for p in sorted((p for p in enum_periods or [] if p.get("addr") == cb_addr
+                         and p.get("state_start") is not None),
+                        key=lambda p: _tz(p["state_start"])):
+            if _enum_value(p) == 1 and _tz(p["state_start"]) >= crank:
+                cb_closed = _tz(p["state_start"])
+                break
+    if cb_closed is not None:
+        ends.append((cb_closed, "breaker"))
+    if rated is not None:
+        # Позже номинал + 5 мин выбег конец окна уже не решает
+        _a = rated if low_from is None else max(rated, _tz(low_from))
+        low = next((t for t, v in _iter_values(all_by_addr, rpm_a, _a, min(seg_end, t_cap))
+                    if t > rated and v < prm["rundown_rpm"]), None)
+        if low is not None:
+            ends.append((low, "rundown"))
+        if steady_to is not None and _tz(steady_to) > rated:
+            ends.append((_tz(steady_to), "rundown"))
+    t_to, end_by = min(ends, key=lambda e: e[0])
+    return max(t_to, fire), end_by, cb_closed
+
+
+def _iso_dt(v: Any) -> datetime | None:
+    if v is None:
+        return None
+    try:
+        return _tz(v if isinstance(v, datetime) else datetime.fromisoformat(str(v)))
+    except (TypeError, ValueError):
+        return None
+
+
+def start_profile_carry(
+    prev: dict[str, Any] | None,
+    all_by_addr: dict[int, list[dict]],
+    enum_periods: list[dict],
+    cfg,
+    p0: datetime,
+    tf: datetime,
+    seg_end: datetime,
+    open_end: bool = False,
+    steady_to: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Профиль пуска «Работы»-предка у «Работы», продолжающейся через суточный
+    рез (ревью v5.1.23, R1). None — профиля нет или он не этой «Работы».
+
+    Окно пуска через рез не дописывается (план §2.1): профиль своей строки у
+    продолжения не считается, строки «Пуск» в отчёте нет. Но эпизод, начавшийся
+    в окне неустойчивого пуска до 09:00, после реза идёт мостом, и гейт новой
+    строки без профиля вправе был бы его снять — это запрет (В1, В3). Профиль
+    предка переносится как есть (факты окна до реза, unstable и причины);
+    окно, обрезанное резом (end_by state_end на начале окна), — с концом без
+    обрезки: номинал (нет — «схватил») + 5 мин, автомат, конец режима, выбег —
+    по строкам этого окна. Из уже загруженной истории окна, без чтения.
+    p0 — начало периода «Работы» (до окна), tf — начало окна (рез)."""
+    if not isinstance(prev, dict):
+        return None
+    tol = _joint_tol(cfg)
+    crank, t_prev = _iso_dt(prev.get("crank_at")), _iso_dt(prev.get("t_to"))
+    p0, tf, seg_end = _tz(p0), _tz(tf), _tz(seg_end)
+    # Профиль этой «Работы»: прокрутка не позже её начала, окно — не раньше
+    if crank is None or t_prev is None or crank > p0 + timedelta(seconds=tol) \
+            or t_prev < p0 - timedelta(seconds=tol):
+        return None
+    out = dict(prev, carried=True, cut_at=tf.isoformat(), open=False)
+    if prev.get("end_by") == "state_end" and abs((t_prev - tf).total_seconds()) <= tol:
+        prm = start_profile_params(cfg)
+        fire = _iso_dt(prev.get("fire_at")) or crank
+        rated = _iso_dt(prev.get("rated_at"))
+        if rated is None:
+            # До реза номинала не было — ищем в строках этого окна
+            for addr, thr in ((cfg.role_to_addr("RPM"), prm["rated_rpm"]),
+                              (cfg.role_to_addr("FREQUENCY"), prm["rated_freq"])):
+                hit = next((t for t, v in _iter_values(all_by_addr, addr, tf, rated or seg_end)
+                            if v >= thr), None)
+                if hit is not None and (rated is None or hit < rated):
+                    rated = hit
+        t_to, end_by, cb_closed = _start_window_end(all_by_addr, enum_periods, cfg, prm, crank,
+                                                    fire, rated, seg_end, steady_to, low_from=tf)
+        out.update(t_to=t_to.isoformat(), end_by=end_by,
+                   open=bool(open_end and end_by == "state_end"))
+        if cb_closed is not None and cb_closed <= t_to and not prev.get("breaker_closed_at"):
+            out["breaker_closed_at"] = cb_closed.isoformat()
+    return out
+
+
+def _r3(v: float | None) -> float | None:
+    """Показание для записи в JSON: без хвоста двоичной дроби (56,800000000000004)."""
+    return round(float(v), 3) if v is not None else None
+
+
+def _rng(vals: list[float]) -> list[float] | None:
+    return [_r3(min(vals)), _r3(max(vals))] if vals else None
+
+
+def start_profile(
+    all_by_addr: dict[int, list[dict]],
+    enum_periods: list[dict],
+    cfg,
+    crank: datetime,
+    fire: datetime | None,
+    seg_end: datetime,
+    open_end: bool = False,
+    steady_to: datetime | None = None,
+    held: dict[str, tuple[datetime, float]] | None = None,
+    gaps: list[dict] | None = None,
+) -> dict[str, Any] | None:
+    """Профиль пуска (v5.1.23, п.3, решение В1, вариант «б»).
+
+    Окно — от «схватил» (fire; нет — первый отсчёт оборотов > rpm_min или
+    частоты > freq_min с начала прокрутки) до самого раннего из: выход на
+    номинал + after_rated_sec; замыкание автомата (GENSET_CB_POS = 1); конец
+    режима (seg_end — и суточный рез: окно через него не дописывается); первый
+    отсчёт оборотов ниже rundown_rpm после номинала; сброс оборотов перед
+    охлаждением (steady_to, _steady_window: 16.10 09:32:32 — 1067 об/мин / 35 Гц
+    за секунду до «Охлаждения» удлинял раскачку на минуту).
+    Поля: выход на номинал за N с от начала прокрутки; обороты и частота
+    мин–макс от номинала (не вышел — от «схватил»); раскачка — от первого
+    выхода частоты за номинал ± swing_out_hz, подтверждённого оборотами того же
+    знака дальше swing_rpm_tol, до входа в номинал ± swing_in_hz после
+    последнего такого выхода; смены знака (выше / ниже номинал ± swing_in_hz);
+    задание частоты — с начала прокрутки (значение на её начало и строки окна):
+    последовательность, размах значений ≥ fref_valid_min_hz (range) и отдельно
+    по строкам после номинала (range_rated), наибольшее с прокрутки и
+    наименьшее после номинала; заброс — метки RPM_OVERSPEED в окне
+    (rpm_freq.over_marks); автомат, кВт, масло на начало.
+    Неустойчив (вариант «б»): заброс, раскачка ≥ unstable_swing_sec, смен
+    знака ≥ unstable_flips, задание ниже fref_low_hz после номинала или выше
+    fref_high_hz с начала прокрутки. open_end — режим идёт (живой край окна):
+    окно пуска ещё растёт, профиль пересчитывается каждый цикл.
+    Из уже загруженной истории окна, срезами по метке — без чтения и без
+    разбора всего окна. None — выключено в KB или оборотов и частоты нет."""
+    prm = start_profile_params(cfg)
+    if not prm["enabled"]:
+        return None
+    crank, seg_end = _tz(crank), _tz(seg_end)
+    rpm_a, frq_a = cfg.role_to_addr("RPM"), cfg.role_to_addr("FREQUENCY")
+    _hd = held or {}
+    # Поиск «схватил» и номинала — до первого попадания, без разбора всего окна.
+    # Значение на начало прокрутки — и удержанное перед окном (ревью R7: окно
+    # живого движка начинается с «Работы», прогрев — до преамбулы истории)
+    if fire is None:
+        hits = []
+        for addr, thr, role in ((rpm_a, prm["rpm_min"], "RPM"), (frq_a, prm["freq_min"], "FREQUENCY")):
+            c = _value_at(all_by_addr, addr, crank, prm["carry_sec"], _hd.get(role))
+            if c is not None and c[1] > thr:
+                hits.append(crank)
+                continue
+            hit = next((t for t, v in _iter_values(all_by_addr, addr, crank, seg_end) if v > thr), None)
+            if hit is not None:
+                hits.append(hit)
+        fire = min(hits) if hits else None
+    if fire is None:
+        return None
+    fire = max(_tz(fire), crank)
+
+    # Выход на номинал: обороты ≥ рабочих или частота ≥ рабочей (как у рабочей
+    # части «Работы», _steady_window)
+    rated: datetime | None = None
+    for addr, thr in ((rpm_a, prm["rated_rpm"]), (frq_a, prm["rated_freq"])):
+        hit = next((t for t, v in _iter_values(all_by_addr, addr, fire, rated or seg_end) if v >= thr), None)
+        if hit is not None and (rated is None or hit < rated):
+            rated = hit
+    base = rated or fire
+
+    # Конец окна — самое раннее из номинал + 5 мин, автомата, конца режима, выбега
+    t_to, end_by, cb_closed = _start_window_end(all_by_addr, enum_periods, cfg, prm, crank, fire,
+                                                rated, seg_end, steady_to)
+
+    # Номинал в одном кадре опроса со сменой режима (ревью R14): разгон прошёл
+    # между отсчётами — «за 0 с» была бы ложной точностью. Оценка сверху — от
+    # последнего отсчёта оборотов или частоты до прокрутки (не дальше минуты)
+    rated_first, rated_bound = False, None
+    if rated is not None and (rated - crank).total_seconds() <= prm["frame_tol_sec"] and not any(
+            True for addr in (rpm_a, frq_a) for _ in _iter_values(all_by_addr, addr, crank, rated)):
+        rated_first = True
+        _before = [x for x in (_value_at(all_by_addr, a, crank - timedelta(microseconds=1), None, _hd.get(r))
+                               for a, r in ((rpm_a, "RPM"), (frq_a, "FREQUENCY"))) if x is not None]
+        if _before:
+            _b = (rated - max(ts for ts, _ in _before)).total_seconds()
+            if 0 < _b <= _RATED_BOUND_MAX_SEC:
+                rated_bound = round(_b, 1)
+
+    # Ряды окна пуска: обороты с запасом на поиск ближайшего (± swing_pair_sec)
+    _pair = timedelta(seconds=prm["swing_pair_sec"])
+    rpm = _Series.window(all_by_addr, rpm_a, crank - _pair, t_to + _pair)
+    freq = _Series.window(all_by_addr, frq_a, base, t_to)
+    rpm_w, freq_w = rpm.span(base, t_to), freq.s
+    out: dict[str, Any] = {
+        "v": 1,
+        "crank_at": crank.isoformat(),
+        "fire_at": fire.isoformat(),
+        "rated_at": rated.isoformat() if rated else None,
+        "rated_sec": round((rated - crank).total_seconds(), 1) if rated else None,
+        # Номинал — в кадре смены режима: разгон не виден (ревью R14)
+        "rated_first": rated_first,
+        "rated_bound_sec": rated_bound,
+        "t_to": t_to.isoformat(),
+        "end_by": end_by,
+        "open": bool(open_end and end_by == "state_end"),
+        "rpm": _rng([v for _, v in rpm_w]),
+        "freq": _rng([v for _, v in freq_w]),
+        "swing_sec": 0.0, "swing_from": None, "swing_to": None, "flips": 0,
+    }
+
+    # Раскачка и смены знака — только после выхода на номинал (разгон — не раскачка)
+    if rated is not None:
+        f0, r0 = prm["nominal_hz"], prm["nominal_rpm"]
+        outs: list[datetime] = []
+        side = flips = 0
+        for t, v in freq_w:
+            dev = v - f0
+            if abs(dev) > prm["swing_out_hz"]:
+                r = rpm.near(t, prm["swing_pair_sec"])
+                if r is not None and abs(r - r0) > prm["swing_rpm_tol"] and (dev > 0) == (r > r0):
+                    outs.append(t)
+            sd = 1 if dev > prm["swing_in_hz"] else (-1 if dev < -prm["swing_in_hz"] else 0)
+            if sd and side and sd != side:
+                flips += 1
+            if sd:
+                side = sd
+        out["flips"] = flips
+        if outs:
+            back = next((t for t, v in freq_w if t > outs[-1] and abs(v - f0) <= prm["swing_in_hz"]), t_to)
+            out.update(swing_sec=round((back - outs[0]).total_seconds(), 1),
+                       swing_from=outs[0].isoformat(), swing_to=back.isoformat())
+
+    # Задание частоты: значение на начало прокрутки и строки окна
+    fr_a = cfg.role_to_addr("FREQ_REFERENCE")
+    if fr_a is not None:
+        # (момент, значение, в силе на начало прокрутки)
+        pts: list[tuple[datetime, float, bool]] = []
+        h0 = _value_at(all_by_addr, fr_a, crank, prm["fref_hold_max_sec"], _hd.get("FREQ_REFERENCE"))
+        if h0 is not None:
+            pts.append((crank, h0[1], True))
+        pts += [(t, v, False) for t, v in _iter_values(all_by_addr, fr_a, crank, t_to) if t > crank]
+        if pts:
+            seq: list[float] = []
+            for _, v, _h in pts:
+                if v > 0 and (not seq or abs(seq[-1] - v) > 1e-6):
+                    seq.append(_r3(v))
+            valid = [x for x in pts if x[1] >= prm["fref_valid_min_hz"]]
+            # Размах — полный с начала прокрутки и отдельно по строкам после номинала
+            fref: dict[str, Any] = {"seq": seq[:8], "seq_n": len(seq),
+                                    "range": _rng([v for _, v, _h in valid]),
+                                    "range_rated": None, "high": None, "low": None}
+            if valid:
+                th, vh, held0 = max(valid, key=lambda x: x[1])
+                if vh > prm["fref_high_hz"]:
+                    # На прокрутке — значение на её начало или строка до «схватил»
+                    stage = ("crank" if held0 or th < fire else
+                             "ramp" if rated is None or th < rated else "rated")
+                    fref["high"] = {"v": _r3(vh), "t": th.isoformat(), "stage": stage,
+                                    "rpm": None if stage == "crank" else rpm.near(th, prm["swing_pair_sec"])}
+            if rated is not None:
+                after = [(t, v) for t, v, _h in valid if t >= rated and not _h]
+                fref["range_rated"] = _rng([v for _, v in after])
+                if after:
+                    tl, vl = min(after, key=lambda x: x[1])
+                    if vl < prm["fref_low_hz"]:
+                        fref["low"] = {"v": _r3(vl), "t": tl.isoformat(),
+                                       "rpm": rpm.near(tl, prm["swing_pair_sec"])}
+            out["fref"] = fref
+
+    # Заброс — те же метки, что у RPM_OVERSPEED (обороты и k·f_max опроса)
+    out["overspeed"] = None
+    try:
+        from .rpm_freq import build_poll, over_marks, overspeed_params
+        oprm = overspeed_params(cfg)
+        if oprm is not None:
+            rr = rpm.span(fire, t_to)
+            if any(v > oprm["threshold_rpm"] for _, v in rr):
+                # Следующий отсчёт — граница окна опроса последнего
+                _nx = next(_iter_values(all_by_addr, rpm_a, t_to), None)
+                nxt = [_nx] if _nx is not None else []
+                poll = build_poll(all_by_addr, cfg, oprm, (held or {}).get("FREQUENCY"), gaps)
+                bad = [(t, v, fm) for t, v, fm, b in over_marks(rr + nxt, poll, oprm)
+                       if b and t < t_to]
+                if bad:
+                    t, v, fm = max(bad, key=lambda x: x[1])
+                    out["overspeed"] = {"rpm": _r3(v), "hz": _r3(fm), "t": t.isoformat(),
+                                        "threshold_rpm": _r3(oprm["threshold_rpm"])}  # 1575,0000375 → 1575
+    except Exception:
+        logger.warning("Заброс оборотов в профиле пуска не оценён", exc_info=True)
+
+    # Автомат, нагрузка, масло
+    out["breaker_closed_at"] = cb_closed.isoformat() if cb_closed is not None and cb_closed <= t_to else None
+    kw = [v for _, v in _iter_values(all_by_addr, cfg.role_to_addr("ACTIVE_POWER_TOTAL"), fire, t_to)]
+    out["kw_max"] = _r3(max(kw)) if kw else None
+    # Масло на начало прокрутки: последняя строка до неё (строк до неё в окне
+    # нет — удержанное перед окном, если оно не позже прокрутки, ревью R7),
+    # иначе первая в окне, иначе удержанное перед окном (посев)
+    oil_a = cfg.role_to_addr("OIL_TEMP")
+    o = (_value_at(all_by_addr, oil_a, crank, None, _hd.get("OIL_TEMP"))
+         or next(_iter_values(all_by_addr, oil_a, crank, t_to), None))
+    if o is None and _hd.get("OIL_TEMP") is not None:
+        o = _hd["OIL_TEMP"]
+    out["oil_temp"] = round(o[1], 1) if o is not None else None
+
+    # Неустойчивый пуск — вариант «б» (В1)
+    reasons: list[str] = []
+    if out["overspeed"]:
+        reasons.append("overspeed")
+    if out["swing_sec"] >= prm["unstable_swing_sec"]:
+        reasons.append("swing")
+    if out["flips"] >= prm["unstable_flips"]:
+        reasons.append("flips")
+    fz = out.get("fref") or {}
+    if fz.get("low"):
+        reasons.append("fref_low")
+    if fz.get("high"):
+        reasons.append("fref_high")
+    out["unstable"] = bool(reasons)
+    out["reasons"] = reasons
+    out["limits"] = {k: prm[k] for k in ("unstable_swing_sec", "unstable_flips",
+                                         "fref_low_hz", "fref_high_hz")}
+    return out
+
+
 def segment(
     enum_periods: list[dict[str, Any]],
     history: list[dict[str, Any]],
@@ -2632,6 +3299,8 @@ def segment(
                                     # held/held_gaps — удержанные значения (v5.1.21, П10)
     confirm_to: datetime | None = None,  # докуда решать исход попытки за краем окна (v5.1.16)
     live_edge: bool = False,  # ts_to — живой край открытого окна (v5.1.21, правило B)
+    start_carry: dict | None = None,  # профиль пуска «Работы»-предка, закрытой
+                                      # суточным резом (ревью v5.1.23, R1)
 ) -> list[Segment]:
     """Главная точка входа: преобразует сырые данные в список сегментов.
 
@@ -2645,6 +3314,11 @@ def segment(
     отсчёт оборотов без следующего правило B (dip_needs_freq: false) пока не
     учитывает. Закрытое окно (рез, перечитка) — False: будущих строк не будет
     (ревью v5.1.21, analytics-3).
+
+    start_carry: профиль пуска «Работы», закрытой суточным резом перед окном
+    (подсказка предка движка). «Работа», продолжающаяся с него на голове окна,
+    получает его в start_profile_prev — для запрета снятия гейтом эпизода,
+    начавшегося в окне неустойчивого пуска до реза (ревью v5.1.23, R1).
     """
     import copy as _copy
     tf = _tz(ts_from)
@@ -2715,10 +3389,14 @@ def segment(
     # Выход из стопа подтверждается фактом (v5.1.16). Режим перед окном — из
     # контекста переходов: окно живого движка начинается ровно на попытке
     _prev_rs: int | None = None
+    # Звенья перед окном — и прогрев, которым машина вышла из стопа перед
+    # «Работой» на голове окна (профиль пуска, v5.1.23)
+    _ctx_links: list = []
     if transition_ctx:
         from .transitions import ctx_for_window
         _ctx = ctx_for_window(transition_ctx, tf,
                               float(cfg.seg("transitions", "joint_tol_sec", default=2.0)))
+        _ctx_links = list(_ctx or [])
         # Задержка пуска выход из стопа не прерывает: режим до неё
         for _lk in reversed(_ctx or []):
             if _lk.run_state is not None and int(_lk.run_state) != 1:
@@ -2735,6 +3413,7 @@ def segment(
         confirm_to=confirm_to,
         code_periods=state_periods.get(cfg.role_to_addr("LAST_FAULT_CODE")) or [],
         carry_glue=_carry,
+        enum_periods=enum_periods,
     )
 
     segments: list[Segment] = []
@@ -2895,10 +3574,33 @@ def segment(
                 logger.warning("Лента отсчётов попытки не снята", exc_info=True)
 
         # L2-подсегменты
+        start_prof: dict[str, Any] | None = None
+        start_prev: dict[str, Any] | None = None
         if run_state == 3:
             _nxt = int(_next_period["value"]) if _next_period is not None else None
             _steady = _steady_window(all_by_addr, cfg, seg_start, seg_end, _nxt,
                                      attempt_pending)
+            # Профиль пуска (v5.1.23, п.3): «Работа» с подтверждённым выходом из
+            # стопа. Из истории окна, без чтения; сбой — без профиля, нарезка идёт
+            if not attempt_pending:
+                try:
+                    _org = _start_origin(run_state_periods, k_period, _ctx_links, tf,
+                                         float(cfg.seg("transitions", "joint_tol_sec", default=2.0)))
+                    _st_to = (_steady[1] if isinstance(_steady, tuple) and _steady[1] is not None
+                              and _steady[1] < _tz(seg_end) else None)
+                    if _org is not None:
+                        start_prof = start_profile(
+                            all_by_addr, enum_periods, cfg, _org[0], _org[1], seg_end,
+                            open_end=live_edge and p_end_raw is None, steady_to=_st_to,
+                            held=_held, gaps=_held_gaps)
+                    elif start_carry is not None and p_start < tf:
+                        # «Работа» идёт через суточный рез: профиль предка — для
+                        # запрета снятия (ревью R1); окно пуска не дописывается
+                        start_prev = start_profile_carry(
+                            start_carry, all_by_addr, enum_periods, cfg, p_start, tf, seg_end,
+                            open_end=live_edge and p_end_raw is None, steady_to=_st_to)
+                except Exception:
+                    logger.warning("Профиль пуска сегмента %s не посчитан", seg_start, exc_info=True)
             # Удержанные значения на начало сегмента (v5.1.21): последняя строка
             # до него в окне истории, иначе посев перед окном (П10). Сбой — без них
             try:
@@ -3008,6 +3710,8 @@ def segment(
             closed_by_trip=closed_by_trip,
             engine_hours_end=engine_hours_end,
             fall_trace=fall_trace,
+            start_profile=start_prof,
+            start_profile_prev=start_prev,
         )
         segments.append(seg)
 

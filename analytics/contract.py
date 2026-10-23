@@ -459,9 +459,23 @@ class Segment:
     # пишется — у оборванного аварией нестопового сегмента лента лежит в
     # closed_by_trip["trace"] (переживает рестарт через подсказку предка)
     fall_trace: Optional[dict[str, Any]] = None
+    # Профиль пуска «Работы» с подтверждённым выходом из стопа (v5.1.23, п.3,
+    # решение В1): окно от «схватил» до номинал + 5 мин / замыкания автомата /
+    # конца режима / выбега; выход на номинал, обороты и частота, раскачка,
+    # смены знака, задание частоты, автомат, кВт, масло, unstable и причины
+    # (segmenter.start_profile). Пишется в characteristics_json (и открытой
+    # строки: запрет снятия гейтом start_unstable); None — не пуск или сегмент
+    # до v5.1.23 — ключа в словаре нет
+    start_profile: Optional[dict[str, Any]] = None
+    # Профиль пуска «Работы»-предка, закрытой суточным резом, у «Работы», идущей
+    # дальше без стопа (ревью v5.1.23, R1; segmenter.start_profile_carry): окно
+    # пуска через рез не дописывается, строки «Пуск» в отчёте нет, но эпизод,
+    # начавшийся в окне неустойчивого пуска до реза, гейт снимать не вправе.
+    # Окно — без обрезки резом (carried, cut_at); None — ключа в словаре нет
+    start_profile_prev: Optional[dict[str, Any]] = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d = {
             "id": self.id,
             "router_sn": self.router_sn,
             "equip_type": self.equip_type,
@@ -488,3 +502,8 @@ class Segment:
             "closed_by_trip": self.closed_by_trip,
             "engine_hours_end": self.engine_hours_end,
         }
+        if self.start_profile is not None:
+            d["start_profile"] = self.start_profile
+        if self.start_profile_prev is not None:
+            d["start_profile_prev"] = self.start_profile_prev
+        return d

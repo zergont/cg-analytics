@@ -16,7 +16,8 @@
 
 Решение — по трём независимым сигналам (детерминированно из enum-периодов):
   1. RUN_STATE (40011): прошёл ли cooldown 4/5 перед остановом;
-  2. RunCommand (40599): прямой Работа→EmergencyStop vs через фазу «Стоп»;
+  2. RunCommand (40599): «Работа» снята сразу (3→0, «нет команды») vs через
+     фазу «Стоп»;
   3. тип неисправности (40013): Shutdown(4) vs ShutdownWithCooldown(3).
 Согласие сигналов даёт уверенность; конфликт помечается (флаг неоднозначности).
 
@@ -32,7 +33,7 @@ from typing import Any
 # enum-значения (PCC3300)
 _RS_COOLDOWN = (4, 5)          # RUN_STATE: Cooldown/StopDelay, CooldownatIdle
 _RS_STOP = 0                   # RUN_STATE: Stop
-_RC_EMERGENCY_STOP = 0         # 40599: EmergencyStop
+_RC_EMERGENCY_STOP = 0         # 40599: «нет команды» (в каталоге было EmergencyStop, В5)
 _RC_STOP = 1                   # 40599: Stop
 _FT_SHUTDOWN = 4               # 40013: Shutdown (немедленный)
 _FT_SHUTDOWN_COOLDOWN = 3      # 40013: ShutdownwithCooldown (контролируемый)
@@ -128,7 +129,7 @@ def classify_stop_character(
     )
     rs_before = _value_at(rs, stop_ts - timedelta(seconds=1))
 
-    # 2) RunCommand: через «Стоп» или прямой EmergencyStop
+    # 2) RunCommand: через «Стоп» или «Работа» снята сразу (3→0, «нет команды»)
     rc_at = _value_at(rc, stop_ts)
     had_stop_cmd = any(
         win_from <= _tz(p["state_start"]) <= stop_ts and p.get("value") == _RC_STOP
@@ -151,7 +152,10 @@ def classify_stop_character(
     else:
         controlled.append("RUN_STATE через cooldown")
     if rc_path == "direct_estop":
-        immediate.append("RunCommand прямой EmergencyStop")
+        # v5.1.23 (решение В5): 40599 = 0 — «нет команды», а не кнопка
+        # аварийного останова; голос остаётся — он отличает аварийное снятие
+        # 3→0 от операторского 3→1→0
+        immediate.append("команда «Работа» снята сразу (3→0), без «Стоп»")
     elif rc_path == "via_stop":
         controlled.append("RunCommand через «Стоп»")
     if fault_type == _FT_SHUTDOWN:

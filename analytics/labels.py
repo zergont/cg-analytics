@@ -11,7 +11,8 @@
 
 Одна функция на все места — календарь, отчёт, строку статуса, разбор аварии:
 плашка неудачной попытки — это стоп с исходом, а подпись говорит, что было
-до него («Неудачная работа · Авария»). Решение владельца 13.10.2026.
+до него. Решение владельца 13.10.2026 («Неудачная работа · Авария» — по режиму
+панели), с v5.1.23 — по прокрутке («Неудачный пуск · Авария», решение В4).
 
 v5.1.22: местное время подписей (fmt_local, tz_label — «МСК» во всех входах и
 фактах, P1-6) и подпись снятия гейтом с источником (gate_supp_label, P1-1);
@@ -19,32 +20,59 @@ v5.1.22: местное время подписей (fmt_local, tz_label — «�
 (fault_code_close_text, P1-2, решение В7), сегмент, оборванный аварийным
 остановом (run_trip_name / run_trip_text, P1-3, решение В3), наработка
 строкой шапки (engine_hours_text).
+
+v5.1.23: тексты профиля пуска (решение В1) — строка «Пуск» отчёта, акта и
+входа гейта (start_profile_text), пометка «на пуске» в сводке
+(start_note_text), причины неустойчивости (start_reasons_ru), окно пуска
+(start_window). Подпись плашки попытки по прокрутке, а не по режиму панели
+(attempt_label, решение В4), факты попытки — только наблюдаемое
+(attempt_facts_ru); метка значения enum-регистра — KB поверх каталога
+(enum_label), имя неисправности панели по привязанному коду
+(panel_fault_name, решение В5).
 """
 from __future__ import annotations
 
 import re
 from typing import Any
 
-# Попытка какого режима не подтвердилась (по старшему в цепочке)
-_ATTEMPT_HEAD = {2: "Неудачный прогрев", 3: "Неудачная работа"}
 # Пока исход неизвестен — режим по сигналу панели
 _PENDING_HEAD = {1: "Задержка пуска", 2: "Прогрев", 3: "Работа"}
+# Прокрутка стартером: обороты выше — коленвал вращали. Умолчание ключа KB
+# transition_confirm.crank_rpm_min — для старых записей без поля cranked
+CRANK_RPM_MIN = 50.0
+
+
+def attempt_cranked(attempt: dict[str, Any] | None) -> bool | None:
+    """Была ли прокрутка на попытке: поле cranked (с v5.1.23), у старой записи —
+    по rpm_max фактов; None — оборотов нет, не знаем."""
+    if not isinstance(attempt, dict):
+        return None
+    if isinstance(attempt.get("cranked"), bool):
+        return attempt["cranked"]
+    rpm = (attempt.get("facts") or {}).get("rpm_max")
+    if isinstance(rpm, (int, float)):
+        return float(rpm) > CRANK_RPM_MIN
+    return None
 
 
 def attempt_label(attempt: dict[str, Any] | None) -> str | None:
-    """«Неудачная работа · Авария» / «Неудачный прогрев · Стоп» / … ; None — не попытка."""
+    """«Неудачный пуск · Стоп/Авария» / «Отменённый пуск · Стоп»; None — не попытка.
+
+    v5.1.23 (решение В4, пересмотр решения 13.10): первое слово — по прокрутке,
+    а не по режиму панели. У PCC режим не физичен (0→3 ставится сразу при
+    прокрутке), а на любой плашке обороты не выше 250 — «работы» не было.
+    Прокрутка выше crank_rpm_min без вспышки, код панели или авария — «Неудачный
+    пуск»; ни прокрутки, ни кода, ни аварии — «Отменённый пуск · Стоп».
+    Переключатель 40010 и команда 40599 подпись не решают: 40010 падает в
+    «Выкл» и на паузе циклической прокрутки. Оборотов нет (None) — «Неудачный
+    пуск»: что пуск отменили, не видно. Второе слово — исход (вид стопа).
+    """
     if not isinstance(attempt, dict):
         return None
-    try:
-        fs = int(attempt.get("from_state") or 3)
-    except (TypeError, ValueError):
-        fs = 3
     emergency = attempt.get("outcome") == "EMERGENCY"
-    if fs == 1:
-        # Пуск снят на задержке — не неудача машины; с аварией — неудачный пуск
-        head = "Неудачный пуск" if emergency else "Отменённый пуск"
-    else:
-        head = _ATTEMPT_HEAD.get(fs, "Неудачный пуск")
+    cancelled = (attempt_cranked(attempt) is False and not attempt.get("codes")
+                 and not emergency)
+    head = "Отменённый пуск" if cancelled else "Неудачный пуск"
     return f"{head} · {'Авария' if emergency else 'Стоп'}"
 
 
@@ -118,6 +146,7 @@ ROLE_LABELS: dict[str, str] = {
     "OIL_TEMP": "Температура масла",
     "OIL_PRESS": "Давление масла",
     "FREQUENCY": "Частота генератора",
+    "FREQ_REFERENCE": "Задание частоты (регулятор)",
     "BATTERY_V": "Напряжение АКБ",
     "ECM_BATTERY_V": "Питание ЭБУ",
     "INTAKE_MANIFOLD_TEMP": "Температура воздуха на впуске",
@@ -181,22 +210,131 @@ def fmt_number(v: Any, decimals: int | None = None) -> str:
     return txt.replace(".", ",")
 
 
-def attempt_facts_ru(attempt: dict[str, Any] | None) -> str | None:
-    """Факты попытки одной строкой: что не подтвердило режим."""
+def attempt_facts_ru(attempt: dict[str, Any] | None, tz=None, codes: bool = False) -> str | None:
+    """Факты попытки одной строкой — только наблюдаемое (v5.1.23, решение В4).
+
+    «прокрутка 20 с до 189 об/мин без вспышки, АКБ до 21,5 В, переключатель
+    «Выкл» 09:27:43, команда работы — «Работа»»: длительность и обороты
+    прокрутки, минимум АКБ, переключатель 40010 и команда 40599 в кадре падения
+    (сменились в нём — со временем, «и» при одном моменте), codes=True — коды
+    панели попытки. Без выводов «прервал оператор» / «пауза цикла»: 40010
+    падает в «Выкл» и на паузе циклической прокрутки. Коды по умолчанию не
+    печатаются: у заключения плашки и серии аварий они своей строкой.
+    Запись до v5.1.23 (без полей прокрутки и сигналов) — прежний текст.
+    """
     if not isinstance(attempt, dict):
         return None
     f = attempt.get("facts") or {}
-    parts = []
     rpm = f.get("rpm_max")
-    parts.append(f"обороты до {rpm:.0f} об/мин" if isinstance(rpm, (int, float))
-                 else "обороты неизвестны")
-    fq = f.get("freq_max")
-    parts.append(f"частота до {fq:.1f} Гц" if isinstance(fq, (int, float)) and fq > 0
-                 else "частоты нет")
-    parts.append("«Готов к нагрузке» был" if f.get("ready") else "«Готов к нагрузке» не выставлен")
     dur = attempt.get("duration_sec")
-    lead = (f"попытка {dur:.0f} с" if isinstance(dur, (int, float)) else "попытка")
-    return f"{lead}: " + ", ".join(parts)
+    if "cranked" not in attempt:
+        parts = []
+        parts.append(f"обороты до {rpm:.0f} об/мин" if isinstance(rpm, (int, float))
+                     else "обороты неизвестны")
+        fq = f.get("freq_max")
+        parts.append(f"частота до {fq:.1f} Гц" if isinstance(fq, (int, float)) and fq > 0
+                     else "частоты нет")
+        parts.append("«Готов к нагрузке» был" if f.get("ready") else "«Готов к нагрузке» не выставлен")
+        lead = (f"попытка {dur:.0f} с" if isinstance(dur, (int, float)) else "попытка")
+        return f"{lead}: " + ", ".join(parts)
+
+    parts: list[str] = []
+    cranked = attempt_cranked(attempt)
+    sec = attempt.get("crank_sec")
+    if cranked:
+        parts.append("прокрутка" + (f" {sec:.0f} с" if isinstance(sec, (int, float)) else "")
+                     + f" до {rpm:.0f} об/мин без вспышки")
+    else:
+        lead = f"попытка {dur:.0f} с" if isinstance(dur, (int, float)) else "попытка"
+        if not isinstance(rpm, (int, float)):
+            parts.append(f"{lead}, обороты неизвестны")
+        else:
+            parts.append(f"{lead} без прокрутки (обороты "
+                         + (f"до {rpm:.0f} об/мин)" if rpm > 0 else "0)"))
+    fq = f.get("freq_max")
+    if isinstance(fq, (int, float)) and fq > 0:
+        parts.append(f"частота до {fmt_number(fq, 1)} Гц")
+    if f.get("ready"):
+        parts.append("«Готов к нагрузке» был")
+    bv = attempt.get("battery_min_v")
+    if isinstance(bv, (int, float)):
+        parts.append(f"АКБ до {bv:.1f} В".replace(".", ","))
+    parts += _attempt_signals_ru(attempt.get("switch"), attempt.get("run_command"), tz)
+    if codes:
+        names = attempt.get("code_names") or {}
+        for c in attempt.get("codes") or []:
+            parts.append(f"код {_code_ref(c, names.get(str(c)))}")
+    return ", ".join(parts)
+
+
+def _attempt_signals_ru(sw: Any, rc: Any, tz=None) -> list[str]:
+    """Переключатель и команда работы в кадре падения попытки: сменились в нём —
+    «переключатель «Выкл» 09:27:43» (оба в один момент — «переключатель «Выкл»
+    и команда работы «Стоп» 09:28:02»), держались — «команда работы — «Работа»»."""
+    sw = sw if isinstance(sw, dict) else None
+    rc = rc if isinstance(rc, dict) else None
+
+    def lab(x: dict) -> str:
+        return str(x.get("label") or x.get("value"))
+
+    sw_at = fmt_local(sw.get("at"), tz) if sw and sw.get("at") else None
+    rc_at = fmt_local(rc.get("at"), tz) if rc and rc.get("at") else None
+    if sw_at and rc_at and sw_at == rc_at:
+        return [f"переключатель «{lab(sw)}» и команда работы «{lab(rc)}» {sw_at}"]
+    out: list[str] = []
+    if sw:
+        out.append(f"переключатель «{lab(sw)}» {sw_at}" if sw_at else f"переключатель — «{lab(sw)}»")
+    if rc:
+        out.append(f"команда работы «{lab(rc)}» {rc_at}" if rc_at else f"команда работы — «{lab(rc)}»")
+    return out
+
+
+def enum_label(meta: dict[str, Any] | None, value: Any, catalog_label: Any = None,
+               fallback_value: bool = True) -> str | None:
+    """Метка значения enum-регистра (v5.1.23, решение В5): labels_ru из KB
+    (mapping.yaml) поверх каталога БД телеметрии; каталог — labels_ru, затем
+    labels, затем само значение (так их сливает analytics.source).
+    fallback_value=False — без метки KB и каталога None, а не значение (лента
+    событий печатает метку как есть, как до v5.1.23)."""
+    kb = (meta or {}).get("labels_ru") if isinstance(meta, dict) else None
+    if isinstance(kb, dict) and value is not None:
+        for k, v in kb.items():
+            try:
+                if int(k) == int(value):
+                    return str(v)
+            except (TypeError, ValueError):
+                if str(k) == str(value):
+                    return str(v)
+    if catalog_label is not None and str(catalog_label) != "":
+        return str(catalog_label)
+    return None if value is None or not fallback_value else str(value)
+
+
+def panel_fault_name(values: dict[str, Any] | None, code_name=None) -> str | None:
+    """Имя неисправности панели (v5.1.23, решение В5): код привязан к биту
+    (values.panel_code) — имя кода из справочника KB и «(код N)»: «Разнос
+    двигателя — превышение частоты вращения (код 234)». Имя кода — values.
+    code_name (детекция с v5.1.23), иначе code_name(код) — справочник по вызову
+    (эпизод, открытый до v5.1.23). Кода в справочнике нет — имя бита и «(код N)»
+    (у записи v5.1.23 — values.bit_name). Код не привязан или старая запись без
+    имени кода — values.fault_name, как раньше. Ключи эпизодов (addr/bit) те же."""
+    if not isinstance(values, dict):
+        return None
+    base = values.get("fault_name")
+    code = values.get("panel_code")
+    if code is None:
+        return base
+    cname = values.get("code_name")
+    if not cname and code_name is not None:
+        try:
+            cname = code_name(code)
+        except Exception:
+            cname = None
+    if cname:
+        return f"{cname} (код {code})"
+    if "bit_name" in values:
+        return f"{values.get('bit_name') or base} (код {code})"
+    return base
 
 
 # ── Местное время в подписях (v5.1.22, P1-6) ─────────────────────────────────
@@ -427,6 +565,195 @@ def shutdown_cleared_how(mttr: dict[str, Any] | None) -> str:
         return ("панель сняла аварию (аварийной маски не было — авария по типу "
                 "неисправности 40013)")
     return "панель сняла аварию"
+
+
+# ── Профиль пуска (v5.1.23, п.3, решение В1) ─────────────────────────────────
+# Одни тексты на все места: строка «Пуск» отчёта, пометка «на пуске» в сводке,
+# строка входа гейта и акта, причина запрета снятия start_unstable
+
+_START_STAGE = {"crank": "на прокрутке", "ramp": "на разгоне", "rated": "после выхода на номинал"}
+# Замечания оборотов, к которым относится пуск: пометка «на пуске» в сводке и
+# запрет снятия гейтом start_unstable (online.status_assembler)
+START_SCENARIOS = frozenset({"RPM_UNDERSPEED", "RPM_OVERSPEED"})
+
+
+def _hz(v: Any) -> str:
+    return fmt_number(v, 1)
+
+
+def _rpm(v: Any) -> str:
+    return fmt_number(v, 0)
+
+
+def _span_txt(rng: Any, unit: str, fmt) -> str | None:
+    if not isinstance(rng, (list, tuple)) or len(rng) != 2 or rng[0] is None:
+        return None
+    lo, hi = fmt(rng[0]), fmt(rng[1])
+    return f"{lo} {unit}" if lo == hi else f"{lo}–{hi} {unit}"
+
+
+def _flips_txt(n: int) -> str:
+    n = int(n)
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} смена знака"
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return f"{n} смены знака"
+    return f"{n} смен знака"
+
+
+def start_fref_text(sp: dict[str, Any] | None) -> str | None:
+    """«задание 30,6 → 55 Гц» — до трёх разных значений с начала прокрутки
+    (последовательность, с холостым ходом 30), иначе размах значений номинала
+    «задание 48,6–50,7 Гц». None — задания в данных нет."""
+    f = (sp or {}).get("fref") if isinstance(sp, dict) else None
+    if not isinstance(f, dict):
+        return None
+    seq = [x for x in f.get("seq") or [] if isinstance(x, (int, float))]
+    shown: list[str] = []
+    for x in seq:
+        t = _hz(x)
+        if not shown or shown[-1] != t:
+            shown.append(t)
+    if shown and len(shown) <= 3 and (f.get("seq_n") or len(seq)) <= 3:
+        return f"задание {' → '.join(shown)} Гц"
+    rng = _span_txt(f.get("range"), "Гц", _hz)
+    if rng:
+        return f"задание {rng}"
+    return f"задание {' → '.join(shown[:3])} Гц" if shown else None
+
+
+def start_reasons_ru(sp: dict[str, Any] | None) -> list[str]:
+    """Почему пуск неустойчив (вариант «б»): «заброс 1696 об/мин (56,8 Гц)»,
+    «раскачка 1 мин 50 с, 6 смен знака», «на разгоне задание 55 Гц при 1294
+    об/мин», «задание до 42,3 Гц после выхода на номинал»."""
+    if not isinstance(sp, dict):
+        return []
+    rs = sp.get("reasons") or []
+    out: list[str] = []
+    o = sp.get("overspeed") or {}
+    if "overspeed" in rs and isinstance(o, dict) and o.get("rpm") is not None:
+        out.append(f"заброс {_rpm(o['rpm'])} об/мин" + (f" ({_hz(o['hz'])} Гц)" if o.get("hz") else ""))
+    sw = []
+    if "swing" in rs:
+        sw.append(f"раскачка {fmt_duration(sp.get('swing_sec'))}")
+    if "flips" in rs:
+        sw.append(_flips_txt(sp.get("flips") or 0))
+    if sw:
+        out.append(", ".join(sw))
+    f = sp.get("fref") or {}
+    hi = f.get("high") if isinstance(f, dict) else None
+    if "fref_high" in rs and isinstance(hi, dict):
+        txt = f"{_START_STAGE.get(hi.get('stage'), '')} задание {_hz(hi.get('v'))} Гц".strip()
+        if hi.get("rpm") is not None and hi.get("stage") != "crank":
+            txt += f" при {_rpm(hi['rpm'])} об/мин"
+        out.append(txt)
+    lo = f.get("low") if isinstance(f, dict) else None
+    if "fref_low" in rs and isinstance(lo, dict):
+        txt = f"задание до {_hz(lo.get('v'))} Гц после выхода на номинал"
+        if lo.get("rpm") is not None:
+            txt += f" (обороты {_rpm(lo['rpm'])})"
+        out.append(txt)
+    return out
+
+
+def _start_tail(sp: dict[str, Any], tz=None) -> list[str]:
+    """Автомат и нагрузка окна пуска: «автомат разомкнут, 0 кВт»."""
+    out = []
+    cb = sp.get("breaker_closed_at")
+    out.append(f"автомат замкнут {fmt_local(cb, tz) or '?'}" if cb else "автомат разомкнут")
+    kw = sp.get("kw_max")
+    if isinstance(kw, (int, float)):
+        out.append(f"до {_rpm(kw)} кВт" if kw >= 1 else "0 кВт")
+    return out
+
+
+def start_profile_text(sp: dict[str, Any] | None, tz=None) -> str | None:
+    """Строка профиля пуска без заголовка: «выход на номинал за 9 с; обороты
+    1439–1584 об/мин, частота 48,1–52,9 Гц; раскачка 1 мин 50 с, 6 смен знака;
+    задание 48,6–50,7 Гц; автомат разомкнут, 0 кВт; масло перед пуском 25 °C — неустойчивый:
+    заброс 1584 об/мин (52,9 Гц); раскачка 1 мин 50 с, 6 смен знака».
+    У неустойчивого — пометка с причинами (В1, вариант «б»). None — профиля нет."""
+    if not isinstance(sp, dict):
+        return None
+    parts: list[str] = []
+    rsec = sp.get("rated_sec")
+    # Номинал в кадре смены режима (ревью R14): разгон прошёл между отсчётами —
+    # «за 0 с» была бы ложной точностью; оценка сверху, если она есть
+    _first = sp.get("rated_first") if "rated_first" in sp else (
+        isinstance(rsec, (int, float)) and rsec < 1)
+    if isinstance(rsec, (int, float)) and _first:
+        _bnd = sp.get("rated_bound_sec")
+        parts.append("на номинале с первого отсчёта"
+                     + (f" (разгон между отсчётами, не дольше {fmt_duration(_bnd)})"
+                        if isinstance(_bnd, (int, float)) and _bnd > 0 else ""))
+    else:
+        parts.append(f"выход на номинал за {fmt_duration(rsec)}" if isinstance(rsec, (int, float))
+                     else "до номинала не вышел")
+    rr = []
+    _r = _span_txt(sp.get("rpm"), "об/мин", _rpm)
+    if _r:
+        rr.append(f"обороты {_r}")
+    _f = _span_txt(sp.get("freq"), "Гц", _hz)
+    if _f:
+        rr.append(f"частота {_f}")
+    if rr:
+        parts.append(", ".join(rr))
+    sw = []
+    if (sp.get("swing_sec") or 0) >= 1:
+        sw.append(f"раскачка {fmt_duration(sp.get('swing_sec'))}")
+    if sp.get("flips"):
+        sw.append(_flips_txt(sp["flips"]))
+    if sw:
+        parts.append(", ".join(sw))
+    fz = start_fref_text(sp)
+    # Размах после номинала — отдельно, если он уже размаха с прокрутки
+    _fr = sp.get("fref") if isinstance(sp.get("fref"), dict) else {}
+    _rr = _span_txt(_fr.get("range_rated"), "Гц", _hz)
+    if fz and _rr and "→" not in fz and _rr not in fz:
+        fz += f", после номинала {_rr}"
+    if fz:
+        parts.append(fz)
+    parts.append(", ".join(_start_tail(sp, tz)))
+    oil = sp.get("oil_temp")
+    if isinstance(oil, (int, float)):
+        # Значение на начало прокрутки, а не за окно пуска: таблица того же
+        # сегмента показывает масло за всю работу
+        parts.append(f"масло перед пуском {_rpm(oil)} °C")
+    txt = "; ".join(parts)
+    if sp.get("open"):
+        txt += " (окно пуска ещё идёт)"
+    if sp.get("unstable"):
+        why = start_reasons_ru(sp)
+        txt += " — неустойчивый" + (": " + "; ".join(why) if why else "")
+    return txt
+
+
+def start_note_text(sp: dict[str, Any] | None, tz=None) -> str | None:
+    """Пометка к «Просадке» и «Забросу оборотов», начавшимся в окне пуска (В1):
+    «на пуске: раскачка 1 мин 50 с, 6 смен знака, задание 48,6–50,7 Гц,
+    автомат разомкнут, 0 кВт», у неустойчивого — «, пуск неустойчивый»."""
+    if not isinstance(sp, dict):
+        return None
+    bits: list[str] = []
+    if (sp.get("swing_sec") or 0) >= 1:
+        bits.append(f"раскачка {fmt_duration(sp.get('swing_sec'))}")
+    if sp.get("flips"):
+        bits.append(_flips_txt(sp["flips"]))
+    fz = start_fref_text(sp)
+    if fz:
+        bits.append(fz)
+    bits += _start_tail(sp, tz)
+    if sp.get("unstable"):
+        bits.append("пуск неустойчивый")
+    return "на пуске: " + ", ".join(bits)
+
+
+def start_window(sp: dict[str, Any] | None) -> tuple[Any, Any] | None:
+    """Окно пуска [начало прокрутки, конец окна) профиля — ISO-строки; None —
+    профиля нет. Окно ещё идёт (open) — конец None: растёт с каждым циклом."""
+    if not isinstance(sp, dict) or not sp.get("crank_at"):
+        return None
+    return sp.get("crank_at"), (None if sp.get("open") else sp.get("t_to"))
 
 
 def engine_hours_text(hours: Any) -> str | None:

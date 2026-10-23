@@ -1525,8 +1525,9 @@ check(tr29.get("t_from") == iso(M(16, 9, 25, 52)) and tr29.get("stop") == iso(M(
       and tr29.get("t_to") == iso(M(16, 9, 26, 53)) and tr29.get("max_rows") == 40
       and (tr29.get("segment") or {}).get("label") == "Работа",
       f"3а: окно ленты #35929 — от начала сегмента до останова + 30 с: {[tr29.get(k) for k in ('t_from', 't_to', 'segment')]}")
-check([c["role"] for c in tr29.get("cols") or []] == ["RPM", "FREQUENCY", "ACTIVE_POWER_TOTAL", "CURRENT_AVG",
-                                                     "VOLTAGE_LL_AVG", "OIL_PRESS", "BATTERY_V"],
+# v5.1.23: + задание частоты 40595 сразу за частотой (incident_trace: 2.5)
+check([c["role"] for c in tr29.get("cols") or []] == ["RPM", "FREQUENCY", "FREQ_REFERENCE", "ACTIVE_POWER_TOTAL",
+                                                     "CURRENT_AVG", "VOLTAGE_LL_AVG", "OIL_PRESS", "BATTERY_V"],
       f"3а: колонки — пометка incident_trace KB по порядку: {tr29.get('cols')}")
 check(tr29.get("entry", {}).get("RPM") == {"v": 0.0, "t": iso(M(16, 9, 25, 12))}
       and tr29.get("entry", {}).get("FREQUENCY", {}).get("t") == iso(M(16, 9, 17, 3)),
@@ -1568,7 +1569,7 @@ check(trace_params(KB_CFG) == {"before": 600, "after": 30, "max_rows": 40}
       and trace_params(NS(seg=lambda *a, default=None: default)) == {"before": 600, "after": 30, "max_rows": 40},
       "3а: лимиты KB stop_kind.act_trace_* и те же умолчания в коде")
 check([r["addr"] for r in KB_CFG.incident_trace_registers]
-      == [40068, 40044, 40034, 40029, 40025, 40062, 40061, 43562], "3а: пометка incident_trace в mapping.yaml")
+      == [40068, 40044, 40595, 40034, 40029, 40025, 40062, 40061, 43562], "3а: пометка incident_trace в mapping.yaml")
 _cfg_nt = binding.build_config(ROOT / "knowledge_base", controller_id="pcc3300", engine_id="cummins_kta50")
 for _m in _cfg_nt._register_map.values():
     _m.pop("incident_trace", None)
@@ -1762,7 +1763,9 @@ check(len(_cm) == 30 and _cm[0].startswith("  - … ранее 11 строк: 01
       f"3г: не больше 30 строк хода цикла, ранние свёрнуты: {len(_cm)} {_cm[:2]}")
 _own = dict(_row(_plate), t_start=datetime.fromisoformat(_plate.t_start))
 _pp = ig.build_incident_prompt(act_pl, None, [_own], tz=MSK)
-check("(эта попытка)" in _pp and not any(ln.startswith("  - Неудачный прогрев · Авария:")
+# v5.1.23 (В4): подпись плашки — «Неудачный пуск · Авария» (была «Неудачный прогрев · …»)
+check("(эта попытка)" in _pp and not any(ln.startswith(("  - Неудачный пуск · Авария:",
+                                                        "  - Неудачный прогрев · Авария:"))
                                          for ln in _pp.splitlines()),
       "3г: своя плашка в ход цикла не входит — только строкой «эта попытка»")
 # Старый акт (без ленты) — вход строится, ленты нет

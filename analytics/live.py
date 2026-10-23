@@ -24,7 +24,10 @@
   (астрономическое минус data_gaps). Кластер — это эпизод.
 
 Ключи (решения владельца В1–В7): RPM_UNDERSPEED — по v* (обороты и частота
-опроса ниже порога, analytics/rpm_freq.py); LIMIT_PROXIMITY — три роли в одном
+опроса ниже порога, analytics/rpm_freq.py); RPM_OVERSPEED (v5.1.23, В2′) — то
+же сверху: обороты и k·f_max опроса выше порога (1575 об/мин = уставка разноса
+1725 − 150, 91,3 % уставки), без частоты заброса нет, без участков нет и
+детекции; LIMIT_PROXIMITY — три роли в одном
 наборе кластеров, участки по ролям внутри кластера; давление ниже уставки
 останова — не замер (пол, В3); COOLING_FAILURE — ветка близости к HCT;
 OIL_DILUTION — паспорт давления (участки oil_passport_runs из metrics, начало
@@ -43,19 +46,23 @@ from __future__ import annotations
 
 import bisect
 import copy
+import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 from .metrics import oil_passport_params, oil_passport_runs, passport_instep
-from .rpm_freq import _PACKET_TOL_SEC, build_poll, dip_marks, freq_ok, packet_times, rpm_freq_params
+from .rpm_freq import (
+    _PACKET_TOL_SEC, build_poll, dip_marks, freq_ok, over_marks, overspeed_params, packet_times,
+    rpm_freq_params,
+)
+
+logger = logging.getLogger(__name__)
 
 # Окно свежести и склейки N (В2, 15.10.2026): участки, между которыми не больше
 # N видимого времени, — один кластер; нарушение живо, пока идёт или кончилось
 # не больше N назад. То же окно, что у паспорта давления с v5.1.12
 LIVE_RECENT_SEC = 600
 
-# Ключи участков первого выпуска; остальные детекторы — по подсегменту, как раньше
-LIVE_KEYS = ("RPM_UNDERSPEED", "LIMIT_PROXIMITY", "COOLING_FAILURE", "OIL_DILUTION")
 # Роли, чьи удержанные значения переносятся через начало окна (и частота опроса)
 HELD_ROLES = ("RPM", "FREQUENCY", "OIL_TEMP", "COOLANT_TEMP", "OIL_PRESS")
 
@@ -383,6 +390,50 @@ def _rpm_points(seg_by_addr, cfg, prm, t0, t1, held, carry, gaps, packets, horiz
     return pts, init
 
 
+def _above(r: dict, thr: float) -> bool:
+    """Реальная строка выше порога (копии forward-fill и нечисла — нет)."""
+    v = r.get("value")
+    if v is None or r.get("is_carried_forward"):
+        return False
+    try:
+        return float(v) > thr
+    except (TypeError, ValueError):
+        return False
+
+
+def _over_points(seg_by_addr, cfg, oprm, t0, t1, held, carry, gaps, packets):
+    """Отсчёты оборотов с признаком заброса (v5.1.23, п.2): [(момент, в заборе,
+    обороты, k·f_max)]. oprm — overspeed_params. Ни одного отсчёта выше порога
+    (почти всегда) — сразу пусто: опрос частоты не строится. Перенос через
+    начало окна — как у провала (удержанный отсчёт на место строк до окна)."""
+    addr = cfg.role_to_addr("RPM")
+    if addr is None:
+        return [], None
+    thr = oprm["threshold_rpm"]
+    h = held.get("RPM") if carry else None
+    if h is not None:
+        h = (_tz(h[0]), float(h[1]))
+    raw = seg_by_addr.get(addr) or []
+    # Дешёвый просмотр до разбора строк: заброса нет почти никогда
+    if (h is None or h[1] <= thr) and not any(_above(r, thr) for r in raw):
+        return [], None
+    rows = _real_rows(raw)
+    if h is not None:
+        rows = [h] + [r for r in rows if r[0] >= t0]
+    poll = build_poll(seg_by_addr, cfg, oprm, held.get("FREQUENCY"), gaps, packets)
+    pts, init = [], None
+    for ts, v, fmax, bad in over_marks(rows, poll, oprm):
+        kf = oprm["k"] * fmax if bad else None
+        if ts < t0:
+            if h is not None and ts == h[0]:
+                init = (ts, bad, v, kf)
+            continue
+        if ts >= t1:
+            break
+        pts.append((ts, bad, v, kf))
+    return pts, init
+
+
 def _value_points(rows, bad, floor=None) -> list[tuple]:
     return [(ts, bad(v), v, None) for ts, v in rows if floor is None or v >= floor]
 
@@ -553,7 +604,7 @@ def segment_spans(
     held: dict[str, Any] | None = None,
     carry: bool = False,
     horizon: datetime | None = None,
-) -> dict[str, list[dict[str, Any]]]:
+) -> dict[str, list[dict[str, Any]] | None]:
     """Участки и кластеры нарушений рабочей части сегмента [t0, t1): {ключ: [кластер]}.
 
     seg_by_addr — строки сегмента (берутся только реальные, без копий
@@ -565,7 +616,11 @@ def segment_spans(
     открытого окна. None — окно закрыто (рез, смена режима): будущих строк не
     будет, отсчёт без следующего решается по себе (ревью v5.1.21, analytics-3:
     горизонт = рез терял последний отсчёт провала в минуте до 09:00).
-    Ключа без участков в ответе нет. O(n) по строкам адреса."""
+    Ключа без участков в ответе нет. Ключ со сбоем расчёта — None (v5.1.23,
+    п.7): каждый ключ считается в своём try, сбой одного не гасит соседей,
+    детектор этого ключа идёт по подсегменту, как при live_spans=None. Сбой
+    общей части (пакеты, разрывы) — исключение наружу, в страховку сегментатора.
+    O(n) по строкам адреса."""
     t0, t1 = _tz(t0), _tz(t1)
     if t1 <= t0:
         return {}
@@ -576,7 +631,7 @@ def segment_spans(
     gl = _merge_gaps(gaps)
     brk = _breaks(packets, gl, t0, t1, prm["packet_max_gap_sec"])
     trail_pause = bool(brk) and brk[-1][1] is None and brk[-1][2] == "pause"
-    out: dict[str, list[dict[str, Any]]] = {}
+    out: dict[str, list[dict[str, Any]] | None] = {}
 
     def add(key: str, spans: list[dict]) -> None:
         for s in spans:
@@ -584,35 +639,62 @@ def segment_spans(
         if spans:
             out[key] = _clusters(spans, gl, key)
 
+    def guarded(key: str, calc: Callable[[], None]) -> None:
+        # Ключ — в своём try: до v5.1.23 сбой одного ключа (общий try
+        # сегментатора) переводил на подсегмент все четыре детектора
+        try:
+            calc()
+        except Exception:
+            out[key] = None
+            logger.warning("Участки ключа %s [%s, %s) не посчитаны — детектор по подсегменту",
+                           key, _iso(t0), _iso(t1), exc_info=True)
+
     # Просадка оборотов по v* (В1)
-    pts, init = _rpm_points(seg_by_addr, cfg, prm, t0, t1, held, carry, gaps, packets,
-                            _tz(horizon) if horizon else None)
-    add("RPM_UNDERSPEED", _spans(pts, t0, t1, brk, init, "RPM"))
+    def _rpm() -> None:
+        pts, init = _rpm_points(seg_by_addr, cfg, prm, t0, t1, held, carry, gaps, packets,
+                                _tz(horizon) if horizon else None)
+        add("RPM_UNDERSPEED", _spans(pts, t0, t1, brk, init, "RPM"))
+    guarded("RPM_UNDERSPEED", _rpm)
+
+    # Заброс оборотов по v* (v5.1.23, п.2, В2): обороты и k·f_max опроса выше
+    # порога; уставки разноса в KB нет — ключа нет
+    def _over() -> None:
+        oprm = overspeed_params(cfg, prm)
+        if oprm is None:
+            return
+        pts, init = _over_points(seg_by_addr, cfg, oprm, t0, t1, held, carry, gaps, packets)
+        add("RPM_OVERSPEED", _spans(pts, t0, t1, brk, init, "RPM"))
+    guarded("RPM_OVERSPEED", _over)
 
     # Близость к уставкам: три роли — один набор кластеров, пол давления (В3)
-    lp: list[dict] = []
-    for chk in limit_checks(cfg):
-        addr = cfg.role_to_addr(chk["role"])
-        if addr is None:
-            continue
-        bad = (lambda c: (lambda v: limit_bad(c, v)))(chk)
-        rows = _real_rows(seg_by_addr.get(addr), t0, t1)
-        lp += _spans(_value_points(rows, bad, chk["floor"]), t0, t1, brk,
-                     _held_init(held, chk["role"], carry, bad, chk["floor"]), chk["role"])
-    add("LIMIT_PROXIMITY", lp)
+    def _limit() -> None:
+        lp: list[dict] = []
+        for chk in limit_checks(cfg):
+            addr = cfg.role_to_addr(chk["role"])
+            if addr is None:
+                continue
+            bad = (lambda c: (lambda v: limit_bad(c, v)))(chk)
+            rows = _real_rows(seg_by_addr.get(addr), t0, t1)
+            lp += _spans(_value_points(rows, bad, chk["floor"]), t0, t1, brk,
+                         _held_init(held, chk["role"], carry, bad, chk["floor"]), chk["role"])
+        add("LIMIT_PROXIMITY", lp)
+    guarded("LIMIT_PROXIMITY", _limit)
 
     # ОЖ у уставки HCT Warning (COOLING_FAILURE, ветка близости)
-    c_addr = cfg.role_to_addr("COOLANT_TEMP")
-    if c_addr is not None:
+    def _cooling() -> None:
+        c_addr = cfg.role_to_addr("COOLANT_TEMP")
+        if c_addr is None:
+            return
         near = cooling_proximity(cfg)["near"]
         bad_c = lambda v: v >= near  # noqa: E731
         rows = _real_rows(seg_by_addr.get(c_addr), t0, t1)
         add("COOLING_FAILURE", _spans(_value_points(rows, bad_c), t0, t1, brk,
                                       _held_init(held, "COOLANT_TEMP", carry, bad_c), "COOLANT_TEMP"))
+    guarded("COOLING_FAILURE", _cooling)
 
     # Паспорт давления масла (OIL_DILUTION)
-    add("OIL_DILUTION", _passport_spans(seg_by_addr, cfg, t0, t1, gaps, held, carry, packets,
-                                        trail_pause))
+    guarded("OIL_DILUTION", lambda: add("OIL_DILUTION", _passport_spans(
+        seg_by_addr, cfg, t0, t1, gaps, held, carry, packets, trail_pause)))
     return out
 
 

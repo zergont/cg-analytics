@@ -62,6 +62,33 @@ def _cap_sev(scenario: str | None, severity: str | None) -> str | None:
     return cap_severity(scenario, severity)
 
 
+def _alarm_name(e: dict, key: str | None = None) -> str | None:
+    """Имя открытого эпизода для бегущей строки (active_alarms[].name).
+
+    v5.1.23 (решение В5): панель с привязанным кодом (open_values_json.
+    panel_code) — «имя кода (код N)» через labels.panel_fault_name, как в
+    карточке; эпизоду до v5.1.23 имя кода — по справочнику KB работающего
+    движка машины. Без кода (и аналитика) — open_values_json.fault_name, как
+    было. Сбой — как было."""
+    vals = _parse_json(e.get("open_values_json")) or {}
+    if not isinstance(vals, dict):
+        return None
+    if e.get("source") == "panel" and vals.get("panel_code") is not None:
+        try:
+            from analytics.labels import panel_fault_name
+            cn = None
+            try:
+                from online.manager import get_manager
+                _eng = get_manager()._engines.get(key) if key else None
+                cn = getattr(getattr(_eng, "cfg", None), "fault_code_name", None)
+            except Exception:
+                cn = None
+            return panel_fault_name(vals, cn) or vals.get("fault_name")
+        except Exception:
+            logger.warning("api_machines: имя панели по коду не построено", exc_info=True)
+    return vals.get("fault_name")
+
+
 
 router = APIRouter()
 templates = Jinja2Templates(directory="web/templates")
@@ -2329,7 +2356,9 @@ async def api_machines():
                     # per-fault: панельные аварии различаются по addr/bit
                     "addr":            e.get("addr"),
                     "bit":             e.get("bit"),
-                    "name":            (_parse_json(e.get("open_values_json")) or {}).get("fault_name"),
+                    # v5.1.23 (В5): панель с привязанным кодом — имя кода из
+                    # справочника KB и «(код N)», как в карточке; без кода — как было
+                    "name":            _alarm_name(e, key),
                     "since":           e["t_open"].isoformat() if e.get("t_open") else None,
                     "duration_sec":    round(e.get("active_sec") or 0),
                     # Сколько из воздействия прошло без связи: внутри этого

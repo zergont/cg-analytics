@@ -43,7 +43,10 @@ def _state_event(p: dict[str, Any], reg: dict[int, dict]) -> dict[str, Any]:
     addr = p["addr"]
     meta = reg.get(addr, {})
     # Имя — из KB, если регистр там описан; иначе из каталога БД телеметрии:
-    # лента несёт всё, что прислала панель, а не только объявленное в KB
+    # лента несёт всё, что прислала панель, а не только объявленное в KB.
+    # Метка значения — labels_ru KB поверх каталога (v5.1.23, решение В5:
+    # 40599 = 0 — «нет команды (0)», а не «EmergencyStop» каталога)
+    from .labels import enum_label
     return {
         "ts":       _tz(p["state_start"]),
         "end":      _tz(p.get("state_end")),
@@ -54,7 +57,7 @@ def _state_event(p: dict[str, Any], reg: dict[int, dict]) -> dict[str, Any]:
         "name":     (meta.get("description") or p.get("name_ru")
                      or meta.get("role") or f"reg_{addr}"),
         "value":    p.get("value"),
-        "label":    p.get("label"),
+        "label":    enum_label(meta, p.get("value"), p.get("label"), fallback_value=False),
         "severity": None,
     }
 
@@ -176,13 +179,15 @@ TRACE_VERSION = 1
 # Предохранитель хранения: окно ленты ≤ before + after (~63 опроса), но опрос
 # бывает чаще — ранние строки сверх предела уходят во «вход»
 _TRACE_STORE_MAX = 200
-# Короткие подписи колонок и имена в фактах; неизвестная роль — кодом
-_TRACE_HEAD = {"RPM": "об/мин", "FREQUENCY": "Гц", "ACTIVE_POWER_TOTAL": "P,кВт",
-               "CURRENT_AVG": "I,А", "VOLTAGE_LL_AVG": "U,В", "OIL_PRESS": "Pм,кПа",
-               "BATTERY_V": "АКБ,В", "COOLANT_TEMP": "ОЖ,°C", "OIL_TEMP": "Tм,°C"}
-_TRACE_NAME = {"RPM": "обороты", "FREQUENCY": "частота", "ACTIVE_POWER_TOTAL": "P",
-               "CURRENT_AVG": "I", "VOLTAGE_LL_AVG": "U", "OIL_PRESS": "давление масла",
-               "BATTERY_V": "АКБ", "COOLANT_TEMP": "ОЖ", "OIL_TEMP": "температура масла"}
+# Короткие подписи колонок и имена в фактах; неизвестная роль — кодом.
+# Задание частоты регулятора (40595, v5.1.23) — колонка «задание» за частотой
+_TRACE_HEAD = {"RPM": "об/мин", "FREQUENCY": "Гц", "FREQ_REFERENCE": "задание",
+               "ACTIVE_POWER_TOTAL": "P,кВт", "CURRENT_AVG": "I,А", "VOLTAGE_LL_AVG": "U,В",
+               "OIL_PRESS": "Pм,кПа", "BATTERY_V": "АКБ,В", "COOLANT_TEMP": "ОЖ,°C", "OIL_TEMP": "Tм,°C"}
+_TRACE_NAME = {"RPM": "обороты", "FREQUENCY": "частота", "FREQ_REFERENCE": "задание",
+               "ACTIVE_POWER_TOTAL": "P", "CURRENT_AVG": "I", "VOLTAGE_LL_AVG": "U",
+               "OIL_PRESS": "давление масла", "BATTERY_V": "АКБ", "COOLANT_TEMP": "ОЖ",
+               "OIL_TEMP": "температура масла"}
 # Положение автомата — в фактах заключения (остальные состояния — только в печати)
 _CB_ROLES = ("GENSET_CB_POS",)
 # Короткие имена состояний в печати ленты; прочие — описание из KB
@@ -452,7 +457,10 @@ def fall_facts_ru(trace: dict[str, Any] | None, tz=None, n_before: int = 3) -> s
     последние n_before отсчётов до останова и отсчёт кадра останова (первая
     запись позже кадра — после звена «останов», «через N с после останова»): печатается
     только свежая запись, удержанное значение — «(частота 42,6 Гц держится с
-    09:28:42)», а не как замер (критика прототипа #35941). None — ленты нет.
+    09:28:42)», а не как замер (критика прототипа #35941). Задание частоты
+    регулятора (v5.1.23) — в той же цепочке с подписью: «1696 об/мин / 56,8 Гц /
+    задание 30,6 Гц → … задание 55 Гц»; не менялось за ленту — в цепочку не
+    идёт (оно в строке «Без изменений» ленты). None — ленты нет.
     """
     from .labels import unit_ru
     stop = _dt((trace or {}).get("stop")) if isinstance(trace, dict) else None
@@ -507,6 +515,9 @@ def fall_facts_ru(trace: dict[str, Any] | None, tz=None, n_before: int = 3) -> s
             parts.append(f"автомат {lab} с {_hms_day(cur['t'], tz)}")
 
     rf = [r for r in ("RPM", "FREQUENCY") if r in by_role]
+    # Задание — только если менялось: неизменное держалось бы скобкой у каждого звена
+    if "FREQ_REFERENCE" in by_role and vals.get("FREQ_REFERENCE") and "FREQ_REFERENCE" not in const_roles:
+        rf.append("FREQ_REFERENCE")
     if rf:
         held: dict[str, tuple[float, str]] = {}
         for role in rf:
@@ -524,7 +535,9 @@ def fall_facts_ru(trace: dict[str, Any] | None, tz=None, n_before: int = 3) -> s
         after = next((x for x in seq if _dt(x[0]["t"]) >= stop), None)
 
         def _row(r: dict, h: dict[str, tuple[float, str]], mark: str = "") -> str:
-            fresh = [_val(role, float(r["v"][role])) for role in rf if role in r["v"]]
+            # Обороты и частота — по единице, задание — с подписью (тоже Гц)
+            fresh = [("задание " if role == "FREQ_REFERENCE" else "") + _val(role, float(r["v"][role]))
+                     for role in rf if role in r["v"]]
             kept = [f"{_TRACE_NAME.get(role, role)} {_val(role, h[role][0])} "
                     f"{'держатся' if role == 'RPM' else 'держится'} с {_hms(h[role][1], tz, stop)}"
                     for role in rf if role not in r["v"] and role in h]
@@ -548,7 +561,8 @@ def fall_facts_ru(trace: dict[str, Any] | None, tz=None, n_before: int = 3) -> s
                 chain.append(_row(after[0], after[1],
                                   f" (через {int(round(_gap))} с после останова)"))
         if before or after is not None:
-            parts.append("обороты и частота по отсчётам: " + " → ".join(chain))
+            what = "обороты, частота и задание" if "FREQ_REFERENCE" in rf else "обороты и частота"
+            parts.append(f"{what} по отсчётам: " + " → ".join(chain))
 
     if not parts:
         return None

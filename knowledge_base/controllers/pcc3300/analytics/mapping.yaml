@@ -261,6 +261,21 @@ registers:
     description: Частота генератора
     _source: PASSPORT_РЭ
 
+  40595:
+    role: FREQ_REFERENCE
+    domain: CONTROLLER
+    # Итоговое задание частоты регулятора (v5.1.23): куда регулятор ведёт
+    # обороты — на пуске ДГУ №1 16.10 задание 30,6 → 55 Гц перед разносом. В БД
+    # уже в Гц (u32, raw × 0,001: 49866 → 49,866), на номинале ~50, на стоянке 0.
+    # Колонка ленты акта сразу за частотой (порядок дробный); в стоп-сегментах
+    # отчёта не печатается
+    incident_trace: 2.5
+    group: HEALTH
+    unit: Hz
+    kind: analog
+    description: Итоговое задание частоты регулятора
+    _source: PASSPORT_РЭ
+
   40061:
     role: BATTERY_V
     domain: ENGINE
@@ -380,7 +395,12 @@ registers:
     group: STATE
     unit: ~
     kind: enum
-    description: Genset Run Command (0 EmergencyStop / 1 Stop / 2 LoadDemandStop / 3 Run)
+    # v5.1.23 (решение В5): по данным 0 — «нет команды» (после Стопа 1 → 0 и
+    # при аварийном снятии «Работы» 3 → 0), а не нажатая кнопка аварийного
+    # останова, как в каталоге «EmergencyStop». Метка KB — поверх каталога
+    # (labels.enum_label, лента акта); каталог декодер поправил 17.10
+    description: "Команда работы панели (0 — нет команды, 1 — Стоп, 2 — останов по Load Demand, 3 — Работа)"
+    labels_ru: {0: "нет команды (0)"}
     _source: PASSPORT_РЭ
 
   40598:

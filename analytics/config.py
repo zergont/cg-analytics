@@ -19,10 +19,11 @@ import yaml
 _log = logging.getLogger(__name__)
 
 # Колонки ленты отсчётов акта по умолчанию (v5.1.22, P1-4) — если в mapping.yaml
-# нет ни одной пометки incident_trace: обороты, частота, мощность, ток,
-# напряжение, давление масла, АКБ, положение автомата
-_TRACE_DEFAULT_ROLES = ("RPM", "FREQUENCY", "ACTIVE_POWER_TOTAL", "CURRENT_AVG",
-                        "VOLTAGE_LL_AVG", "OIL_PRESS", "BATTERY_V", "GENSET_CB_POS")
+# нет ни одной пометки incident_trace: обороты, частота, задание частоты
+# (v5.1.23; роли нет в карте — колонки нет), мощность, ток, напряжение,
+# давление масла, АКБ, положение автомата
+_TRACE_DEFAULT_ROLES = ("RPM", "FREQUENCY", "FREQ_REFERENCE", "ACTIVE_POWER_TOTAL",
+                        "CURRENT_AVG", "VOLTAGE_LL_AVG", "OIL_PRESS", "BATTERY_V", "GENSET_CB_POS")
 
 
 class AnalyticsConfig:
@@ -129,12 +130,8 @@ class AnalyticsConfig:
         """Адреса fault-bitmap регистров (из fault_history)."""
         return self._whitelist_fault
 
-    def code_fits_bit(self, code: int, raw_severity: str | None) -> bool:
-        """Подходит ли код панели биту по тяжести (справочник кодов ↔ карта битов).
-
-        Код без записи в справочнике или бит без тяжести — не подходит: привязать
-        чужой код хуже, чем не привязать никакого (v5.1.16).
-        """
+    def _fault_ref(self):
+        """Справочник кодов слоёв конфига (FaultRef), один на конфиг; False — нет."""
         ref = getattr(self, "_fault_ref_cache", None)
         if ref is None:
             try:
@@ -143,6 +140,32 @@ class AnalyticsConfig:
             except Exception:
                 ref = False
             self._fault_ref_cache = ref
+        return ref
+
+    def fault_code_name(self, code: Any) -> str | None:
+        """Имя кода панели по справочнику кодов KB (v5.1.23, решение В5): ru, а
+        без перевода (ru пусто или совпадает с en) — None, тогда имя бита из
+        каталога: текст для людей — по-русски. Кода нет в справочнике — None."""
+        ref = self._fault_ref()
+        if not ref:
+            return None
+        try:
+            entry = ref.lookup(int(code)) or {}
+        except (TypeError, ValueError):
+            return None
+        desc = entry.get("description") or {}
+        ru = str(desc.get("ru") or "").strip()
+        if not ru or ru == str(desc.get("en") or "").strip():
+            return None
+        return ru
+
+    def code_fits_bit(self, code: int, raw_severity: str | None) -> bool:
+        """Подходит ли код панели биту по тяжести (справочник кодов ↔ карта битов).
+
+        Код без записи в справочнике или бит без тяжести — не подходит: привязать
+        чужой код хуже, чем не привязать никакого (v5.1.16).
+        """
+        ref = self._fault_ref()
         if not ref or not raw_severity:
             return False
         # По уровню, а не по метке: у бита «предупреждение» бывает код со

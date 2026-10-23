@@ -31,6 +31,10 @@
   k = rated_rpm / freq_nominal_hz. Без частоты (нет, вне 40–55 Гц, 0) — по
   оборотам, как раньше: обороты 0 при 0 Гц и падение в стоп — провал (v5.1.16).
   Ключ dip_needs_freq: false — правило B: провал по оборотам после фильтра 1а.
+- overspeed_params / is_over / over_marks — заброс оборотов (v5.1.23, п.2, В2′):
+  отсчёт в заборе, только если выше порога (1575 об/мин при уставке разноса
+  1725) и обороты, и k·f_max опроса; без частоты (нет, вне 40–65 Гц) заброса
+  нет — по одним оборотам не ловим.
 """
 
 from __future__ import annotations
@@ -43,6 +47,11 @@ from typing import Any
 # частота в :44) — пауза пакетов считается от первой строки после неё
 _PACKET_TOL_SEC = 2.0
 _FAR = datetime.max.replace(tzinfo=timezone.utc)
+
+# Порог заброса — доля уставки разноса ниже неё, % (RPM_OVERSPEED.proximity_pct,
+# решение В2′ 17.10.2026): 150/1725 → 1575 об/мин, 91,3 % уставки. Умолчание
+# кода равно KB, чтобы опечатка ключа не вернула прежние 1552,5 (10 %)
+OVERSPEED_PROXIMITY_PCT = 8.69565
 
 
 def _tz(ts: datetime) -> datetime:
@@ -282,6 +291,96 @@ def dip_marks(
                 and (_tz(tt) - t).total_seconds() < prm["next_max_gap_sec"]):
             bad = None
         out.append((t, v, fmin, bad))
+    return out
+
+
+def overspeed_params(cfg, base: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Параметры заброса оборотов (RPM_OVERSPEED, v5.1.23, решение В2′ 17.10.2026).
+
+    Порог — уставка разноса панели (thresholds двигателя rpm.controller.
+    overspeed_rpm, код 234) минус proximity_pct: у KTA50 и QSX15 1725 − 150 =
+    1575 об/мин (proximity_pct 8,69565 = 150/1725, 91,3 % уставки; В2′ — пересмотр
+    В2 «на 10 % строже» = 1552,5 по данным 60 дней). Сравнение строгое: 1575 —
+    ещё не заброс (порог 1575,0000375 при 8,69565). Частоте опроса верим в
+    freq_valid_hz — шире, чем у провала: 1696 об/мин 16.10 шли при 56,8 Гц.
+    Опрос и k — от сверки v* (base, по умолчанию rpm_freq_params): FreqPoll
+    берёт из словаря удержание и окно опроса. None — уставки разноса в KB нет:
+    порог не выдумываем, ключа и детекции нет."""
+    try:
+        ovs = cfg.thr("rpm", "controller", "overspeed_rpm", default=None)
+        if ovs is None:
+            ovs = cfg.thr("frequency", "controller", "overspeed_rpm", default=None)
+        ovs = float(ovs) if ovs is not None else None
+    except (TypeError, ValueError):
+        ovs = None
+    if ovs is None or ovs <= 0:
+        return None
+
+    def d(key: str, default: Any) -> Any:
+        try:
+            v = cfg.det("RPM_OVERSPEED", key, default=default)
+        except Exception:
+            v = default
+        return default if v is None else v
+
+    # Умолчание = KB (OVERSPEED_PROXIMITY_PCT, В2′): без ключа — тоже 1575
+    try:
+        pct = float(d("proximity_pct", OVERSPEED_PROXIMITY_PCT))
+    except (TypeError, ValueError):
+        pct = OVERSPEED_PROXIMITY_PCT
+    try:
+        lo, hi = (float(x) for x in d("freq_valid_hz", [40.0, 65.0]))
+    except (TypeError, ValueError):
+        lo, hi = 40.0, 65.0
+    try:
+        code = int(d("fault_code", 234))
+    except (TypeError, ValueError):
+        code = 234
+    return dict(base if base is not None else rpm_freq_params(cfg),
+                threshold_rpm=ovs * (1 - pct / 100), overspeed_rpm=ovs, proximity_pct=pct,
+                freq_lo=lo, freq_hi=hi, fault_code=code)
+
+
+def over_fmax(fvals: list[float], prm: dict[str, Any]) -> float | None:
+    """Наибольшая частота опроса, которой можно верить (в freq_valid_hz заброса).
+    0 Гц стоянки и 66 Гц сбоя отбрасываются, остальное решает максимум."""
+    ok = [f for f in fvals if prm["freq_lo"] <= f <= prm["freq_hi"]]
+    return max(ok) if ok else None
+
+
+def is_over(rpm: float, fvals: list[float], prm: dict[str, Any]) -> bool:
+    """Отсчёт в заборе: обороты > порога И k·f_max опроса > порога (строго)."""
+    thr = prm["threshold_rpm"]
+    if rpm <= thr:
+        return False
+    fmax = over_fmax(fvals, prm)
+    return fmax is not None and prm["k"] * fmax > thr
+
+
+def over_marks(
+    rpm_rows: list[tuple[datetime, float]],
+    poll: FreqPoll | None,
+    prm: dict[str, Any],
+) -> list[tuple[datetime, float, float | None, bool]]:
+    """Заброс по каждому отсчёту оборотов: [(момент, обороты, f_max опроса, в заборе)].
+
+    prm — overspeed_params. f_max — только у отсчётов выше порога (ниже
+    заброса нет при любой частоте, окно опроса не считается). Без опроса
+    (регистра частоты нет) заброса нет. Частота опроса — та же, что у провала:
+    удержанное значение и строки до следующего отсчёта оборотов (строка
+    частоты приходит на 1–8 с позже — ДГУ №2 15.10 12:42:19: 1606 об/мин,
+    удержано 0 Гц, через секунду 53,6). Добавочные строки только поднимают
+    максимум: отсчёт, подтверждённый на одном цикле, на следующем не отзывается."""
+    out: list[tuple[datetime, float, float | None, bool]] = []
+    rows = sorted(((_tz(t), float(v)) for t, v in rpm_rows), key=lambda x: x[0])
+    thr = prm["threshold_rpm"]
+    for k, (t, v) in enumerate(rows):
+        if v <= thr or poll is None:
+            out.append((t, v, None, False))
+            continue
+        nxt_t = rows[k + 1][0] if k + 1 < len(rows) else None
+        fvals = poll.window(t, nxt_t)
+        out.append((t, v, over_fmax(fvals, prm), is_over(v, fvals, prm)))
     return out
 
 
