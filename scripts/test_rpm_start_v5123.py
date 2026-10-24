@@ -1939,7 +1939,10 @@ for _v, _lab in ((50.0, "Отменённый пуск · Стоп"), (51.0, "Н
           f"7д: прокрутка {_v} об/мин — «{_lab}» (порог строго выше 50): "
           f"{[label_from_chars(s.to_dict()) for s in _pp7]}")
 _pk7 = plates(seg7(cfg=cfg_seg(CFG, "transition_confirm", crank_rpm_min=200)))
-check([label_from_chars(s.to_dict()) for s in _pk7] == ["Отменённый пуск · Стоп"] * 2
+# v5.1.25 (решение А): у второй попытки (09:27:55–09:28:02) внутри отсчётов
+# нет — 187 об/мин удержаны с 09:27:52, ниже порога 200: прокрутка не видна,
+# «Неудачный пуск»; у первой отсчёты внутри есть — «Отменённый»
+check([label_from_chars(s.to_dict()) for s in _pk7] == ["Отменённый пуск · Стоп", "Неудачный пуск · Стоп"]
       and "попытка 20 с без прокрутки (обороты до 189 об/мин)" in attempt_facts_ru(_pk7[0].attempt, MSK),
       f"7д: порог из KB (200) — 189 об/мин не прокрутка: {[label_from_chars(s.to_dict()) for s in _pk7]}")
 
@@ -2146,7 +2149,8 @@ check("команда «Работа» снята сразу (3→0), без «�
       and not any("EmergencyStop" in v for v in _ch8["immediate_votes"] + _ch8["controlled_votes"])
       and _ch8["signals"]["run_command_path"] == "direct_estop" and _ch8["character"] == "immediate",
       f"8е: #35941 — голос «команда «Работа» снята сразу (3→0), без «Стоп»»: {_ch8['immediate_votes']}")
-check("RunCommand через «Стоп»" in _ch8b["controlled_votes"]
+# v5.1.25: голос по-русски — «команда работы 40599 через «Стоп»»
+check("команда работы 40599 через «Стоп»" in _ch8b["controlled_votes"]
       and not any("снята сразу" in v for v in _ch8b["immediate_votes"]),
       f"8е: операторский 3→1→0 — голос «через «Стоп»»: {_ch8b['controlled_votes']}")
 

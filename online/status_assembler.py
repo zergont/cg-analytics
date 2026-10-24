@@ -832,6 +832,7 @@ def _code_at_segment_start(chars: dict) -> int | None:
 
 # Служебные счётчики и коды — не параметры для разбора
 _PARAM_SKIP = frozenset({"HEARTBEAT", "FUEL_TOTAL", "ENGINE_HOURS", "START_ATTEMPTS_TOTAL",
+                         "START_SUCCESS_TOTAL",
                          "LAST_FAULT_CODE", "LAST_FAULT_TYPE"})
 _PARAM_GROUPS = ("Двигатель", "Генератор", "Нагрузка")
 

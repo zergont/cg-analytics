@@ -15,9 +15,12 @@ Markdown — структурированный отчёт для человек
 from __future__ import annotations
 
 import json
+import logging
 import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from .contract import Segment, Subsegment, cap_severity
 from .labels import (
@@ -475,12 +478,60 @@ def _weighted_median(pairs: list[tuple]) -> float | None:
     return pts[-1][0]
 
 
-def _key_metrics_part(segments: list, trip_roles: list[str] | None) -> dict[str, Any] | None:
+# Короткая работа в таблице «Ключевые показатели» (решение В-25.3): медиана по
+# паре отсчётов — не «обычно». Правило показа, а не порог аналитики — в коде,
+# как _SAME_FRAME_SEC
+_KM_SHORT_WORK_SEC = 120
+_KM_SHORT_SAMPLES = 10
+
+
+def _km_samples(ch: dict) -> int | None:
+    """Отсчётов роли в подсегменте: реальных (real_count, с v5.1.25), у старых
+    характеристик — всех строк окна вместе с forward-fill (sample_count);
+    None — счёта нет (тогда короткая работа — только по времени)."""
+    for k in ("real_count", "sample_count"):
+        try:
+            if ch.get(k) is not None:
+                return int(ch[k])
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _km_continued_since(segments: list, tz=None) -> tuple[str | None, str | None]:
+    """Работа периода началась до окна — продолжение через суточный рез или
+    рестарт (cause_open REPORT_START у первого рабочего сегмента): (начало окна
+    ISO, «09:00»). Иначе (None, None). Ревью v5.1.25 (Q2/Q7): у продолжения
+    сутки работы — не «короткая работа» и не «работа идёт 40 с»."""
+    s = next((s for s in segments or [] if getattr(s, "run_state", None) == 3), None)
+    if s is None or getattr(s, "cause_open", None) != "REPORT_START":
+        return None, None
+    t0 = _dt(getattr(s, "t_start", None))
+    if t0 is None:
+        return None, None
+    return t0.isoformat(), fmt_local(t0, tz if tz is not None else timezone.utc, seconds=False)
+
+
+def _key_metrics_part(segments: list, trip_roles: list[str] | None,
+                      is_open: bool = False, tz=None) -> dict[str, Any] | None:
     """Ключевые показатели за весь период работы (v5.1.6; раньше — последний
     подсегмент: у ДЭС №3 «36,7 %» при сутках в основном на малой нагрузке).
 
     Медиана — по медианам подсегментов, взвешенная по времени с данными
     (длительность × качество); мин/макс — точные за период.
+
+    v5.1.25 (решение В-25.3): в строке — n (отсчётов по нетранзиентным
+    подсегментам), start/end (первое и последнее значение). Работа короче
+    _KM_SHORT_WORK_SEC или с отсчётами оборотов меньше _KM_SHORT_SAMPLES —
+    short {sec, n, rpm, freq, open, by, since, since_text}: «Обычно» не
+    печатается, под таблицей — пояснение «Короткая работа (20 с, 2 отсчёта):
+    обороты A → B об/мин, …»; у открытого сегмента (is_open) — «Работа идёт
+    N с …» (критика, SHOULD 4).
+
+    Ревью v5.1.25: by — почему «—»: time (работа короче 120 с) или samples
+    (только мало отсчётов: часы работы с обрывом связи — «короткой» не
+    назвать, Q9); since/since_text — работа началась до окна (продолжение
+    через суточный рез, Q2/Q7): пояснение от начала окна «С 09:00 — 40 с …».
     """
     subs = [(sub, float(getattr(sub, "duration_sec", 0) or 0)
              * float(sub.data_quality if getattr(sub, "data_quality", None) is not None else 1.0))
@@ -497,6 +548,7 @@ def _key_metrics_part(segments: list, trip_roles: list[str] | None) -> dict[str,
     rows = []
     for role in trip_roles:
         meds, mins, maxs, unit = [], [], [], ""
+        n, v_start, v_end = None, None, None
         for sub, w in subs:
             ch = (getattr(sub, "characteristics", None) or {}).get(role)
             if not isinstance(ch, dict) or ch.get("kind") == "state":
@@ -507,16 +559,70 @@ def _key_metrics_part(segments: list, trip_roles: list[str] | None) -> dict[str,
                 mins.append(ch["min"])
             if ch.get("max") is not None:
                 maxs.append(ch["max"])
+            _n = _km_samples(ch)
+            if _n is not None:
+                n = (n or 0) + _n
+            if v_start is None and ch.get("value_start") is not None:
+                v_start = ch["value_start"]
+            if ch.get("value_end") is not None:
+                v_end = ch["value_end"]
         if meds or mins:
             rows.append({"role": role, "name": role_label(role),
                          "median": _weighted_median(meds),
                          "min": min(mins, default=None), "max": max(maxs, default=None),
-                         "unit": unit})
+                         "unit": unit, "n": n, "start": v_start, "end": v_end})
     if not rows:
         return None
     # work_sec взвешен качеством данных (вес медианы); в заголовок — время работы
-    return {"rows": rows, "basis": "period", "work_sec": sum(w for _, w in subs),
-            "work_raw_sec": work_raw, "subsegments": len(subs)}
+    out = {"rows": rows, "basis": "period", "work_sec": sum(w for _, w in subs),
+           "work_raw_sec": work_raw, "subsegments": len(subs)}
+    try:
+        by_role = {r["role"]: r for r in rows}
+        rpm_n = (by_role.get("RPM") or {}).get("n")
+        _by_time = work_raw < _KM_SHORT_WORK_SEC
+        if _by_time or (rpm_n is not None and rpm_n < _KM_SHORT_SAMPLES):
+            def _se(role: str) -> list | None:
+                r = by_role.get(role)
+                return [r.get("start"), r.get("end")] if r and r.get("start") is not None else None
+            _since, _since_txt = _km_continued_since(segments, tz)
+            out["short"] = {"sec": work_raw, "n": rpm_n, "rpm": _se("RPM"),
+                            "freq": _se("FREQUENCY"), "open": bool(is_open),
+                            "by": "time" if _by_time else "samples",
+                            "since": _since, "since_text": _since_txt}
+    except Exception:
+        logger.warning("Короткая работа в ключевых показателях не определена — таблица как раньше",
+                       exc_info=True)
+    return out
+
+
+def _km_short_text(short: dict) -> str | None:
+    """«Короткая работа (20 с, 2 отсчёта): обороты 1696 → 1247 об/мин, частота
+    56,8 → 41,5 Гц» (решение В-25.3); у открытого сегмента — «Работа идёт …».
+    Ревью v5.1.25: продолжение работы через рез — «С 09:00 — 40 с (1 отсчёт)»
+    (Q2/Q7); долгая работа с малым числом отсчётов (обрыв связи) — «Мало
+    отсчётов за работу (3 ч 12 мин, 6 отсчётов)» (Q9)."""
+    if not isinstance(short, dict):
+        return None
+    dur = _fmt_duration(short.get("sec") or 0)
+    n = short.get("n")
+    cnt = f"{n} {_plural(n, 'отсчёт', 'отсчёта', 'отсчётов')}" if isinstance(n, int) else None
+    if short.get("since_text"):
+        # Работа началась до окна: длительность — окна, а не работы
+        head = f"С {short['since_text']} — {dur}" + (f" ({cnt})" if cnt else "")
+    elif short.get("open"):
+        # Работа идёт (критика SHOULD 4): «короткой» её не назвать
+        head = f"Работа идёт {dur}" + (f" ({cnt})" if cnt else "")
+    elif short.get("by") == "samples":
+        # Работа не короче 120 с, мало только отсчётов — не «короткая»
+        head = f"Мало отсчётов за работу ({dur}" + (f", {cnt}" if cnt else "") + ")"
+    else:
+        head = f"Короткая работа ({dur}" + (f", {cnt}" if cnt else "") + ")"
+    bits = []
+    for key, name, unit in (("rpm", "обороты", "об/мин"), ("freq", "частота", "Гц")):
+        se = short.get(key)
+        if isinstance(se, (list, tuple)) and len(se) == 2 and se[0] is not None:
+            bits.append(f"{name} {fmt_number(se[0])} → {fmt_number(se[1])} {unit}")
+    return head + (f": {', '.join(bits)}" if bits else "")
 
 
 def build_summary_parts(
@@ -527,6 +633,8 @@ def build_summary_parts(
     t_from: datetime | None = None,
     t_to: datetime | None = None,
     code_name=None,
+    is_open: bool = False,
+    common_alarm: tuple | None = None,
 ) -> dict[str, Any]:
     """Сводка сегмента частями — единый источник вердикта (v5.1.0).
 
@@ -555,6 +663,19 @@ def build_summary_parts(
     v5.1.23 (решение В5): имя замечания панели с привязанным кодом — имя кода
     из справочника KB и «(код N)» (labels.panel_fault_name); code_name(код) —
     справочник для эпизодов, открытых до v5.1.23 (движок: cfg.fault_code_name).
+    v5.1.25 (решение В-25.3): key_metrics.short — короткая работа, «Обычно» не
+    печатается; is_open — сводка открытого сегмента («Работа идёт …»).
+    LOAD_STEP — разовое событие (В-25.1): INFO в замечания не идёт.
+    v5.1.25 (П6–П7, разбор ДЭС №3 24.10): «Общая авария» при несброшенном коде
+    — имя и код по детекции того же фронта (последней по времени); code_note
+    {from, to, at, text} — код сменился внутри окна сводки (начало кода
+    детекции в [t_from, t_to)); superseded {name, at, severity, text} — эпизод
+    закрыт в окне «перекрыта предупреждением панели». common_alarm — (addr,
+    bit[, допуск начала кода, с]) бита «Общая авария» из KB: часть
+    common_alarm_hold {since, code, name, text} — бит висит на конец под
+    громким битом панели, своей строки нет (строка «ℹ️ Висит также …», вне
+    счёта замечаний и вердикта; критика M8 — только если фронт Общей аварии
+    старше громкого больше допуска или у него есть свой эпизод).
     """
     # Риск нагара — состояние, у него своя часть (старые эпизоды до v5.1.3 не в счёт)
     from .contract import STATE_SCENARIOS
@@ -678,6 +799,73 @@ def build_summary_parts(
                 if dd.get("scenario") == "CONTROLLER_FAULT" and v.get("panel_code") is not None \
                         and _dt(v.get("fault_start")) is not None:
                     _front_code.setdefault((v.get("addr"), v.get("bit"), _dt(v["fault_start"])), v)
+    # «Общая авария» при несброшенном коде (v5.1.25, П6): код фронта меняется
+    # (ДЭС №3 24.10: 1453 → 1248 под одним фронтом с 13.10) — имя и код берутся
+    # у детекции того же фронта, последней по времени
+    _front_ca: dict[tuple, dict] = {}
+    for s in segments:
+        for sub in (getattr(s, "subsegments", None) or []):
+            for d in (getattr(sub, "detections", None) or []):
+                dd = _as_dict(d)
+                v = dd.get("values") or {}
+                if (dd.get("scenario") == "CONTROLLER_FAULT" and v.get("panel_code") is None
+                        and v.get("last_fault_code") and _dt(v.get("fault_start")) is not None):
+                    _front_ca[(v.get("addr"), v.get("bit"), _dt(v["fault_start"]))] = v
+
+    def _ep_vals(e: dict) -> dict:
+        vals = e.get("open_values_json")
+        if isinstance(vals, str):
+            try:
+                vals = json.loads(vals)
+            except Exception:
+                vals = {}
+        return vals if isinstance(vals, dict) else {}
+
+    def _ca_notes(e: dict) -> tuple[dict | None, dict | None]:
+        """Пометки эпизода «Общей аварии» (v5.1.25, П6–П7): «код сменился A → B»
+        — только в сегменте, где код сменился (начало кода детекции в окне; A —
+        из code_changes эпизода, иначе его прежний код); «перекрыта
+        предупреждением панели» — эпизод закрыт так в этом окне."""
+        code_note = sup = None
+        try:
+            fca = _front_ca.get((e.get("addr"), e.get("bit"), _dt(e.get("t_open"))))
+            ov = _ep_vals(e)
+            if fca:
+                b = int(fca.get("last_fault_code") or 0)
+                since = _dt(fca.get("last_fault_code_since"))
+                if (b > 0 and since is not None and w0 is not None and since >= w0
+                        and (w1 is None or since < w1)):
+                    a_ = None
+                    for c in reversed(ov.get("code_changes") or []):
+                        if isinstance(c, dict) and str(c.get("to")) == str(b):
+                            a_ = c.get("from")
+                            break
+                    if a_ is None:
+                        a_ = ov.get("last_fault_code")
+                    a_ = int(a_ or 0)
+                    if a_ > 0 and a_ != b:
+                        code_note = {"from": a_, "to": b, "at": since.isoformat(),
+                                     "text": f"код сменился {a_} → {b}"}
+            if e.get("close_reason") == "superseded":
+                tc = _dt(e.get("t_close"))
+                sb = ov.get("superseded_by")
+                if (isinstance(sb, dict) and tc is not None
+                        and (w0 is None or tc >= w0) and (w1 is None or tc <= w1)):
+                    # Громкий бит может быть аварией (критика SHOULD 7)
+                    _kind = ("аварией панели" if sb.get("severity") == "SHUTDOWN"
+                             else "предупреждением панели")
+                    _at = fmt_local(sb.get("at"), tz if tz is not None else timezone.utc)
+                    sup = {"name": sb.get("name"), "at": sb.get("at"),
+                           "severity": sb.get("severity"),
+                           "text": (f"перекрыта {_kind}"
+                                    + (f" «{sb['name']}»" if sb.get("name") else "")
+                                    + (f" с {_at}" if _at else "")
+                                    + ", Общая авария не снята")}
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning("Пометки «Общей аварии» не построены",
+                                                exc_info=True)
+        return code_note, sup
 
     def _group_name(e: dict) -> str:
         if e.get("source") == "panel":
@@ -695,6 +883,12 @@ def build_summary_parts(
                         if fv.get(k) is not None:
                             vals[k] = fv[k]
                     vals.setdefault("fault_name", fv.get("fault_name"))
+            if vals.get("panel_code") is None:
+                # Код «Общей аварии» — у детекции фронта, последней (v5.1.25, П6)
+                fca = _front_ca.get((e.get("addr"), e.get("bit"), _dt(e.get("t_open"))))
+                if fca:
+                    vals["last_fault_code"] = fca.get("last_fault_code")
+                    vals["code_name"] = fca.get("code_name")
             try:
                 from .labels import panel_fault_name
                 name = panel_fault_name(vals, code_name)
@@ -863,6 +1057,12 @@ def build_summary_parts(
             "_uiv": [], "_ss": [], "_ns": 0, "open_live_t": [],
         })
         g["count"] += 1
+        if e.get("source") == "panel":
+            _cn, _sp = _ca_notes(e)
+            if _cn:
+                g["code_note"] = _cn
+            if _sp:
+                g["superseded"] = _sp
         # Снятое ИИ и неподтверждённое не суммируются: снятие главнее
         _unconf = not e.get("gate_suppressed") and not _confirmed(e)
         if _unconf:
@@ -1018,8 +1218,19 @@ def build_summary_parts(
 
     verdict, end_level = _verdict_from_remarks(remarks, checks, bool(emergency))
 
+    # «Висит также Общая авария» под громким битом панели (v5.1.25, П7) — после
+    # вердикта: в «ЗАМЕЧАНИЯ — N» и вердикт строка не идёт
+    try:
+        ca_hold = _common_alarm_hold(segments, groups, episodes, common_alarm, w1,
+                                     code_name, tz, is_open=is_open)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning("Строка «Висит также Общая авария» не построена",
+                                            exc_info=True)
+        ca_hold = None
+
     # ── Ключевые показатели — за весь период работы ──
-    key_metrics = _key_metrics_part(segments, trip_roles)
+    key_metrics = _key_metrics_part(segments, trip_roles, is_open=is_open, tz=tz)
     coking = coking_part
 
     # Неудачная попытка выхода из стопа (v5.1.16): что не подтвердило режим
@@ -1053,7 +1264,85 @@ def build_summary_parts(
         "coking": coking,
         "no_data": False,
         "attempt": attempt_part,
+        "common_alarm_hold": ca_hold,
     }
+
+
+_LOUD_RAW = frozenset({"warning", "shutdown", "shutdown_cooldown"})
+
+
+def _common_alarm_hold(segments, groups: dict, episodes: list[dict], common_alarm,
+                       w1, code_name=None, tz=None, is_open: bool = False) -> dict[str, Any] | None:
+    """«Висит также Общая авария» (v5.1.25, П7, разбор ДЭС №3 24.10).
+
+    Бит «Общая авария» висит на конец (событие FAULT последнего сегмента без
+    снятия или со снятием не раньше конца окна), 40012 на конец > 0, есть
+    громкая панельная строка «активен на конец», а своей строки Общей аварии
+    «на конец» (или перекрытой в этом окне) нет. Критика M8: громкий бит сам
+    поднимает Общую аварию (все 55 громких фронтов за 60 дней), и код на панели
+    — его код; строка — только если фронт Общей аварии старше громкого больше
+    допуска начала кода или у фронта есть свой эпизод (открытый или
+    «перекрыт»). Код в тексте — что сейчас на панели (критика SHOULD 7), не
+    код Общей аварии. None — строки нет.
+
+    Ревью v5.1.25 (Q10): «сейчас» — только у открытого сегмента (is_open); у
+    закрытого код — на конец периода: Сводка хранится, и через день «сейчас»
+    стало бы неправдой (код сбрасывают)."""
+    if not common_alarm or not segments:
+        return None
+    ca_addr, ca_bit = common_alarm[0], common_alarm[1]
+    tol = float(common_alarm[2]) if len(common_alarm) > 2 and common_alarm[2] is not None else 15.0
+    last = segments[-1]
+    w1 = _dt(w1) or _dt(getattr(last, "t_end", None))
+    evs = [x for x in (getattr(last, "events", None) or [])
+           if isinstance(x, dict) and x.get("type") == "FAULT"]
+
+    def _hangs(x) -> bool:
+        fe = _dt(x.get("fault_end"))
+        return fe is None or (w1 is not None and fe >= w1)
+
+    ca_t = min((_dt(x.get("t")) for x in evs
+                if x.get("addr") == ca_addr and x.get("bit") == ca_bit and _hangs(x)
+                and _dt(x.get("t")) is not None), default=None)
+    if ca_t is None:
+        return None
+    subs = getattr(last, "subsegments", None) or []
+    lfc = ((getattr(subs[-1], "characteristics", None) or {}).get("LAST_FAULT_CODE") or {}) if subs else {}
+    try:
+        code = int((lfc.get("value_end") if isinstance(lfc, dict) else 0) or 0)
+    except (TypeError, ValueError):
+        code = 0
+    if code <= 0:
+        return None
+    loud = [g for g in groups.values() if g.get("source") == "panel" and g.get("at_end")
+            and g.get("severity") in ("WARNING", "SHUTDOWN")]
+    if not loud:
+        return None
+    own = groups.get(("panel", ca_addr, ca_bit))
+    if own and (own.get("at_end") or own.get("superseded")):
+        return None
+    loud_t = min((_dt(x.get("t")) for x in evs
+                  if str(x.get("severity") or "").lower() in _LOUD_RAW and _hangs(x)
+                  and not (x.get("addr") == ca_addr and x.get("bit") == ca_bit)
+                  and _dt(x.get("t")) is not None), default=None)
+    older = loud_t is not None and (loud_t - ca_t).total_seconds() > tol
+    has_ep = any(e.get("source") == "panel" and e.get("addr") == ca_addr and e.get("bit") == ca_bit
+                 and _dt(e.get("t_open")) == ca_t
+                 and (e.get("t_close") is None or e.get("close_reason") == "superseded")
+                 for e in episodes or [])
+    if not (older or has_ep):
+        return None
+    name = None
+    if code_name is not None:
+        try:
+            name = code_name(code)
+        except Exception:
+            name = None
+    since = ca_t.isoformat()
+    _when = "на панели сейчас" if is_open else "на конец периода на панели"
+    text = (f"Висит также Общая авария с {_fmt_dm(since, tz)} ({_when} код {code}"
+            + (f" «{name}»" if name else "") + ")")
+    return {"since": since, "code": code, "name": name, "text": text}
 
 
 # Проверки последовательности, которые говорят о качестве данных, а не о
@@ -1176,9 +1465,14 @@ def _mark_start_notes(groups: dict, episodes: list[dict], segments, group_key, t
 
 def _event_groups(segments, event_eps, w0, w1, tz) -> list[dict]:
     """Группы замечаний разовых событий перехода: из детекций сегментов окна;
-    точечный эпизод — запасной источник, если детекции нет (сбой контекста)."""
+    точечный эпизод — запасной источник, если детекции нет (сбой контекста).
+
+    v5.1.25 (решение В-25.1): INFO-событие (LOAD_STEP в пределах нормы) —
+    не замечание: ни группы, ни вида, ни цвета; только строка «Обнаружений»
+    полного отчёта. Его онсет запасным эпизодом не воскрешается."""
     from .contract import EVENT_SCENARIOS
     on: dict[tuple, dict] = {}
+    info_on: set[tuple] = set()
 
     def _in(t):
         return t is not None and (w0 is None or t >= w0) and (w1 is None or t < w1)
@@ -1190,10 +1484,15 @@ def _event_groups(segments, event_eps, w0, w1, tz) -> list[dict]:
                 sc = dd.get("scenario")
                 t = _dt(dd.get("t_detected"))
                 if sc in EVENT_SCENARIOS and _in(t):
+                    if dd.get("severity") == "INFO":
+                        info_on.add((sc, t))
+                        continue
                     on.setdefault((sc, t), {"text": dd.get("trigger")})
     for e in event_eps or []:
         sc, t = e.get("scenario"), _dt(e.get("t_open"))
-        if sc in EVENT_SCENARIOS and _in(t) and (sc, t) not in on:
+        if e.get("severity") == "INFO":
+            continue
+        if sc in EVENT_SCENARIOS and _in(t) and (sc, t) not in on and (sc, t) not in info_on:
             on[(sc, t)] = {"text": None}
     groups: dict[str, dict] = {}
     for (sc, t), v in sorted(on.items(), key=lambda x: x[0][1]):
@@ -1532,6 +1831,12 @@ def render_summary_md(parts: dict[str, Any]) -> str:
             if g.get("start_note"):
                 # v5.1.23 (п.3): эпизод начался в окне пуска — факты пуска рядом
                 line += f" — {g['start_note']}"
+            # «Общая авария» (v5.1.25, П6–П7): код сменился в этом окне; эпизод
+            # закрыт громким битом панели, а бит Общей аварии не снят
+            if isinstance(g.get("code_note"), dict) and g["code_note"].get("text"):
+                line += f" — {g['code_note']['text']}"
+            if isinstance(g.get("superseded"), dict) and g["superseded"].get("text"):
+                line += f" — {g['superseded']['text']}"
             _nc = g["count"] - (_u if _v3u else 0)
             if g["suppressed"]:
                 # С источником (v5.1.22): «снято ИИ (разбор 09:59)» / «снято по
@@ -1558,6 +1863,10 @@ def render_summary_md(parts: dict[str, Any]) -> str:
             det = c.get("details") if isinstance(c, dict) else c
             mark = "ℹ️" if isinstance(c, dict) and c.get("check") in _INFO_CHECKS else "❗"
             a(f"- {mark} {det}" if det else f"- {mark} проверка не пройдена")
+        # v5.1.25 (П7): бит «Общая авария» висит под громким — сведения, не замечание
+        _hold = parts.get("common_alarm_hold")
+        if isinstance(_hold, dict) and _hold.get("text"):
+            a(f"- ℹ️ {_hold['text']}")
 
     km = parts.get("key_metrics")
     if km and km.get("rows"):
@@ -1570,11 +1879,18 @@ def render_summary_md(parts: dict[str, Any]) -> str:
         a("")
         a("| Параметр | Обычно | Минимум | Максимум | Ед. |")
         a("|----------|-------:|--------:|---------:|-----|")
+        # Короткая работа (решение В-25.3): медиана по паре отсчётов — не «обычно»
+        _short = km.get("short") if isinstance(km.get("short"), dict) else None
         for r in km["rows"]:
             _d = number_decimals([r.get("median"), r.get("min"), r.get("max")])
-            a(f"| {r.get('name') or role_label(r.get('role'))} | {fmt_number(r.get('median'), _d)} "
+            _med = "—" if _short else fmt_number(r.get('median'), _d)
+            a(f"| {r.get('name') or role_label(r.get('role'))} | {_med} "
               f"| {fmt_number(r.get('min'), _d)} | {fmt_number(r.get('max'), _d)} "
               f"| {unit_ru(r.get('unit'))} |")
+        _st = _km_short_text(_short) if _short else None
+        if _st:
+            a("")
+            a(_st)
     ck = parts.get("coking")
     if ck and isinstance(ck, dict) and "before_start" in ck:
         if ck["before_start"]:
@@ -1662,13 +1978,100 @@ def build_summary_md(
                                                  code_name=code_name))
 
 
-def no_data_summary_parts() -> dict[str, Any]:
-    """Части сводки сегмента без связи: вердикта нет, ИИ не нужен."""
+def no_data_summary_parts(run_estimate: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Части сводки сегмента без связи: вердикта нет, ИИ не нужен.
+
+    v5.1.25 (П10): run_estimate — оценка работы за обрыв по счётчику наработки
+    (no_data_run_estimate, с текстом) для API; вердикта по-прежнему нет."""
     return {
         "version": SUMMARY_PARTS_VERSION, "verdict": None, "end_level": None,
         "mttr": None, "remarks": [], "has_remarks": False, "failed_checks": [],
         "emergency": False, "key_metrics": None, "coking": None, "no_data": True,
+        "run_estimate": run_estimate if isinstance(run_estimate, dict) else None,
     }
+
+
+def no_data_estimate_params(cfg) -> dict[str, Any]:
+    """Оценка работы за обрыв по счётчику наработки (KB: segmentation.yaml →
+    no_data_estimate; шаг счётчика — свойство контроллера, в его слое)."""
+    def g(key: str, default: Any) -> Any:
+        try:
+            v = cfg.seg("no_data_estimate", key, default=default)
+        except Exception:
+            v = default
+        return default if v is None else v
+    return {"enabled": bool(g("enabled", True)),
+            "step_sec": float(g("engine_hours_step_sec", 180)),
+            "lookback_sec": float(g("lookback_sec", 172800))}
+
+
+def no_data_run_estimate(
+    h0: "tuple[datetime, float] | None",
+    h1: "tuple[datetime, float] | None",
+    step_sec: float,
+    seg_t0: datetime,
+    starts_changed: bool | None = None,
+    run_state: int | None = None,
+) -> dict[str, Any] | None:
+    """Работа за обрыв связи по счётчику наработки (v5.1.25, П10, разбор ДЭС №3
+    24.10: связи не было 05:48–12:38, по 40070 машина работала до ~12:05–12:08).
+
+    h0 — (метка, секунды) последнее показание счётчика до обрыва, h1 — первое
+    после. ΔH = h1 − h0 — наработка за перерыв (от тика h0, а не от последних
+    данных — критика SHOULD 5). Счётчик идёт шагом step_sec, поэтому конец
+    работы при непрерывной работе — [h0 + ΔH, h0 + ΔH + шаг]. Виды:
+    - idle — ΔH ≤ 0: за перерыв не работал;
+    - starts — счётчики пусков сменились: были остановы/пуски, момент конца
+      не оценить (только наработка);
+    - whole — конец не раньше h1 − шаг: работал весь перерыв (наработка почти
+      равна перерыву — это верно и без сверки пусков);
+    - hours_only — непрерывность работы с h0 не подтверждена (ревью v5.1.25,
+      Q1): на последних данных двигатель не работал (run_state ≠ 3, reason
+      «stood») или счётчика пусков нет (starts_changed None, reason
+      «no_starts», KTA50) — только наработка, без момента останова;
+    - before — конец раньше начала сегмента seg_t0: в этом периоде не работал;
+    - until — работал до ~конца.
+    before и until — только при работе на последних данных (run_state 3) и
+    неизменном счётчике пусков (starts_changed False): ДГУ №1 стояла на обрыве
+    05:48 и пущена в 10:00 — «не работал, остановился ~08:25» было бы ложью.
+    Нет h0 или h1 — None (оценки нет: связи ещё нет, суточный рез в обрыве)."""
+    if not h0 or not h1:
+        return None
+    t0, v0 = _tz_utc(h0[0]), float(h0[1])
+    t1, v1 = _tz_utc(h1[0]), float(h1[1])
+    if t1 <= t0:
+        return None
+    dh = v1 - v0
+    out: dict[str, Any] = {"h0_at": t0.isoformat(), "h0_sec": v0, "h1_at": t1.isoformat(), "h1_sec": v1,
+                           "worked_sec": max(0.0, dh), "step_sec": float(step_sec),
+                           "end_from": None, "end_to": None, "starts_changed": starts_changed,
+                           "run_state": run_state}
+    if dh <= 0:
+        out["kind"] = "idle"
+        return out
+    if starts_changed:
+        out["kind"] = "starts"
+        return out
+    e0 = t0 + timedelta(seconds=dh)
+    e1 = e0 + timedelta(seconds=step_sec)
+    if e0 >= t1 - timedelta(seconds=step_sec):
+        out.update(end_from=e0.isoformat(), end_to=e1.isoformat(), kind="whole")
+        return out
+    # Непрерывность с h0 не подтверждена — момент останова не оценить (Q1)
+    if run_state != 3 or starts_changed is not False:
+        out.update(kind="hours_only", reason="stood" if run_state != 3 else "no_starts")
+        return out
+    out.update(end_from=e0.isoformat(), end_to=e1.isoformat())
+    if e1 <= _tz_utc(seg_t0):
+        out["kind"] = "before"
+    else:
+        out["kind"] = "until"
+    return out
+
+
+def _tz_utc(t: Any) -> datetime:
+    t = t if isinstance(t, datetime) else datetime.fromisoformat(str(t))
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 
 def build_no_data_report(
@@ -1679,20 +2082,33 @@ def build_no_data_report(
     t_end: datetime,
     tz=None,
     last_data_ts: "datetime | None" = None,
+    run_estimate: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """Заглушка отчёта для сегмента без единой строки телеметрии (data_quality == 0).
 
     Возвращает (report_md, report_summary_md). Штатный to_markdown для таких
     сегментов не вызывается: метрики там строятся из преамбулы/forward-fill,
     т.е. из данных ДО обрыва связи, и читаются как актуальный анализ.
+
+    v5.1.25 (П10): last_data_ts — последние данные ДО обрыва (у #36065 было
+    время уже после восстановления связи), run_estimate — оценка работы за
+    обрыв по счётчику наработки (labels.no_data_hours_text).
     """
     fmt_ts = _make_fmt_ts(tz)
     period = f"{fmt_ts(t_start.isoformat())} — {fmt_ts(t_end.isoformat())}"
     last_line = (
-        f"Последние данные получены: {fmt_ts(last_data_ts.isoformat())}."
+        f"Последние данные до обрыва: {fmt_ts(last_data_ts.isoformat())}."
         if last_data_ts is not None
         else "Данных за период нет."
     )
+    try:
+        from .labels import no_data_hours_text
+        _est = no_data_hours_text(run_estimate, tz)
+    except Exception:
+        logger.warning("Оценка работы за обрыв по наработке не напечатана", exc_info=True)
+        _est = None
+    if _est:
+        last_line = f"{last_line} {_est}"
 
     report_md = "\n".join([
         f"# Аналитический отчёт — ДГУ `{router_sn}` / панель {panel_id}",
@@ -1874,12 +2290,37 @@ def _det_counter_lines(d: dict, fmt_ts) -> list[str]:
     return out
 
 
-def _violation_line(entries: list[tuple[int, dict]], tz=None) -> str | None:
+def _ongoing_label(close: tuple | None, tz=None) -> str:
+    """Подпись идущего на конце кластера (v5.1.25, решение В-25.3): «(идёт)» —
+    только у открытого сегмента; у закрытого — «(до конца работы)» / «(до
+    конца режима)», на суточном резе — «(продолжается после 09:00)».
+
+    close — (cause_close, t_end, run_state) сегмента; None — как раньше «(идёт)».
+    Причину и конец последнего сегмента окна передаёт движок явно (критика M3):
+    у сегмента на суточном резе сегментатор cause_close не ставит."""
+    if not close:
+        return " (идёт)"
+    try:
+        cc, t_end, rs = close
+    except (TypeError, ValueError):
+        return " (идёт)"
+    if cc is None:
+        return " (идёт)"
+    if cc == "DAILY_BOUNDARY":
+        t = fmt_local(t_end, tz, seconds=False)
+        return f" (продолжается после {t})" if t else " (продолжается после суточного реза)"
+    return " (до конца работы)" if rs == 3 else " (до конца режима)"
+
+
+def _violation_line(entries: list[tuple[int, dict]], tz=None,
+                    close: tuple | None = None) -> str | None:
     """Строка «Нарушение: …» пункта обнаружения с участками (v5.1.21, П9).
 
     Уникальные кластеры values.live вхождений (один кластер виден в каждом
     подсегменте, который пересекает), «чистое время» — объединение участков,
-    у близости к уставке — участки своей роли (values.role). Без live — None."""
+    у близости к уставке — участки своей роли (values.role). Без live — None.
+    close — (cause_close, t_end, run_state) для подписи идущего кластера
+    (_ongoing_label, v5.1.25)."""
     cl: dict[datetime, dict] = {}
     role = None
     for _, d in entries:
@@ -1905,7 +2346,8 @@ def _violation_line(entries: list[tuple[int, dict]], tz=None) -> str | None:
             return float(rr[role].get("viol_sec") or 0.0)
         return float(c.get("viol_sec") or 0.0)
 
-    spans = [_fmt_span(c["start"], c["end"], tz) + (" (идёт)" if c.get("ongoing") else "")
+    _og = _ongoing_label(close, tz)
+    spans = [_fmt_span(c["start"], c["end"], tz) + (_og if c.get("ongoing") else "")
              for c in items]
     if len(spans) > 6:
         spans = spans[:3] + ["…"] + spans[-2:]
@@ -1915,11 +2357,17 @@ def _violation_line(entries: list[tuple[int, dict]], tz=None) -> str | None:
             f"(чистое время {_fmt_duration(sum(_clean(c) for c in items))})")
 
 
-def _append_detections(lines: list[str], seg: Segment, idx: int, fmt_ts, tz=None) -> None:
+def _append_detections(lines: list[str], seg: Segment, idx: int, fmt_ts, tz=None,
+                       close: tuple | None = None) -> None:
     """Обнаружения сегмента одним блоком, повторы по подсегментам свёрнуты.
 
     v5.1.21 (П9): у обнаружения с участками — строка «Нарушение: …» по
-    уникальным кластерам с чистым временем (_violation_line)."""
+    уникальным кластерам с чистым временем (_violation_line). close —
+    (cause_close, t_end, run_state) для подписи идущего кластера (v5.1.25);
+    None — по самому сегменту."""
+    if close is None:
+        close = (getattr(seg, "cause_close", None), getattr(seg, "t_end", None),
+                 getattr(seg, "run_state", None))
     groups = _group_detections(seg.subsegments)
     if not groups:
         return
@@ -1951,7 +2399,7 @@ def _append_detections(lines: list[str], seg: Segment, idx: int, fmt_ts, tz=None
                 a(f"  - худшее ({_fmt_sub_ranges([w[0]], idx)}): {w[1].get('trigger')}")
             a(f"  - последнее ({_fmt_sub_ranges([li], idx)}): {ld.get('trigger')}")
             a(f"  - всего разных значений: {len(trig)}")
-        _vl = _violation_line(g["entries"], tz)
+        _vl = _violation_line(g["entries"], tz, close)
         if _vl:
             a(_vl)
         lv = g["last"].get("values") or {}
@@ -2007,12 +2455,16 @@ def to_markdown(
     prev_seg=None,
     fault_ref=None,
     inherited_run_state_sec: "dict[int, float] | None" = None,
+    last_close: "tuple | None" = None,
 ) -> str:
     """Сформировать Markdown-отчёт.
 
     tz — объект часового пояса (например, из config.get_tz()); None → UTC.
     inherited_run_state_sec — накопленное время (сек) в каждом RS от предыдущих
     сегментов суточной цепочки (continued_from). Добавляется к RS=3 времени в сводке.
+    last_close — (cause_close, t_end) последнего сегмента, как его закрывает
+    движок (v5.1.25): подпись идущего нарушения «(до конца работы)» /
+    «(продолжается после 09:00)» вместо «(идёт)»; None — по сегменту.
     """
     fmt_ts = _make_fmt_ts(tz)
 
@@ -2100,7 +2552,16 @@ def to_markdown(
 
     for seg_idx, seg in enumerate(segments, 1):
         ps = segments[seg_idx - 2] if seg_idx >= 2 else prev_seg
-        _append_segment(lines, seg, seg_idx, fmt_ts, prev_seg=ps, fault_ref=fault_ref, tz=tz)
+        # Фактическая причина и конец последнего сегмента окна — от движка
+        # (критика M3: на суточном резе сегментатор cause_close не ставит)
+        _cl = None
+        if last_close is not None and seg_idx == len(segments):
+            try:
+                _cl = (last_close[0], last_close[1], seg.run_state)
+            except (TypeError, IndexError):
+                _cl = None
+        _append_segment(lines, seg, seg_idx, fmt_ts, prev_seg=ps, fault_ref=fault_ref, tz=tz,
+                        close=_cl)
 
     return "\n".join(lines)
 
@@ -2113,6 +2574,7 @@ def _append_segment(
     prev_seg: "Segment | None" = None,
     fault_ref=None,
     tz=None,
+    close: tuple | None = None,
 ) -> None:
     a = lines.append
     state_label = (
@@ -2369,7 +2831,7 @@ def _append_segment(
         a("")
 
     # Обнаружения — одним блоком на сегмент, повторы по подсегментам свёрнуты
-    _append_detections(lines, seg, idx, fmt_ts, tz=tz)
+    _append_detections(lines, seg, idx, fmt_ts, tz=tz, close=close)
 
     # Подсегменты
     if len(seg.subsegments) > 1:
@@ -2460,6 +2922,13 @@ def _append_subsegment(
     # Derived metrics (только ненулевые)
     dm = sub.derived_metrics.to_dict()
     dm_nz = {k: v for k, v in dm.items() if v is not None}
+    # v5.1.25 (решение В-25.1): шаг опроса больше нормы — восстановление
+    # подписью «не более N с (…)»; моменты dP/dt видно в триггере детекции
+    _rt = dm_nz.pop("freq_recovery_text", None)
+    if _rt and "freq_recovery_sec" in dm_nz:
+        dm_nz["freq_recovery_sec"] = _rt
+    dm_nz.pop("dP_dt_max_at", None)
+    dm_nz.pop("dP_dt_onset_at", None)
     if dm_nz:
         a("**Производные метрики:**")
         a("")

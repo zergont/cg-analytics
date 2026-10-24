@@ -15,11 +15,12 @@
   - immediate  (немедленный/горячий)       → incident_json + черновик акта.
 
 Решение — по трём независимым сигналам (детерминированно из enum-периодов):
-  1. RUN_STATE (40011): прошёл ли cooldown 4/5 перед остановом;
-  2. RunCommand (40599): «Работа» снята сразу (3→0, «нет команды») vs через
-     фазу «Стоп»;
-  3. тип неисправности (40013): Shutdown(4) vs ShutdownWithCooldown(3).
+  1. режим 40011: прошло ли охлаждение 4/5 перед остановом;
+  2. команда работы 40599: «Работа» снята сразу (3→0, «нет команды») или
+     через фазу «Стоп»;
+  3. тип неисправности 40013: «Останов» (4) или «Останов с охлаждением» (3).
 Согласие сигналов даёт уверенность; конфликт помечается (флаг неоднозначности).
+Голоса — по-русски (v5.1.25); у старых актов переводятся при чтении (vote_ru).
 
 Пороги/логика — из наблюдаемых состояний; RUN_STATE 4/5 = штатное охлаждение
 (operation_rules: 3–5 мин на холостом перед остановом). Полный классификатор
@@ -27,8 +28,12 @@
 """
 from __future__ import annotations
 
+import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # enum-значения (PCC3300)
 _RS_COOLDOWN = (4, 5)          # RUN_STATE: Cooldown/StopDelay, CooldownatIdle
@@ -41,6 +46,68 @@ _FT_SHUTDOWN_COOLDOWN = 3      # 40013: ShutdownwithCooldown (контролир
 _ADDR_RUN_STATE = 40011
 _ADDR_RUN_COMMAND = 40599
 _ADDR_FAULT_TYPE = 40013
+
+# ── Признаки характера по-русски (v5.1.25, хвост v5.1.23) ─────────────────────
+# Голоса печатаются как есть: акт, вход совета (incident_gate), реконструкция
+# корпуса (preprocessor), UI (votes.join(" · ")). До v5.1.25 — наполовину
+# по-английски («RUN_STATE без cooldown 4/5», «40013=Shutdown»)
+VOTE_NO_COOLDOWN = "без охлаждения перед остановом (режим 40011 не проходил 4/5)"
+VOTE_COOLDOWN = "через охлаждение (режим 40011 прошёл 4/5)"
+VOTE_RC_DIRECT = "команда «Работа» снята сразу (3→0), без «Стоп»"
+VOTE_RC_VIA_STOP = "команда работы 40599 через «Стоп»"
+VOTE_FT_SHUTDOWN = "тип неисправности 40013 — «Останов» (4)"
+VOTE_FT_SHUTDOWN_COOLDOWN = "тип неисправности 40013 — «Останов с охлаждением» (3)"
+
+# Старые акты (incident_json до v5.1.25) не переписываются — голоса
+# переводятся при чтении. «RunCommand прямой EmergencyStop» — до v5.1.23 (В5:
+# 0 — «нет команды», а не кнопка): 7 из 8 актов за 45 дней (критика M2)
+_VOTES_OLD_RU = {
+    "RUN_STATE без cooldown 4/5": VOTE_NO_COOLDOWN,
+    "RUN_STATE через cooldown": VOTE_COOLDOWN,
+    "RunCommand через «Стоп»": VOTE_RC_VIA_STOP,
+    "RunCommand прямой EmergencyStop": VOTE_RC_DIRECT,
+    "40013=Shutdown": VOTE_FT_SHUTDOWN,
+    "40013=ShutdownWithCooldown": VOTE_FT_SHUTDOWN_COOLDOWN,
+}
+
+# Характер и уверенность в тексте (значения в incident_json — коды, их читает UI)
+CHARACTER_RU = {"immediate": "немедленный", "controlled": "контролируемый", "unknown": "неясен"}
+CONFIDENCE_RU = {"high": "высокая", "low": "низкая"}
+# Путь команды работы 40599 перед остановом (signals.run_command_path)
+RC_PATH_RU = {"direct_estop": "снята сразу", "via_stop": "через «Стоп»", "unknown": "не видно"}
+
+_LATIN3 = re.compile(r"[A-Za-z]{3,}")
+
+
+def vote_ru(v: Any) -> Any:
+    """Голос характера по-русски: старая строка — новая, новая — как есть.
+    Неизвестный голос с латиницей печатается как есть, с WARNING в журнал."""
+    if not isinstance(v, str):
+        return v
+    out = _VOTES_OLD_RU.get(v, v)
+    if _LATIN3.search(out):
+        logger.warning("Голос характера без перевода: %r", out)
+    return out
+
+
+def character_ru(ch: Any) -> Any:
+    """Копия incident_json.character с голосами по-русски (для чтения: API,
+    вход совета, реконструкция). Коды character/confidence/signals — как есть."""
+    if not isinstance(ch, dict):
+        return ch
+    out = dict(ch)
+    for k in ("immediate_votes", "controlled_votes"):
+        if isinstance(out.get(k), list):
+            out[k] = [vote_ru(v) for v in out[k]]
+    return out
+
+
+def character_text(ch: Any) -> str:
+    """«немедленный (уверенность высокая)» по кодам character/confidence."""
+    ch = ch if isinstance(ch, dict) else {}
+    c, conf = ch.get("character"), ch.get("confidence")
+    return (f"{CHARACTER_RU.get(c, c if c is not None else '?')} "
+            f"(уверенность {CONFIDENCE_RU.get(conf, conf if conf is not None else '?')})")
 
 
 def _tz(ts: datetime) -> datetime:
@@ -145,23 +212,26 @@ def classify_stop_character(
     # 3) Тип последней неисправности на останове
     fault_type = _value_at(ft, stop_ts)
 
+    # Голоса — по-русски (v5.1.25, хвост v5.1.23): их печатают акт, вход совета
+    # и UI как есть. Коды signals и значения character/confidence не меняются —
+    # на них стоит логика и UI (CHARACTER_LABELS)
     immediate: list[str] = []
     controlled: list[str] = []
     if not passed_cooldown:
-        immediate.append("RUN_STATE без cooldown 4/5")
+        immediate.append(VOTE_NO_COOLDOWN)
     else:
-        controlled.append("RUN_STATE через cooldown")
+        controlled.append(VOTE_COOLDOWN)
     if rc_path == "direct_estop":
         # v5.1.23 (решение В5): 40599 = 0 — «нет команды», а не кнопка
         # аварийного останова; голос остаётся — он отличает аварийное снятие
         # 3→0 от операторского 3→1→0
-        immediate.append("команда «Работа» снята сразу (3→0), без «Стоп»")
+        immediate.append(VOTE_RC_DIRECT)
     elif rc_path == "via_stop":
-        controlled.append("RunCommand через «Стоп»")
+        controlled.append(VOTE_RC_VIA_STOP)
     if fault_type == _FT_SHUTDOWN:
-        immediate.append("40013=Shutdown")
+        immediate.append(VOTE_FT_SHUTDOWN)
     elif fault_type == _FT_SHUTDOWN_COOLDOWN:
-        controlled.append("40013=ShutdownWithCooldown")
+        controlled.append(VOTE_FT_SHUTDOWN_COOLDOWN)
 
     if immediate and not controlled:
         character, confidence = "immediate", "high"

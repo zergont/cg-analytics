@@ -81,7 +81,9 @@ def _age(sec: float) -> str:
 # Счётчик наработки — монотонный, не параметр режима (в акте «мин–макс» бессмыслен).
 # v5.1.22: пульс опроса и номиналы установки — не параметры режима, только шум
 _NOT_PARAMS = {"LAST_FAULT_CODE", "LAST_FAULT_TYPE", "ENGINE_HOURS",
-               "HEARTBEAT", "RATING_KW", "RATING_KVA"}
+               "HEARTBEAT", "RATING_KW", "RATING_KVA",
+               # v5.1.25: счётчики пусков панели — монотонные, как наработка
+               "START_ATTEMPTS_TOTAL", "START_SUCCESS_TOTAL"}
 # Строка хода цикла: ключевые параметры сегмента (v5.1.22, P1-4) — нагрузка,
 # ток, обороты, частота, масло, ОЖ, АКБ; прочее — в подробных блоках
 _CYCLE_KEYS = (("ACTIVE_POWER_TOTAL", "P"), ("CURRENT_AVG", "I"), ("RPM", "обороты"),
@@ -512,11 +514,19 @@ def build_incident_prompt(
         out.append(f"Попытка: {attempt_label(att)}, с {_ts(att.get('t_start'), tz, stop_raw)}; "
                    f"{attempt_facts_ru(att, tz) or ''}".rstrip("; "))
     else:
-        out.append(f"Характер по детерминированному гейту: {ch.get('character', '?')} "
-                   f"(уверенность {ch.get('confidence', '?')})")
-        votes = (ch.get("immediate_votes") or []) + (ch.get("controlled_votes") or [])
+        # Характер, уверенность и голоса — по-русски (v5.1.25); у старых актов
+        # голоса переводятся при чтении
+        try:
+            from analytics.classifier import character_ru, character_text
+            ch_ru, ch_txt = character_ru(ch), character_text(ch)
+        except Exception:
+            logger.warning("Признаки характера не переведены — как в акте", exc_info=True)
+            ch_ru = ch
+            ch_txt = f"{ch.get('character', '?')} (уверенность {ch.get('confidence', '?')})"
+        out.append(f"Характер по детерминированному гейту: {ch_txt}")
+        votes = (ch_ru.get("immediate_votes") or []) + (ch_ru.get("controlled_votes") or [])
         if votes:
-            out.append("Сигналы: " + "; ".join(votes))
+            out.append("Сигналы: " + "; ".join(str(v) for v in votes))
     if win.get("baseline") == "fallback":
         out.append("Предшествующего штатного останова в истории нет — "
                    "окно взято по последним сегментам.")
@@ -697,6 +707,14 @@ INC_ORDERED, INC_FAILED, INC_REMOVED, INC_SAVE_FAILED = (
     "ordered", "failed", "removed", "save_failed")
 INC_TERMINAL = (INC_FAILED, INC_REMOVED, INC_SAVE_FAILED)
 
+# Значок акта в календаре (v5.1.25, решение В-25.2): красный — разбор совета
+# готов; пока разбор в работе — значка нет; серый «акт без разбора совета» —
+# после терминальной отметки или когда вышли все сроки (заказов не больше
+# INCIDENT_MAX_ORDERS, у каждого INCIDENT_DEADLINE_SEC — 72 ч от аварии). Так же
+# серые старые акты без заказа (#35282 14.09, #35492 20.09). Акт виден всегда
+BADGE_READY, BADGE_PENDING, BADGE_FAILED, BADGE_NONE = "ready", "pending", "failed", "none"
+BADGE_GIVE_UP_SEC = INCIDENT_MAX_ORDERS * INCIDENT_DEADLINE_SEC
+
 _inflight: dict[tuple[str, str, int, str], asyncio.Task] = {}
 _closing = False
 _recover_task: asyncio.Task | None = None
@@ -713,6 +731,65 @@ def _utc(ts: datetime) -> datetime:
 def incident_hash(stop_ts: datetime) -> str:
     """Ключ разбора аварии в warning_analyses и журнале гейта."""
     return f"incident:{_utc(stop_ts).isoformat()}"
+
+
+def act_stop_ts(raw: Any, t_start: Any) -> datetime | None:
+    """Момент останова акта: incident_json.stop_ts (у плашки попытки — падение,
+    а не начало строки, v5.1.16), иначе начало строки — как recover_pending.
+    Ключ разбора (incident_hash) строится от него. None — момента нет."""
+    try:
+        if raw:
+            return _utc(datetime.fromisoformat(raw) if isinstance(raw, str) else raw)
+    except (TypeError, ValueError, AttributeError):
+        pass
+    try:
+        t = datetime.fromisoformat(t_start) if isinstance(t_start, str) else t_start
+        return _utc(t) if isinstance(t, datetime) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def analysis_badge(state: dict[str, Any] | None, stop_ts: datetime | None,
+                   now: datetime | None = None) -> str:
+    """Значок акта по состоянию разбора (v5.1.25, решение В-25.2).
+
+    state — {analysed, ordered, terminal} из get_incident_analysis_state(s):
+    ready — разбор с ключом аварии есть (и на соседней строке, окно ±2 сут);
+    failed — терминальная отметка (INC_TERMINAL) или от аварии прошло
+    BADGE_GIVE_UP_SEC — все заказы со своими сроками вышли (у старых актов без
+    заказа — так же); pending — разбор ещё может прийти; none — состояния нет
+    (нет акта). Сроки — из констант жизненного цикла, не числом."""
+    if not isinstance(state, dict):
+        return BADGE_NONE
+    if state.get("analysed"):
+        return BADGE_READY
+    if state.get("terminal") in INC_TERMINAL:
+        return BADGE_FAILED
+    if stop_ts is not None:
+        now = _utc(now) if now is not None else datetime.now(timezone.utc)
+        if (now - _utc(stop_ts)).total_seconds() >= BADGE_GIVE_UP_SEC:
+            return BADGE_FAILED
+    return BADGE_PENDING
+
+
+def analysis_failed_reason(state: dict[str, Any] | None) -> str | None:
+    """Почему разбора совета нет — для текста в блоке акта (критика SHOULD 6):
+    у акта без заказа «совет не ответил» было бы неправдой.
+
+    not_ordered — разбор не заказывался (старые акты, маршрут без разбора);
+    no_answer — совет не ответил (попытки или заказы исчерпаны, вышел срок);
+    removed — задача снята на шлюзе; save_failed — разбор получен, но не
+    записан. None — разбор есть или состояния нет."""
+    if not isinstance(state, dict) or state.get("analysed"):
+        return None
+    term = state.get("terminal")
+    if term == INC_REMOVED:
+        return "removed"
+    if term == INC_SAVE_FAILED:
+        return "save_failed"
+    if term == INC_FAILED or int(state.get("ordered") or 0) > 0:
+        return "no_answer"
+    return "not_ordered"
 
 
 def order_incident_analysis(

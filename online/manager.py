@@ -130,6 +130,10 @@ class OnlineManager:
         self._progress_mark: dict[str, tuple] = {}
         # Устаревшие данные в статус-тике: ключ → с какого момента (одно WARNING)
         self._stale_since: dict[str, datetime] = {}
+        # …и последние данные на входе в «устарело» (v5.1.25, П8): перерыв в
+        # журнале — от них, а не от входа (рестарт посреди обрыва давал 4 ч 51 мин
+        # вместо 6 ч 51 мин, ДЭС №3 24.10)
+        self._stale_last_data: dict[str, datetime | None] = {}
         # Машины, у которых идёт перезапуск сторожем (повтор не создаётся)
         self._restarting: set[str] = set()
         # Эпизод, уже описанный в журнале, когда сторож движок не трогает (выключен;
@@ -1181,6 +1185,10 @@ class OnlineManager:
                         # Вход в «устарело» — одно WARNING (v5.1.24: 17.10 было
                         # только DEBUG каждую минуту — 4 сут тишины в журнале)
                         self._stale_since[key] = now
+                        _stl = getattr(self, "_stale_last_data", None)
+                        if _stl is None:
+                            _stl = self._stale_last_data = {}
+                        _stl[key] = engine.last_data_ts
                         logger.warning("StatusScheduler[%s]: данные устарели %.0f с — статус и "
                                        "гейт заморожены (%s)", key, _age,
                                        self._engine_progress_text(key, engine, now))
@@ -1189,9 +1197,14 @@ class OnlineManager:
                                      key, _age)
                     continue
                 _since_stale = self._stale_since.pop(key, None)
+                _last_before = (getattr(self, "_stale_last_data", None) or {}).pop(key, None)
                 if _since_stale is not None:
+                    # Перерыв — от последних данных до обрыва (v5.1.25, П8)
+                    _from = _last_before or _since_stale
+                    if _from.tzinfo is None:
+                        _from = _from.replace(tzinfo=timezone.utc)
                     logger.info("StatusScheduler[%s]: данные снова свежие (перерыв %s)", key,
-                                _fmt_dur((now - _since_stale).total_seconds()))
+                                _fmt_dur((now - _from).total_seconds()))
 
                 seg = await online_db.get_open_segment(
                     engine.router_sn, engine.equip_type, engine.panel_id

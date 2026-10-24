@@ -73,7 +73,10 @@ def _alarm_name(e: dict, key: str | None = None) -> str | None:
     vals = _parse_json(e.get("open_values_json")) or {}
     if not isinstance(vals, dict):
         return None
-    if e.get("source") == "panel" and vals.get("panel_code") is not None:
+    # v5.1.25 (П6): «Общая авария» при несброшенном коде — «Общая авария: имя
+    # кода (код N)», и у старых строк («CommonAlarm (Общая авария)»)
+    if e.get("source") == "panel" and (vals.get("panel_code") is not None
+                                       or vals.get("last_fault_code")):
         try:
             from analytics.labels import panel_fault_name
             cn = None
@@ -1392,6 +1395,44 @@ def _attempt_fields(chars: dict | None) -> dict:
     }
 
 
+def _incident_ru(inc: Any) -> Any:
+    """Акт для API: копия incident_json.character с голосами по-русски (v5.1.25,
+    хвост v5.1.23). UI печатает голоса как есть (votes.join(" · ")), а старые
+    акты не переписываются — перевод при чтении. Сбой — акт как в БД."""
+    if not isinstance(inc, dict) or not isinstance(inc.get("character"), dict):
+        return inc
+    try:
+        from analytics.classifier import character_ru
+        return dict(inc, character=character_ru(inc["character"]))
+    except Exception:
+        logger.warning("Голоса характера акта не переведены — как в БД", exc_info=True)
+        return inc
+
+
+def _incident_analysis_fields(has_incident: bool, state: Any, stop_raw: Any,
+                              t_start: Any, now: Any = None) -> dict:
+    """Значок акта по готовности разбора совета (v5.1.25, решение В-25.2).
+
+    incident_analysis: ready — разбор готов (значок красный); pending — разбор
+    в работе (значка нет, в акте «Разбор совета готовится»); failed — разбора
+    не будет (серый значок «акт без разбора совета»); none — акта нет.
+    incident_analysis_reason — почему разбора нет, только у failed (критика
+    SHOULD 6): not_ordered / no_answer / removed / save_failed. Состояние не
+    прочитано — оба null: UI рисует значок как раньше, по has_incident."""
+    if not has_incident:
+        return {"incident_analysis": "none", "incident_analysis_reason": None}
+    if not isinstance(state, dict):
+        return {"incident_analysis": None, "incident_analysis_reason": None}
+    try:
+        from online.incident_gate import act_stop_ts, analysis_badge, analysis_failed_reason
+        badge = analysis_badge(state, act_stop_ts(stop_raw, t_start), now)
+        return {"incident_analysis": badge,
+                "incident_analysis_reason": analysis_failed_reason(state) if badge == "failed" else None}
+    except Exception:
+        logger.warning("Значок акта не определён — как раньше, по has_incident", exc_info=True)
+        return {"incident_analysis": None, "incident_analysis_reason": None}
+
+
 def _seg_label(run_state: int | None, stop_kind: str | None = None,
                chars: dict | None = None) -> str | None:
     """Подпись сегмента для API: вид стопа поверх словаря режимов.
@@ -2462,10 +2503,13 @@ async def api_machine_segments(
     except Exception:
         daily_hour = 9
 
+    # Состояние разбора актов — вторым запросом на весь календарь, только при
+    # наличии актов (значок акта, v5.1.25)
     segments = await odb.get_segments_for_calendar(
         router_sn, equip_type, panel_id,
-        ts_from=ts_from, ts_to=ts_to, limit=limit,
+        ts_from=ts_from, ts_to=ts_to, limit=limit, incident_state=True,
     )
+    _now = datetime.now(timezone.utc)
 
     # Загружаем статусы ИИ-анализа одним запросом
     seg_ids = [s["id"] for s in segments if s.get("id")]
@@ -2522,6 +2566,9 @@ async def api_machine_segments(
             "severity":      sev,                         # SHUTDOWN/WARNING/CAUTION/None (было INFO до v4.8.9)
             "gate_checked":  gate_ok,                     # срабатывание аналитики отменено гейтом
             "has_incident":  bool(seg.get("has_incident")),  # есть акт аварийного останова
+            # Значок акта — по готовности разбора совета (v5.1.25, В-25.2)
+            **_incident_analysis_fields(bool(seg.get("has_incident")), seg.get("_incident_state"),
+                                        seg.get("incident_stop_ts"), seg.get("t_start"), _now),
             "data_quality":  dq,                          # 0.0–1.0, null у старых сегментов
             "no_data":       (not is_open) and dq == 0.0, # весь сегмент без связи → «нет связи» в UI
             "coking_risk":   None,                        # в calendar-запросе не грузим JSONB полностью
@@ -2604,6 +2651,21 @@ async def api_segment_detail(seg_id: int):
     if seg.get("t_start") and seg.get("t_end"):
         dur = (seg["t_end"] - seg["t_start"]).total_seconds()
 
+    # Акт и состояние разбора совета — один запрос, только при акте (значок,
+    # v5.1.25, В-25.2). Сбой — значок null, акт отдаётся как раньше
+    _inc = _parse_json(seg.get("incident_json"), None, ctx="incident_json")
+    _inc_state = None
+    if isinstance(_inc, dict):
+        try:
+            from online.incident_gate import act_stop_ts, incident_hash
+            _inc_stop = act_stop_ts(_inc.get("stop_ts"), seg.get("t_start"))
+            if _inc_stop is not None:
+                _inc_state = await odb.get_incident_analysis_state(
+                    seg["router_sn"], seg["equip_type"], seg["panel_id"],
+                    incident_hash(_inc_stop), _inc_stop)
+        except Exception:
+            logger.warning("Сегмент #%s: состояние разбора акта не прочитано", seg_id, exc_info=True)
+
     return JSONResponse({
         "id":            seg_id,
         "router_sn":     seg["router_sn"],
@@ -2636,7 +2698,12 @@ async def api_segment_detail(seg_id: int):
         # Акт аварийного останова («Следователь»): вердикт характера и лента
         # событий [останов − 5 мин, конец сегмента]. Только у стоп-сегментов
         # вида EMERGENCY; у остальных null (v4.9.70)
-        "incident_json": _parse_json(seg.get("incident_json"), None, ctx="incident_json"),
+        # Голоса характера — по-русски при чтении (v5.1.25)
+        "incident_json": _incident_ru(_inc),
+        # Значок и текст блока акта — по готовности разбора совета (v5.1.25, В-25.2)
+        **_incident_analysis_fields(isinstance(_inc, dict), _inc_state,
+                                    _inc.get("stop_ts") if isinstance(_inc, dict) else None,
+                                    seg.get("t_start")),
         # Цепочка суточного реза: у продолжения аварийного стопа своего акта
         # нет — он лежит в голове, на которую указывает continued_from
         "continued_from": seg.get("continued_from"),

@@ -65,6 +65,12 @@ def _filter_window_episodes(
     закрывается точно по концу нарушения — хвоста дебаунса у него нет, и любое
     пересечение с окном — настоящее: перенос 60 с после 09:00 остаётся в
     сводке нового дня (порог ≈120 с его выбрасывал).
+
+    Ревью v5.1.25 (Q4): «Общая авария», закрытая «superseded» (перекрыта
+    громким битом, сам бит висит), — не хвост дебаунса: громкий бит приходит
+    рядом со сменой режима, и закрытие ложилось в первые 120 с окна — суффикс
+    «перекрыта …, Общая авария не снята» не доходил до Сводки (#36070 24.10:
+    закрыта через 62 с от начала). Любое пересечение с окном — настоящее.
     """
     out = []
     for e in eps:
@@ -74,6 +80,8 @@ def _filter_window_episodes(
         elif t_close is None or _tz_utc(t_close) >= t_to:
             out.append(e)
         elif _episode_has_live(e) and _tz_utc(t_close) > t_from:
+            out.append(e)
+        elif e.get("close_reason") == "superseded" and _tz_utc(t_close) > t_from:
             out.append(e)
         elif (_tz_utc(t_close) - t_from).total_seconds() > tail_sec:
             out.append(e)
@@ -129,6 +137,64 @@ def _panel_cleared_at(segments: list) -> dict[str, datetime]:
                 if key not in out or ts > out[key]:
                     out[key] = ts
     return out
+
+
+def _panel_front_ends(segments: list) -> dict[str, dict[datetime, datetime | None]]:
+    """Фронты панели окна по биту: ключ → {начало фронта: снятие | None} (ревью
+    v5.1.25, Q3). Рядом с _panel_cleared_at: та берёт самое позднее снятие
+    ключа, а панельный эпизод — по фронту, и конец его — снятие своего фронта.
+    Без запросов; сбой — пустая карта (конец — как раньше, по _panel_cleared_at)."""
+    out: dict[str, dict[datetime, datetime | None]] = {}
+    try:
+        for seg in segments or []:
+            for sub in getattr(seg, "subsegments", None) or []:
+                for d in getattr(sub, "detections", None) or []:
+                    if getattr(d, "scenario", None) != "CONTROLLER_FAULT":
+                        continue
+                    v = d.values or {}
+                    fs = _as_utc(v.get("fault_start") or d.t_detected)
+                    if fs is None:
+                        continue
+                    m = out.setdefault(_alert_key({"scenario": d.scenario, "values": v}), {})
+                    m[fs] = m.get(fs) or _as_utc(v.get("fault_end"))
+    except Exception:
+        logger.warning("Фронты панели окна не собраны — конец эпизодов по самому позднему "
+                       "снятию", exc_info=True)
+        return {}
+    return out
+
+
+def _panel_own_end(ep: dict, key: str, front_ends: dict | None) -> datetime | None:
+    """Снятие собственного фронта панельного эпизода памяти (ревью v5.1.25, Q3):
+    фронт — front памяти (нет — t_open). None — фронта в окне нет или он висит."""
+    own = _as_utc(ep.get("front")) or _as_utc(ep.get("t_open"))
+    if own is None:
+        return None
+    return ((front_ends or {}).get(key) or {}).get(own)
+
+
+def _panel_split_end(ep: dict, key: str, fs_new: datetime | None,
+                     front_ends: dict | None) -> datetime | None:
+    """Новый фронт того же бита у панельного эпизода, чей фронт уже снят, —
+    конец этого эпизода (ревью v5.1.25, Q3). Память панели ведётся по биту:
+    фронт, пришедший в дебаунсе (13.10 ДЭС №3, 1438: 10:44:13–10:44:31 и с
+    10:45:26), продолжал прежний эпизод — тот тянулся до снятия второго, а
+    второй ещё и сеялся отдельной строкой (наложение, двойная длительность).
+    Конец — снятие своего фронта по детекциям окна; его в окне нет, но эпизод
+    уже в дебаунсе (промах) — первый промах (не позже нового фронта). None —
+    продолжение: тот же или более ранний фронт, либо снятие своего фронта не
+    известно и промаха не было (рестарт со строкой до v5.1.25 — как раньше)."""
+    own = _as_utc(ep.get("front")) or _as_utc(ep.get("t_open"))
+    fs_new = _as_utc(fs_new)
+    if own is None or fs_new is None or fs_new <= own:
+        return None
+    fe = _panel_own_end(ep, key, front_ends)
+    if fe is not None and fe <= fs_new:
+        return max(fe, own)
+    fm = _as_utc(ep.get("first_miss_ts"))
+    if (ep.get("miss") or 0) > 0 and fm is not None:
+        return max(min(fm, fs_new), own)
+    return None
 
 
 def _analytics_cleared_at(segments: list,
@@ -222,6 +288,233 @@ def _exact_end(ep: dict, ca: datetime | None) -> datetime | None:
     return ca
 
 
+def _known_ends(segments: list, live_episodes: dict[str, dict] | None,
+                live_keys: set[str] | None = None,
+                w1: datetime | None = None) -> dict[str, dict]:
+    """Известный конец открытого эпизода памяти в окне сегментов (v5.1.25, P2-3):
+    ключ → {"id", "end", "exact"}. Только память и данные окна, без запросов.
+
+    Открытому эпизоду дебаунс держит t_close пустым ещё N циклов после снятия:
+    сводка закрываемого сегмента и счётчики видели его «висящим» до конца окна
+    (#35944: «Сброс нагрузки 2 мин 51 с» при 1 мин 51 с), а счётчики — с
+    недоначисленным воздействием.
+    - панель: конец — снятие фронта (fault_end) по детекциям окна, если ключа
+      нет среди живых (live_keys), ни одна детекция ключа в окне не висит на
+      его конец (fault_end пуст или не раньше конца последнего подсегмента —
+      критика M5), снятие не позже w1 и не раньше начала эпизода (прежний
+      период той же маски не в счёт). Берутся фронты не позже последнего
+      живого фронта эпизода (front памяти): фронт, целиком прошедший между
+      циклами, — свой эпизод (посев), а не продолжение этого. Ревью v5.1.25
+      (Q3): эпизод панели — по фронту, и более поздний фронт того же бита
+      (висящий тоже) — уже свой эпизод: на конец этого не влияет;
+    - точный эпизод аналитики, не живой на конец: конец нарушения по карте
+      кластеров окна (_exact_end), как раньше в _drop_debounce_tails.
+    Сбой — пустая карта (сводка и счётчики — прежним путём)."""
+    try:
+        eps = live_episodes or {}
+        if not eps:
+            return {}
+        live_keys = live_keys or set()
+        subs = [sub for seg in segments or [] for sub in getattr(seg, "subsegments", None) or []]
+        w_end = (_as_utc(getattr(subs[-1], "t_end", None) or getattr(subs[-1], "t_start", None))
+                 if subs else None)
+        if w1 is None:
+            w1 = w_end
+        w1 = _as_utc(w1)
+        # Фронты панели окна: ключ → [(начало, снятие | None)]
+        fronts: dict[str, list[tuple]] = {}
+        for sub in subs:
+            for d in getattr(sub, "detections", None) or []:
+                if getattr(d, "scenario", None) != "CONTROLLER_FAULT":
+                    continue
+                v = d.values or {}
+                key = _alert_key({"scenario": d.scenario, "values": v})
+                fronts.setdefault(key, []).append(
+                    (_as_utc(v.get("fault_start") or d.t_detected), _as_utc(v.get("fault_end"))))
+        _ca: dict[str, datetime] | None = None
+        out: dict[str, dict] = {}
+        for key, mem in eps.items():
+            if key in live_keys:
+                continue
+            t_open = _as_utc(mem.get("t_open"))
+            if key.startswith("CONTROLLER_FAULT|"):
+                fr = fronts.get(key) or []
+                if not fr or t_open is None:
+                    continue
+                last_live = _as_utc(mem.get("front")) or t_open
+                # Эпизод — по фронту (ревью v5.1.25, Q3): более поздний фронт того
+                # же бита — уже свой эпизод (_panel_split_end), его висение на конец
+                # окна этот эпизод не продлевает; висит свой фронт — конца нет (M5)
+                # Снятие ровно на конце окна — снята (как _cleared_by): сегмент,
+                # закрытый снятием аварии (10:44:04–10:44:31, 13.10), её не держит
+                fr = [(fs, fe) for fs, fe in fr if fs is None or fs <= last_live]
+                if not fr or any(fe is None or (w_end is not None and fe > w_end) for _fs, fe in fr):
+                    continue
+                ends = [fe for _fs, fe in fr]
+                end = max(ends) if ends else None
+                if end is None or end < t_open or (w1 is not None and end > w1):
+                    continue
+                out[key] = {"id": mem.get("id"), "end": end, "exact": False}
+            elif mem.get("exact"):
+                if _ca is None:
+                    _ca = _analytics_cleared_at(segments, eps)
+                end = _exact_end(mem, _ca.get(key))
+                if end is None:
+                    continue
+                end = _as_utc(end)
+                if t_open is not None and end < t_open:
+                    end = t_open
+                out[key] = {"id": mem.get("id"), "end": end, "exact": True}
+        return out
+    except Exception:
+        logger.warning("Известные концы открытых эпизодов не собраны — сводка и счётчики "
+                       "прежним путём", exc_info=True)
+        return {}
+
+
+def _known_end_copy(ep: dict, kn: dict) -> dict:
+    """Копия строки открытого эпизода для сводки с известным концом (v5.1.25,
+    P2-3) — так её закроет close_episode: t_close = конец, воздействие у точного
+    — конец − начало (слепая доля не больше), у панели — не меньше начисленного.
+    БД не трогается."""
+    t_open = _as_utc(ep.get("t_open"))
+    end = kn["end"]
+    if t_open is not None and end < t_open:
+        end = t_open
+    out = dict(ep, t_close=end)
+    # Воздействие — только у строки, где оно есть (строка БД); иначе как было
+    if t_open is not None and "active_sec" in ep:
+        span = max(0.0, (end - t_open).total_seconds())
+        if kn.get("exact"):
+            out["active_sec"] = span
+            if ep.get("blind_sec") is not None:
+                out["blind_sec"] = min(float(ep.get("blind_sec") or 0.0), span)
+        else:
+            out["active_sec"] = max(float(ep.get("active_sec") or 0.0), span)
+    return out
+
+
+def _known_ends_arg(known: dict[str, dict] | None) -> dict[int, tuple[datetime, bool]] | None:
+    """Карта _known_ends → аргумент ends счётчиков (id → (конец, exact))."""
+    if not known:
+        return None
+    return {int(v["id"]): (v["end"], bool(v.get("exact"))) for v in known.values()
+            if v.get("id") is not None and v.get("end") is not None}
+
+
+def _json_list(v) -> list:
+    """Список из JSON (asyncpg отдаёт jsonb строкой); иное — пустой список."""
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except (TypeError, ValueError):
+            return []
+    return v if isinstance(v, list) else []
+
+
+def _panel_code_mem(vals: dict | None, front) -> dict:
+    """Память панельного эпизода (v5.1.25): код «Общей аварии» (40012,
+    values.last_fault_code), его смены (code_changes) и последний живой фронт
+    (front, для _known_ends). У бита без кода — code None."""
+    v = vals or {}
+    try:
+        code = int(v.get("last_fault_code") or 0)
+    except (TypeError, ValueError):
+        code = 0
+    return {"code": code or None,
+            "code_changes": [c for c in _json_list(v.get("code_changes")) if isinstance(c, dict)],
+            "front": _as_utc(front)}
+
+
+def _code_change(mem: dict | None, vals: dict | None) -> dict | None:
+    """Смена кода «Общей аварии» под тем же фронтом (v5.1.25, П6, решение Б):
+    у детекции код B > 0, в памяти эпизода A > 0 и A ≠ B. Слияние для
+    open_values_json: {last_fault_code: B, code_name, last_fault_code_since,
+    code_changes: (прежние + {from: A, to: B, at: начало B})[-10:]}. Нули не в
+    счёт (мигающий 40012), список ограничен 10 записями. Иначе None."""
+    v = vals or {}
+    try:
+        b = int(v.get("last_fault_code") or 0)
+        a = int((mem or {}).get("code") or 0)
+    except (TypeError, ValueError):
+        return None
+    if b <= 0 or a <= 0 or a == b:
+        return None
+    ch = [c for c in _json_list((mem or {}).get("code_changes")) if isinstance(c, dict)]
+    ch = (ch + [{"from": a, "to": b, "at": v.get("last_fault_code_since")}])[-10:]
+    return {"last_fault_code": b, "code_name": v.get("code_name"),
+            "last_fault_code_since": v.get("last_fault_code_since"), "code_changes": ch}
+
+
+def _supersede_ctx(cfg, fault_periods: list[dict] | None, curr_dets: list[dict] | None,
+                   t_to: datetime) -> dict | None:
+    """Кто перекрыл «Общую аварию» (v5.1.25, П7), из уже загруженного, без
+    запросов: ca_key — ключ бита Общей аварии из KB; ca_active — его период
+    висит на конец окна (fault_end пуст или позже t_to); loud — первый по началу
+    живой громкий бит панели (WARNING/SHUTDOWN) {name, at, severity}. None —
+    бита Общей аварии в KB нет."""
+    ca_addr = cfg.det("CONTROLLER_FAULT", "common_alarm_addr", default=None)
+    ca_bit = cfg.det("CONTROLLER_FAULT", "common_alarm_bit", default=None)
+    if ca_addr is None or ca_bit is None:
+        return None
+    t_to = _tz_utc(t_to)
+    ca_active = any(
+        fp.get("addr") == ca_addr and fp.get("bit") == ca_bit
+        and (fp.get("fault_end") is None or _as_utc(fp.get("fault_end")) > t_to)
+        for fp in fault_periods or [])
+    loud = sorted(
+        (d for d in curr_dets or []
+         if d.get("scenario") == "CONTROLLER_FAULT" and d.get("severity") in ("WARNING", "SHUTDOWN")
+         and _as_utc((d.get("values") or {}).get("fault_start") or d.get("t_detected")) is not None),
+        key=lambda d: _as_utc((d.get("values") or {}).get("fault_start") or d.get("t_detected")))
+    lp = None
+    if loud:
+        d0 = loud[0]
+        v0 = d0.get("values") or {}
+        try:
+            from analytics.labels import panel_fault_name
+            nm = panel_fault_name(v0, getattr(cfg, "fault_code_name", None))
+        except Exception:
+            nm = v0.get("fault_name")
+        lp = {"name": nm or v0.get("fault_name"),
+              "at": _as_utc(v0.get("fault_start") or d0.get("t_detected")).isoformat(),
+              "severity": d0.get("severity")}
+    return {"ca_key": f"CONTROLLER_FAULT|{ca_addr}|{ca_bit}", "ca_active": ca_active, "loud": lp}
+
+
+def _open_panel_front_candidates(open_seg, t_to: datetime, episodes_mem: dict | None,
+                                 seeded: set | None) -> list[tuple]:
+    """Фронты панели, снятые внутри открытого сегмента (v5.1.25, П5), — без БД.
+
+    Короткая неисправность целиком внутри одного окна (197 на 10 с, ДЭС №3
+    24.10) живой не бывает, и эпизод по ней сеялся только при закрытии
+    сегмента — Сводка открытого её не показывала. Кандидат — детекция
+    CONTROLLER_FAULT с fault_end не позже t_to, чья пара (ключ, фронт) ещё не
+    в seeded и не текущий живой эпизод того же онсета (его закроет
+    _process_episodes точным концом). [(ключ, фронт, детекция)]."""
+    out: list[tuple] = []
+    seen: set = set()
+    t_to = _tz_utc(t_to)
+    for sub in getattr(open_seg, "subsegments", None) or []:
+        for d in getattr(sub, "detections", None) or []:
+            if getattr(d, "scenario", None) != "CONTROLLER_FAULT":
+                continue
+            v = d.values or {}
+            fe = _as_utc(v.get("fault_end"))
+            fs = _as_utc(v.get("fault_start") or d.t_detected)
+            if fe is None or fs is None or fe > t_to:
+                continue
+            key = _alert_key({"scenario": d.scenario, "values": v})
+            if (key, fs) in (seeded or set()) or (key, fs) in seen:
+                continue
+            mem = (episodes_mem or {}).get(key)
+            if mem is not None and _as_utc(mem.get("t_open")) == fs:
+                continue
+            seen.add((key, fs))
+            out.append((key, fs, d))
+    return out
+
+
 def _until_kind(li: dict) -> str:
     """Чем является until кластера цикла (v5.1.21, ревью engine-1): «plain» —
     горизонт из-за детекции без live (смешанный ключ), «horizon» — горизонт
@@ -233,7 +526,8 @@ def _until_kind(li: dict) -> str:
 
 def _drop_debounce_tails(eps: list[dict], segments: list,
                          live_episodes: dict[str, dict],
-                         live_keys: set[str] | None = None) -> list[dict]:
+                         live_keys: set[str] | None = None,
+                         w1: datetime | None = None) -> list[dict]:
     """Убрать из сводки ЗАКРЫВАЕМОГО сегмента эпизоды, снятые до него.
 
     Эпизод закрывается после нескольких чистых циклов (дебаунс), и в цикле, где
@@ -252,7 +546,11 @@ def _drop_debounce_tails(eps: list[dict], segments: list,
     (_process_episodes). Мост держит его открытым до
     N после реза, промах в памяти ещё 0 — без этого сводка показала бы его
     висящим до конца окна. Кончился до сегмента — хвост, в сводку не идёт.
-    БД не трогается."""
+    БД не трогается.
+
+    v5.1.25 (P2-3): конец берётся из _known_ends — у точного эпизода как
+    раньше, у панели — снятие фронта, если ключ не висит на конец сегмента
+    (копия _known_end_copy: t_close и воздействие, как закроет close_episode)."""
     det_keys = {
         _alert_key(d.to_dict())
         for seg in segments or []
@@ -261,26 +559,22 @@ def _drop_debounce_tails(eps: list[dict], segments: list,
     }
     live_keys = live_keys or set()
     w0 = _as_utc(getattr(segments[0], "t_start", None)) if segments else None
-    _ca: dict[str, datetime] | None = None
+    known = _known_ends(segments, live_episodes, live_keys, w1)
     out = []
     for ep in eps:
         if ep.get("t_close") is None:
             key = _episode_key(ep)
             mem = live_episodes.get(key) or {}
-            if (mem.get("exact") and key not in live_keys
-                    and ep.get("scenario") != "CONTROLLER_FAULT"
-                    and (mem.get("id") is None or ep.get("id") is None or mem["id"] == ep["id"])):
-                if _ca is None:
-                    _ca = _analytics_cleared_at(segments, live_episodes)
-                _tc = _exact_end(mem, _ca.get(key))
-                if _tc is not None:
-                    _to = _as_utc(ep.get("t_open"))
-                    if _to is not None and _tc < _to:
-                        _tc = _to
-                    if w0 is not None and _tc <= w0 and (_to is None or _to < w0):
-                        continue
-                    out.append(dict(ep, t_close=_tc))
+            kn = known.get(key)
+            if kn is not None and (kn.get("id") is None or ep.get("id") is None
+                                   or kn["id"] == ep["id"]):
+                cp = _known_end_copy(ep, kn)
+                _tc, _to = cp["t_close"], _as_utc(ep.get("t_open"))
+                if (kn.get("exact") and w0 is not None and _tc <= w0
+                        and (_to is None or _to < w0)):
                     continue
+                out.append(cp)
+                continue
             if key not in det_keys:
                 if ep.get("scenario") == "CONTROLLER_FAULT" or mem.get("miss", 0) > 0:
                     continue
@@ -570,8 +864,9 @@ def _live_new_episodes(segments: list, eps: list[dict], live_keys: set[str],
                         or dd.get("scenario") in EVENT_SCENARIOS):
                     continue
                 # Снятый панелью фронт того же бита — не живой (с v5.1.6 у «Общей
-                # аварии» по детекции на каждый период: брался закрытый фронт)
-                if dd.get("scenario") == "CONTROLLER_FAULT" and (dd.get("values") or {}).get("fault_end"):
+                # аварии» по детекции на каждый период: брался закрытый фронт).
+                # v5.1.25 (П4): снятие позже конца сегмента — на конец ещё висит
+                if dd.get("scenario") == "CONTROLLER_FAULT" and _cleared_by(dd, t_end):
                     continue
                 v = dd.get("values") or {}
                 try:
@@ -953,6 +1248,17 @@ def _extract_coking_risk_from_segments(segments: list) -> CokingRisk:
     return copy.deepcopy(last_seg.subsegments[-1].risk_accumulators.coking_risk)
 
 
+def _cleared_by(d: dict, end) -> bool:
+    """Снятая панелью неисправность к моменту end (v5.1.25, П4): fault_end
+    проставлен и не позже end. Снятие позже — на end ещё висела. end неизвестен
+    или метка снятия не читается — снята, как раньше (по одному факту fault_end)."""
+    raw = (d.get("values") or {}).get("fault_end")
+    if not raw:
+        return False
+    fe, e = _as_utc(raw), _as_utc(end)
+    return fe is None or e is None or fe <= e
+
+
 def _extract_open_segment_data(seg) -> tuple[dict, list]:
     """Извлечь текущие значения и активные детекции из открытого сегмента.
 
@@ -1004,8 +1310,11 @@ def _extract_open_segment_data(seg) -> tuple[dict, list]:
         _gl, _cands = None, [d.to_dict() for d in last_sub.detections]
     active_dets: list[dict] = []
     for dd in _cands:
-        if (dd.get("scenario") == "CONTROLLER_FAULT"
-                and (dd.get("values") or {}).get("fault_end")):
+        # v5.1.25 (П4, разбор ДЭС №3 24.10): снятие позже конца окна — на конец
+        # неисправность ещё висела (окно отстаёт на цикл): короткая (422 на 26 с)
+        # один цикл живёт тревогой, затем эпизод закрывается точно по fault_end
+        # (то же правило, что «активен на конец» в serializer)
+        if dd.get("scenario") == "CONTROLLER_FAULT" and _cleared_by(dd, _end):
             continue
         # Разовое событие перехода — не живая тревога (v5.1.10): иначе эпизод,
         # «воздействие» на весь стоп, журнал и состав гейта
@@ -2150,8 +2459,15 @@ async def _collect_and_enrich_detections(
     gaps: list[dict] | None = None,
     live_episodes: dict[str, dict] | None = None,
     carry_end: bool = False,
+    known_ends: dict[str, dict] | None = None,
 ) -> list[dict]:
     """Для закрытого сегмента: обогатить детекции счётчиками + вернуть events.
+
+    v5.1.25 (P2-3): known_ends — известные концы открытых эпизодов памяти в
+    этом сегменте (_known_ends, считает вызывающий): счётчики берут
+    воздействие открытой строки от этого конца (count_episodes_batch(ends=…)),
+    как её закроет движок, а не то, что дебаунс успел начислить. Снятый панелью
+    фронт сеется до своего снятия, даже если оно позже конца сегмента.
 
     1. Собирает уникальные (scenario, severity, run_state, front_count) из всех подсегментов.
     2. Для сценариев без живого эпизода (короткий сегмент закрылся внутри одного
@@ -2209,8 +2525,11 @@ async def _collect_and_enrich_detections(
                 if not pick(d):
                     continue
                 k = _alert_key({"scenario": d.scenario, "values": d.values})
-                # Панель — по фронту: бит, снятый и поднятый в одном сегменте, — две тревоги
-                sk = (k, d.t_detected) if d.scenario == "CONTROLLER_FAULT" else k
+                # Панель — по фронту: бит, снятый и поднятый в одном сегменте, — две
+                # тревоги. Разовое событие — по онсету (v5.1.25): иначе из нескольких
+                # LOAD_STEP сегмента сеялся бы только первый
+                sk = ((k, d.t_detected) if d.scenario == "CONTROLLER_FAULT"
+                      or d.scenario in EVENT_SCENARIOS else k)
                 if d.scenario != "CONTROLLER_FAULT":
                     _here.add(sk)
                     if sk in seen and _sub_end is not None:
@@ -2279,6 +2598,9 @@ async def _collect_and_enrich_detections(
             _panel = info["scenario"] == "CONTROLLER_FAULT"
             _cleared = _panel and bool((info.get("values") or {}).get("fault_end"))
             _event = info["scenario"] in EVENT_SCENARIOS
+            # INFO-событие (LOAD_STEP в пределах нормы, В-25.1) — без эпизода
+            if _event and info["severity"] == "INFO":
+                continue
             # Событие — только по онсету: старый живой эпизод того же сценария
             # (до v5.1.10) не должен блокировать новый (v5.1.10)
             if ((k in open_keys and not _cleared and not _event)
@@ -2301,14 +2623,19 @@ async def _collect_and_enrich_detections(
                     continue
             t_open = info["t_open"] or _tz_utc(seg_t_end)
             # Снятая панелью тревога закрывается временем снятия, а не концом
-            # сегмента; аналитика — концом последнего подсегмента с ней (v5.1.15)
+            # сегмента; аналитика — концом последнего подсегмента с ней (v5.1.15).
+            # v5.1.25 (P2-3): снятие позже конца сегмента (оно известно из-за
+            # отставания окна) — тоже снятие: резать эпизод на границе сегмента
+            # значит терять воздействие
             t_close = _tz_utc(seg_t_end)
             if not _panel and not _event and info.get("last_end"):
                 t_close = min(info["last_end"], t_close)
             _fe = (info.get("values") or {}).get("fault_end")
             if _fe:
                 try:
-                    t_close = min(_tz_utc(datetime.fromisoformat(_fe)), t_close)
+                    t_close = _tz_utc(datetime.fromisoformat(_fe))
+                    if t_close < t_open:
+                        t_close = t_open
                 except (TypeError, ValueError):
                     pass
             if _event:
@@ -2339,13 +2666,16 @@ async def _collect_and_enrich_detections(
                 logger.warning("Не удалось создать эпизод для %s", k, exc_info=True)
 
     # Счётчики по эпизодам: WHERE по scenario, результат — per-fault ключом;
-    # у аналитики — с даты выкладки v5.1.21 (В5, переходный месяц)
+    # у аналитики — с даты выкладки v5.1.21 (В5, переходный месяц); открытые
+    # строки с известным концом — от него (v5.1.25, P2-3)
     try:
+        _ends = _known_ends_arg(known_ends)
         counts = await online_db.count_episodes_batch(
             router_sn, equip_type, panel_id,
             list({info["scenario"] for info in seen.values()}),
             window_days, run_origin_ts,
             analytics_since=analytics_counts_since(cfg),
+            **({"ends": _ends} if _ends else {}),
         )
     except Exception:
         logger.warning("Счётчики эпизодов не получены", exc_info=True)
@@ -2379,11 +2709,15 @@ async def _enrich_open_seg_detections(
     panel_id: int,
     cfg,
     run_origin_ts: datetime,
+    known_ends: dict[str, dict] | None = None,
 ) -> None:
     """Для открытого сегмента: обогатить детекции счётчиками.
 
     Только запрос — без вставки в detection_events (сегмент не завершён).
     +1 добавляется для обоих счётчиков: текущее активное событие включается в счёт.
+    v5.1.25 (P2-3): known_ends — известные концы открытых эпизодов окна: у
+    снятого, но ещё в дебаунсе, воздействие — от снятия (тот же завышенный /
+    недоначисленный хвост, что у закрываемого сегмента).
     """
     window_days = int(cfg.det("DETECTION_COUNTER", "window_days", default=30) or 30)
 
@@ -2396,10 +2730,12 @@ async def _enrich_open_seg_detections(
         return
 
     try:
+        _ends = _known_ends_arg(known_ends)
         counts = await online_db.count_episodes_batch(
             router_sn, equip_type, panel_id, list(scenarios),
             window_days, run_origin_ts,
             analytics_since=analytics_counts_since(cfg),
+            **({"ends": _ends} if _ends else {}),
         )
     except Exception:
         logger.warning("Счётчики эпизодов не получены", exc_info=True)
@@ -2465,6 +2801,10 @@ class OnlinePollEngine:
         self._load_seed_cache: tuple | None = None
         # Засеянные точечные эпизоды событий перехода (сценарий, онсет)
         self._events_seeded: set = set()
+        # Фронты панели с эпизодом (ключ, фронт) — посев снятых внутри открытого
+        # сегмента их не спрашивает (v5.1.25, П5); набор — фронты открытого сегмента
+        self._panel_seeded: set = set()
+        self._panel_seeded_seg: str | None = None
 
         self._running = False
         self._task: asyncio.Task | None = None
@@ -2768,6 +3108,15 @@ class OnlinePollEngine:
                     "until_kind": "horizon" if _until is not None else None,
                     "exact": _exact,
                 }
+                # Панель (v5.1.25, П6): код «Общей аварии» и его смены — из
+                # open_values_json; последний живой фронт уточнит первый цикл
+                if e.get("scenario") == "CONTROLLER_FAULT":
+                    try:
+                        _pm = _panel_code_mem(_ov if isinstance(_ov, dict) else {}, None)
+                        self._episodes[k].update(code=_pm["code"], code_changes=_pm["code_changes"])
+                    except Exception:
+                        logger.warning("OnlineEngine[%s]: код эпизода %s не восстановлен",
+                                       self.key, k, exc_info=True)
             if self._episodes:
                 logger.info(
                     "OnlineEngine[%s]: восстановлены открытые эпизоды: %s",
@@ -2970,12 +3319,33 @@ class OnlinePollEngine:
         gaps_from: datetime | None = None,
         run_state: int | None = None,
         start_carry: dict | None = None,
+        panel_ctx: dict | None = None,
+        front_ends: dict | None = None,
     ) -> None:
         """Материализовать эпизоды тревог из снимка активных детекций.
+
+        Ревью v5.1.25 (Q3): панельный эпизод — по фронту. front_ends — фронты
+        панели окна (_panel_front_ends): новый фронт того же бита при эпизоде,
+        чей фронт уже снят, закрывает его снятием своего фронта
+        (_panel_split_end) и заводит свой эпизод (контекст аварии — ему);
+        первый промах панели — снятие своего фронта, а не самое позднее по биту.
 
         start_carry — профиль пуска «Работы»-предка у открытой «Работы», идущей
         через суточный рез (Segment.start_profile_prev, v5.1.23, R1): только
         тогда детекциям оборотов ставится начало эпизода (_mark_episode_onsets).
+
+        v5.1.25 (П6–П7, разбор ДЭС №3 24.10):
+        - память панельного эпизода несёт code (40012 «Общей аварии») и
+          code_changes; код под тем же фронтом сменился (1453 → 1248) —
+          слияние в open_values_json тем же UPDATE (update_episode /
+          reopen_episode, values_merge), новый эпизод не заводится, счётчики не
+          меняются (решение Б); front — последний живой фронт ключа (P2-3);
+        - panel_ctx {ca_key, ca_active, loud} (_supersede_ctx, без запросов):
+          «Общая авария» закрывается дебаунсом, когда её перекрыл громкий бит,
+          а сам бит висит, — close_reason «superseded» с superseded_by {name,
+          at, severity}; переоткрытие по онсету отметку снимает;
+        - панельные (ключ, фронт) — в _panel_seeded при открытии, переоткрытии и
+          закрытии (критика SHOULD 1: посев снятых фронтов П5 их не спрашивает).
 
         Открытие — сразу; закрытие — после N циклов подряд «чисто»
         (ALARM_EPISODES.close_debounce_cycles в detectors.yaml, default 3 —
@@ -3066,6 +3436,32 @@ class OnlinePollEngine:
                             (_end or now_ts).isoformat(), li["onset"].isoformat())
                 self._episodes.pop(key, None)
                 ep = None
+            # Панель — по фронту (ревью v5.1.25, Q3): новый фронт того же бита, а
+            # свой фронт эпизода уже снят — эпизод закрывается снятием своего
+            # фронта, новый фронт идёт новым эпизодом (тот же онсет, засеянный
+            # путём закрытия, переоткроется по find_episode_by_onset)
+            if ep is not None and sc == "CONTROLLER_FAULT" and not ep.get("exact"):
+                try:
+                    _pend = _panel_split_end(ep, key, _vals.get("fault_start") or d.get("t_detected"),
+                                             front_ends)
+                except Exception:
+                    logger.warning("OnlineEngine[%s]: новый фронт %s не проверен — эпизод "
+                                   "продолжается", self.key, key, exc_info=True)
+                    _pend = None
+                if _pend is not None:
+                    try:
+                        await online_db.close_episode(ep["id"], _pend, "condition_cleared")
+                    except Exception:
+                        logger.warning("OnlineEngine[%s]: эпизод %s по снятому фронту не закрыт — "
+                                       "повтор следующим циклом", self.key, key, exc_info=True)
+                        continue
+                    if ep.get("t_open") is not None:
+                        self._mark_panel_seeded(key, ep["t_open"])
+                    logger.info("OnlineEngine[%s]: эпизод %s закрыт снятием своего фронта %s — "
+                                "новый фронт с %s", self.key, key, _pend.isoformat(),
+                                _vals.get("fault_start") or d.get("t_detected"))
+                    self._episodes.pop(key, None)
+                    ep = None
             if ep is None:
                 t_open = now_ts
                 if li is not None:
@@ -3099,6 +3495,8 @@ class OnlinePollEngine:
                 except Exception:
                     logger.warning("OnlineEngine[%s]: не удалось проверить онсет %s",
                                    self.key, key, exc_info=True)
+                # Код «Общей аварии» и фронт — в память (v5.1.25, П6, P2-3)
+                _mem_code = (_panel_code_mem(_vals, t_open) if sc == "CONTROLLER_FAULT" else {})
                 if prev is not None:
                     ep_id = prev["id"]
                     was_closed = prev.get("t_close") is not None
@@ -3110,6 +3508,28 @@ class OnlinePollEngine:
                         _, tail_blind, _ = _accrual_split(_t0, now_ts, _g)
                     # until — тем же UPDATE (v5.1.21): посев и рестарт читают его из БД
                     _ru = {"until": li["until"]} if li is not None else {}
+                    # Переоткрытие с другим кодом — «код сменился» тем же UPDATE; у
+                    # «Общей аварии» снимается отметка «перекрыта» (v5.1.25, П6–П7)
+                    _vm: dict = {}
+                    _cc = None
+                    if sc == "CONTROLLER_FAULT":
+                        try:
+                            # Память — по строке БД (её код и смены), сравнение — с детекцией
+                            _mem_code = _panel_code_mem(
+                                {"last_fault_code": prev.get("last_fault_code")
+                                 or _vals.get("last_fault_code"),
+                                 "code_changes": prev.get("code_changes")}, t_open)
+                            _cc = _code_change(_mem_code, _vals)
+                        except Exception:
+                            logger.warning("OnlineEngine[%s]: смена кода %s при переоткрытии не "
+                                           "проверена", self.key, key, exc_info=True)
+                            _cc = None
+                        if _cc:
+                            _vm.update(_cc)
+                        if was_closed and panel_ctx and key == panel_ctx.get("ca_key"):
+                            _vm["superseded_by"] = None
+                    if _vm:
+                        _ru["values_merge"] = _vm
                     try:
                         await online_db.reopen_episode(
                             ep_id, now_ts=now_ts, blind_sec_add=tail_blind,
@@ -3123,12 +3543,19 @@ class OnlinePollEngine:
                         logger.info("OnlineEngine[%s]: эпизод %s переоткрыт — %s "
                                     "(тот же онсет %s)", self.key, ep_id, key,
                                     t_open.isoformat())
+                    if _cc:
+                        _mem_code.update(code=_cc["last_fault_code"], code_changes=_cc["code_changes"])
+                        logger.info("OnlineEngine[%s]: код Общей аварии сменился %s → %s (эпизод %s)",
+                                    self.key, _cc["code_changes"][-1].get("from"),
+                                    _cc["last_fault_code"], ep_id)
                     self._episodes[key] = {"id": ep_id,
                                            "severity": _max_severity(prev.get("severity"), sev, sc),
                                            "miss": 0, "first_miss_ts": None,
-                                           "t_open": t_open, **_mem_live}
+                                           "t_open": t_open, **_mem_live, **_mem_code}
                     if sc != "CONTROLLER_FAULT":
                         _new_analytics.append((sc, ep_id, t_open))
+                    else:
+                        self._mark_panel_seeded(key, t_open)
                     continue
                 # Время от фронта неисправности до конца этого окна. Дальше
                 # тикают поцикловые приращения от той же базы, так что
@@ -3154,9 +3581,11 @@ class OnlinePollEngine:
                     continue
                 self._episodes[key] = {"id": ep_id, "severity": sev,
                                        "miss": 0, "first_miss_ts": None,
-                                       "t_open": t_open, **_mem_live}
+                                       "t_open": t_open, **_mem_live, **_mem_code}
                 if sc != "CONTROLLER_FAULT":
                     _new_analytics.append((sc, ep_id, t_open))
+                else:
+                    self._mark_panel_seeded(key, t_open)
                 logger.info("OnlineEngine[%s]: эпизод открыт — %s (severity=%s%s)",
                             self.key, key, sev,
                             f", с {t_open.isoformat()}" if li is not None else "")
@@ -3189,6 +3618,25 @@ class OnlinePollEngine:
                                 and li is not None and li["onset"] <= _u0)):
                         ep["until"], ep["until_kind"] = u_new, _kind
                     _upd["until"] = ep["until"]
+                # Панель (v5.1.25): последний живой фронт ключа (P2-3) и смена кода
+                # «Общей аварии» под тем же фронтом — тем же UPDATE (П6)
+                _cc = None
+                if sc == "CONTROLLER_FAULT":
+                    try:
+                        _fr = _as_utc(_vals.get("fault_start") or d.get("t_detected"))
+                        if _fr is not None and (ep.get("front") is None or _fr > _as_utc(ep["front"])):
+                            ep["front"] = _fr
+                        _cc = _code_change(ep, _vals)
+                        if _cc is None and not ep.get("code"):
+                            _c0 = _panel_code_mem(_vals, None).get("code")
+                            if _c0:
+                                ep["code"] = _c0
+                    except Exception:
+                        logger.warning("OnlineEngine[%s]: смена кода %s не проверена", self.key,
+                                       key, exc_info=True)
+                        _cc = None
+                    if _cc:
+                        _upd["values_merge"] = _cc
                 try:
                     await online_db.update_episode(
                         ep["id"], active_sec_add=span_sec, blind_sec_add=gap_sec,
@@ -3196,6 +3644,10 @@ class OnlinePollEngine:
                         **_upd,
                     )
                     ep["severity"] = new_sev
+                    if _cc:
+                        logger.info("OnlineEngine[%s]: код Общей аварии сменился %s → %s (эпизод %s)",
+                                    self.key, ep.get("code"), _cc["last_fault_code"], ep["id"])
+                        ep["code"], ep["code_changes"] = _cc["last_fault_code"], _cc["code_changes"]
                 except Exception:
                     logger.warning("OnlineEngine[%s]: не удалось обновить эпизод %s",
                                    self.key, key, exc_info=True)
@@ -3272,21 +3724,51 @@ class OnlinePollEngine:
                         _fm = ep["t_open"]
                     ep["first_miss_ts"] = _fm
                 else:
-                    ep["first_miss_ts"] = _ca or now_ts
+                    # Панель — снятие своего фронта (ревью v5.1.25, Q3): к промаху мог
+                    # сняться и следующий фронт бита (он — свой эпизод, посев)
+                    _own = None
+                    if key.startswith("CONTROLLER_FAULT|"):
+                        try:
+                            _own = _panel_own_end(ep, key, front_ends)
+                        except Exception:
+                            _own = None
+                        if _own is not None and ep.get("t_open") is not None and _own < ep["t_open"]:
+                            _own = None
+                    ep["first_miss_ts"] = _own or _ca or now_ts
             if ep["miss"] < debounce:
                 continue
             if exact:
                 if not await self._close_exact(key, ep, ep["first_miss_ts"], gaps, gaps_from, _hc):
                     continue
             else:
+                # «Общая авария» ушла не сама: её перекрыл громкий бит панели, а
+                # бит Общей аварии висит (v5.1.25, П7) — «superseded», не «снято»
+                _sup = None
                 try:
-                    await online_db.close_episode(
-                        ep["id"], ep["first_miss_ts"], "condition_cleared"
-                    )
+                    if (panel_ctx and key == panel_ctx.get("ca_key") and panel_ctx.get("ca_active")
+                            and isinstance(panel_ctx.get("loud"), dict)):
+                        _sup = {"superseded_by": dict(panel_ctx["loud"])}
+                except Exception:
+                    _sup = None
+                try:
+                    if _sup:
+                        await online_db.close_episode(
+                            ep["id"], ep["first_miss_ts"], "superseded", values_merge=_sup
+                        )
+                    else:
+                        await online_db.close_episode(
+                            ep["id"], ep["first_miss_ts"], "condition_cleared"
+                        )
                 except Exception:
                     logger.warning("OnlineEngine[%s]: не удалось закрыть эпизод %s",
                                    self.key, key, exc_info=True)
                     continue
+                if _sup:
+                    logger.info("OnlineEngine[%s]: Общая авария перекрыта «%s» с %s — бит не снят",
+                                self.key, _sup["superseded_by"].get("name"),
+                                _sup["superseded_by"].get("at"))
+                if key.startswith("CONTROLLER_FAULT|") and ep.get("t_open") is not None:
+                    self._mark_panel_seeded(key, ep["t_open"])
             logger.info("OnlineEngine[%s]: эпизод закрыт — %s", self.key, key)
             self._episodes.pop(key, None)
 
@@ -3530,6 +4012,11 @@ class OnlinePollEngine:
         печатается из них. closing — сводка закрываемого сегмента: открытые
         эпизоды без детекции в его данных — хвосты дебаунса, в сводку не идут
         (_drop_debounce_tails).
+
+        v5.1.25 (P2-3): у открытого сегмента live_keys — живой состав цикла;
+        эпизод, снятый панелью (или точный, кончившийся), но ещё в дебаунсе, идёт
+        в сводку снятым с известным концом (_known_ends), а не «активен на
+        конец». common_alarm из KB — для строки «Висит также Общая авария» (П7).
         """
         try:
             eps = await online_db.get_episodes_overlapping(
@@ -3543,8 +4030,10 @@ class OnlinePollEngine:
                 tail_sec=(debounce + 1) * self.poll_interval_sec,
             )
             if closing:
-                # Точный эпизод, не живой на конец, — до конца нарушения (v5.1.21)
-                eps = _drop_debounce_tails(eps, segments, self._episodes, live_keys or set())
+                # Точный эпизод, не живой на конец, — до конца нарушения (v5.1.21);
+                # снятая панелью — до снятия (v5.1.25, P2-3)
+                eps = _drop_debounce_tails(eps, segments, self._episodes, live_keys or set(),
+                                           w1=_tz_utc(t_to))
                 _syn = _live_new_episodes(segments, eps, live_keys or set(), _tz_utc(t_to),
                                           suppressed_sc, supp_src)
                 eps = _drop_same_onset(eps, _syn) + _syn
@@ -3554,13 +4043,32 @@ class OnlinePollEngine:
                 # открытого сегмента не идёт (иначе «не подтверждено» на 10 мин)
                 eps = [e for e in eps
                        if not _bridge_only(e, getattr(self, "_episodes", None), _tz_utc(t_from))]
+                # Снятый, но ещё в дебаунсе — снятым с известным концом (v5.1.25,
+                # P2-3): сводка открытого сегмента = полный отчёт
+                if live_keys is not None:
+                    _kn = _known_ends(segments, getattr(self, "_episodes", None) or {},
+                                      live_keys, _tz_utc(t_to))
+                    if _kn:
+                        eps = [(_known_end_copy(e, _kn[_episode_key(e)])
+                                if e.get("t_close") is None and _episode_key(e) in _kn
+                                and (_kn[_episode_key(e)].get("id") is None or e.get("id") is None
+                                     or _kn[_episode_key(e)]["id"] == e["id"])
+                                else e) for e in eps]
             from analytics.serializer import build_summary_parts, render_summary_md
+            # Бит «Общая авария» из KB — строка «Висит также» (v5.1.25, П7)
+            _ca_addr = self.cfg.det("CONTROLLER_FAULT", "common_alarm_addr", default=None)
+            _ca = ((_ca_addr, self.cfg.det("CONTROLLER_FAULT", "common_alarm_bit", default=None),
+                    float(self.cfg.det("CONTROLLER_FAULT", "code_onset_tol_sec", default=15.0) or 15.0))
+                   if _ca_addr is not None else None)
             # Имя кода панели — справочник KB (v5.1.23, В5): эпизоду, открытому до
             # v5.1.23, имя кода из детекции не досталось
             parts = build_summary_parts(segments, episodes=eps, tz=self.tz,
                                         trip_roles=self.cfg.trip_snapshot_roles,
                                         t_from=_tz_utc(t_from), t_to=_tz_utc(t_to),
-                                        code_name=getattr(self.cfg, "fault_code_name", None))
+                                        code_name=getattr(self.cfg, "fault_code_name", None),
+                                        # «Работа идёт N с» вместо «Короткая работа» (v5.1.25)
+                                        is_open=not closing,
+                                        common_alarm=_ca)
             return render_summary_md(parts), parts
         except Exception:
             logger.warning("OnlineEngine[%s]: не удалось построить summary-отчёт",
@@ -3751,6 +4259,9 @@ class OnlinePollEngine:
             for d in sub.detections:
                 if d.scenario not in EVENT_SCENARIOS:
                     continue
+                # INFO-событие (LOAD_STEP в пределах нормы, В-25.1) — без эпизода
+                if d.severity == "INFO":
+                    continue
                 try:
                     t_open = _tz_utc(datetime.fromisoformat(d.t_detected))
                 except (TypeError, ValueError):
@@ -3784,6 +4295,169 @@ class OnlinePollEngine:
             except Exception:
                 logger.warning("OnlineEngine[%s]: точечный эпизод события не заведён",
                                self.key, exc_info=True)
+
+    def _mark_panel_seeded(self, key: str, onset) -> None:
+        """Пара (ключ, фронт) панели уже имеет эпизод — посев снятых фронтов (П5)
+        её не спрашивает (v5.1.25, критика SHOULD 1). Только память."""
+        try:
+            s = getattr(self, "_panel_seeded", None)
+            if s is None:
+                s = self._panel_seeded = set()
+            t = _as_utc(onset)
+            if t is not None:
+                s.add((key, t))
+        except Exception:
+            logger.warning("OnlineEngine[%s]: отметка фронта панели не поставлена", self.key,
+                           exc_info=True)
+
+    async def _seed_open_panel_fronts(self, open_seg, t_to: datetime,
+                                      gaps: list[dict] | None) -> int:
+        """Эпизоды по фронтам панели, снятым внутри открытого сегмента (v5.1.25,
+        П5, разбор ДЭС №3 24.10): закрытые строки сразу, в живом цикле — Сводка
+        открытого сегмента совпадает с полным отчётом (197 на 10 с).
+
+        Отбор — _open_panel_front_candidates, без БД: кандидатов нет — ни одного
+        запроса (установившийся режим). Есть — один existing_episode_onsets по их
+        фронтам; отсутствующие — insert_closed_episode [фронт, снятие], слепая
+        доля — дыры окна внутри. Найденные и засеянные — в _panel_seeded (при
+        закрытии сегмента повтор отсекает existing_episode_onsets). Набор при
+        смене открытого сегмента сужается до его фронтов. После _process_episodes:
+        живой эпизод того же онсета уже записан — дубля нет. Запросы — к БД
+        аналитики (online.db), пульс и флаги цикла не трогаются; сбой — у
+        вызывающего (WARNING «посев снятых фронтов панели»). Возвращает число
+        вставок."""
+        seeded = getattr(self, "_panel_seeded", None)
+        if seeded is None:
+            seeded = self._panel_seeded = set()
+        _st = getattr(open_seg, "t_start", None)
+        if getattr(self, "_panel_seeded_seg", None) != _st:
+            # Открытый сегмент сменился — оставить только его фронты
+            here = set()
+            for sub in getattr(open_seg, "subsegments", None) or []:
+                for d in getattr(sub, "detections", None) or []:
+                    if getattr(d, "scenario", None) == "CONTROLLER_FAULT":
+                        v = d.values or {}
+                        here.add((_alert_key({"scenario": d.scenario, "values": v}),
+                                  _as_utc(v.get("fault_start") or d.t_detected)))
+            seeded &= here
+            self._panel_seeded_seg = _st
+        cand = _open_panel_front_candidates(open_seg, t_to, getattr(self, "_episodes", None),
+                                            seeded)
+        if not cand:
+            return 0
+        have = await online_db.existing_episode_onsets(
+            self.router_sn, self.equip_type, self.panel_id, [fs for _k, fs, _d in cand])
+        n = 0
+        for key, fs, d in cand:
+            if (key, fs) in have:
+                seeded.add((key, fs))
+                continue
+            v = d.values or {}
+            fe = _as_utc(v.get("fault_end"))
+            span = max(0.0, (fe - fs).total_seconds())
+            blind = 0.0
+            if gaps and span > 0:
+                from analytics.accumulators import gap_union_overlap_sec
+                blind = min(span, max(0.0, gap_union_overlap_sec(gaps, fs, fe)))
+            try:
+                await online_db.insert_closed_episode(
+                    self.router_sn, self.equip_type, self.panel_id,
+                    scenario="CONTROLLER_FAULT", source="panel", severity=d.severity,
+                    t_open=fs, t_close=fe, active_sec=span, open_values=v,
+                    addr=v.get("addr"), bit=v.get("bit"), blind_sec=blind,
+                    close_reason="condition_cleared",
+                )
+            except Exception:
+                logger.warning("OnlineEngine[%s]: эпизод снятого фронта %s не заведён — повтор "
+                               "следующим циклом", self.key, key, exc_info=True)
+                continue
+            seeded.add((key, fs))
+            n += 1
+            logger.info("OnlineEngine[%s]: эпизод снятого фронта панели — %s %s–%s", self.key, key,
+                        fs.isoformat(), fe.isoformat())
+        return n
+
+    def _no_data_last_before(self, seg_t0: datetime, gaps: list[dict] | None,
+                             history: list[dict] | None = None) -> datetime | None:
+        """Последние данные до обрыва для заглушки сегмента без связи (v5.1.25,
+        П10, критика M1): начало разрыва data_gaps, покрывающего начало
+        сегмента (у #36065 — 05:48:15), а не last_data_ts памяти — его поднимают
+        поздние строки (10 строк медленной группы 11:48:09 пришли в 12:38:28).
+        Запасной — последний ts загруженной history раньше начала сегмента;
+        затем last_data_ts, если он раньше начала. Без запросов."""
+        t0 = _tz_utc(seg_t0)
+        best = None
+        for g in gaps or []:
+            gs = _as_utc(g.get("gap_start"))
+            ge = _as_utc(g.get("gap_end"))
+            if gs is not None and gs <= t0 and (ge is None or ge > t0):
+                best = gs if best is None or gs < best else best
+        if best is not None:
+            return best
+        hb = max((_tz_utc(r["ts"]) for r in history or []
+                  if r.get("ts") is not None and _tz_utc(r["ts"]) < t0), default=None)
+        if hb is not None:
+            return hb
+        ld = getattr(self, "last_data_ts", None)
+        ld = _as_utc(ld)
+        return ld if ld is not None and ld < t0 else None
+
+    async def _no_data_estimate(self, seg_t0: datetime, seg_t1: datetime,
+                                history: list[dict] | None,
+                                last_before: datetime | None,
+                                run_state: int | None = None) -> dict | None:
+        """Оценка работы за обрыв связи по счётчику наработки (v5.1.25, П10).
+
+        H1 — первый отсчёт ENGINE_HOURS после last_before в уже загруженной
+        history (нет — оценки нет: связи ещё нет, суточный рез в обрыве — там
+        history не возвращается, критика SHOULD 5). H0 — один запрос
+        get_last_values_before до last_before (+1 с), не старше lookback_sec,
+        через remote (продлевает пульс). Счётчик попыток пуска
+        (START_ATTEMPTS_TOTAL, если он есть у машины) — тем же запросом и по
+        history: сменился — «были остановы и пуски», без «до ~». Выключено в
+        KB, нет роли или сбой — None (строка без оценки).
+
+        run_state — режим сегмента без связи (удержан с начала обрыва, то есть
+        режим на последних данных). Ревью v5.1.25 (Q1): «до ~» и «не работал» —
+        только если машина на обрыве работала (3) и счётчик пусков есть и не
+        менялся; иначе только наработка (no_data_run_estimate, hours_only)."""
+        try:
+            from analytics.serializer import no_data_estimate_params, no_data_run_estimate
+            prm = no_data_estimate_params(self.cfg)
+            addr = self.cfg.role_to_addr("ENGINE_HOURS")
+            if not prm["enabled"] or not addr or last_before is None or not history:
+                return None
+            lb = _tz_utc(last_before)
+            st_addr = self.cfg.role_to_addr("START_ATTEMPTS_TOTAL")
+
+            def _first_after(a):
+                rows = sorted((r for r in history if r.get("addr") == a and r.get("value") is not None
+                               and _tz_utc(r["ts"]) > lb), key=lambda r: _tz_utc(r["ts"]))
+                return (_tz_utc(rows[0]["ts"]), float(rows[0]["value"])) if rows else None
+
+            h1 = _first_after(addr)
+            if h1 is None:
+                return None
+            from analytics import source as _src
+            _addrs = [addr] + ([st_addr] if st_addr else [])
+            got = await _src.get_last_values_before(
+                self.router_sn, self.equip_type, self.panel_id, _addrs,
+                lb + timedelta(seconds=1), prm["lookback_sec"])
+            r0 = got.get(int(addr))
+            if not r0 or r0.get("value") is None:
+                return None
+            h0 = (_tz_utc(r0["ts"]), float(r0["value"]))
+            starts_changed = None
+            if st_addr:
+                s0, s1 = got.get(int(st_addr)), _first_after(st_addr)
+                if s0 and s0.get("value") is not None and s1 is not None:
+                    starts_changed = float(s0["value"]) != s1[1]
+            return no_data_run_estimate(h0, h1, prm["step_sec"], seg_t0,
+                                        starts_changed=starts_changed, run_state=run_state)
+        except Exception:
+            logger.warning("OnlineEngine[%s]: оценка работы за обрыв по счётчику наработки не "
+                           "получена — заглушка без неё", self.key, exc_info=True)
+            return None
 
     def _fill_coking_accum_end(self, t_from: datetime) -> None:
         """Конец накопления нагара, если в перенесённом состоянии его нет (v5.1.9).
@@ -4022,12 +4696,16 @@ class OnlinePollEngine:
             _carry_end = _seed_carry(
                 is_last and close_reason == "DAILY_BOUNDARY" and seg.run_state == 3,
                 t_to, live_to, getattr(self, "poll_interval_sec", 30))
+            # Известные концы открытых эпизодов в этом сегменте — счётчикам
+            # (v5.1.25, P2-3): живые на конец — только у последнего, как у сводки
+            _kn_seg = ({} if _seg_no_data else
+                       _known_ends([seg], self._episodes, _live_keys if is_last else set(), seg_t_end))
             _det_events = [] if _seg_no_data else await _collect_and_enrich_detections(
                 seg, self.router_sn, self.equip_type, self.panel_id,
                 seg_t_end, self.cfg, run_origin_ts=_run_origin,
                 open_keys=set(self._episodes) | _live_keys | _seeded,
                 seeded_out=_seeded, gaps=gaps, live_episodes=self._episodes,
-                carry_end=_carry_end,
+                carry_end=_carry_end, known_ends=_kn_seg,
             )
 
             seg_dict = seg.to_dict()
@@ -4042,10 +4720,20 @@ class OnlinePollEngine:
                 from analytics.serializer import build_no_data_report as _nd_report
                 from analytics.serializer import no_data_summary_parts as _nd_parts
                 summary_parts = _nd_parts()
+                # Последние данные до обрыва — по разрывам окна (v5.1.25, П10,
+                # критика M1); оценки по наработке на суточном пути нет: history
+                # окна _run_segment не возвращает (SHOULD 5)
+                try:
+                    _nd_last = self._no_data_last_before(
+                        _tz_utc(datetime.fromisoformat(seg.t_start)), gaps)
+                except Exception:
+                    logger.warning("OnlineEngine[%s]: последние данные до обрыва не найдены",
+                                   self.key, exc_info=True)
+                    _nd_last = None
                 report_md, summary_md = _nd_report(
                     self.router_sn, self.equip_type, self.panel_id,
                     _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end,
-                    tz=self.tz, last_data_ts=self.last_data_ts,
+                    tz=self.tz, last_data_ts=_nd_last,
                 )
             else:
                 try:
@@ -4056,6 +4744,10 @@ class OnlinePollEngine:
                         ANALYTICS_VERSION, tz=self.tz, prev_seg=ps,
                         fault_ref=self._fault_ref,
                         inherited_run_state_sec=seg_inherited_rs,
+                        # Фактические причина и конец (v5.1.25, критика M3): на
+                        # суточном резе у сегмента cause_close нет — «(продолжается
+                        # после 09:00)», а не «(идёт)»
+                        last_close=(seg_cause_close, seg_t_end),
                     )
                 except Exception:
                     logger.exception("OnlineEngine[%s]: не удалось построить отчёт закрытого сегмента, сохраняю без report_md", self.key)
@@ -4581,22 +5273,42 @@ class OnlinePollEngine:
                     else _tz_utc(datetime.fromisoformat(seg.t_start))
                 )
 
-                # Обогатить детекции счётчиками ДО to_dict() / to_markdown()
+                # Обогатить детекции счётчиками ДО to_dict() / to_markdown();
+                # открытые эпизоды с известным концом — от него (v5.1.25, P2-3)
+                _kn_rs = ({} if _rs_no_data else
+                          _known_ends([seg], self._episodes,
+                                      _live_keys if ci == len(closed_segs) - 1 else set(),
+                                      seg_t_end_rs))
                 _rs_det_events = [] if _rs_no_data else await _collect_and_enrich_detections(
                     seg, self.router_sn, self.equip_type, self.panel_id,
                     seg_t_end_rs, self.cfg, run_origin_ts=_rs_run_origin,
                     open_keys=set(self._episodes) | _live_keys | _seeded,
                     seeded_out=_seeded, gaps=gaps, live_episodes=self._episodes,
+                    known_ends=_kn_rs,
                 )
 
                 if _rs_no_data:
                     from analytics.serializer import build_no_data_report as _nd_report
                     from analytics.serializer import no_data_summary_parts as _nd_parts
-                    summary_parts_rs = _nd_parts()
+                    # Последние данные до обрыва — по разрывам окна, не last_data_ts
+                    # (его поднимают поздние строки, критика M1); оценка работы за
+                    # обрыв по счётчику наработки — по history окна и одному
+                    # запросу до обрыва (v5.1.25, П10)
+                    _nd_t0 = _tz_utc(datetime.fromisoformat(seg.t_start))
+                    try:
+                        _nd_last = self._no_data_last_before(_nd_t0, gaps, history)
+                    except Exception:
+                        logger.warning("OnlineEngine[%s]: последние данные до обрыва не найдены",
+                                       self.key, exc_info=True)
+                        _nd_last = None
+                    # Режим на обрыве — удержанный режим сегмента без связи (ревью Q1)
+                    _nd_est = await self._no_data_estimate(_nd_t0, seg_t_end_rs, history, _nd_last,
+                                                           run_state=seg.run_state)
+                    summary_parts_rs = _nd_parts(_nd_est)
                     report_md_rs, summary_md_rs = _nd_report(
                         self.router_sn, self.equip_type, self.panel_id,
-                        _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end_rs,
-                        tz=self.tz, last_data_ts=self.last_data_ts,
+                        _nd_t0, seg_t_end_rs,
+                        tz=self.tz, last_data_ts=_nd_last, run_estimate=_nd_est,
                     )
                 else:
                     try:
@@ -4608,6 +5320,8 @@ class OnlinePollEngine:
                             fault_ref=self._fault_ref,
                             inherited_run_state_sec=(_rs_carry(_rs_inherited_before, seg.run_state)
                                                      if ci == 0 else {}),
+                            # Причина и конец — как в строке БД (v5.1.25, «(до конца работы)»)
+                            last_close=(seg.cause_close or "RUN_STATE_CHANGE", seg_t_end_rs),
                         )
                     except Exception:
                         logger.exception("OnlineEngine[%s]: не удалось построить отчёт сегмента RUN_STATE_CHANGE, сохраняю без report_md", self.key)
@@ -4783,14 +5497,25 @@ class OnlinePollEngine:
         # Эпизоды тревог — ДО обогащения: счётчики уже включат текущий эпизод.
         # Конец нарушения: у панели — снятие (fault_end), у аналитики — конец
         # кластера (v5.1.21); режим открытого сегмента — для моста
+        _raw_curr_dets: list[dict] = []
         try:
             _, _raw_curr_dets = _extract_open_segment_data(open_seg)
+            # Кто перекрыл «Общую аварию» — из загруженного, без запросов (v5.1.25, П7)
+            try:
+                _pctx = _supersede_ctx(self.cfg, fault_periods, _raw_curr_dets, ts_to_utc)
+            except Exception:
+                logger.warning("OnlineEngine[%s]: перекрытие Общей аварии не определено",
+                               self.key, exc_info=True)
+                _pctx = None
             await self._process_episodes(_raw_curr_dets, t_to, gaps,
                                          cleared_at={**_panel_cleared_at(segments),
                                                      **_analytics_cleared_at(segments, self._episodes)},
                                          gaps_from=ts_from_utc,
                                          run_state=open_seg.run_state,
-                                         start_carry=getattr(open_seg, "start_profile_prev", None))
+                                         start_carry=getattr(open_seg, "start_profile_prev", None),
+                                         panel_ctx=_pctx,
+                                         # Панель — по фронту (ревью v5.1.25, Q3)
+                                         front_ends=_panel_front_ends(segments))
         except Exception:
             logger.warning("OnlineEngine[%s]: ошибка обработки эпизодов тревог",
                            self.key, exc_info=True)
@@ -4801,11 +5526,24 @@ class OnlinePollEngine:
         except Exception:
             logger.warning("OnlineEngine[%s]: посев событий", self.key, exc_info=True)
 
+        # Фронты панели, снятые внутри открытого сегмента, — закрытым эпизодом
+        # сразу, до счётчиков и Сводки (v5.1.25, П5); после _process_episodes —
+        # живой эпизод того же онсета уже записан
+        try:
+            await self._seed_open_panel_fronts(open_seg, ts_to_utc, gaps)
+        except Exception:
+            logger.warning("OnlineEngine[%s]: посев снятых фронтов панели", self.key, exc_info=True)
+
+        # Живой состав цикла и известные концы открытых эпизодов окна — счётчикам
+        # и Сводке (v5.1.25, P2-3): снятое в дебаунсе — от снятия, не «на конец»
+        _open_live_keys = {_alert_key(d) for d in _raw_curr_dets if d.get("scenario")}
+        _kn_open = _known_ends([open_seg], self._episodes, _open_live_keys, ts_to_utc)
+
         # Обогатить детекции счётчиками ДО _extract_open_segment_data / to_markdown
         _t0 = _time.perf_counter()
         await _enrich_open_seg_detections(
             open_seg, self.router_sn, self.equip_type, self.panel_id, self.cfg,
-            run_origin_ts=_open_run_origin,
+            run_origin_ts=_open_run_origin, known_ends=_kn_open,
         )
         logger.debug(
             "TIMING[%s]: enrich за %.3fs",
@@ -4853,7 +5591,7 @@ class OnlinePollEngine:
             open_report_md = None
 
         open_summary_md, open_summary_parts = await self._build_summary_md_for(
-            [open_seg], self.cursor_ts, t_to
+            [open_seg], self.cursor_ts, t_to, live_keys=_open_live_keys,
         )
         logger.debug(
             "TIMING[%s]: to_markdown за %.3fs",

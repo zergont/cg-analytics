@@ -29,6 +29,12 @@ v5.1.23: тексты профиля пуска (решение В1) — стр�
 (attempt_facts_ru); метка значения enum-регистра — KB поверх каталога
 (enum_label), имя неисправности панели по привязанному коду
 (panel_fault_name, решение В5).
+
+v5.1.25: попытка без отсчётов оборотов внутри — «Неудачный пуск» и факт
+«прокрутка по данным не видна» (attempt_cranked/attempt_facts_ru, решение А
+24.10); оценка работы за обрыв связи по счётчику наработки в заглушке
+(no_data_hours_text, П10); «Общая авария» при несброшенном коде — «Общая
+авария: имя кода (код N)» (panel_fault_name, П6).
 """
 from __future__ import annotations
 
@@ -44,11 +50,16 @@ CRANK_RPM_MIN = 50.0
 
 def attempt_cranked(attempt: dict[str, Any] | None) -> bool | None:
     """Была ли прокрутка на попытке: поле cranked (с v5.1.23), у старой записи —
-    по rpm_max фактов; None — оборотов нет, не знаем."""
+    по rpm_max фактов; None — оборотов нет, не знаем.
+
+    v5.1.25 (решение А): поле есть — его значение, в том числе None (внутри
+    попытки нет отсчётов оборотов): иначе None проваливался в rpm_max из
+    отсчёта до попытки и давал «Отменённый пуск» (ДЭС №3 24.10 13:34, 13:35)."""
     if not isinstance(attempt, dict):
         return None
-    if isinstance(attempt.get("cranked"), bool):
-        return attempt["cranked"]
+    if "cranked" in attempt:
+        c = attempt["cranked"]
+        return c if isinstance(c, bool) else None
     rpm = (attempt.get("facts") or {}).get("rpm_max")
     if isinstance(rpm, (int, float)):
         return float(rpm) > CRANK_RPM_MIN
@@ -160,6 +171,8 @@ ROLE_LABELS: dict[str, str] = {
     "CURRENT_L2": "Ток L2",
     "CURRENT_L3": "Ток L3",
     "ENGINE_HOURS": "Наработка",
+    "START_ATTEMPTS_TOTAL": "Попытки пуска (счётчик панели)",
+    "START_SUCCESS_TOTAL": "Успешные пуски (счётчик панели)",
 }
 
 # Единицы карты регистров → по-русски. psi и gal/h — единицы датчика ДЭС №3:
@@ -246,7 +259,11 @@ def attempt_facts_ru(attempt: dict[str, Any] | None, tz=None, codes: bool = Fals
                      + f" до {rpm:.0f} об/мин без вспышки")
     else:
         lead = f"попытка {dur:.0f} с" if isinstance(dur, (int, float)) else "попытка"
-        if not isinstance(rpm, (int, float)):
+        if cranked is None and attempt.get("rpm_in") == 0:
+            # Решение А (24.10): внутри попытки ни одного отсчёта оборотов —
+            # ноль до попытки отмены не доказывает
+            parts.append(f"{lead}, прокрутка по данным не видна (отсчётов внутри попытки нет)")
+        elif not isinstance(rpm, (int, float)):
             parts.append(f"{lead}, обороты неизвестны")
         else:
             parts.append(f"{lead} без прокрутки (обороты "
@@ -317,12 +334,30 @@ def panel_fault_name(values: dict[str, Any] | None, code_name=None) -> str | Non
     code_name (детекция с v5.1.23), иначе code_name(код) — справочник по вызову
     (эпизод, открытый до v5.1.23). Кода в справочнике нет — имя бита и «(код N)»
     (у записи v5.1.23 — values.bit_name). Код не привязан или старая запись без
-    имени кода — values.fault_name, как раньше. Ключи эпизодов (addr/bit) те же."""
+    имени кода — values.fault_name, как раньше. Ключи эпизодов (addr/bit) те же.
+
+    v5.1.25 (П6, разбор ДЭС №3 24.10): «Общая авария» при несброшенном коде
+    (кода бита нет, есть values.last_fault_code) — «Общая авария: имя кода (код
+    N)»; имя — values.code_name, иначе справочник, иначе «Общая авария (код N)».
+    И у старых строк («CommonAlarm (Общая авария)», 14901) — подпись при чтении."""
     if not isinstance(values, dict):
         return None
     base = values.get("fault_name")
     code = values.get("panel_code")
     if code is None:
+        try:
+            lfc = int(values.get("last_fault_code") or 0)
+        except (TypeError, ValueError):
+            lfc = 0
+        if lfc > 0:
+            cname = values.get("code_name")
+            if not cname and code_name is not None:
+                try:
+                    cname = code_name(lfc)
+                except Exception:
+                    cname = None
+            return (f"Общая авария: {cname} (код {lfc})" if cname
+                    else f"Общая авария (код {lfc})")
         return base
     cname = values.get("code_name")
     if not cname and code_name is not None:
@@ -660,7 +695,11 @@ def _start_tail(sp: dict[str, Any], tz=None) -> list[str]:
     """Автомат и нагрузка окна пуска: «автомат разомкнут, 0 кВт»."""
     out = []
     cb = sp.get("breaker_closed_at")
-    out.append(f"автомат замкнут {fmt_local(cb, tz) or '?'}" if cb else "автомат разомкнут")
+    if cb and sp.get("unobserved"):
+        # Пуск без связи (ревью v5.1.25, Q5): момент — первый отсчёт, не замыкание
+        out.append("автомат уже замкнут")
+    else:
+        out.append(f"автомат замкнут {fmt_local(cb, tz) or '?'}" if cb else "автомат разомкнут")
     kw = sp.get("kw_max")
     if isinstance(kw, (int, float)):
         out.append(f"до {_rpm(kw)} кВт" if kw >= 1 else "0 кВт")
@@ -681,7 +720,13 @@ def start_profile_text(sp: dict[str, Any] | None, tz=None) -> str | None:
     # «за 0 с» была бы ложной точностью; оценка сверху, если она есть
     _first = sp.get("rated_first") if "rated_first" in sp else (
         isinstance(rsec, (int, float)) and rsec < 1)
-    if isinstance(rsec, (int, float)) and _first:
+    if sp.get("unobserved"):
+        # Пуск прошёл без связи (ревью v5.1.25, Q5): самого пуска не видели
+        _t0 = fmt_local(sp.get("crank_at"), tz)
+        parts.append("пуск прошёл без связи — " + (
+            f"на номинале с первого отсчёта после обрыва ({_t0})" if _first and _t0
+            else f"первый отсчёт после обрыва {_t0}" if _t0 else "первый отсчёт после обрыва"))
+    elif isinstance(rsec, (int, float)) and _first:
         _bnd = sp.get("rated_bound_sec")
         parts.append("на номинале с первого отсчёта"
                      + (f" (разгон между отсчётами, не дольше {fmt_duration(_bnd)})"
@@ -754,6 +799,43 @@ def start_window(sp: dict[str, Any] | None) -> tuple[Any, Any] | None:
     if not isinstance(sp, dict) or not sp.get("crank_at"):
         return None
     return sp.get("crank_at"), (None if sp.get("open") else sp.get("t_to"))
+
+
+def no_data_hours_text(est: dict[str, Any] | None, tz=None) -> str | None:
+    """Оценка работы за обрыв связи по счётчику наработки — строкой заглушки
+    (v5.1.25, П10; serializer.no_data_run_estimate). «Наработка за перерыв по
+    счётчику — 6 ч 18 мин: двигатель работал до ~12:05–12:08 (счётчик идёт
+    шагом 3 мин).» Наработка — от тика счётчика, а не от последних данных
+    (критика SHOULD 5); «до ~» — только при непрерывной работе (счётчики пусков
+    не менялись). hours_only (ревью v5.1.25, Q1) — только наработка: на
+    обрыве стоял или счётчика пусков нет. None — оценки нет."""
+    if not isinstance(est, dict) or not est.get("kind"):
+        return None
+    kind = est["kind"]
+    worked = fmt_duration(est.get("worked_sec") or 0, seconds=False)
+    if kind == "idle":
+        return "По счётчику наработки за перерыв двигатель не работал."
+    if kind == "starts":
+        return (f"Наработка за перерыв по счётчику — {worked}; счётчики пусков сменились — были "
+                f"остановы и пуски, момент останова не оценить.")
+    if kind == "whole":
+        return f"Наработка за перерыв по счётчику — {worked}: двигатель работал весь перерыв."
+    if kind == "hours_only":
+        # Непрерывность работы с последних данных не подтверждена (ревью v5.1.25, Q1)
+        why = ("на последних данных до обрыва двигатель не работал — когда он работал, "
+               if est.get("reason") == "stood" else
+               "счётчика пусков у машины нет — были ли остановы и когда двигатель остановился, ")
+        return f"Наработка за перерыв по счётчику — {worked}; {why}по счётчику не оценить."
+    a = fmt_local(est.get("end_from"), tz, seconds=False)
+    b = fmt_local(est.get("end_to"), tz, seconds=False)
+    if not a or not b:
+        return f"Наработка за перерыв по счётчику — {worked}."
+    step = fmt_duration(est.get("step_sec") or 0, seconds=False)
+    if kind == "before":
+        d = fmt_local(est.get("end_from"), tz, day=True, seconds=False)
+        return f"В этот период не работал (по счётчику наработки остановился ~{d}–{b})."
+    return (f"Наработка за перерыв по счётчику — {worked}: двигатель работал до ~{a}–{b} "
+            f"(счётчик идёт шагом {step}).")
 
 
 def engine_hours_text(hours: Any) -> str | None:

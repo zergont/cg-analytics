@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import bisect
 import cmath
+import logging
 import math
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,8 @@ from typing import Any
 
 from .contract import Characteristic, DerivedMetrics
 from .config import AnalyticsConfig
+
+logger = logging.getLogger(__name__)
 
 
 # ── Вспомогательные функции ──────────────────────────────────────────────────
@@ -162,6 +165,7 @@ def compute_characteristics(
             value_start=round(vals[0], 3),
             value_end=round(vals[-1], 3),
             slope=round(slope, 5) if slope is not None else None,
+            real_count=len(window_real),
         )
         result[role] = char.to_dict()
 
@@ -485,8 +489,21 @@ def compute_derived_metrics(
     cool_t_real = _rows_in(_addr("COOLANT_TEMP") or 0, real_only=True) if _addr("COOLANT_TEMP") else []
     oil_press_real = _rows_in(_addr("OIL_PRESS") or 0, real_only=True) if _addr("OIL_PRESS") else []
 
-    # dP_dt_max (кВт/с) — максимальная скорость изменения мощности
-    dP_dt_max = _max_speed(p_total_real, gaps, heartbeat, max_mult, absolute=True)
+    # dP_dt_max (кВт/с) — максимальная скорость изменения мощности.
+    # v5.1.25 (решение В-25.1): пары ближе LOAD_STEP.min_pair_dt_sec не в счёт
+    # (пульс db-writer — 9 ложных CAUTION за 60 дней); момент наибольшей и
+    # онсет (первая пара выше порога детектора) — для t_detected события
+    dP_dt_max_at = dP_dt_onset_at = None
+    try:
+        _ls_min_dt = float(cfg.det("LOAD_STEP", "min_pair_dt_sec", default=1.0) or 0.0)
+        _ls_thr = float(cfg.det("LOAD_STEP", "dP_dt_threshold_kw_per_s", default=50.0))
+        dP_dt_max, dP_dt_max_at, dP_dt_onset_at = _max_speed(
+            p_total_real, gaps, heartbeat, max_mult, absolute=True,
+            min_dt=_ls_min_dt, with_ts=True, onset_thr=_ls_thr)
+    except Exception:
+        logger.warning("dP/dt по парам дальше min_pair_dt_sec не посчитан — как раньше",
+                       exc_info=True)
+        dP_dt_max = _max_speed(p_total_real, gaps, heartbeat, max_mult, absolute=True)
 
     # dRPM_dt_max
     dRPM_dt_max = _max_speed(rpm_rows_real, gaps, heartbeat, max_mult, absolute=True)
@@ -528,6 +545,22 @@ def compute_derived_metrics(
     else:
         freq_dip_pct = freq_rise_pct = freq_recovery_sec = None
 
+    # Шаг опроса и подпись восстановления (v5.1.25, решение В-25.1): шаг больше
+    # нормы класса — восстановление короче шага не измерить, «не более N с»
+    freq_poll_step_sec = freq_recovery_text = None
+    if freq_recovery_sec is not None:
+        try:
+            freq_poll_step_sec = _poll_step_sec(by_addr, t_start, t_end, cfg)
+            _cls = cfg.det("LOAD_STEP", "load_class_iso", default="G3")
+            _norm = float(((cfg.det("LOAD_STEP", "iso_classes", default={}) or {})
+                           .get(_cls) or {}).get("freq_recovery_sec", 3.0))
+            if freq_poll_step_sec is not None and freq_poll_step_sec > _norm:
+                freq_recovery_text = recovery_bound_text(freq_recovery_sec, freq_poll_step_sec, _cls)
+        except Exception:
+            logger.warning("Шаг опроса для восстановления частоты не посчитан — как раньше",
+                           exc_info=True)
+            freq_poll_step_sec = freq_recovery_text = None
+
     # ── Предиктор асимптоты прогрева ОЖ (Класс B, Phase 1 COOLING_FAILURE) ────
     # Оценивает T_равн для растущего ряда — используется в _detect_cooling_failure
     # чтобы обнаружить «нацеленность на перегрев» ещё до достижения опасной T.
@@ -559,6 +592,10 @@ def compute_derived_metrics(
         freq_dip_pct=_r(freq_dip_pct),
         freq_rise_pct=_r(freq_rise_pct),
         freq_recovery_sec=_r(freq_recovery_sec),
+        freq_poll_step_sec=_r(freq_poll_step_sec, 1),
+        freq_recovery_text=freq_recovery_text,
+        dP_dt_max_at=dP_dt_max_at,
+        dP_dt_onset_at=dP_dt_onset_at,
         dCoolant_dt_max=_r(dCoolant_dt_max),
         dOil_press_dt_min=_r(dOil_press_dt_min),
         coolant_below_60_sec=_r(coolant_below_60_sec),
@@ -756,20 +793,37 @@ def _max_speed(
     heartbeat: float,
     max_mult: float,
     absolute: bool = False,
-) -> float | None:
-    """Максимальная скорость изменения параметра (ед./с)."""
-    speeds: list[float] = []
+    min_dt: float = 0.0,
+    with_ts: bool = False,
+    onset_thr: float | None = None,
+):
+    """Максимальная скорость изменения параметра (ед./с).
+
+    v5.1.25 (решение В-25.1): min_dt — пары отсчётов ближе не учитываются
+    (пульс db-writer пишет ту же мощность второй строкой через доли секунды).
+    with_ts — (скорость, момент наибольшей, момент первой пары выше
+    onset_thr); момент — второй отсчёт пары, ISO."""
+    best: float | None = None
+    best_at: datetime | None = None
+    first_at: datetime | None = None
     for i in range(len(series) - 1):
         ts1, v1 = series[i]
         ts2, v2 = series[i + 1]
         if _is_gap_between(ts1, ts2, gaps, heartbeat, max_mult):
             continue
         dt = (_tz(ts2) - _tz(ts1)).total_seconds()
-        if dt < 1e-6:
+        if dt < max(1e-6, min_dt):
             continue
         speed = (v2 - v1) / dt
-        speeds.append(abs(speed) if absolute else speed)
-    return max(speeds) if speeds else None
+        speed = abs(speed) if absolute else speed
+        if best is None or speed > best:
+            best, best_at = speed, _tz(ts2)
+        if first_at is None and onset_thr is not None and speed > onset_thr:
+            first_at = _tz(ts2)
+    if not with_ts:
+        return best
+    return (best, best_at.isoformat() if best_at else None,
+            first_at.isoformat() if first_at else None)
 
 
 def _max_speed_per_second(
@@ -1095,11 +1149,14 @@ def _freq_transient_metrics(
 
     freq_recovery_sec: float | None = None
     if nadir_ts is not None:
-        # Первый момент после наддира, когда |f - nominal| ≤ settled_hz
+        # Первый момент после наддира, когда |f - nominal| ≤ settled_hz.
+        # v5.1.25 (В-25.1): отсчёт — от минимума, как в docstring; до v5.1.25
+        # от начала подсегмента (t_start) — до 85 276 с. t_start остаётся ради
+        # сигнатуры (test_v13)
         post_nadir = [(ts, v) for ts, v in freq_series if ts >= nadir_ts]
         for ts, v in post_nadir:
             if abs(v - nominal_hz) <= settled_hz:
-                dt = (_tz(ts) - _tz(t_start)).total_seconds()
+                dt = (_tz(ts) - _tz(nadir_ts)).total_seconds()
                 freq_recovery_sec = max(0.0, dt)
                 break
 
@@ -1108,6 +1165,56 @@ def _freq_transient_metrics(
         round(freq_rise_pct, 2) if freq_rise_pct > 0.1 else None,
         round(freq_recovery_sec, 1) if freq_recovery_sec is not None else None,
     )
+
+
+def _poll_step_sec(
+    by_addr: dict[int, list[dict[str, Any]]],
+    t_start: datetime,
+    t_end: datetime,
+    cfg: AnalyticsConfig,
+) -> float | None:
+    """Шаг опроса в подсегменте (v5.1.25, решение В-25.1): медиана интервалов
+    между соседними пакетами связи (rpm_freq.packet_times — пинг, без него
+    любые реальные строки) в [t_start, t_end). Шаг пакетов, а не ряда: регистр
+    частоты пишется по изменению. Интервалы длиннее packet_max_gap_sec (обрыв
+    связи) не в счёт. Меньше двух пакетов — None.
+    Срез по окну подсегмента до разбора пакетов: история окна — до суток."""
+    from .rpm_freq import packet_times, rpm_freq_params
+    prm = rpm_freq_params(cfg)
+    t0, t1 = _tz(t_start), _tz(t_end)
+
+    def _win(rows):
+        # Строки адреса идут по метке (сортирует БД, как у срезов segmenter._row_at)
+        rows = rows or []
+        a = bisect.bisect_left(rows, t0, key=lambda r: _tz(r["ts"]))
+        return rows[a:bisect.bisect_left(rows, t1, key=lambda r: _tz(r["ts"]))]
+
+    hb = prm.get("heartbeat_addr")
+    sub = {hb: _win(by_addr.get(hb))} if hb is not None else {}
+    if not any(not r.get("is_carried_forward") for rows in sub.values() for r in rows):
+        sub = {a: _win(rows) for a, rows in by_addr.items()}
+    pk = [t for t in packet_times(sub, prm) if t0 <= t < t1]
+    if len(pk) < 2:
+        return None
+    max_gap = float(prm.get("packet_max_gap_sec") or 90.0)
+    iv = [(b - a).total_seconds() for a, b in zip(pk, pk[1:])]
+    iv = [x for x in iv if 0 < x <= max_gap]
+    if not iv:
+        return None
+    return float(_median(iv))
+
+
+def recovery_bound_text(rec: float | None, step: float | None, load_class: str) -> str | None:
+    """«не более N с (шаг опроса M с, норма G3 не проверяется)» (решение В-25.1).
+
+    N — оценка сверху: восстановление от отсчёта-минимума плюс шаг — настоящий
+    минимум частоты мог быть до отсчёта на шаг опроса (критика v5.1.25, п. 9)."""
+    if rec is None or step is None:
+        return None
+    from .labels import fmt_number
+    st = round(step) if step >= 1 else round(step, 1)
+    return (f"не более {fmt_number(round(rec + step))} с (шаг опроса {fmt_number(st)} с, "
+            f"норма {load_class} не проверяется)")
 
 
 def _r(v: float | None, decimals: int = 3) -> float | None:

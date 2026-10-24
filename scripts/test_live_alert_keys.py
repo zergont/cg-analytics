@@ -60,11 +60,18 @@ def seg(subs: list) -> SimpleNamespace:
 keys = _live_alert_keys(seg([sub([_Det("CONTROLLER_FAULT", 40404, 3)])]))
 check(keys == {"CONTROLLER_FAULT|40404|3"}, f"1: ожидали ключ маски, получили {keys}")
 
-# 2. Снятая маска (fault_end проставлен) — уже не живая, её сеять как раз надо
+# 2а. Снятая маска (fault_end не позже конца окна) — уже не живая, её сеять как раз надо
+keys = _live_alert_keys(seg([sub([
+    _Det("CONTROLLER_FAULT", 40404, 3, fault_end="2026-09-16T21:35:00+00:00"),
+])]))
+check(keys == set(), f"2а: снятая маска попала в живые: {keys}")
+
+# 2б. v5.1.25 (П4): снятие позже конца окна (21:37:52 > 21:35:50) — на конец окна
+# маска ещё висела, она живая
 keys = _live_alert_keys(seg([sub([
     _Det("CONTROLLER_FAULT", 40404, 3, fault_end="2026-09-16T21:37:52+00:00"),
 ])]))
-check(keys == set(), f"2: снятая маска попала в живые: {keys}")
+check(keys == {"CONTROLLER_FAULT|40404|3"}, f"2б: маска, снятая позже окна, не живая: {keys}")
 
 # 3. Разные биты — разные тревоги, ключи не схлопываются
 keys = _live_alert_keys(seg([sub([

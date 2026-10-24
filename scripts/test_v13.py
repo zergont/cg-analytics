@@ -32,12 +32,15 @@ freq_series = [
 dip, rise, rec = _freq_transient_metrics(freq_series, 50.0, 0.5, t0)
 print(f"  freq_dip_pct = {dip}  (expect ~5.0)")
 print(f"  freq_rise_pct = {rise}  (expect None)")
-print(f"  freq_recovery_sec = {rec}  (expect ~5.0)")
+# v5.1.25 (решение В-25.1): от минимума (t0+2) до входа в коридор (t0+5), как
+# в docstring; до v5.1.25 считалось от начала подсегмента — 5,0
+print(f"  freq_recovery_sec = {rec}  (expect ~3.0)")
+assert dip == 5.0 and rise is None and rec == 3.0, (dip, rise, rec)
 
 print()
 print("=== Test 2: LOAD_STEP ISO G3 classification ===")
 # G3 norm: drop<7%, recovery<3s
-# Our case: dip=5% (ok), rec=5s (exceeds 3s) -> WARNING
+# Our case: dip=5% (ok), rec=3,0 с (= норме 3 с, не больше) -> INFO, без нарушения
 dm = DerivedMetrics(dP_dt_max=60.0, freq_dip_pct=dip, freq_recovery_sec=rec)
 dets = run_all_detectors(
     {}, dm, RiskAccumulators(), [], "NORMAL", 3,
@@ -50,6 +53,8 @@ for d in load_step:
     print(f"  trigger: {d.trigger}")
 if not load_step:
     print("  No LOAD_STEP (unexpected)")
+assert len(load_step) == 1 and load_step[0].severity == "INFO" and not load_step[0].values["violations"], \
+    "3,0 с при норме G3 3 с — не нарушение"
 
 print()
 print("=== Test 3: LOAD_STEP in RS=0 should NOT fire ===")

@@ -617,8 +617,16 @@ async def get_segments_for_calendar(
     ts_from: datetime | None = None,
     ts_to: datetime | None = None,
     limit: int = 500,
+    incident_state: bool = False,
 ) -> list[dict[str, Any]]:
-    """Все сегменты машины в заданном диапазоне (включая открытый), от старых к новым."""
+    """Все сегменты машины в заданном диапазоне (включая открытый), от старых к новым.
+
+    incident_state (v5.1.25, значок акта, В-25.2) — у строк с актом положить
+    состояние разбора совета (_incident_state: {analysed, ordered, terminal})
+    одним вторым запросом на весь календарь; без актов второго запроса нет.
+    Нужно только API календаря: движок (контекст гейта) и HTML-календарь
+    зовут без него — у них запросов не прибавляется.
+    """
     conn = await _connect()
     try:
         conditions = [
@@ -644,7 +652,11 @@ async def get_segments_for_calendar(
                        active_detections_json, characteristics_json,
                        gate_suppressed_hash, report_summary_json,
                        -- сам акт тяжёлый, в календарь тянем только признак
-                       (incident_json IS NOT NULL) AS has_incident
+                       (incident_json IS NOT NULL) AS has_incident,
+                       -- и момент останова для значка (v5.1.25): JSONB
+                       -- разворачивается только у строк с актом
+                       CASE WHEN incident_json IS NOT NULL
+                            THEN incident_json->>'stop_ts' END AS incident_stop_ts
                 FROM auto_segments
                 WHERE {where}
                 ORDER BY t_start DESC
@@ -652,9 +664,41 @@ async def get_segments_for_calendar(
             ) recent
             ORDER BY t_start ASC
         """, *params)
-        return [dict(r) for r in rows]
+        out = [dict(r) for r in rows]
+        if incident_state:
+            await _attach_incident_states(conn, router_sn, equip_type, panel_id, out)
+        return out
     finally:
         await conn.close()
+
+
+async def _attach_incident_states(
+    conn, router_sn: str, equip_type: str, panel_id: int, rows: list[dict[str, Any]],
+) -> None:
+    """Состояние разбора совета у строк календаря с актом (v5.1.25, В-25.2):
+    rows[i]["_incident_state"]. Ключ разбора — incident_hash от момента
+    останова акта (строится в Python, формат ISO в SQL не повторяется). Без
+    актов — без запроса; сбой — строки без состояния (API отдаёт null, UI
+    рисует значок как раньше, по has_incident)."""
+    try:
+        from online.incident_gate import act_stop_ts, incident_hash
+        acts: list[tuple[int, datetime, str]] = []
+        for r in rows:
+            if not r.get("has_incident") or r.get("id") is None:
+                continue
+            st = act_stop_ts(r.get("incident_stop_ts"), r.get("t_start"))
+            if st is not None:
+                acts.append((int(r["id"]), st, incident_hash(st)))
+        if not acts:
+            return
+        states = await get_incident_analysis_states(
+            router_sn, equip_type, panel_id, acts, conn=conn)
+        for r in rows:
+            if r.get("id") in states:
+                r["_incident_state"] = states[r["id"]]
+    except Exception:
+        logger.warning("Календарь %s/%s/%s: состояние разбора актов не прочитано — "
+                       "значок по has_incident", router_sn, equip_type, panel_id, exc_info=True)
 
 
 async def clear_segments(
@@ -999,6 +1043,66 @@ async def get_incident_analysis_state(
         await conn.close()
 
 
+async def get_incident_analysis_states(
+    router_sn: str, equip_type: str, panel_id: int,
+    acts: list[tuple[int, datetime, str]],
+    conn=None,
+) -> dict[int, dict[str, Any]]:
+    """Состояние разбора нескольких аварий машины одним запросом (v5.1.25,
+    значок акта в календаре, В-25.2).
+
+    acts — [(id строки акта, момент останова, ключ incident_hash)]. Логика —
+    как у get_incident_analysis_state: по каждой аварии сегменты машины в окне
+    ±2 сут от останова (разбор и отметки могли лечь на соседнюю строку).
+    Результат — {id: {analysed, ordered, terminal}}. conn — соединение
+    вызывающего (календарь), иначе своё.
+    """
+    if not acts:
+        return {}
+    own = conn is None
+    if own:
+        conn = await _connect()
+    try:
+        rows = await conn.fetch("""
+            WITH q AS (
+                SELECT * FROM unnest($4::bigint[], $5::timestamptz[], $6::text[])
+                    AS q(id, stop_ts, fh)
+            ), s AS (
+                SELECT q.id, q.fh, a.warning_analyses, a.gate_log
+                FROM q JOIN auto_segments a
+                  ON a.router_sn = $1 AND a.equip_type = $2 AND a.panel_id = $3
+                 AND a.t_start >= q.stop_ts - interval '2 days'
+                 AND a.t_start <= q.stop_ts + interval '2 days'
+            ), ev AS (
+                SELECT s.id, e->>'decision' AS decision, e->>'at' AS at
+                FROM s, jsonb_array_elements(
+                    CASE WHEN jsonb_typeof(s.gate_log) = 'array' THEN s.gate_log
+                         ELSE '[]'::jsonb END) e
+                WHERE e->>'kind' = 'incident' AND e->>'fault_hash' = s.fh
+            )
+            SELECT
+                q.id,
+                EXISTS (SELECT 1 FROM s
+                        WHERE s.id = q.id
+                          AND jsonb_typeof(s.warning_analyses) = 'array'
+                          AND s.warning_analyses @> jsonb_build_array(
+                                  jsonb_build_object('fault_hash', q.fh))) AS analysed,
+                (SELECT count(*) FROM ev
+                 WHERE ev.id = q.id AND ev.decision = 'ordered') AS ordered,
+                (SELECT ev.decision FROM ev
+                 WHERE ev.id = q.id AND ev.decision IN ('failed', 'removed', 'save_failed')
+                 ORDER BY ev.at DESC NULLS LAST LIMIT 1) AS terminal
+            FROM q
+        """, router_sn, equip_type, panel_id,
+             [int(a[0]) for a in acts], [a[1] for a in acts], [a[2] for a in acts])
+        return {int(r["id"]): {"analysed": bool(r["analysed"]), "ordered": int(r["ordered"] or 0),
+                               "terminal": r["terminal"]}
+                for r in rows}
+    finally:
+        if own:
+            await conn.close()
+
+
 async def get_incident_acts_since(since: datetime) -> list[dict[str, Any]]:
     """Сегменты с актом аварийного останова (голова стопа), начавшиеся не раньше since."""
     conn = await _connect()
@@ -1243,11 +1347,17 @@ async def find_episode_by_onset(
 
     Совпадение онсета означает ту же тревогу (см. existing_episode_onsets): у
     панельной это фронт неисправности из fault_history.
+
+    v5.1.25 (П6): заодно код «Общей аварии» строки и его смены
+    (open_values_json → last_fault_code, code_changes) — переоткрытие с другим
+    кодом пишет «код сменился» тем же UPDATE, без нового запроса.
     """
     conn = await _connect()
     try:
         row = await conn.fetchrow("""
-            SELECT id, t_close, severity
+            SELECT id, t_close, severity,
+                   open_values_json->>'last_fault_code' AS last_fault_code,
+                   open_values_json->'code_changes' AS code_changes
             FROM alarm_episodes
             WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
               AND scenario = $4
@@ -1261,9 +1371,28 @@ async def find_episode_by_onset(
         await conn.close()
 
 
+def _values_merge_sql(until_param: str, merge_param: str) -> str:
+    """Выражение open_values_json для UPDATE (v5.1.25, П6–П7): until кластера
+    (jsonb_set, как в v5.1.21) и слияние values_merge (||). Без слияния — текст
+    прежний; со слиянием — пустая строка JSON становится {} (NULL || jsonb =
+    NULL, критика SHOULD 10)."""
+    return (f"CASE WHEN {merge_param}::jsonb IS NULL THEN "
+            f"(CASE WHEN {until_param}::text IS NULL THEN open_values_json\n"
+            f"    ELSE jsonb_set(open_values_json, '{{live,until}}', to_jsonb({until_param}::text)) END)\n"
+            f"    ELSE (CASE WHEN {until_param}::text IS NULL THEN COALESCE(open_values_json, '{{}}'::jsonb)\n"
+            f"    ELSE jsonb_set(COALESCE(open_values_json, '{{}}'::jsonb), '{{live,until}}', "
+            f"to_jsonb({until_param}::text)) END) || {merge_param}::jsonb END")
+
+
+def _merge_json(values_merge: dict | None) -> str | None:
+    return (json.dumps(values_merge, ensure_ascii=False, default=str)
+            if isinstance(values_merge, dict) and values_merge else None)
+
+
 async def reopen_episode(
     episode_id: int, *, now_ts: datetime, blind_sec_add: float = 0.0,
     severity: str | None = None, until: datetime | None = None,
+    values_merge: dict | None = None,
 ) -> None:
     """Снова открыть эпизод того же онсета — тревога не снималась.
 
@@ -1277,28 +1406,48 @@ async def reopen_episode(
     until (v5.1.21) — конец кластера точного эпизода аналитики, тем же UPDATE,
     как в update_episode: иначе до следующего цикла в open_values_json лежал бы
     конец с момента открытия (посев и рестарт брали бы его).
+    values_merge (v5.1.25, П6–П7) — слияние в open_values_json тем же UPDATE:
+    код «Общей аварии» и его смена («код сменился»), снятие отметки «перекрыта
+    предупреждением панели» (superseded_by: null).
     """
     until_iso = None
     if until is not None:
         until_iso = (until if until.tzinfo else until.replace(tzinfo=timezone.utc)).isoformat()
+    _vm = _merge_json(values_merge)
     conn = await _connect()
     try:
-        await conn.execute("""
+        if _vm is None:
+            await conn.execute("""
+                UPDATE alarm_episodes
+                SET gate_suppressed = CASE WHEN t_close IS NOT NULL THEN FALSE
+                                           ELSE gate_suppressed END,
+                    -- источник снятия — вместе с пометкой (v5.1.22)
+                    gate_suppressed_src = CASE WHEN t_close IS NOT NULL THEN NULL
+                                               ELSE gate_suppressed_src END,
+                    t_close = NULL, close_reason = NULL,
+                    active_sec = GREATEST(active_sec, EXTRACT(EPOCH FROM ($2 - t_open))),
+                    blind_sec  = blind_sec + $3,
+                    severity   = COALESCE($4, severity),
+                    open_values_json = CASE WHEN $5::text IS NULL THEN open_values_json
+                        ELSE jsonb_set(open_values_json, '{live,until}', to_jsonb($5::text)) END,
+                    updated_at = now()
+                WHERE id = $1
+            """, episode_id, now_ts, max(0.0, float(blind_sec_add)), severity, until_iso)
+            return
+        await conn.execute(f"""
             UPDATE alarm_episodes
             SET gate_suppressed = CASE WHEN t_close IS NOT NULL THEN FALSE
                                        ELSE gate_suppressed END,
-                -- источник снятия — вместе с пометкой (v5.1.22)
                 gate_suppressed_src = CASE WHEN t_close IS NOT NULL THEN NULL
                                            ELSE gate_suppressed_src END,
                 t_close = NULL, close_reason = NULL,
                 active_sec = GREATEST(active_sec, EXTRACT(EPOCH FROM ($2 - t_open))),
                 blind_sec  = blind_sec + $3,
                 severity   = COALESCE($4, severity),
-                open_values_json = CASE WHEN $5::text IS NULL THEN open_values_json
-                    ELSE jsonb_set(open_values_json, '{live,until}', to_jsonb($5::text)) END,
+                open_values_json = {_values_merge_sql("$5", "$6")},
                 updated_at = now()
             WHERE id = $1
-        """, episode_id, now_ts, max(0.0, float(blind_sec_add)), severity, until_iso)
+        """, episode_id, now_ts, max(0.0, float(blind_sec_add)), severity, until_iso, _vm)
     finally:
         await conn.close()
 
@@ -1337,6 +1486,7 @@ async def insert_closed_episode(
 async def update_episode(
     episode_id: int, *, active_sec_add: float = 0.0, severity: str | None = None,
     blind_sec_add: float = 0.0, until: datetime | None = None,
+    values_merge: dict | None = None,
 ) -> None:
     """Приращение воздействия (и его слепой доли) и/или эскалация severity.
 
@@ -1345,22 +1495,36 @@ async def update_episode(
     open_values_json.live.until тем же UPDATE (схема не меняется, лишнего
     запроса нет), после рестарта движок поднимает его в память. Строка без
     блока live (панель, старые) — jsonb_set оставляет её как есть.
+    values_merge (v5.1.25, П6) — слияние в open_values_json тем же UPDATE:
+    смена кода «Общей аварии» (last_fault_code, code_name, code_changes).
     """
     until_iso = None
     if until is not None:
         until_iso = (until if until.tzinfo else until.replace(tzinfo=timezone.utc)).isoformat()
+    _vm = _merge_json(values_merge)
     conn = await _connect()
     try:
-        await conn.execute("""
+        if _vm is None:
+            await conn.execute("""
+                UPDATE alarm_episodes
+                SET active_sec = active_sec + $2,
+                    blind_sec  = blind_sec + $4,
+                    severity   = COALESCE($3, severity),
+                    open_values_json = CASE WHEN $5::text IS NULL THEN open_values_json
+                        ELSE jsonb_set(open_values_json, '{live,until}', to_jsonb($5::text)) END,
+                    updated_at = now()
+                WHERE id = $1 AND t_close IS NULL
+            """, episode_id, active_sec_add, severity, blind_sec_add, until_iso)
+            return
+        await conn.execute(f"""
             UPDATE alarm_episodes
             SET active_sec = active_sec + $2,
                 blind_sec  = blind_sec + $4,
                 severity   = COALESCE($3, severity),
-                open_values_json = CASE WHEN $5::text IS NULL THEN open_values_json
-                    ELSE jsonb_set(open_values_json, '{live,until}', to_jsonb($5::text)) END,
+                open_values_json = {_values_merge_sql("$5", "$6")},
                 updated_at = now()
             WHERE id = $1 AND t_close IS NULL
-        """, episode_id, active_sec_add, severity, blind_sec_add, until_iso)
+        """, episode_id, active_sec_add, severity, blind_sec_add, until_iso, _vm)
     finally:
         await conn.close()
 
@@ -1392,7 +1556,8 @@ async def retarget_episode_segments(
 
 
 async def close_episode(episode_id: int, t_close: datetime, reason: str,
-                        exact: bool = False, blind_sec: float | None = None) -> None:
+                        exact: bool = False, blind_sec: float | None = None,
+                        values_merge: dict | None = None) -> None:
     """Закрыть открытый эпизод.
 
     Без exact (панель, старые строки) — воздействие не меньше начисленного по
@@ -1401,7 +1566,28 @@ async def close_episode(episode_id: int, t_close: datetime, reason: str,
     (начисленное по циклам включает хвост свежести после конца кластера),
     слепая доля — пересчитанная blind_sec (None — накопленная), не больше
     воздействия.
+
+    v5.1.25 (П7): reason «superseded» — «Общая авария» перекрыта громким битом
+    панели (бит Общей аварии не снят); values_merge — слияние в
+    open_values_json тем же UPDATE (superseded_by: кем и с какого момента).
     """
+    _vm = _merge_json(values_merge)
+    if _vm is not None and not exact:
+        conn = await _connect()
+        try:
+            await conn.execute("""
+                UPDATE alarm_episodes
+                SET t_close = $2, close_reason = $3,
+                    active_sec = GREATEST(
+                        active_sec, EXTRACT(EPOCH FROM ($2 - t_open))
+                    ),
+                    open_values_json = COALESCE(open_values_json, '{}'::jsonb) || $4::jsonb,
+                    updated_at = now()
+                WHERE id = $1 AND t_close IS NULL
+            """, episode_id, t_close, reason, _vm)
+        finally:
+            await conn.close()
+        return
     conn = await _connect()
     try:
         if exact:
@@ -1695,6 +1881,7 @@ async def count_episodes_batch(
     window_days: int = 30,
     since_ts: datetime | None = None,
     analytics_since: datetime | None = None,
+    ends: dict[int, tuple[datetime, bool]] | None = None,
 ) -> dict[str, dict[str, float]]:
     """Счётчики эпизодов одним запросом: фронты И суммарная длительность.
 
@@ -1713,16 +1900,39 @@ async def count_episodes_batch(
     t_open не раньше этой даты (выкладка эпизодов по событию: старые строки
     «24 ч от одного отсчёта» не смешиваются с новыми); панель не трогается.
     None — без фильтра (ALARM_EPISODES.analytics_counts_since пуст).
+
+    v5.1.25 (P2-3): ends — известные концы открытых строк {id: (конец,
+    exact)} (движок: _known_ends — снятие панели / конец нарушения, пока
+    дебаунс держит строку открытой). Тем же запросом воздействие такой строки
+    считается, как её закроет close_episode: exact — конец − начало (слепая
+    доля не больше), иначе — не меньше начисленного. БД не трогается; пустые
+    массивы — прежний результат.
     """
     if not scenarios:
         return {}
+    _ids, _ends, _ex = [], [], []
+    for _id, (_t, _x) in (ends or {}).items():
+        if _t is None:
+            continue
+        _ids.append(int(_id))
+        _ends.append(_t if _t.tzinfo else _t.replace(tzinfo=timezone.utc))
+        _ex.append(bool(_x))
     conn = await _connect()
     try:
         rows = await conn.fetch("""
-            WITH e AS (
+            WITH u AS (
+                SELECT * FROM unnest($8::bigint[], $9::timestamptz[], $10::bool[])
+                    AS u(id, t_end, exact)
+            ), e AS (
                 SELECT scenario, addr, bit, t_open,
-                       MAX(active_sec) AS active_sec, MAX(blind_sec) AS blind_sec
-                FROM alarm_episodes
+                       MAX(CASE WHEN u.id IS NULL THEN active_sec
+                                WHEN u.exact THEN GREATEST(0, EXTRACT(EPOCH FROM (u.t_end - t_open)))
+                                ELSE GREATEST(active_sec, EXTRACT(EPOCH FROM (u.t_end - t_open)))
+                           END) AS active_sec,
+                       MAX(CASE WHEN u.exact THEN LEAST(blind_sec,
+                                    GREATEST(0, EXTRACT(EPOCH FROM (u.t_end - t_open))))
+                                ELSE blind_sec END) AS blind_sec
+                FROM alarm_episodes a LEFT JOIN u ON u.id = a.id AND a.t_close IS NULL
                 WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
                   AND scenario = ANY($4::text[])
                   AND (t_open > now() - ($5 || ' days')::interval
@@ -1745,7 +1955,7 @@ async def count_episodes_batch(
             FROM e
             GROUP BY scenario, addr, bit
         """, router_sn, equip_type, panel_id, scenarios, str(window_days), since_ts,
-             analytics_since)
+             analytics_since, _ids, _ends, _ex)
         # Ключ — per-fault (совпадает с engine._alert_key)
         result: dict[str, dict[str, float]] = {}
         for r in rows:
@@ -1769,7 +1979,13 @@ async def insert_alert_events(
     panel_id: int,
     events: list[dict[str, Any]],
 ) -> None:
-    """Записать события жизненного цикла детекций (OPENED / UPDATED / CLOSED)."""
+    """Записать события жизненного цикла детекций (OPENED / UPDATED / CLOSED).
+
+    Журнал служебный (решение В-25.4): события OPENED/UPDATED/CLOSED для
+    восстановления живых тревог после рестарта. segment_id не поддерживается
+    (открытая строка удаляется при закрытии сегмента, ссылка не
+    перецеливается). Источник правды по тревогам — alarm_episodes.
+    """
     if not events:
         return
     conn = await _connect()
@@ -1805,6 +2021,10 @@ async def get_active_alerts(
     """Вернуть список сценариев с незакрытой тревогой (последнее событие ≠ CLOSED).
 
     Используется при инициализации движка для восстановления _active_alerts.
+    Журнал служебный (решение В-25.4): события OPENED/UPDATED/CLOSED для
+    восстановления живых тревог после рестарта. segment_id не поддерживается
+    (открытая строка удаляется при закрытии сегмента, ссылка не
+    перецеливается). Источник правды по тревогам — alarm_episodes.
     """
     conn = await _connect()
     try:

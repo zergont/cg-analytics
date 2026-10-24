@@ -216,6 +216,14 @@ def _detect_load_step(
     - INFO  — штатный рампинг (плавное изменение в окне рампинга PCC)
     - INFO  — переходный процесс в пределах нормы выбранного класса ISO
     - CAUTION — превышение нормы класса (просадка/заброс/время восстановления)
+
+    v5.1.25 (решение В-25.1): восстановление сравнивается с нормой, только если
+    шаг опроса не больше её (derived.freq_poll_step_sec; None — старые вызовы,
+    как раньше): иначе «не более N с (шаг опроса M с, норма G3 не
+    проверяется)». Разовое событие (EVENT_SCENARIOS): t_detected — онсет
+    (первая пара выше порога dP/dt, не сдвигается при росте подсегмента —
+    критика M7), момент наибольшего dP/dt — в values и тексте. Триггер
+    по-русски, ключи violations прежние.
     """
     if derived.dP_dt_max is None:
         return []
@@ -236,6 +244,8 @@ def _detect_load_step(
     dip = derived.freq_dip_pct
     rise = derived.freq_rise_pct
     rec = derived.freq_recovery_sec
+    step = getattr(derived, "freq_poll_step_sec", None)
+    rec_checked = rec is not None and (step is None or step <= recovery_norm)
 
     # Нарушения нормативов ISO
     violations: list[str] = []
@@ -243,30 +253,60 @@ def _detect_load_step(
         violations.append(f"freq_dip={dip:.1f}% > {load_class}:{freq_drop_norm:.1f}%")
     if rise is not None and rise > freq_rise_norm:
         violations.append(f"freq_rise={rise:.1f}% > {load_class}:{freq_rise_norm:.1f}%")
-    if rec is not None and rec > recovery_norm:
+    if rec_checked and rec > recovery_norm:
         violations.append(f"recovery={rec:.1f}с > {load_class}:{recovery_norm:.1f}с")
+
+    def _pct(x: float) -> str:
+        return f"{x:.1f}".replace(".", ",")
+
+    _at = getattr(derived, "dP_dt_max_at", None)
+    _onset = getattr(derived, "dP_dt_onset_at", None)
+    _sp = f"скорость изменения мощности {fmt_number(derived.dP_dt_max)} кВт/с"
+    try:
+        # Наибольшая — позже онсета (второй наброс в подсегменте): момент в
+        # тексте, онсет — в t_detected (критика M7)
+        if _at and _onset and abs((datetime.fromisoformat(_at)
+                                   - datetime.fromisoformat(_onset)).total_seconds()) > 1.0:
+            from .labels import fmt_local
+            _t = fmt_local(_at)
+            if _t:
+                _sp += f" (наибольшая в {_t})"
+    except (TypeError, ValueError):
+        pass
+    parts = [_sp]
+    if dip is not None:
+        parts.append(f"провал частоты {_pct(dip)} %"
+                     + (f" больше нормы {load_class} {fmt_number(freq_drop_norm)} %"
+                        if dip > freq_drop_norm else ""))
+    if rise is not None:
+        parts.append(f"заброс частоты {_pct(rise)} %"
+                     + (f" больше нормы {load_class} {fmt_number(freq_rise_norm)} %"
+                        if rise > freq_rise_norm else ""))
+    if rec is not None:
+        if rec_checked:
+            parts.append(f"восстановление {fmt_number(rec)} с"
+                         + (f" больше нормы {load_class} {fmt_number(recovery_norm)} с"
+                            if rec > recovery_norm else ""))
+        else:
+            _txt = getattr(derived, "freq_recovery_text", None)
+            if not _txt:
+                from .metrics import recovery_bound_text
+                _txt = recovery_bound_text(rec, step, load_class)
+            parts.append(f"восстановление {_txt}")
 
     if violations:
         severity = "CAUTION"
-        trigger = (
-            f"dP_dt_max={derived.dP_dt_max:.2f} кВт/с; "
-            f"нарушение {load_class}: {'; '.join(violations)}"
-        )
+        trigger = "; ".join(parts)
         description_key = "LOAD_STEP.iso_norm_exceeded"
     else:
         severity = cfg.det("LOAD_STEP", "severity_default", default="INFO")
-        parts = [f"dP_dt_max={derived.dP_dt_max:.2f} кВт/с"]
-        if dip is not None:
-            parts.append(f"freq_dip={dip:.1f}%")
-        if rec is not None:
-            parts.append(f"recovery={rec:.1f}с")
-        trigger = f"{'; '.join(parts)} (в пределах {load_class})"
+        trigger = f"{'; '.join(parts)} — в пределах {load_class}"
         description_key = "LOAD_STEP.iso_norm_ok"
 
     return [Detection(
         scenario="LOAD_STEP",
         severity=severity,
-        t_detected=_iso(seg_start),
+        t_detected=_onset or _at or _iso(seg_start),
         source="METRIC_RULE",
         trigger=trigger,
         related_roles=["ACTIVE_POWER_TOTAL", "FREQUENCY", "RPM"],
@@ -274,9 +314,12 @@ def _detect_load_step(
         description_key=description_key,
         values={
             "dP_dt_max_kw_per_s": derived.dP_dt_max,
+            "dP_dt_max_at": _at,
             "freq_dip_pct": dip,
             "freq_rise_pct": rise,
             "freq_recovery_sec": rec,
+            "poll_step_sec": step,
+            "recovery_checked": rec_checked,
             "load_class_iso": load_class,
             "norm_freq_drop_pct": freq_drop_norm,
             "norm_freq_rise_pct": freq_rise_norm,
@@ -1003,6 +1046,43 @@ def _last_nonzero(periods: list[dict] | None, a: datetime, b: datetime) -> tuple
     return best, at
 
 
+def _last_nonzero_since(periods: list[dict] | None, a: datetime,
+                        b: datetime) -> tuple[int, datetime | None, datetime | None]:
+    """Как _last_nonzero, и ещё начало периода этого кода (v5.1.25, П6).
+
+    Начало — настоящее state_start периода 40012, без обрезки по a (критика
+    M4: обрезанное ставило «код сменился» в каждый следующий сегмент), со
+    склейкой соседних периодов того же значения (пульс записи)."""
+    best, at, since = 0, None, None
+    for p in periods or []:
+        s = _tz(p["state_start"])
+        e = _tz(p["state_end"]) if p.get("state_end") else b
+        if s >= b or e <= a:
+            continue
+        try:
+            v = int(p.get("value") or 0)
+        except (TypeError, ValueError):
+            continue
+        end = min(e, b)
+        if v > 0 and (at is None or end >= at):
+            best, at, since = v, end, s
+    if since is not None:
+        # Соседний более ранний период того же кода — тот же код
+        def _same(p) -> bool:
+            try:
+                return int(p.get("value") or 0) == best
+            except (TypeError, ValueError):
+                return False
+        while True:
+            prev = next((p for p in periods or []
+                         if p.get("state_end") and _tz(p["state_end"]) == since
+                         and _tz(p["state_start"]) < since and _same(p)), None)
+            if prev is None:
+                break
+            since = _tz(prev["state_start"])
+    return best, at, since
+
+
 def _detect_controller_faults(
     fault_periods: list[dict[str, Any]],
     characteristics: dict[str, Any],
@@ -1126,8 +1206,9 @@ def _detect_controller_faults(
         b_ = min(_tz(fe_raw) if fe_raw else t_end, t_end)
         if b_ <= a_ or any(s < b_ and e > a_ for s, e in loud):
             continue      # панель в это время говорит громче — CAUTION не нужен
+        since = None
         if lfc_p is not None:
-            code, at = _last_nonzero(lfc_p, a_, b_)
+            code, at, since = _last_nonzero_since(lfc_p, a_, b_)
             ftype = (_last_nonzero(lft_p, a_, at)[0] or None) if at and lft_p is not None else None
         else:             # без периодов (старые вызовы) — как раньше, по концу подсегмента
             lfc = characteristics.get("LAST_FAULT_CODE") or {}
@@ -1142,24 +1223,37 @@ def _detect_controller_faults(
                 ftype = None
         if code <= 0:
             continue
+        # Имя кода из справочника KB (v5.1.25, П6, разбор ДЭС №3 24.10): имя
+        # замечания — «Общая авария: имя кода (код N)» (labels.panel_fault_name),
+        # момент кода — для «код сменился 1453 → 1248» в сводке
+        try:
+            _cn = cfg.fault_code_name(code)
+        except Exception:
+            _cn = None
+        _vals = {
+            "addr": ca_addr,
+            "bit": ca_bit,
+            "fault_name": "Общая авария",
+            "last_fault_code": code,
+            "last_fault_type": ftype,
+            "fault_start": _iso(fs),
+            "fault_end": _iso(_tz(fe_raw)) if fe_raw else None,
+        }
+        if _cn:
+            _vals["code_name"] = _cn
+        if since is not None:
+            _vals["last_fault_code_since"] = _iso(since)
         results.append(Detection(
             scenario="CONTROLLER_FAULT",
             severity=cfg.det("CONTROLLER_FAULT", "unconfirmed_severity", default="CAUTION"),
             t_detected=_iso(fs),
             source="CONTROLLER_FAULT",
-            trigger=f"Общая авария (CommonAlarm) при несброшенном коде неисправности {code}",
+            trigger=(f"Общая авария при несброшенном коде {code} «{_cn}»" if _cn
+                     else f"Общая авария при несброшенном коде неисправности {code}"),
             related_roles=[f"FAULT_MASK_{ca_addr - 40400}", "LAST_FAULT_CODE"],
             fault_codes=[code],
             description_key="CONTROLLER_FAULT.common_alarm_unconfirmed",
-            values={
-                "addr": ca_addr,
-                "bit": ca_bit,
-                "fault_name": "CommonAlarm (Общая авария)",
-                "last_fault_code": code,
-                "last_fault_type": ftype,
-                "fault_start": _iso(fs),
-                "fault_end": _iso(_tz(fe_raw)) if fe_raw else None,
-            },
+            values=_vals,
         ))
 
     return results

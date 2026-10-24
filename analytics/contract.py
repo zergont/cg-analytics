@@ -35,12 +35,16 @@ class Characteristic:
     slope: Optional[float]              # ед./с, по реальным device-timestamp (Addendum v1.4)
     baseline_resid: None = None         # Этап 1.5 — отклонение от модели нормы
     baseline_z: None = None             # Этап 1.5 — нормированное отклонение
+    # Реальных отсчётов, без forward-fill (v5.1.25, «Обычно» короткой работы):
+    # sample_count считает и удержанные строки
+    real_count: Optional[int] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "role": self.role,
             "unit": self.unit,
             "sample_count": self.sample_count,
+            "real_count": self.real_count,
             "median": self.median,
             "mad": self.mad,
             "min": self.min,
@@ -109,6 +113,14 @@ class DerivedMetrics:
     freq_dip_pct: Optional[float] = None       # просадка частоты при набросе, % от 50 Гц
     freq_rise_pct: Optional[float] = None      # заброс частоты при сбросе, % от 50 Гц
     freq_recovery_sec: Optional[float] = None  # время возврата частоты в коридор ±settled%, сек
+    # v5.1.25 (решение В-25.1): частота пишется пакетами раз в шаг опроса —
+    # восстановление короче шага не измерить, с нормой оно тогда не сравнивается
+    freq_poll_step_sec: Optional[float] = None   # шаг опроса (медиана интервалов пакетов), с
+    freq_recovery_text: Optional[str] = None     # «не более N с (шаг опроса M с, норма G3 не проверяется)»
+    dP_dt_max_at: Optional[str] = None           # ISO момента наибольшего dP/dt (второй отсчёт пары)
+    # Онсет события LOAD_STEP — первая пара выше порога dP/dt: не сдвигается,
+    # когда растёт последний подсегмент открытого окна (критика v5.1.25, M7)
+    dP_dt_onset_at: Optional[str] = None
     # ── Класс B (медленные/инерционные) — СПРАВОЧНЫЕ (детекторы используют slope из chars) ──
     dCoolant_dt_max: Optional[float] = None    # °C/с    — Class B, для LLM Stage 2
     dOil_press_dt_min: Optional[float] = None  # кПа/с   — Class B, для LLM Stage 2
@@ -295,8 +307,11 @@ STATE_SCENARIOS = frozenset({"COKING_RISK"})
 # тревога: нет «воздействия», журнала тревог, состава гейта (гейт не снимает —
 # исключение из «CAUTION — ИИ может снять»), строки «Состояние». В сводке —
 # замечание «событие ЧЧ:ММ:СС» из детекции сегмента; эпизод точечный (для
-# счётчиков и хронологии): t_open = t_close, воздействие 0
-EVENT_SCENARIOS = frozenset({"COOLDOWN_VIOLATION", "WARMUP_VIOLATION"})
+# счётчиков и хронологии): t_open = t_close, воздействие 0.
+# v5.1.25 (решение В-25.1): LOAD_STEP — тоже разовое событие (наброс/сброс
+# нагрузки случился); INFO — только строка «Обнаружений» полного отчёта, без
+# эпизода, вида в «ЗАМЕЧАНИЯ — N» и цвета; CAUTION — точечный эпизод
+EVENT_SCENARIOS = frozenset({"COOLDOWN_VIOLATION", "WARMUP_VIOLATION", "LOAD_STEP"})
 # Проверка, парная событию: вторым замечанием не считается
 EVENT_CHECKS = {"cooldown_after_elevated": "COOLDOWN_VIOLATION",
                 "warmup_duration": "WARMUP_VIOLATION"}

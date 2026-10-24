@@ -469,14 +469,30 @@ def _format_incident(incident_json: Any) -> str:
 
     ch = incident_json.get("character") or {}
     sig = ch.get("signals") or {}
+    # По-русски (v5.1.25, хвост v5.1.23): характер, уверенность, сигналы и
+    # голоса; у старых актов голоса переводятся при чтении (vote_ru)
+    try:
+        from analytics.classifier import RC_PATH_RU, character_ru, character_text
+        ch = character_ru(ch)
+        _ch_txt = character_text(ch)
+        _rc = RC_PATH_RU.get(sig.get("run_command_path"), sig.get("run_command_path"))
+    except Exception:
+        _ch_txt = f"{ch.get('character', '?')} (уверенность {ch.get('confidence', '?')})"
+        _rc = sig.get("run_command_path")
+
+    def _yn(v: Any) -> str:
+        return "да" if v is True else "нет" if v is False else "—"
+
+    def _v(v: Any) -> str:
+        return "—" if v is None else str(v)
+
     out: list[str] = [
         "## Реконструкция аварийного останова",
         "",
-        f"**Характер:** {ch.get('character', '?')} "
-        f"(уверенность {ch.get('confidence', '?')}); падение из работы: {sig.get('is_fall_from_work')}",
-        f"**Сигналы:** cooldown пройден={sig.get('passed_cooldown')}, "
-        f"RunCommand={sig.get('run_command_path')}, RUN_STATE перед остановом={sig.get('run_state_before')}, "
-        f"тип 40013={sig.get('fault_type_40013')}",
+        f"**Характер:** {_ch_txt}; падение из работы: {_yn(sig.get('is_fall_from_work'))}",
+        f"**Сигналы:** охлаждение пройдено — {_yn(sig.get('passed_cooldown'))}; "
+        f"команда работы 40599 — {_v(_rc)}; режим 40011 перед остановом — {_v(sig.get('run_state_before'))}; "
+        f"тип 40013 — {_v(sig.get('fault_type_40013'))}",
     ]
     if ch.get("immediate_votes"):
         out.append(f"**За немедленный:** {'; '.join(ch['immediate_votes'])}")

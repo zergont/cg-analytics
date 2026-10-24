@@ -1908,6 +1908,11 @@ def _check_cooldown_transition(
 # по режиму панели: «Неудачный пуск · Стоп/Авария» / «Отменённый пуск · Стоп»
 # (labels.attempt_label); в записи — наблюдаемое: прокрутка, АКБ, 40010 и
 # 40599 в кадре падения (_attempt_observed).
+# v5.1.25 (разбор ДЭС №3 24.10): бит готовности, переживший стоп, и бит при
+# оборотах/частоте ниже порогов выход не подтверждают (confirm_exit, П1/П2);
+# попытка без отсчётов оборотов внутри — cranked None, «Неудачный пуск»
+# (_attempt_record, решение А); профиль пуска без перехода порогов не
+# строится (start_profile, П3).
 
 def confirm_params(cfg) -> dict[str, Any]:
     """Пороги подтверждения (KB: segmentation.yaml → transition_confirm).
@@ -1987,6 +1992,7 @@ def confirm_exit(
     t0: datetime, t1: datetime,
     rpm: list[tuple[datetime, float]], freq: list[tuple[datetime, float]],
     ready: list[tuple[datetime, datetime]], gaps: list[dict] | None, prm: dict,
+    ready_since: datetime | None = None,
 ) -> tuple[str, datetime | None, dict[str, Any]]:
     """Подтвердился ли режим на [t0, t1): ('confirmed', момент, факты),
     ('unconfirmed', None, факты) или ('no_data', None, факты).
@@ -1995,11 +2001,25 @@ def confirm_exit(
     держится с последнего показания до t0 (не старше carry_sec). Без единого
     показания оборотов и частоты, или когда отрезок больше чем наполовину без
     связи, исход не объявляется (решение 13.10: «нет данных» — не неудача).
+
+    v5.1.25 (разбор ДЭС №3 24.10, П1/П2): бит «Готов к нагрузке» держался с
+    13.10 через стоп при 0 об/мин и ложно подтвердил попытку 12:41:05 (#36068
+    «Работа» 8 с вместо плашки). Бит засчитывается, только если:
+    - его период начался не раньше ready_since (П1: начало стопа перед
+      цепочкой — бит, вставший раньше, пережил стоп); None — без проверки;
+    - у оборотов и частоты нет ни одного показания (включая удержанное) или
+      хоть одно перешло порог (П2): показания есть, а порогов не перешли — бит
+      противоречит данным. С переходом порога бит засчитывается как раньше —
+      момент подтверждения не сдвигается (критика M6).
+    Отброшенный бит — facts["ready_ignored"]: "stale" (П1) / "no_rotation"
+    (П2); facts["ready"] тогда False — «Готов к нагрузке был» про старое
+    значение в фактах плашки не печатается.
     """
     t0, t1 = _tz(t0), _tz(t1)
     facts: dict[str, Any] = {"rpm_max": None, "freq_max": None, "ready": False}
     hits: list[datetime] = []
     evidence = False
+    crossed = False
     for series, thr, key in ((rpm, prm["rpm_min"], "rpm_max"),
                              (freq, prm["freq_min"], "freq_max")):
         vals: list[float] = []
@@ -2023,10 +2043,22 @@ def confirm_exit(
             facts[key] = max(vals)
         if first_hit is not None:
             hits.append(first_hit)
+            crossed = True
+    _since = _tz(ready_since) if ready_since is not None else None
     for s, e in ready:
-        if s < t1 and e > t0:
-            facts["ready"] = True
-            hits.append(max(s, t0))
+        if not (s < t1 and e > t0):
+            continue
+        if _since is not None and s < _since:
+            # П1: бит встал раньше стопа перед попыткой — пережил стоп
+            facts.setdefault("ready_ignored", "stale")
+            continue
+        if evidence and not crossed:
+            # П2: обороты или частота есть, но порогов не перешли
+            facts["ready_ignored"] = "no_rotation"
+            continue
+        facts["ready"] = True
+        facts.pop("ready_ignored", None)
+        hits.append(max(s, t0))
     if hits:
         return "confirmed", min(hits), facts
     dur = (t1 - t0).total_seconds()
@@ -2117,12 +2149,16 @@ def _attempt_observed(
     crank_min = prm["crank_rpm_min"]
     crank_from: datetime | None = None
     carried = None
+    # Отсчёты оборотов внутри попытки, без удержанного (v5.1.25, решение А):
+    # нет ни одного — прокрутка по данным не видна
+    rpm_in = 0
     for ts, v in rpm:
         if ts < t0:
             carried = (ts, v) if (t0 - ts).total_seconds() <= prm["carry_sec"] else None
             continue
         if ts >= t_fall:
             break
+        rpm_in += 1
         if crank_from is None and v > crank_min:
             crank_from = ts
     if carried is not None and carried[1] > crank_min:
@@ -2139,6 +2175,7 @@ def _attempt_observed(
             if nm:
                 names[str(v)] = nm
     return {
+        "rpm_in": rpm_in,
         "crank_from": crank_from.isoformat() if crank_from else None,
         "crank_sec": max(0.0, (t_fall - crank_from).total_seconds()) if crank_from else None,
         "battery_min_v": min(bat) if bat else None,
@@ -2181,15 +2218,24 @@ def _attempt_record(chain: list[dict], stop: dict, res: list[tuple],
     }
     if observe:
         try:
-            # Прокрутка — rpm_max попытки выше crank_rpm_min (план §2.1 п.5);
-            # оборотов нет — None: что пуск отменили, не видно
-            _rm = rec["facts"]["rpm_max"]
-            obs = {"cranked": (float(_rm) > observe["prm"]["crank_rpm_min"]
-                               if isinstance(_rm, (int, float)) else None)}
-            obs.update(_attempt_observed(
+            obs = _attempt_observed(
                 t0, t_fall, observe["rpm"], observe["all_by_addr"], observe.get("enum_periods"),
-                code_periods, rec["codes"], observe["cfg"], observe["prm"]))
-            rec.update(obs)
+                code_periods, rec["codes"], observe["cfg"], observe["prm"])
+            # Прокрутка — rpm_max попытки (с удержанным, как в confirm_exit:
+            # #35937) выше crank_rpm_min (план v5.1.23 §2.1 п.5). Не выше — «без
+            # прокрутки», только если внутри попытки есть отсчёты (v5.1.25,
+            # решение А): ноль из отсчёта ДО попытки (ДЭС №3 24.10 13:34, 13:35)
+            # отмены не доказывает. Оборотов нет — None: что пуск отменили, не видно
+            _rm = rec["facts"]["rpm_max"]
+            if isinstance(_rm, (int, float)) and float(_rm) > observe["prm"]["crank_rpm_min"]:
+                cranked = True
+            elif obs.get("rpm_in") == 0:
+                cranked = None
+            elif isinstance(_rm, (int, float)):
+                cranked = False
+            else:
+                cranked = None
+            rec.update({"cranked": cranked, **obs})
         except Exception:
             logger.warning("Наблюдаемое на попытке %s не собрано — запись без него",
                            t0.isoformat(), exc_info=True)
@@ -2523,6 +2569,25 @@ def _engine_hours_at(all_by_addr: dict[int, list[dict]], cfg, t: datetime,
     return None
 
 
+def _ready_since(periods: list[dict], i: int) -> datetime:
+    """С какого момента бит «Готов к нагрузке» засчитывается цепочке, которая
+    начинается periods[i] (v5.1.25, П1, разбор ДЭС №3 24.10).
+
+    Есть стоп перед цепочкой — его начало: задержка пуска (1) пропускается, как
+    у last в _confirm_attempts. Стоп до окна (цепочка на голове окна) — начало
+    цепочки: бит, вставший раньше попытки, когда машина известно стояла, —
+    старый. Допуск в кадр опроса: бит и 40011 приходят пакетами, и метка бита
+    бывает на доли секунды раньше смены режима (критика v5.1.25, SHOULD 8).
+    По истории ДЭС №3 бит гас до перехода 40011 в стоп в 32 циклах из 33, а у
+    настоящего пуска встаёт на номинале — через секунды после прокрутки."""
+    k = i - 1
+    while k >= 0 and int(periods[k]["value"]) == 1:
+        k -= 1
+    if k >= 0 and int(periods[k]["value"]) == 0:
+        return _tz(periods[k]["state_start"])
+    return _tz(periods[i]["state_start"]) - timedelta(seconds=_SAME_FRAME_SEC)
+
+
 def _confirm_attempts(
     periods: list[dict],
     all_by_addr: dict[int, list[dict]],
@@ -2604,11 +2669,17 @@ def _confirm_attempts(
         while j < n and int(periods[j]["value"]) not in (0, 1):
             j += 1
         chain = periods[i:j]
+        try:
+            ready_since = _ready_since(periods, i)
+        except Exception:
+            logger.warning("Начало стопа перед попыткой не найдено — бит готовности без П1",
+                           exc_info=True)
+            ready_since = None
         res = []
         for c in chain:
             c0 = _tz(c["state_start"])
             c1 = min(_tz(c["state_end"]), t_res) if c.get("state_end") else t_res
-            res.append(confirm_exit(c0, c1, rpm, freq, ready, gaps, prm))
+            res.append(confirm_exit(c0, c1, rpm, freq, ready, gaps, prm, ready_since=ready_since))
 
         first = next((k for k, r in enumerate(res) if r[0] == "confirmed"), None)
         if first is not None:
@@ -3093,7 +3164,12 @@ def start_profile(
     fref_high_hz с начала прокрутки. open_end — режим идёт (живой край окна):
     окно пуска ещё растёт, профиль пересчитывается каждый цикл.
     Из уже загруженной истории окна, срезами по метке — без чтения и без
-    разбора всего окна. None — выключено в KB или оборотов и частоты нет."""
+    разбора всего окна. None — выключено в KB, оборотов и частоты нет или они
+    порогов не перешли (v5.1.25, П3: «схватил» по одному биту готовности —
+    профиля нет; ДЭС №3 24.10 12:41:05 — «до номинала не вышел» при 0 об/мин).
+    unobserved (ревью v5.1.25, Q5) — пуск прошёл без связи: прокрутка на конце
+    разрыва data_gaps, первый отсчёт после него уже выше порога; масла перед
+    пуском нет, автомат в тексте — без момента (labels.start_profile_text)."""
     prm = start_profile_params(cfg)
     if not prm["enabled"]:
         return None
@@ -3102,21 +3178,41 @@ def start_profile(
     _hd = held or {}
     # Поиск «схватил» и номинала — до первого попадания, без разбора всего окна.
     # Значение на начало прокрутки — и удержанное перед окном (ревью R7: окно
-    # живого движка начинается с «Работы», прогрев — до преамбулы истории)
-    if fire is None:
-        hits = []
-        for addr, thr, role in ((rpm_a, prm["rpm_min"], "RPM"), (frq_a, prm["freq_min"], "FREQUENCY")):
-            c = _value_at(all_by_addr, addr, crank, prm["carry_sec"], _hd.get(role))
-            if c is not None and c[1] > thr:
-                hits.append(crank)
-                continue
-            hit = next((t for t, v in _iter_values(all_by_addr, addr, crank, seg_end) if v > thr), None)
-            if hit is not None:
-                hits.append(hit)
-        fire = min(hits) if hits else None
-    if fire is None:
+    # живого движка начинается с «Работы», прогрев — до преамбулы истории).
+    # Переход порогов ищется всегда, и при переданном fire (confirmed_at): тот
+    # мог дать один бит готовности (П3)
+    hits = []
+    for addr, thr, role in ((rpm_a, prm["rpm_min"], "RPM"), (frq_a, prm["freq_min"], "FREQUENCY")):
+        c = _value_at(all_by_addr, addr, crank, prm["carry_sec"], _hd.get(role))
+        hit = (crank if c is not None and c[1] > thr else
+               next((t for t, v in _iter_values(all_by_addr, addr, crank, seg_end) if v > thr), None))
+        if hit is not None:
+            hits.append(hit)
+            if fire is not None:
+                break                   # fire известен — достаточно, что порог перешли
+    if not hits:
         return None
+    fire = fire or min(hits)
     fire = max(_tz(fire), crank)
+    # Пуск без связи (ревью v5.1.25, Q5): прокрутка — на конце разрыва
+    # data_gaps (в пределах кадра опроса), а первый же отсчёт после него уже
+    # выше порога — самого пуска не видели (ДЭС №3 30.09: разрыв 15:31:56–
+    # 20:33:17, в 20:33:17 сразу 1496 об/мин, автомат замкнут, масло 93 °C).
+    # Профиль остаётся (строка «Пуск» у каждого пуска, В1), но с пометкой, без
+    # «масла перед пуском» и момента автомата — это уже работающая машина
+    unobserved = False
+    try:
+        if crank in hits:
+            _ft = prm["frame_tol_sec"]
+            for g in gaps or []:
+                gs, ge = _iso_dt(g.get("gap_start")), _iso_dt(g.get("gap_end"))
+                if (gs is not None and ge is not None and gs < crank
+                        and abs((ge - crank).total_seconds()) <= _ft):
+                    unobserved = True
+                    break
+    except Exception:
+        logger.warning("Пуск в разрыве связи не проверен — профиль как раньше", exc_info=True)
+        unobserved = False
 
     # Выход на номинал: обороты ≥ рабочих или частота ≥ рабочей (как у рабочей
     # части «Работы», _steady_window)
@@ -3260,6 +3356,9 @@ def start_profile(
     if o is None and _hd.get("OIL_TEMP") is not None:
         o = _hd["OIL_TEMP"]
     out["oil_temp"] = round(o[1], 1) if o is not None else None
+    if unobserved:
+        # Пуск прошёл без связи (Q5): масло и автомат — уже работающей машины
+        out.update(unobserved=True, oil_temp=None)
 
     # Неустойчивый пуск — вариант «б» (В1)
     reasons: list[str] = []
