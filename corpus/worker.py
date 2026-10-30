@@ -723,6 +723,45 @@ def _entry_ctx_limit(entry: dict) -> int:
     return limit
 
 
+def _est_prompt_tokens(system_prompt: str, user_input: str) -> int:
+    return int((len(system_prompt) + len(user_input)) / _EST_CHARS_PER_TOKEN) \
+        + _RESPONSE_RESERVE_TOKENS
+
+
+def _compact_model_input(seg_row: dict, system_prompt: str,
+                         full: str) -> tuple[str, int, dict] | None:
+    """Сжатый вход (v5.1.29, В-29.2): ступени corpus.compact.LEVELS до первой,
+    что влезла в предел шлюза; не влезла и самая короткая — она же (дальше
+    быстрый skip_size). Ступень не короче полного входа пропускается.
+    None — сжать нечем (подсегмент один, отчёт не совпал) или сбой."""
+    try:
+        from corpus.compact import LEVELS, compact_input, subsegments
+        best: tuple[str, int, int] | None = None
+        for level in LEVELS:
+            txt = compact_input(full, seg_row, level)
+            if txt is None:
+                break
+            if len(txt) >= len(full):
+                continue
+            best = (txt, _est_prompt_tokens(system_prompt, txt), level)
+            if best[1] <= _GW_MAX_PROMPT_TOKENS:
+                break
+        n_subs = len(subsegments(seg_row))
+    except Exception:
+        logger.warning("corpus/chain: #%s — вход не сжат (сбой), остаётся полный",
+                       seg_row.get("id"), exc_info=True)
+        return None
+    if best is None:
+        logger.info("corpus/chain: #%s — вход не сжат: сжимать нечем (подсегментов %d)",
+                    seg_row.get("id"), n_subs)
+        return None
+    txt, est, level = best
+    info = {"level": level, "subsegments": n_subs, "chars_full": len(full), "chars": len(txt)}
+    logger.info("corpus/chain: #%s — вход сжат (ступень %d, подсегментов %d): %d → %d симв., ~%d ток.",
+                seg_row.get("id"), level, n_subs, len(full), len(txt), est)
+    return txt, est, info
+
+
 async def _analyse_segment_chain(
     seg_row: dict,
     kb_path: str | None,
@@ -750,27 +789,38 @@ async def _analyse_segment_chain(
 
     user_input = _model_input(seg_row)
     verdict, alarm_level = _verdict_fields(seg_row)
-    est_tokens = int((len(system_prompt) + len(user_input)) / _EST_CHARS_PER_TOKEN) \
-                 + _RESPONSE_RESERVE_TOKENS
+    full_input = user_input
+    est_full = _est_prompt_tokens(system_prompt, full_input)
+    # Полный вход не влез в предел шлюза — сжатый кодом (v5.1.29, В-29.1).
+    # Каждой модели цепочки — полный, если он влезает в её предел, иначе сжатый
+    compact: tuple[str, int, dict] | None = None
+    if est_full > _GW_MAX_PROMPT_TOKENS:
+        compact = _compact_model_input(seg_row, system_prompt, full_input)
+    est_tokens = est_full
     trace: list[dict] = []
 
     for entry in entries:
         limit = _entry_ctx_limit(entry)
+        used_compact = est_full > limit and compact is not None
+        user_input, est_tokens = (compact[0], compact[1]) if used_compact else (full_input, est_full)
         if est_tokens > limit:
+            _what = f" (сжатый вход, ступень {compact[2]['level']})" if used_compact else ""
             trace.append({"entry": entry["id"],
                           "action": "skip_size",
-                          "detail": f"~{est_tokens} ток. > лимита {limit}"})
-            logger.info("corpus/chain: #%s → «%s» пропущена по размеру (~%d > %d ток.)",
-                        seg_row.get("id"), entry["name"], est_tokens, limit)
+                          "detail": f"~{est_tokens} ток.{_what} > лимита {limit}"})
+            logger.info("corpus/chain: #%s → «%s» пропущена по размеру (~%d%s > %d ток.)",
+                        seg_row.get("id"), entry["name"], est_tokens, _what, limit)
             continue
 
         t0 = time.monotonic()
         try:
             if entry["type"] == "api":
                 from corpus.agent import analyse_segment
+                # Сжатый вход — тот же, что у шлюза; обычный агент собирает сам
                 result = await analyse_segment(
                     seg_row, kb_path, system_prompt=system_prompt,
-                    model=entry.get("model") if entry.get("_route") else None)
+                    model=entry.get("model") if entry.get("_route") else None,
+                    **({"user_input": user_input} if used_compact else {}))
                 if result.get("error"):
                     trace.append({"entry": entry["id"], "action": "error",
                                   "detail": str(result["error"])[:300]})
@@ -823,6 +873,12 @@ async def _analyse_segment_chain(
             dbg = result.get("debug_json") or {}
             dbg["routing"] = trace
             dbg["est_prompt_tokens"] = est_tokens
+            if used_compact:
+                # Диспетчеру — строка кода перед подписью модели (В-29.3)
+                from corpus.compact import compact_note, with_note
+                dbg["input_compact"] = compact[2]
+                result["conclusion_md"] = with_note(result.get("conclusion_md") or "",
+                                                    compact_note(compact[2]))
             result["debug_json"] = dbg
             return result
         except Exception as exc:
@@ -833,13 +889,18 @@ async def _analyse_segment_chain(
                            seg_row.get("id"), entry["name"], exc)
 
     detail = "; ".join(f"{t['entry']}: {t['action']}" for t in trace) or "цепочка пуста"
+    _dbg: dict[str, Any] = {"routing": trace, "est_prompt_tokens": est_full}
+    _cw = ""
+    if compact:
+        _dbg["input_compact"] = {**compact[2], "est": compact[1]}
+        _cw = f", сжатый ~{compact[1]} ток."
     return {
         "verdict": None, "alarm_level": None, "conclusion_md": "",
         "error": f"Ни одна модель цепочки не обработала сегмент "
-                 f"(промпт ~{est_tokens} ток.): {detail}",
+                 f"(промпт ~{est_full} ток.{_cw}): {detail}",
         "tokens_used": 0, "tool_calls_count": 0, "loops_count": 0,
         "generation_time_sec": 0,
-        "debug_json": {"routing": trace, "est_prompt_tokens": est_tokens},
+        "debug_json": _dbg,
         "claude_model": None,
     }
 

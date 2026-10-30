@@ -31,11 +31,13 @@ async def analyse_segment(
     kb_path: str | None,
     system_prompt: str | None = None,
     model: str | None = None,
+    user_input: str | None = None,
 ) -> dict[str, Any]:
     """Прогнать сегмент через Claude API.
 
     system_prompt — если передан, используется вместо промпта из corpus/settings.
     model — модель строки таблицы «Кто и как разбирает»; None — из карточки Claude.
+    user_input — готовый вход (сжатый цепочкой, v5.1.29); None — build_claude_input.
     Returns dict со всеми полями для corpus/db.upsert_analysis():
         conclusion_md, verdict, alarm_level, claude_model,
         tokens_used, tool_calls_count, loops_count,
@@ -46,7 +48,7 @@ async def analyse_segment(
     claude_cfg = get_claude_settings()
 
     # Формируем вход и извлекаем вердикт до вызова API
-    claude_input = build_claude_input(segment_row)
+    claude_input = user_input if user_input is not None else build_claude_input(segment_row)
     verdict, alarm_level = extract_verdict_alarm(segment_row)
 
     debug: dict[str, Any] = {
