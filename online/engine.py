@@ -5090,6 +5090,7 @@ class OnlinePollEngine:
 
             _t_cycle_start = _time.perf_counter()
             _t0 = _time.perf_counter()
+            _fetched: dict = {}
             if self._open_history_cache is not None and self._open_history_cache_ts is not None:
                 # Дозагрузка: стабильная часть из кэша + свежий хвост из БД
                 split_ts = self._open_history_cache_ts - timedelta(seconds=_OVERLAP)
@@ -5099,7 +5100,7 @@ class OnlinePollEngine:
                 stable = [r for r in self._open_history_cache if r["ts"] < split_ts]
                 tail = await _src.get_whitelist_history(
                     self.router_sn, self.equip_type, self.panel_id,
-                    split_ts, ts_to_utc, self.cfg.whitelist_analog,
+                    split_ts, ts_to_utc, self.cfg.whitelist_analog, meta=_fetched,
                 )
                 history = stable + tail
                 logger.debug(
@@ -5112,7 +5113,7 @@ class OnlinePollEngine:
                 # грузим порциями чтобы каждый запрос влезал в command_timeout
                 history = await _src.get_whitelist_history_chunked(
                     self.router_sn, self.equip_type, self.panel_id,
-                    preamble_floor, ts_to_utc, self.cfg.whitelist_analog,
+                    preamble_floor, ts_to_utc, self.cfg.whitelist_analog, meta=_fetched,
                 )
                 logger.debug(
                     "TIMING[%s]: history полная загрузка=%d строк за %.2fs",
@@ -5120,10 +5121,16 @@ class OnlinePollEngine:
                 )
 
             self._open_history_cache = history
-            self._open_history_cache_ts = max((r["ts"] for r in history), default=None)
+            # Свежесть — по принятым строкам; отметка дочитки хвоста — и по
+            # отброшенным проверкой меток (часы роутера впереди, кадр сбитых
+            # часов): иначе хвост перечитывался бы от последней принятой строки
+            # всё длиннее, а без принятых — всё окно каждый цикл
+            _seen_ts = max((r["ts"] for r in history), default=None)
+            self._open_history_cache_ts = max(
+                (t for t in (_seen_ts, _fetched.get("max_ts")) if t is not None), default=None)
 
             # Свежесть телеметрии: продвинулась — фиксируем в памяти и в БД
-            await self._advance_last_data_ts(self._open_history_cache_ts)
+            await self._advance_last_data_ts(_seen_ts)
 
             _t0 = _time.perf_counter()
             # Машина стояла на прошлом цикле — лента понадобится почти
