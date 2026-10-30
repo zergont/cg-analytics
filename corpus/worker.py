@@ -700,6 +700,27 @@ def _verdict_fields(seg_row: dict) -> tuple[str | None, str | None]:
 _EST_CHARS_PER_TOKEN = 1.7
 # Резерв контекста под ответ модели
 _RESPONSE_RESERVE_TOKENS = 4000
+# Предохранитель шлюза (v5.1.28, сутки ДЭС №3 28–29.10): паспорт окна шлюза
+# (262 144) не значит, что голова ответит — вход ~246 тыс. ток. шлюз держал
+# 30 мин и отказал, очередь заключений стояла. Предел — с запасом над самым
+# большим удачным разбором (113 тыс. по ответу шлюза, 122 тыс. по оценке)
+_GW_MAX_PROMPT_TOKENS = 150_000
+# Срок ответа шлюза на заключение: самый долгий удачный — 236 с. Пинги шлюза
+# раз в 15 с держат межбайтовый таймаут клиента, общего срока у потока нет.
+# Истёк — к следующей модели цепочки; задача остаётся на шлюзе (снятия нет)
+_GW_DEADLINE_SEC = 15 * 60
+
+
+class GatewayDeadline(Exception):
+    """Шлюз не ответил за _GW_DEADLINE_SEC — заключение у следующей модели."""
+
+
+def _entry_ctx_limit(entry: dict) -> int:
+    """Предел входа записи цепочки: у шлюза — не выше предохранителя."""
+    limit = int(entry["max_ctx_tokens"])
+    if entry.get("provider") == "gorynych":
+        limit = min(limit, _GW_MAX_PROMPT_TOKENS)
+    return limit
 
 
 async def _analyse_segment_chain(
@@ -712,7 +733,9 @@ async def _analyse_segment_chain(
     """Анализ по цепочке приоритетов: проактивный отбор по размеру + fallback по ошибкам.
 
     Для каждой записи цепочки по порядку (первая — основной из таблицы, _route_head):
-      1. промпт не влезает в max_ctx_tokens → пропуск без запроса;
+      1. промпт не влезает в max_ctx_tokens (у шлюза — не выше
+         _GW_MAX_PROMPT_TOKENS) → пропуск без запроса; шлюз не ответил за
+         _GW_DEADLINE_SEC → следующая запись;
       2. type="api"  → Claude-агент с инструментами (у основного — модель строки);
          type="llm"  → plain chat через запись реестра (стрим по настройке записи),
                        у основного — через общее подключение;
@@ -732,12 +755,13 @@ async def _analyse_segment_chain(
     trace: list[dict] = []
 
     for entry in entries:
-        if est_tokens > entry["max_ctx_tokens"]:
+        limit = _entry_ctx_limit(entry)
+        if est_tokens > limit:
             trace.append({"entry": entry["id"],
                           "action": "skip_size",
-                          "detail": f"~{est_tokens} ток. > лимита {entry['max_ctx_tokens']}"})
+                          "detail": f"~{est_tokens} ток. > лимита {limit}"})
             logger.info("corpus/chain: #%s → «%s» пропущена по размеру (~%d > %d ток.)",
-                        seg_row.get("id"), entry["name"], est_tokens, entry["max_ctx_tokens"])
+                        seg_row.get("id"), entry["name"], est_tokens, limit)
             continue
 
         t0 = time.monotonic()
@@ -759,10 +783,19 @@ async def _analyse_segment_chain(
             else:
                 from llm.router import format_ai_signature
                 meta: dict = {}
-                content = await chat(system_prompt, user_input,
-                                     entry=None if entry.get("_global") else entry,
-                                     stream=entry.get("stream", True),
-                                     depth=depth, meta=meta)
+                _call = chat(system_prompt, user_input,
+                             entry=None if entry.get("_global") else entry,
+                             stream=entry.get("stream", True),
+                             depth=depth, meta=meta)
+                if entry.get("provider") == "gorynych":
+                    try:
+                        content = await asyncio.wait_for(_call, _GW_DEADLINE_SEC)
+                    except asyncio.TimeoutError:
+                        raise GatewayDeadline(
+                            f"шлюз не ответил за {_GW_DEADLINE_SEC / 60:g} мин, задача "
+                            f"{meta.get('task_id') or '?'} осталась на шлюзе") from None
+                else:
+                    content = await _call
                 if not content:
                     raise EmptyLLMResponse("модель вернула пустой ответ")
                 f = _llm_result_fields(meta, entry["model"])
