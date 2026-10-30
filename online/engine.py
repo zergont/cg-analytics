@@ -1722,6 +1722,10 @@ def _synth_connectivity_gap(
     считаем, что данных не было с этого момента и добавляем гэп с открытым
     концом (gap_end=None) — дальше его подхватывает штатный клиппинг
     (_clip_gap_intervals/_compute_data_quality уже умеют gap_end IS NULL).
+
+    Окно без единой строки: начало обрыва неизвестно, гэп берётся от t_from
+    и помечается start_unknown — это граница окна, а не «последние данные»
+    (v5.1.26, П10: заглушка #36125 печатала 09:00 вместо 00:11:03).
     """
     t_from = _tz_utc(t_from)
     t_to = _tz_utc(t_to)
@@ -1736,7 +1740,10 @@ def _synth_connectivity_gap(
     max_mult  = float(cfg.seg("data_quality", "heartbeat_max_multiplier", default=3) or 3)
     if (t_to - gap_start).total_seconds() <= heartbeat * max_mult:
         return None
-    return {"gap_start": gap_start, "gap_end": None}
+    gap = {"gap_start": gap_start, "gap_end": None}
+    if last_ts is None:
+        gap["start_unknown"] = True
+    return gap
 
 
 async def _run_segment(
@@ -1752,6 +1759,7 @@ async def _run_segment(
     confirm_to: datetime | None = None,
     load_seed: Any = _SEED_UNSET,
     prev_hint: Any = None,
+    last_ts_out: dict | None = None,
 ) -> tuple[list, dict[str, dict], list[dict], dict[str, dict]]:
     """Загрузить данные и запустить segment() в отдельном потоке.
 
@@ -1773,6 +1781,10 @@ async def _run_segment(
     prev_hint — сегмент перед окном (подсказка предка движка): если окно
     начинается с аварийного стопа, лента отсчётов акта — из его отметки обрыва
     (v5.1.22, P1-4).
+
+    last_ts_out — сюда кладётся последний ts history раньше ts_to (с
+    преамбулой; None — строк нет): закрытие окна продвигает по нему память
+    свежести (v5.1.26).
     """
     import functools
     from analytics.segmenter import segment as _segment
@@ -1781,6 +1793,12 @@ async def _run_segment(
     history, enum_periods, fault_periods, gaps = await _load_data(
         router_sn, equip_type, panel_id, ts_from, _load_to, cfg
     )
+    if last_ts_out is not None:
+        last_ts_out["last_ts"] = max(
+            (_tz_utc(r["ts"]) for r in history
+             if r.get("ts") is not None and _tz_utc(r["ts"]) < _tz_utc(ts_to)),
+            default=None,
+        )
     if load_seed is _SEED_UNSET:
         load_seed = await _load_seed(router_sn, equip_type, panel_id, ts_from, cfg)
     synth_gap = _synth_connectivity_gap(history, ts_from, ts_to, cfg)
@@ -4377,6 +4395,23 @@ class OnlinePollEngine:
                         fs.isoformat(), fe.isoformat())
         return n
 
+    async def _advance_last_data_ts(self, ts: datetime | None) -> None:
+        """Продвинуть память свежести (максимальный ts виденной history) — только
+        вперёд — и сохранить в observation: после рестарта движок поднимет её
+        оттуда (manager). Сбой записи — предупреждение, не ошибка цикла."""
+        if ts is None:
+            return
+        ts = _tz_utc(ts)
+        if self.last_data_ts is not None and ts <= _tz_utc(self.last_data_ts):
+            return
+        self.last_data_ts = ts
+        try:
+            await online_db.update_observation_last_data_ts(
+                self.router_sn, self.equip_type, self.panel_id, self.last_data_ts
+            )
+        except Exception:
+            logger.warning("OnlineEngine[%s]: не удалось сохранить last_data_ts", self.key, exc_info=True)
+
     def _no_data_last_before(self, seg_t0: datetime, gaps: list[dict] | None,
                              history: list[dict] | None = None) -> datetime | None:
         """Последние данные до обрыва для заглушки сегмента без связи (v5.1.25,
@@ -4384,10 +4419,15 @@ class OnlinePollEngine:
         сегмента (у #36065 — 05:48:15), а не last_data_ts памяти — его поднимают
         поздние строки (10 строк медленной группы 11:48:09 пришли в 12:38:28).
         Запасной — последний ts загруженной history раньше начала сегмента;
-        затем last_data_ts, если он раньше начала. Без запросов."""
+        затем last_data_ts, если он раньше начала (после рестарта — из
+        observation). Синтетический гэп пустого окна (start_unknown) начинается
+        с границы окна, а не с последних данных, — не в счёт (v5.1.26, П10).
+        Без запросов."""
         t0 = _tz_utc(seg_t0)
         best = None
         for g in gaps or []:
+            if g.get("start_unknown"):
+                continue
             gs = _as_utc(g.get("gap_start"))
             ge = _as_utc(g.get("gap_end"))
             if gs is not None and gs <= t0 and (ge is None or ge > t0):
@@ -4506,6 +4546,7 @@ class OnlinePollEngine:
             # Удержанные значения перед окном — те же, что у открытого окна этого
             # курсора: один запрос на курсор, а не на каждый прогон (v5.1.21)
             _seed = await self._open_load_seed(t_from)
+            _win_last: dict = {}
             segments, incidents, gaps, chronologies = await _run_segment(
                 self.router_sn, self.equip_type, self.panel_id, self.engine_sn,
                 t_from, t_to, self.cfg,
@@ -4513,6 +4554,7 @@ class OnlinePollEngine:
                 transition_ctx=self._transition_ctx,
                 load_seed=_seed,
                 prev_hint=self._prev_seg_hint,
+                last_ts_out=_win_last,
             )
             if (close_reason == "DAILY_BOUNDARY" and segments
                     and getattr(segments[-1], "attempt_pending", False)
@@ -4526,12 +4568,18 @@ class OnlinePollEngine:
                                    _tz_utc(t_to) + timedelta(seconds=_CONFIRM_LOOKAHEAD_SEC)),
                     load_seed=_seed,
                     prev_hint=self._prev_seg_hint,
+                    last_ts_out=_win_last,
                 )
         except Exception as e:
             self._close_failed = True
             self._note_cycle_error(e)
             logger.exception("OnlineEngine[%s]: ошибка анализа [%s, %s]", self.key, t_from, t_to)
             return
+
+        # Память свежести — и по закрытому окну (v5.1.26, ревью П10): при догонке
+        # после простоя резы закрываются раньше открытого окна, и заглушка
+        # следующего пустого окна напечатала бы момент остановки сервиса
+        await self._advance_last_data_ts(_win_last.get("last_ts"))
 
         # Снять открытую строку: удалить и получить снимок одним запросом (v5.1.13) —
         # запись гейта/аварии между чтением и удалением больше не теряется молча.
@@ -5075,16 +5123,7 @@ class OnlinePollEngine:
             self._open_history_cache_ts = max((r["ts"] for r in history), default=None)
 
             # Свежесть телеметрии: продвинулась — фиксируем в памяти и в БД
-            if self._open_history_cache_ts is not None and (
-                self.last_data_ts is None or self._open_history_cache_ts > self.last_data_ts
-            ):
-                self.last_data_ts = _tz_utc(self._open_history_cache_ts)
-                try:
-                    await online_db.update_observation_last_data_ts(
-                        self.router_sn, self.equip_type, self.panel_id, self.last_data_ts
-                    )
-                except Exception:
-                    logger.warning("OnlineEngine[%s]: не удалось сохранить last_data_ts", self.key, exc_info=True)
+            await self._advance_last_data_ts(self._open_history_cache_ts)
 
             _t0 = _time.perf_counter()
             # Машина стояла на прошлом цикле — лента понадобится почти

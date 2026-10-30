@@ -147,17 +147,30 @@ async def get_unanalyzed_segments(limit: int = 500) -> list[int]:
 
     Незаконченный — статус queued/processing: очередь воркера в памяти, после
     перезапуска такие строки иначе не подбирал никто.
+
+    Заглушки без связи (data_quality == 0) без записи анализа — без ИИ, как и
+    в движке: иначе после рестарта ИИ писал по ним заключение (#36065, CAUTION;
+    v5.1.26). Заказанные (queued/processing — ручной «Анализ») подбираются как
+    раньше. data_quality — только у кандидатов (OFFSET 0 держит фильтр после
+    соединения: иначе распаковывается characteristics_json всех строк) и без
+    приведения типа — нечисловое значение не уронит старт (ревью v5.1.26).
     """
     conn = await _connect()
     try:
         rows = await conn.fetch(
             """
-            SELECT a.id
-            FROM auto_segments a
-            LEFT JOIN segment_analyses sa ON sa.auto_segment_id = a.id
-            WHERE a.t_end IS NOT NULL
-              AND (sa.id IS NULL OR sa.status IN ('queued', 'processing'))
-            ORDER BY a.t_start DESC
+            SELECT c.id
+            FROM (
+                SELECT a.id, a.t_start, sa.id AS sa_id, a.characteristics_json
+                FROM auto_segments a
+                LEFT JOIN segment_analyses sa ON sa.auto_segment_id = a.id
+                WHERE a.t_end IS NOT NULL
+                  AND (sa.id IS NULL OR sa.status IN ('queued', 'processing'))
+                OFFSET 0
+            ) c
+            WHERE c.sa_id IS NOT NULL
+               OR (c.characteristics_json->'data_quality') IS DISTINCT FROM '0'::jsonb
+            ORDER BY c.t_start DESC
             LIMIT $1
             """,
             limit,
