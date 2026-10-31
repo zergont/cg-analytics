@@ -104,7 +104,9 @@ def run_all_detectors(
     Ключ со значением None — сбой расчёта его участков (v5.1.23, п.7): этот
     детектор идёт по подсегменту, как при live_spans=None, соседи — по участкам.
     RPM_OVERSPEED (v5.1.23, п.2) — только по участкам: без них (None, сбой
-    ключа) детекции нет.
+    ключа) детекции нет. v5.1.30 «По событию»: NEGATIVE_SEQUENCE,
+    PHASE_CURRENT_SPREAD, NEUTRAL_CURRENT (ряд фаз по пакетам, В-27.1) и
+    NO_LOAD_TOO_LONG (отрезки без нагрузки, В-27.2) — тоже по участкам.
     t_detected — начало первого пересекающего кластера (одно во всех
     подсегментах кластера), values.live — кластеры, onset, first.
     """
@@ -124,9 +126,12 @@ def run_all_detectors(
     # NEGATIVE_SEQUENCE заменяет PHASE_IMBALANCE (Addendum v1.5):
     # - физически корректная величина I₂ вместо грубого перекоса |I_k - I_avg|
     # - тот же gate: RUN_STATE=3 (задан в valid_run_states конфига)
+    # v5.1.30 (В-27.1): по участкам ряда фаз сегмента — эпизод от начала до
+    # конца кластера, а не от начала подсегмента до реза
     _ns_valid = set(cfg.det("NEGATIVE_SEQUENCE", "valid_run_states", default=[3]) or [3])
     if cfg.det("NEGATIVE_SEQUENCE", "enabled", default=True) and run_state in _ns_valid:
-        detections.extend(_detect_negative_sequence(derived, seg_start, cfg))
+        detections.extend(_detect_negative_sequence(derived, seg_start, cfg,
+                                                    live=_lv("NEGATIVE_SEQUENCE"), seg_end=seg_end))
 
     # Перекос фазных токов и ток нейтрали (v4.9.97): то, чего I₂ не видит —
     # провал одной фазы с током через нейтраль. Пороги из норм, см. KB.
@@ -134,7 +139,7 @@ def run_all_detectors(
                       ("NEUTRAL_CURRENT", _detect_neutral_current)):
         _valid = set(cfg.det(_scn, "valid_run_states", default=[3]) or [3])
         if cfg.det(_scn, "enabled", default=True) and run_state in _valid:
-            detections.extend(_fn(derived, seg_start, cfg))
+            detections.extend(_fn(derived, seg_start, cfg, live=_lv(_scn), seg_end=seg_end))
 
     if cfg.det("COOLING_FAILURE", "enabled", default=True):
         detections.extend(_detect_cooling_failure(characteristics, derived, run_state, seg_start, seg_end, cfg,
@@ -155,8 +160,10 @@ def run_all_detectors(
     if cfg.det("IDLE_TOO_LONG", "enabled", default=True) and run_state in (2, 5):
         detections.extend(_detect_idle_too_long(accumulators, seg_start, cfg))
 
+    # v5.1.30 (В-27.2): по отрезкам сегмента — с момента превышения нормы
     if cfg.det("NO_LOAD_TOO_LONG", "enabled", default=True) and run_state == 3:
-        detections.extend(_detect_no_load_too_long(accumulators, seg_start, cfg))
+        detections.extend(_detect_no_load_too_long(accumulators, seg_start, cfg,
+                                                   live=_lv("NO_LOAD_TOO_LONG"), seg_end=seg_end))
 
     # WARMUP_VIOLATION и COOLDOWN_VIOLATION требуют анализа соседних сегментов —
     # они вызываются из _inter_segment_checks() в segmenter.py, а не здесь.
@@ -331,10 +338,29 @@ def _detect_load_step(
 
 # ── NEGATIVE_SEQUENCE ────────────────────────────────────────────────────────
 
+def _event_cluster_stats(live: list[dict], seg_start: datetime,
+                         seg_end: datetime | None) -> tuple[list, float | None, float] | None:
+    """Кластеры ряда фаз, пересекающие подсегмент (v5.1.30): (hits, устойчивый
+    максимум, самый длинный непрерывный участок) — по кластерам целиком, одно
+    во всех их подсегментах. None — участка в подсегменте нет."""
+    if seg_end is None:
+        return None
+    hits = sub_hits(live, seg_start, seg_end)
+    if not hits:
+        return None
+    cls = [c for c, _ in hits]
+    tops = [c.get("smax") if c.get("smax") is not None else c.get("vmax") for c in cls]
+    tops = [v for v in tops if v is not None]
+    run = max(float(c.get("longest_sec") or 0.0) for c in cls)
+    return hits, (max(tops) if tops else None), run
+
+
 def _detect_negative_sequence(
     derived: DerivedMetrics,
     seg_start: datetime,
     cfg: AnalyticsConfig,
+    live: list[dict] | None = None,
+    seg_end: datetime | None = None,
 ) -> list[Detection]:
     """Детектор тока обратной последовательности I₂ (Addendum v1.5).
 
@@ -346,33 +372,49 @@ def _detect_negative_sequence(
     (генераторы на Cummins) допускает длительно ≤8% номинала и советует защиту
     на 8%; уставка PCC3300 12% выше этого предела. Предупреждаем раньше (KB).
     Gate: RUN_STATE=3 (проверяется в run_all_detectors).
+
+    v5.1.30 (решение владельца В-27.1): нарушение — I₂ ≥ порога непрерывно не
+    короче выдержки (как у перекоса и нейтрали), а не сумма интервалов: на ряду
+    по точному совпадению девяти регистров «117 с» набирала одна точка перед
+    паузой. live — кластеры NEGATIVE_SEQUENCE сегмента (analytics/live.py):
+    детекция — только в подсегменте, который пересекает участок кластера;
+    t_detected — начало кластера, i2_pct_max — устойчивый максимум кластера,
+    duration_sec — его самый длинный непрерывный участок. Эпизод — от начала до
+    конца кластера (у ДГУ №1 12.10 — 25 мин вместо 13 ч 29 мин до реза).
+    None — по подсегменту (метрики того же ряда), как при сбое участков.
     """
-    i2_pct = derived.neg_seq_i2_pct_max
-    dur = derived.neg_seq_i2_duration_sec
-
-    if i2_pct is None:
-        return []
-
     prox_thr = float(cfg.det("NEGATIVE_SEQUENCE", "i2_proximity_warning_pct", default=6.0))
     dur_thr = float(cfg.det("NEGATIVE_SEQUENCE", "duration_warning_sec", default=60.0))
     factory_thr = float(cfg.det("NEGATIVE_SEQUENCE", "factory_threshold_pct", default=12.0))
     norm_ref = cfg.det("NEGATIVE_SEQUENCE", "norm_ref", default="")
 
-    if i2_pct < prox_thr:
-        return []
-    if dur is None or dur < dur_thr:
-        return []
+    t_det, extra = _iso(seg_start), {}
+    if live is not None:
+        st = _event_cluster_stats(live, seg_start, seg_end)
+        if st is None or st[1] is None:
+            return []
+        hits, i2_pct, dur = st
+        t_det, extra = hits[0][0]["start"], {"live": live_values(hits, seg_start)}
+    else:
+        i2_pct = derived.neg_seq_i2_pct_max
+        dur = derived.neg_seq_i2_duration_sec
+        if i2_pct is None:
+            return []
+        if i2_pct < prox_thr:
+            return []
+        if dur is None or dur < dur_thr:
+            return []
 
     return [Detection(
         scenario="NEGATIVE_SEQUENCE",
         severity=cfg.det("NEGATIVE_SEQUENCE", "severity_default", default="CAUTION"),
-        t_detected=_iso(seg_start),
+        t_detected=t_det,
         source="METRIC_RULE",
         trigger=(
-            f"I₂={i2_pct:.1f}% > {prox_thr:.0f}% "
+            f"I₂ до {i2_pct:.1f}% ≥ {prox_thr:.0f}% "
             f"(заводской порог PCC3300: {factory_thr:.0f}%"
-            + (f"; {norm_ref}" if norm_ref else "") + ") "
-            f"за {dur:.0f}с > {dur_thr:.0f}с"
+            + (f"; {norm_ref}" if norm_ref else "") + "), "
+            f"непрерывно {dur:.0f}с ≥ {dur_thr:.0f}с"
         ),
         related_roles=[
             "CURRENT_L1", "CURRENT_L2", "CURRENT_L3",
@@ -388,6 +430,7 @@ def _detect_negative_sequence(
             "proximity_threshold_pct": prox_thr,
             "factory_threshold_pct": factory_thr,
             "norm_ref": norm_ref or None,
+            **extra,
         },
     )]
 
@@ -398,13 +441,16 @@ def _detect_phase_current_spread(
     derived: DerivedMetrics,
     seg_start: datetime,
     cfg: AnalyticsConfig,
+    live: list[dict] | None = None,
+    seg_end: datetime | None = None,
 ) -> list[Detection]:
     """Перекос фазных токов: I_max − I_min в % номинального тока генератора.
 
     Норма — ПТЭД 1993 п. 4.1.8: длительная работа ДЭС допустима при разности
     токов фаз не более 20% номинального. В отличие от I₂ видит провал одной
     фазы: ток уходит в нейтраль, обратная последовательность почти не растёт.
-    Срабатывание — непрерывное превышение не короче выдержки (KB).
+    Срабатывание — непрерывное превышение не короче выдержки (KB). live —
+    кластеры сегмента (v5.1.30), см. _metric_run_detection.
     """
     return _metric_run_detection(
         derived.phase_spread_pct_max, derived.phase_spread_pct_med,
@@ -413,6 +459,7 @@ def _detect_phase_current_spread(
         what="Перекос фазных токов I_max − I_min",
         related=["CURRENT_L1", "CURRENT_L2", "CURRENT_L3"],
         description_key="PHASE_CURRENT_SPREAD.above_norm",
+        live=live, seg_end=seg_end,
     )
 
 
@@ -420,6 +467,8 @@ def _detect_neutral_current(
     derived: DerivedMetrics,
     seg_start: datetime,
     cfg: AnalyticsConfig,
+    live: list[dict] | None = None,
+    seg_end: datetime | None = None,
 ) -> list[Detection]:
     """Ток нейтрали в % номинального тока генератора.
 
@@ -437,6 +486,7 @@ def _detect_neutral_current(
                  "ACTIVE_POWER_L1", "ACTIVE_POWER_L2", "ACTIVE_POWER_L3",
                  "REACTIVE_POWER_L1", "REACTIVE_POWER_L2", "REACTIVE_POWER_L3"],
         description_key="NEUTRAL_CURRENT.above_norm",
+        live=live, seg_end=seg_end,
     )
 
 
@@ -445,23 +495,37 @@ def _metric_run_detection(
     seg_start: datetime, cfg: AnalyticsConfig, *,
     scenario: str, thr_key: str, thr_default: float, what: str,
     related: list[str], description_key: str,
+    live: list[dict] | None = None, seg_end: datetime | None = None,
 ) -> list[Detection]:
     """Общий вид: метрика в % I_ном, порог и выдержка из KB, ссылка на норму.
 
     run_sec — уже посчитанный в метриках самый длинный непрерывный участок
     выше порога из KB, так что здесь он только сравнивается с выдержкой.
+
+    live — кластеры ключа сегмента (v5.1.30, analytics/live.py): уже только
+    квалифицированные (участок непрерывно ≥ выдержки); детекция — в подсегменте,
+    который пересекает их участок, t_detected — начало кластера, pct_max —
+    устойчивый максимум кластера, run_sec — самый длинный непрерывный участок.
+    Граница эпизода у Сининды 29.09 — 13:47:22, а не 13:43:12 начала подсегмента.
     """
-    if pct_max is None or run_sec is None:
-        return []
     thr = float(cfg.det(scenario, thr_key, default=thr_default))
     dur_thr = float(cfg.det(scenario, "duration_warning_sec", default=60.0))
-    if pct_max < thr or run_sec < dur_thr:
+    t_det, extra = _iso(seg_start), {}
+    if live is not None:
+        st = _event_cluster_stats(live, seg_start, seg_end)
+        if st is None or st[1] is None:
+            return []
+        hits, pct_max, run_sec = st
+        t_det, extra = hits[0][0]["start"], {"live": live_values(hits, seg_start)}
+    elif pct_max is None or run_sec is None:
+        return []
+    elif pct_max < thr or run_sec < dur_thr:
         return []
     norm_ref = cfg.det(scenario, "norm_ref", default="")
     return [Detection(
         scenario=scenario,
         severity=cfg.det(scenario, "severity_default", default="CAUTION"),
-        t_detected=_iso(seg_start),
+        t_detected=t_det,
         source="METRIC_RULE",
         trigger=(
             f"{what}: до {pct_max:.0f}% номинального тока ≥ {thr:.0f}%"
@@ -478,6 +542,7 @@ def _metric_run_detection(
             "threshold_pct": thr,
             "duration_threshold_sec": dur_thr,
             "norm_ref": norm_ref or None,
+            **extra,
         },
     )]
 
@@ -843,29 +908,58 @@ def _detect_no_load_too_long(
     acc: RiskAccumulators,
     seg_start: datetime,
     cfg: AnalyticsConfig,
+    live: list[dict] | None = None,
+    seg_end: datetime | None = None,
 ) -> list[Detection]:
     """Работа без нагрузки на номинальных оборотах дольше нормы Cummins (v5.1.5).
 
     A035B516 вып. 6 §5.4.2: без нагрузки — не дольше 15 мин подряд. Детектор
     холостого хода (RUN_STATE 2/5) машину, крутящуюся на номинале в ожидании
     нагрузки, не видит.
+
+    v5.1.30 (решение владельца В-27.2): live — нарушения сегмента
+    (analytics/live.py): участок от момента превышения нормы («начало отрезка +
+    (норма − перенос через рез)») до конца отрезка; детекция — в каждом
+    подсегменте, который он пересекает, t_detected — его начало. Раньше
+    смотрелся счётчик аккумулятора на конце подсегмента: отрезок, кончившийся
+    внутри подсегмента, терялся (27 из 42 за 60 дней), эпизод начинался с
+    начала подсегмента («6 ч 18 мин» при «19 мин подряд»). noload_run_sec — длина
+    отрезка с переносом, run_start — его начало (ISO, в тексте часов нет: UTC и
+    МСК не путаются). None — по аккумулятору, как раньше.
     """
     limit = float(cfg.det("NO_LOAD_TOO_LONG", "max_continuous_sec", default=900))
     pct = float(cfg.det("NO_LOAD_TOO_LONG", "load_pct", default=10))
-    run = acc.coking_risk.noload_run_sec
-    if run <= limit:
-        return []
+    t_det, extra = _iso(seg_start), {}
+    if live is not None:
+        if seg_end is None:
+            return []
+        hits = sub_hits(live, seg_start, seg_end)
+        if not hits:
+            return []
+        # Отрезок — того нарушения, что даёт t_detected (начало первого кластера):
+        # ревью v5.1.30 — при двух нарушениях в подсегменте начало бралось от
+        # первого, а «28 мин подряд» от второго (ДЭС №3 14.09 03:00:53, отрезок 936 с)
+        top = min(hits[0][0].get("_spans") or hits[0][1], key=lambda s: s["_s"])
+        run = float(top.get("run_sec") or 0.0)
+        t_det = hits[0][0]["start"]
+        extra = {"run_start": _iso(top["run_start"]) if top.get("run_start") else None,
+                 "carry_sec": float(top.get("carry_sec") or 0.0),
+                 "live": live_values(hits, seg_start)}
+    else:
+        run = acc.coking_risk.noload_run_sec
+        if run <= limit:
+            return []
     return [Detection(
         scenario="NO_LOAD_TOO_LONG",
         severity=cfg.det("NO_LOAD_TOO_LONG", "severity_default", default="CAUTION"),
-        t_detected=_iso(seg_start),
+        t_detected=t_det,
         source="METRIC_RULE",
         trigger=(f"без нагрузки (<{pct:.0f} %) на номинальных оборотах {run / 60:.0f} мин подряд "
                  f"при норме Cummins ≤{limit / 60:.0f} мин"),
         related_roles=["LOAD_PCT", "RPM"],
         fault_codes=[],
         description_key="NO_LOAD_TOO_LONG.default",
-        values={"noload_run_sec": run, "limit_sec": limit, "load_pct": pct},
+        values={"noload_run_sec": run, "limit_sec": limit, "load_pct": pct, **extra},
     )]
 
 

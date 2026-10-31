@@ -916,15 +916,27 @@ def _build_subsegments_for_running(
     # смена режима) будущих строк не будет (ревью v5.1.21, analytics-3).
     # Ключи изолированы внутри segment_spans (v5.1.23); этот try — страховка
     live_spans: dict[str, list[dict] | None] | None = None
+    # Ряд фаз рабочей части (v5.1.30): посчитан для участков — его срезы идут в
+    # метрики подсегментов, второй раз тот же ряд не строится
+    _phase_out: dict = {}
     try:
+        _carry_sp = cause_open == "REPORT_START" and head_end == seg_t0
+        # Отрезок «без нагрузки», шедший на суточном резе (v5.1.30, В-27.2): длина
+        # и короткий выход — из аккумулятора нагара на начало окна
+        _cr = getattr(accumulators, "coking_risk", None)
         live_spans = segment_spans(
             seg_by_addr, None, cfg, head_end, tail_start, gaps, held or {},
-            carry=(cause_open == "REPORT_START" and head_end == seg_t0),
+            carry=_carry_sp,
             horizon=seg_t1 if live_edge else None,
+            noload_carry_sec=float(getattr(_cr, "noload_run_sec", 0.0) or 0.0) if _carry_sp else 0.0,
+            noload_break_sec=float(getattr(_cr, "noload_break_sec", 0.0) or 0.0) if _carry_sp else 0.0,
+            phase_out=_phase_out,
         )
     except Exception:
         logger.warning("Участки нарушений сегмента %s не посчитаны — детекторы по подсегменту",
                        seg_id, exc_info=True)
+    _phase_ser = _phase_out.get("series") if live_spans is not None else None
+    _phase_ts = [p[0] for p in _phase_ser] if _phase_ser is not None else None
 
     n_stab = int(cfg.seg("boundary_confirmation", "n_stab", default=3))
     load_addr = cfg.role_to_addr("LOAD_PCT")
@@ -1035,7 +1047,9 @@ def _build_subsegments_for_running(
 
         chars        = compute_characteristics(sub_chars, char_t_start, t_sub_end, cfg)
         chars.update(_state_characteristics(state_periods or {}, t_sub_start, t_sub_end, cfg))
-        derived      = compute_derived_metrics(sub_win, t_sub_start, t_sub_end, gaps, cfg)
+        _ph = (_phase_ser[bisect.bisect_left(_phase_ts, t_sub_start):bisect.bisect_left(_phase_ts, t_sub_end)]
+               if _phase_ser is not None else None)
+        derived      = compute_derived_metrics(sub_win, t_sub_start, t_sub_end, gaps, cfg, phase=_ph)
         accumulators = update_accumulators(accumulators, sub_win, t_sub_start, t_sub_end, zone, run_state, cfg, gaps)
 
         faults_in_sub = [

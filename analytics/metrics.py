@@ -180,10 +180,16 @@ def compute_derived_metrics(
     seg_end: datetime,
     gaps: list[dict[str, Any]],
     cfg: AnalyticsConfig,
+    phase: list[tuple] | None = None,
 ) -> DerivedMetrics:
     """Вычислить производные метрики за подсегмент.
 
     Параметры (пороги) берутся из cfg — не захардкожены.
+
+    phase — готовый ряд фаз этого подсегмента (v5.1.30: срез ряда сегмента
+    phase_series, посчитанного для участков analytics/live.py): тот же ряд не
+    строится второй раз. Значения держатся и через границу подсегмента, пока
+    идут пакеты. None — ряд строится по строкам подсегмента, как раньше.
     """
     t_start = _tz(seg_start)
     t_end = _tz(seg_end)
@@ -284,67 +290,16 @@ def compute_derived_metrics(
 
     # ── Ток обратной последовательности I₂ (Метод А, Addendum v1.5) ──────────
     # Физически корректная метрика: именно на неё реагирует заводская защита PCC3300.
-    # Требует пофазных Q (40035/36/37), добавленных в whitelist.
-    q1_rows = _rows_in(_addr("REACTIVE_POWER_L1") or 0) if _addr("REACTIVE_POWER_L1") else []
-    q2_rows = _rows_in(_addr("REACTIVE_POWER_L2") or 0) if _addr("REACTIVE_POWER_L2") else []
-    q3_rows = _rows_in(_addr("REACTIVE_POWER_L3") or 0) if _addr("REACTIVE_POWER_L3") else []
+    # Требует пофазных Q (40035/36/37), добавленных в whitelist. Считается в
+    # общем ряду по пакетам ниже (v5.1.30).
 
     # Номинальный ток для нормировки I₂%
-    i_nominal_cfg = float(cfg.det("NEGATIVE_SEQUENCE", "i_nominal_a", default=0) or 0)
-    i_nominal_a: float = i_nominal_cfg
-    if i_nominal_a <= 0:
-        rating_kw_rows = _rows_in(_addr("RATING_KW") or 0) if _addr("RATING_KW") else []
-        rating_kw = _median([v for _, v in rating_kw_rows]) or 0.0
-        u_ll = float(cfg.det("NEGATIVE_SEQUENCE", "u_nominal_v", default=400.0))
-        pf_n = float(cfg.det("NEGATIVE_SEQUENCE", "pf_nominal", default=0.8))
-        if rating_kw > 0 and u_ll > 0 and pf_n > 0:
-            i_nominal_a = rating_kw * 1000.0 / (math.sqrt(3) * u_ll * pf_n)
+    i_nominal_a = nominal_current(
+        cfg, [v for _, v in _rows_in(_addr("RATING_KW") or 0)] if _addr("RATING_KW") else [])
 
     neg_seq_i2_pct_max: float | None = None
     neg_seq_i2_pct_med: float | None = None
     neg_seq_i2_duration_sec: float | None = None
-
-    if i_nominal_a > 0 and i1 and i2 and i3 and p1 and p2 and p3 and q1_rows and q2_rows and q3_rows:
-        i1d_ns = {ts: v for ts, v in i1}
-        i2d_ns = {ts: v for ts, v in i2}
-        i3d_ns = {ts: v for ts, v in i3}
-        p1d_ns = {ts: v for ts, v in p1}
-        p2d_ns = {ts: v for ts, v in p2}
-        p3d_ns = {ts: v for ts, v in p3}
-        q1d_ns = {ts: v for ts, v in q1_rows}
-        q2d_ns = {ts: v for ts, v in q2_rows}
-        q3d_ns = {ts: v for ts, v in q3_rows}
-
-        ns_common = sorted(
-            set(i1d_ns) & set(i2d_ns) & set(i3d_ns) &
-            set(p1d_ns) & set(p2d_ns) & set(p3d_ns) &
-            set(q1d_ns) & set(q2d_ns) & set(q3d_ns)
-        )
-
-        i2_pct_series: list[tuple[datetime, float]] = []
-        for ts in ns_common:
-            i2_abs = _compute_neg_seq_i2(
-                i1d_ns[ts], p1d_ns[ts], q1d_ns[ts],
-                i2d_ns[ts], p2d_ns[ts], q2d_ns[ts],
-                i3d_ns[ts], p3d_ns[ts], q3d_ns[ts],
-            )
-            if i2_abs is not None:
-                i2_pct_series.append((ts, i2_abs / i_nominal_a * 100))
-
-        if i2_pct_series:
-            pcts = [pct for _, pct in i2_pct_series]
-            neg_seq_i2_pct_max = max(pcts)
-            neg_seq_i2_pct_med = _median(pcts)
-
-            # Суммарное время I₂% > порога приближения к заводской защите
-            i2_prox = float(cfg.det("NEGATIVE_SEQUENCE", "i2_proximity_warning_pct", default=6.0))
-            dur = 0.0
-            for j in range(len(i2_pct_series) - 1):
-                ts_j, pct_j = i2_pct_series[j]
-                ts_next, _ = i2_pct_series[j + 1]
-                if pct_j > i2_prox:
-                    dur += (ts_next - ts_j).total_seconds()
-            neg_seq_i2_duration_sec = dur if dur > 0 else None
 
     # ── Перекос фазных токов и ток нейтрали (v4.9.97) ────────────────────────
     # Заводские защиты PCC3300 такую картину не видят: защиты по току нейтрали
@@ -359,57 +314,56 @@ def compute_derived_metrics(
     # регистр только при изменении, и пофазная Q молчит до 200 с — точное
     # совпадение девяти регистров рвало бы непрерывность, а мёртвая фаза с
     # постоянным нулём не попадала бы в ряд вовсе.
+    #
+    # v5.1.30 («По событию», В-27.1): I₂ — в том же ряду по пакетам (phase_series,
+    # общий с участками сегмента analytics/live.py). Прежний ряд по точному
+    # совпадению девяти регистров был разреженным (у ДЭС №3 — 341 точка за
+    # 5,5 ч), а время за порогом складывалось интервалом до следующей точки и
+    # через паузу: «117 с» ДЭС №3 09.10 набрала одна точка, «780 с» ДГУ №2
+    # 27.09 — один переходный кадр. Теперь длительность — самый длинный
+    # непрерывный участок «≥ порога» (как у перекоса и нейтрали): рвётся на
+    # паузе пакетов, дыре связи и замере без I₂ (ток фазы 0 — не нарушение).
     phase_spread_pct_max: float | None = None
     phase_spread_pct_med: float | None = None
     phase_spread_run_sec: float | None = None
     neutral_current_pct_max: float | None = None
     neutral_current_pct_med: float | None = None
     neutral_current_run_sec: float | None = None
-    _i_addrs = [_addr(f"CURRENT_L{k}") for k in (1, 2, 3)]
-    _p_addrs = [_addr(f"ACTIVE_POWER_L{k}") for k in (1, 2, 3)]
-    _q_addrs = [_addr(f"REACTIVE_POWER_L{k}") for k in (1, 2, 3)]
-    if i_nominal_a > 0 and all(_i_addrs):
-        max_gap = heartbeat * max_mult
-        spread_thr = float(cfg.det("PHASE_CURRENT_SPREAD", "spread_warning_pct", default=20.0))
-        neutral_thr = float(cfg.det("NEUTRAL_CURRENT", "neutral_warning_pct", default=25.0))
-        _hb = cfg.seg("data_quality", "heartbeat_addr", default=None)
-        hb_addr = int(_hb) if _hb is not None else None
-
-        with_pq = all(_p_addrs) and all(_q_addrs)
-        addrs = _i_addrs + ((_p_addrs + _q_addrs) if with_pq else [])
-        samples = _held_samples(
-            {a: _rows_in(a) for a in addrs},
+    _pprm = phase_params(cfg, heartbeat, max_mult)
+    if _pprm is not None and (phase is not None or i_nominal_a > 0):
+        max_gap = _pprm["max_gap"]
+        hb_addr = _pprm["hb_addr"]
+        series = phase if phase is not None else phase_series(
+            {a: _rows_in(a) for a in _pprm["addrs"]},
             [ts for ts, _ in _rows_in(hb_addr)] if hb_addr else [],
-            gaps, max_gap, heartbeat / 2,
+            gaps, _pprm, i_nominal_a,
         )
-        spread: list[tuple[datetime, float]] = []
-        neutral: list[tuple[datetime, float]] = []
-        for ts, held in samples:
-            cur = [held.get(a) for a in _i_addrs]
-            if any(v is None for v in cur):
-                continue
-            spread.append((ts, (max(cur) - min(cur)) / i_nominal_a * 100))
-            if with_pq:
-                p_ = [held.get(a) for a in _p_addrs]
-                q_ = [held.get(a) for a in _q_addrs]
-                if any(v is None for v in p_ + q_):
-                    continue
-                i_n = _compute_neutral_current(cur, p_, q_)
-                if i_n is not None:
-                    neutral.append((ts, i_n / i_nominal_a * 100))
+        spread_ser = [(ts, s) for ts, _i2, s, _n in series]
+        neutral_ser = [(ts, n) for ts, _i2, _s, n in series]
+        spread = [(ts, s) for ts, s in spread_ser if s is not None]
+        neutral = [(ts, n) for ts, n in neutral_ser if n is not None]
+        i2_ser = [(ts, i2v) for ts, i2v, _s, _n in series]
+        i2_ok = [(ts, v) for ts, v in i2_ser if v is not None]
         # Максимум — устойчивый (держится хотя бы два пакета подряд): на скачке
         # нагрузки одна фаза приходит новым значением раньше двух других, и
         # один пакет даёт фантомный перекос (у ДЭС №3 — 61% на одном замере).
         # Детектору это не мешает — ему нужна выдержка, — но в отчёте такой
-        # максимум сбивал бы с толку.
+        # максимум сбивал бы с толку. Ревью v5.1.30: пара — два соседних пакета
+        # ряда, без кадра без значения и без дыры связи между ними
         if spread:
-            phase_spread_pct_max = _sustained_max(spread, max_gap)
+            phase_spread_pct_max = _sustained_max_adj(spread_ser, max_gap, gaps)
             phase_spread_pct_med = _median([v for _, v in spread])
-            phase_spread_run_sec = _longest_run_at_or_above(spread, spread_thr, max_gap)
+            phase_spread_run_sec = _longest_run_at_or_above(spread, _pprm["spread_thr"], max_gap)
         if neutral:
-            neutral_current_pct_max = _sustained_max(neutral, max_gap)
+            neutral_current_pct_max = _sustained_max_adj(neutral_ser, max_gap, gaps)
             neutral_current_pct_med = _median([v for _, v in neutral])
-            neutral_current_run_sec = _longest_run_at_or_above(neutral, neutral_thr, max_gap)
+            neutral_current_run_sec = _longest_run_at_or_above(neutral, _pprm["neutral_thr"], max_gap)
+        if i2_ok:
+            # Тот же устойчивый максимум (ревью E1: ряд по пакетам с удержанием
+            # даёт ложный всплеск I₂ на переходном кадре)
+            neg_seq_i2_pct_max = _sustained_max_adj(i2_ser, max_gap, gaps)
+            neg_seq_i2_pct_med = _median([v for _, v in i2_ok])
+            neg_seq_i2_duration_sec = _longest_run_at_or_above(i2_ser, _pprm["i2_thr"], max_gap, gaps)
 
     # ── Давление масла ниже паспорта своего двигателя (v5.1.12) ──────────────
     # Паспорт — слой двигателя (KTA50 310, QSX15 242); раньше детектор у QSX15
@@ -959,6 +913,30 @@ def _sustained_max(
     return best
 
 
+def _sustained_max_adj(
+    series: list[tuple[datetime, float | None]], max_gap_sec: float,
+    gaps: list[dict[str, Any]] | None = None,
+) -> float | None:
+    """Устойчивый максимум по ряду с пропусками (v5.1.30, ревью): пара — два
+    соседних пакета ряда с значениями, не дальше max_gap_sec и без дыры
+    data_gaps между ними; кадр без значения (None) пару рвёт. Одно значение в
+    ряду — оно само (как _sustained_max)."""
+    vals = [v for _, v in series if v is not None]
+    if not vals:
+        return None
+    if len(vals) == 1:
+        return vals[0]
+    best: float | None = None
+    for (ts, v), (ts_next, v_next) in zip(series, series[1:]):
+        if v is None or v_next is None or (ts_next - ts).total_seconds() > max_gap_sec:
+            continue
+        if gaps and _gap_between(ts, ts_next, gaps):
+            continue
+        m = min(v, v_next)
+        best = m if best is None else max(best, m)
+    return best
+
+
 def _gap_between(t0: datetime, t1: datetime, gaps: list[dict[str, Any]]) -> bool:
     """Есть ли дыра связи из data_gaps, пересекающая (t0, t1)."""
     for g in gaps or []:
@@ -993,7 +971,8 @@ def _compute_neutral_current(
 
 
 def _longest_run_at_or_above(
-    series: list[tuple[datetime, float]], threshold: float, max_gap_sec: float,
+    series: list[tuple[datetime, float | None]], threshold: float, max_gap_sec: float,
+    gaps: list[dict[str, Any]] | None = None,
 ) -> float | None:
     """Самый длинный непрерывный участок, где значение ≥ порога, сек.
 
@@ -1001,16 +980,109 @@ def _longest_run_at_or_above(
     max_gap_sec: дыра — не подтверждение, что превышение длилось. Именно
     непрерывный участок, а не сумма: одиночные всплески в норме бывают
     (у ДЭС №3 за месяц — до 23% перекоса), длительных — нет.
+
+    v5.1.30: замер без значения (None — у I₂ ток фазы 0) рвёт участок; gaps —
+    интервал через дыру data_gaps не засчитывается (у I₂; перекос и нейтраль —
+    как раньше, без gaps).
     """
     best = cur = 0.0
     for (ts, v), (ts_next, _) in zip(series, series[1:]):
         dt = (ts_next - ts).total_seconds()
-        if v >= threshold and dt <= max_gap_sec:
+        if (v is not None and v >= threshold and dt <= max_gap_sec
+                and not (gaps and _gap_between(ts, ts_next, gaps))):
             cur += dt
             best = max(best, cur)
         else:
             cur = 0.0
     return best if best > 0 else None
+
+
+# ── Ряд фаз по пакетам: I₂, перекос, нейтраль (v5.1.30) ─────────────────────
+
+def phase_params(cfg: AnalyticsConfig, heartbeat: float | None = None,
+                 max_mult: float | None = None) -> dict[str, Any] | None:
+    """Адреса и пороги ряда фаз (v5.1.30): общие для метрик подсегмента и
+    участков сегмента (analytics/live.py). None — токов фаз в карте нет.
+
+    with_pq — есть пофазные P и Q: без них нет углов, а значит нет I₂ и тока
+    нейтрали (перекос — по одним токам)."""
+    i_addrs = [cfg.role_to_addr(f"CURRENT_L{k}") for k in (1, 2, 3)]
+    if not all(i_addrs):
+        return None
+    p_addrs = [cfg.role_to_addr(f"ACTIVE_POWER_L{k}") for k in (1, 2, 3)]
+    q_addrs = [cfg.role_to_addr(f"REACTIVE_POWER_L{k}") for k in (1, 2, 3)]
+    with_pq = all(p_addrs) and all(q_addrs)
+    if heartbeat is None:
+        heartbeat = float(cfg.seg("data_quality", "heartbeat_nominal_sec", default=30))
+    if max_mult is None:
+        max_mult = float(cfg.seg("data_quality", "heartbeat_max_multiplier", default=3))
+    _hb = cfg.seg("data_quality", "heartbeat_addr", default=None)
+    return {
+        "i": i_addrs, "p": p_addrs, "q": q_addrs, "with_pq": with_pq,
+        "addrs": i_addrs + ((p_addrs + q_addrs) if with_pq else []),
+        "max_gap": heartbeat * max_mult, "tol": heartbeat / 2,
+        "hb_addr": int(_hb) if _hb is not None else None,
+        "i2_thr": float(cfg.det("NEGATIVE_SEQUENCE", "i2_proximity_warning_pct", default=6.0)),
+        "spread_thr": float(cfg.det("PHASE_CURRENT_SPREAD", "spread_warning_pct", default=20.0)),
+        "neutral_thr": float(cfg.det("NEUTRAL_CURRENT", "neutral_warning_pct", default=25.0)),
+    }
+
+
+def nominal_current(cfg: AnalyticsConfig, rating_kw_values: list[float]) -> float:
+    """Номинальный ток генератора, А: из KB (NEGATIVE_SEQUENCE.i_nominal_a) или
+    по номинальной мощности RATING_KW (медиана строк), U_ном и cos φ_ном.
+    0 — посчитать не из чего."""
+    i_nom = float(cfg.det("NEGATIVE_SEQUENCE", "i_nominal_a", default=0) or 0)
+    if i_nom > 0:
+        return i_nom
+    rating_kw = _median([float(v) for v in rating_kw_values if v is not None]) or 0.0
+    u_ll = float(cfg.det("NEGATIVE_SEQUENCE", "u_nominal_v", default=400.0))
+    pf_n = float(cfg.det("NEGATIVE_SEQUENCE", "pf_nominal", default=0.8))
+    if rating_kw > 0 and u_ll > 0 and pf_n > 0:
+        return rating_kw * 1000.0 / (math.sqrt(3) * u_ll * pf_n)
+    return 0.0
+
+
+def phase_series(
+    rows_by_addr: dict[int, list[tuple[datetime, float]]],
+    packet_ts: list[datetime],
+    gaps: list[dict[str, Any]],
+    prm: dict[str, Any],
+    i_nominal_a: float,
+) -> list[tuple[datetime, float | None, float | None, float | None]]:
+    """Ряд фаз по пакетам связи с удержанием (v5.1.30): [(момент, I₂ %, перекос %,
+    нейтраль %)] в % номинального тока — по одной точке на пакет.
+
+    Значение, которое в пакете не определено, — None: нет удержанного значения
+    какого-то регистра (после обрыва связи, до первой строки), у I₂ — ещё и
+    ток фазы 0 или нет угла (_compute_neg_seq_i2: «нулевые токи — I₂
+    нестабилен»; провал фазы ловят перекос и нейтраль). Один проход на три
+    правила: метрики подсегмента и участки сегмента строят ряд одинаково."""
+    if i_nominal_a <= 0:
+        return []
+    i_a, p_a, q_a, with_pq = prm["i"], prm["p"], prm["q"], prm["with_pq"]
+    samples = _held_samples({a: rows_by_addr.get(a) or [] for a in prm["addrs"]},
+                            packet_ts, gaps, prm["max_gap"], prm["tol"])
+    k = 100.0 / i_nominal_a
+    out: list[tuple[datetime, float | None, float | None, float | None]] = []
+    for ts, held in samples:
+        cur = [held.get(a) for a in i_a]
+        if any(v is None for v in cur):
+            out.append((ts, None, None, None))
+            continue
+        spread = (max(cur) - min(cur)) * k
+        i2v = neut = None
+        if with_pq:
+            p_ = [held.get(a) for a in p_a]
+            q_ = [held.get(a) for a in q_a]
+            if not any(v is None for v in p_ + q_):
+                i_n = _compute_neutral_current(cur, p_, q_)
+                neut = i_n * k if i_n is not None else None
+                i2_abs = _compute_neg_seq_i2(cur[0], p_[0], q_[0], cur[1], p_[1], q_[1],
+                                             cur[2], p_[2], q_[2])
+                i2v = i2_abs * k if i2_abs is not None else None
+        out.append((ts, i2v, spread, neut))
+    return out
 
 
 def _compute_neg_seq_i2(

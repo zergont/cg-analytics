@@ -1421,6 +1421,7 @@ def _alert_key(d: dict) -> str:
 
 def _accrual_split(
     prev_base: datetime | None, now_ts: datetime, gaps: list[dict],
+    window_from: datetime | None = None,
 ) -> tuple[float, float, float]:
     """Разложить интервал цикла на (воздействие, слепая доля, время под данными).
 
@@ -1431,10 +1432,26 @@ def _accrual_split(
     сброс мог произойти внутри слепого куска.
     live — span минус gap, только для дебаунса закрытия: объявлять тревогу
     снятой, пока мы её не видим, нельзя.
+
+    window_from — начало окна цикла (v5.1.30, решение В-30.1): синтетический
+    разрыв пустого окна (start_unknown) начинается с границы окна, но тишина
+    доказана и раньше — пустой преамбулой истории. Его начало для учёта —
+    max(prev_base, window_from − _PREAMBLE_LOOKBACK_SEC): кусок [prev_base,
+    window_from) того же обрыва (последний цикл прошлого окна — до суточного
+    реза) — не живое время, дебаунс замирает.
     """
     from analytics.accumulators import gap_union_overlap_sec
     if prev_base is None or now_ts <= prev_base:
         return 0.0, 0.0, 0.0
+    if window_from is not None and gaps:
+        try:
+            _floor = max(prev_base, _tz_utc(window_from) - timedelta(seconds=_PREAMBLE_LOOKBACK_SEC))
+            gaps = [dict(g, gap_start=min(_tz_utc(g["gap_start"]), _floor))
+                    if g.get("start_unknown") and g.get("gap_start") is not None else g
+                    for g in gaps]
+        except Exception:
+            # Горячий цикл: без продления — разрывы как есть (поведение до v5.1.30)
+            logger.warning("Начало разрыва пустого окна до границы окна не продлено", exc_info=True)
     span = (now_ts - prev_base).total_seconds()
     gap = min(span, max(0.0, gap_union_overlap_sec(gaps, prev_base, now_ts)))
     return span, gap, max(0.0, span - gap)
@@ -1629,8 +1646,10 @@ async def _load_data(
 # нет, и модель выдумывала наработку из событий журнала («680 ч»)
 # v5.1.23, ревью R7: задание частоты — профилю пуска (значение на начало
 # прокрутки, когда прогрев цепочки 0→2→3 длиннее преамбулы окна); тем же запросом
+# v5.1.30 (В-27.2): нагрузка — переносу отрезка «без нагрузки» через суточный
+# рез; её адрес и так в запросе (ts/value посева), нового запроса нет
 _HELD_ROLES = ("RPM", "FREQUENCY", "OIL_TEMP", "COOLANT_TEMP", "OIL_PRESS", "ENGINE_HOURS",
-               "FREQ_REFERENCE")
+               "FREQ_REFERENCE", "LOAD_PCT")
 # Сколько ждать аварийности следующего стопа после закрытия сегмента сменой
 # режима (v5.1.22, P1-3): 40013 и маски приходят тем же кадром или следующим
 _TRIP_WATCH_SEC = 600
@@ -1726,6 +1745,14 @@ def _synth_connectivity_gap(
     Окно без единой строки: начало обрыва неизвестно, гэп берётся от t_from
     и помечается start_unknown — это граница окна, а не «последние данные»
     (v5.1.26, П10: заглушка #36125 печатала 09:00 вместо 00:11:03).
+
+    v5.1.30 (решение владельца В-30.1): у такого окна гэп — с первого цикла,
+    без льготы heartbeat×mult. История грузится с преамбулой
+    (_PREAMBLE_LOOKBACK_SEC до t_from), и пустая преамбула уже доказывает
+    тишину дольше льготы. Раньше первые циклы после суточного реза при идущем
+    обрыве (до 90 с) считались «данные шли»: дебаунс копил промахи, и эпизоды
+    аналитики закрывались «вслепую» (сим. 29.10: S4, S7). Окно со строками —
+    как раньше, со льготой от последней строки.
     """
     t_from = _tz_utc(t_from)
     t_to = _tz_utc(t_to)
@@ -1738,7 +1765,7 @@ def _synth_connectivity_gap(
         return None
     heartbeat = float(cfg.seg("data_quality", "heartbeat_nominal_sec", default=30) or 30)
     max_mult  = float(cfg.seg("data_quality", "heartbeat_max_multiplier", default=3) or 3)
-    if (t_to - gap_start).total_seconds() <= heartbeat * max_mult:
+    if last_ts is not None and (t_to - gap_start).total_seconds() <= heartbeat * max_mult:
         return None
     gap = {"gap_start": gap_start, "gap_end": None}
     if last_ts is None:
@@ -3339,8 +3366,17 @@ class OnlinePollEngine:
         start_carry: dict | None = None,
         panel_ctx: dict | None = None,
         front_ends: dict | None = None,
+        own_rows: bool | None = None,
     ) -> None:
         """Материализовать эпизоды тревог из снимка активных детекций.
+
+        own_rows — есть ли в окне цикла свои строки (ts ≥ начала окна; v5.1.30,
+        ревью В-30.1): окно без них — не живое время для дебаунса. Обрыв,
+        начавшийся меньше чем за ~25 с до суточного реза, оставляет строки в
+        преамбуле, синтетического разрыва ещё нет (льгота 90 с), и неточный
+        эпизод закрывался «вслепую» в 09:00:03. При живой связи первый цикл
+        после реза бывает без строк — дебаунс тогда сдвигается на цикл. None —
+        не известно (как раньше).
 
         Ревью v5.1.25 (Q3): панельный эпизод — по фронту. front_ends — фронты
         панели окна (_panel_front_ends): новый фронт того же бита при эпизоде,
@@ -3423,8 +3459,9 @@ class OnlinePollEngine:
 
         # База — конец окна, а не последние данные (как было): иначе при
         # обрыве она замирала бы и воздействие переставало идти.
+        # v5.1.30 (В-30.1): разрыв пустого окна — и на куске до начала окна
         span_sec, gap_sec, live_sec = _accrual_split(
-            self._episode_accrual_ts, now_ts, gaps
+            self._episode_accrual_ts, now_ts, gaps, window_from=gaps_from
         )
         self._episode_accrual_ts = now_ts
 
@@ -3696,7 +3733,10 @@ class OnlinePollEngine:
                 # проверить после upsert (хвост гейта с хешем переносится туда же)
                 self._supp_recheck = (_new_analytics, curr_dets)
 
-        # Дебаунс закрытия — только когда данные реально шли (в дыре всё замирает)
+        # Дебаунс закрытия — только когда данные реально шли (в дыре всё замирает).
+        # v5.1.30 (В-30.1, ревью): окно без своих строк — тоже не живое время
+        if own_rows is False:
+            live_sec = 0.0
         if live_sec <= 0:
             return
         # Мост — только когда окно продолжает работу (суточный рез, рестарт): после
@@ -5131,6 +5171,13 @@ class OnlinePollEngine:
 
             # Свежесть телеметрии: продвинулась — фиксируем в памяти и в БД
             await self._advance_last_data_ts(_seen_ts)
+            # Есть ли в окне свои строки, а не только преамбула (v5.1.30, В-30.1):
+            # окно без них — не живое время для дебаунса закрытия эпизодов
+            try:
+                _own_rows: bool | None = (_seen_ts is not None
+                                          and _tz_utc(_seen_ts) >= ts_from_utc)
+            except Exception:
+                _own_rows = None
 
             _t0 = _time.perf_counter()
             # Машина стояла на прошлом цикле — лента понадобится почти
@@ -5561,7 +5608,9 @@ class OnlinePollEngine:
                                          start_carry=getattr(open_seg, "start_profile_prev", None),
                                          panel_ctx=_pctx,
                                          # Панель — по фронту (ревью v5.1.25, Q3)
-                                         front_ends=_panel_front_ends(segments))
+                                         front_ends=_panel_front_ends(segments),
+                                         # Свои строки окна — дебаунсу (v5.1.30, В-30.1)
+                                         own_rows=_own_rows)
         except Exception:
             logger.warning("OnlineEngine[%s]: ошибка обработки эпизодов тревог",
                            self.key, exc_info=True)

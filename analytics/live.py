@@ -33,6 +33,24 @@
 OIL_DILUTION — паспорт давления (участки oil_passport_runs из metrics, начало
 эпизода — начало участка, В7).
 
+v5.1.30 «По событию» (решения владельца В-27.1, В-27.2):
+- NEGATIVE_SEQUENCE (I₂), PHASE_CURRENT_SPREAD, NEUTRAL_CURRENT — по ряду фаз
+  по пакетам (metrics.phase_series, тот же, что у метрик подсегмента): отсчёт
+  без значения (ток фазы 0 у I₂, нет удержанного значения) закрывает участок;
+  кластер — эпизод, только если в нём есть участок непрерывно не короче
+  выдержки KB (duration_warning_sec, 60 с; время дыры data_gaps — не
+  непрерывность). Короткий кластер отбрасывается. Эпизод I₂ — от начала до
+  конца кластера, а не от начала подсегмента до суточного реза (у ДГУ №1
+  15037/15061 — по 21 ч при превышении 96–160 с суммой);
+- NO_LOAD_TOO_LONG — отрезки нагрузки LOAD_PCT ниже load_pct: короткий выход
+  (до COKING_RISK.purge_dip_tolerance_sec, 60 с) отрезок не рвёт, дыра связи и
+  пауза пакетов — рвут (как noload_reset аккумулятора). Нарушение — от
+  «начало отрезка + (max_continuous_sec − перенос)» до конца отрезка; перенос
+  через суточный рез — noload_run_sec аккумулятора на начало окна (только при
+  переносе, REPORT_START без разгона). Раньше отрезок, кончившийся внутри
+  подсегмента, терялся (27 из 42 за 60 дней), а эпизод начинался с начала
+  подсегмента.
+
 Окно — рабочая часть сегмента «Работа» [head_end, tail_start). Перенос через
 начало окна — только при продолжении режима (REPORT_START без разгона): иначе
 нули стоянки давали бы «нарушение с начала». Модуль без зависимостей от движка.
@@ -50,7 +68,10 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from .metrics import oil_passport_params, oil_passport_runs, passport_instep
+from .metrics import (
+    nominal_current, oil_passport_params, oil_passport_runs, passport_instep, phase_params,
+    phase_series,
+)
 from .rpm_freq import (
     _PACKET_TOL_SEC, build_poll, dip_marks, freq_ok, over_marks, overspeed_params, packet_times,
     rpm_freq_params,
@@ -63,8 +84,17 @@ logger = logging.getLogger(__name__)
 # не больше N назад. То же окно, что у паспорта давления с v5.1.12
 LIVE_RECENT_SEC = 600
 
-# Роли, чьи удержанные значения переносятся через начало окна (и частота опроса)
-HELD_ROLES = ("RPM", "FREQUENCY", "OIL_TEMP", "COOLANT_TEMP", "OIL_PRESS")
+# Роли, чьи удержанные значения переносятся через начало окна (и частота опроса).
+# v5.1.30: нагрузка — переносу отрезка «без нагрузки» через суточный рез
+HELD_ROLES = ("RPM", "FREQUENCY", "OIL_TEMP", "COOLANT_TEMP", "OIL_PRESS", "LOAD_PCT")
+
+# Ключи по ряду фаз (v5.1.30): (ключ, индекс в точке phase_series, порог в
+# phase_params, роль участка)
+_PHASE_KEYS = (("NEGATIVE_SEQUENCE", 1, "i2_thr", "I2"),
+               ("PHASE_CURRENT_SPREAD", 2, "spread_thr", "PHASE_SPREAD"),
+               ("NEUTRAL_CURRENT", 3, "neutral_thr", "NEUTRAL"))
+# Ключи «по событию» v5.1.30: у их кластеров ещё visible_sec, longest_sec, smax
+_EVENT_KEYS = frozenset(k for k, *_ in _PHASE_KEYS) | {"NO_LOAD_TOO_LONG"}
 
 _FAR = datetime.max.replace(tzinfo=timezone.utc)
 
@@ -509,6 +539,218 @@ def _passport_spans(seg_by_addr, cfg, t0, t1, gaps, held, carry, packets, trail_
     return out
 
 
+# ── Ряд фаз и «без нагрузки» (v5.1.30, «По событию») ───────────────────────
+
+def _rows_any(rows: list[dict] | None, t0: datetime | None = None,
+              t1: datetime | None = None) -> list[tuple[datetime, float]]:
+    """Строки адреса с числом в [t0, t1) — вместе с копиями forward-fill первых
+    пакетов (как у метрик подсегмента: начальное значение на старте)."""
+    out = []
+    for r in rows or []:
+        v = r.get("value")
+        if v is None:
+            continue
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        if fv != fv or fv in (float("inf"), float("-inf")):
+            continue
+        ts = _tz(r["ts"])
+        if (t0 is not None and ts < t0) or (t1 is not None and ts >= t1):
+            continue
+        out.append((ts, fv))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def _longest_free(a: datetime, b: datetime, gl: list[tuple[datetime, datetime]]) -> float:
+    """Самый длинный кусок [a, b] без дыр data_gaps, сек (непрерывность участка:
+    время дыры — не подтверждение, что нарушение длилось)."""
+    best, cur = 0.0, a
+    for gs, ge in gl:
+        if ge <= cur:
+            continue
+        if gs >= b:
+            break
+        if gs > cur:
+            best = max(best, (gs - cur).total_seconds())
+        cur = max(cur, ge)
+        if cur >= b:
+            return best
+    if b > cur:
+        best = max(best, (b - cur).total_seconds())
+    return best
+
+
+def _evidence_end(s: dict) -> datetime:
+    """Конец участка для квалификации (ревью v5.1.30): у идущего — последний
+    реальный отсчёт, а не край окна t1. Иначе один пакет выше порога, за
+    которым обрыв или пауза до 90 с (ещё не разрыв), «держался бы непрерывно»
+    61–89 с — фантом-эпизод, и в закрытом окне, если обрыв начался меньше чем
+    за 90 с до реза; то же у хвоста [конец дыры, t1] без отсчётов после неё.
+    Живой результат так не больше итогового, квалификация запаздывает не
+    больше чем на пакет. Конец эпизода (_e, until) этим не меняется. «_ev» —
+    явный конец (у отрезков «без нагрузки» — последний пакет: строки нагрузки
+    редкие, значение держится, пока идут пакеты)."""
+    if s.get("_ev") is not None:
+        return max(s["_s"], s["_ev"])
+    if not s.get("ongoing"):
+        return s["_e"]
+    pts = [p[0] for p in s.get("_pts") or [] if p[0] >= s["_s"]]
+    return max(pts) if pts else s["_s"]
+
+
+def _phase_series(seg_by_addr, cfg, t0, t1, gaps, packets) -> tuple[list[tuple], dict] | None:
+    """Ряд фаз рабочей части [t0, t1) по пакетам (metrics.phase_series) и его
+    параметры. None — считать не из чего (нет токов фаз в карте или
+    номинального тока)."""
+    prm = phase_params(cfg)
+    if prm is None:
+        return None
+    r_addr = cfg.role_to_addr("RATING_KW")
+    i_nom = nominal_current(cfg, [v for _, v in _rows_any(seg_by_addr.get(r_addr))]
+                            if r_addr is not None else [])
+    if i_nom <= 0:
+        return None
+    rows = {a: _rows_any(seg_by_addr.get(a), t0, t1) for a in prm["addrs"]}
+    pk = packets[bisect.bisect_left(packets, t0):bisect.bisect_left(packets, t1)]
+    return phase_series(rows, pk, gaps or [], prm, i_nom), prm
+
+
+def _phase_spans(series: list[tuple], idx: int, thr: float, t0: datetime, t1: datetime,
+                 brk: list[tuple[datetime, datetime | None, str]], role: str) -> list[dict]:
+    """Участки «≥ порога» одного правила ряда фаз: отсчёт на каждый пакет, без
+    значения — закрывает участок (у I₂ ток фазы 0 — не нарушение)."""
+    pts = [(p[0], p[idx] is not None and p[idx] >= thr, p[idx], None) for p in series]
+    return _spans(pts, t0, t1, brk, None, role)
+
+
+def _noload_spans(seg_by_addr, cfg, t0: datetime, t1: datetime,
+                  brk: list[tuple[datetime, datetime | None, str]],
+                  gl: list[tuple[datetime, datetime]], held: dict[str, Any], carry: bool,
+                  carry_sec: float, break_sec: float,
+                  packets: list[datetime] | None = None, max_gap: float = 90.0) -> list[dict]:
+    """Нарушения NO_LOAD_TOO_LONG рабочей части [t0, t1) (v5.1.30, В-27.2).
+
+    Отрезок — строки LOAD_PCT ниже load_pct (значение держится между строками,
+    пока идут пакеты): выход не дольше допуска (purge_dip_tolerance_sec) отрезок
+    не рвёт; выход дольше — отрезок кончился на начале выхода; дыра data_gaps и
+    пауза пакетов рвут отрезок на последнем пакете перед ними, после них
+    значение неизвестно до свежей строки (как noload_reset аккумулятора).
+    Длина — видимое время отрезка плюс перенос, если отрезок перенесён через
+    начало окна (carry: удержанная на t0 нагрузка ниже порога — или идёт
+    короткий выход, break_sec аккумулятора). Нарушение — участок [начало
+    отрезка + (max_continuous_sec − перенос), конец отрезка], если длина больше
+    нормы (строго, как у прежнего детектора). Участок — dict как у _spans, плюс
+    run_start, run_sec (длина с переносом) и carry_sec.
+
+    Длина идущего отрезка — до последнего пакета (_evidence_end, ревью
+    v5.1.30): хвост без пакетов перед обрывом не досчитывает «850 + 80 с» до
+    нарушения; конец эпизода — край окна, как раньше.
+
+    Перенос — счётчик аккумулятора нагара (CokingRisk.noload_run_sec) на
+    начало окна. Удержанной нагрузки на t0 нет (строка до реза за паузой
+    пакетов длиннее 90 с, held_before её отбросил), а аккумулятор отрезок
+    помнит — перенесённый отрезок идёт с t0, если на t0 нет дыры data_gaps и
+    первый пакет окна не дальше паузы (ревью v5.1.30: иначе перенос терялся
+    целиком). Правила аккумулятора и участков различаются: аккумулятор копит
+    только время ниже порога (короткий выход в длину не входит, участок
+    считает его видимым временем отрезка) и рвёт отрезок только на дыре
+    data_gaps (пауза пакетов без строки data_gaps его не рвёт, участок — рвёт).
+    Поэтому перенос — оценка снизу или сверху на величину коротких выходов и
+    пауз до реза; на окне сравнение с аккумулятором — не равенство."""
+    addr = cfg.role_to_addr("LOAD_PCT")
+    if addr is None:
+        return []
+    pct = float(cfg.det("NO_LOAD_TOO_LONG", "load_pct", default=10))
+    limit = float(cfg.det("NO_LOAD_TOO_LONG", "max_continuous_sec", default=900))
+    tol = float(cfg.det("COKING_RISK", "purge_dip_tolerance_sec", default=60.0))
+    rows = _real_rows(seg_by_addr.get(addr), t0, t1)
+    pk = list(packets or [])
+    ptol = timedelta(seconds=_PACKET_TOL_SEC)
+    runs: list[dict[str, Any]] = []
+    cur: dict[str, Any] | None = None
+
+    def close(te: datetime, ongoing: bool = False) -> None:
+        nonlocal cur
+        cur["_e"] = max(te, cur["_s"])
+        cur["ongoing"] = ongoing
+        runs.append(cur)
+        cur = None
+
+    h = held.get("LOAD_PCT") if carry else None
+    if h is not None:
+        hv = float(h[1])
+        if hv < pct:
+            cur = {"_s": t0, "carried": True, "exit": None, "_pts": [(_tz(h[0]), hv, None)],
+                   "last": t0}
+        elif carry_sec > 0 and 0 < break_sec <= tol:
+            # На резе шёл короткий выход внутри отрезка (аккумулятор его помнит)
+            cur = {"_s": t0, "carried": True, "exit": t0 - timedelta(seconds=break_sec),
+                   "_pts": [], "last": t0}
+    elif carry and carry_sec > 0:
+        # Удержанная нагрузка выпала (пауза до реза), аккумулятор отрезок помнит:
+        # перенос — с t0, если на t0 связь была (нет дыры, первый пакет рядом)
+        i0 = bisect.bisect_left(pk, t0)
+        first = pk[i0] if i0 < len(pk) else None
+        if (first is not None and (first - t0).total_seconds() <= max_gap
+                and not any(gs <= t0 < ge for gs, ge in gl)):
+            cur = {"_s": t0, "carried": True,
+                   "exit": t0 - timedelta(seconds=break_sec) if 0 < break_sec <= tol else None,
+                   "_pts": [], "last": t0}
+    ri, bi = 0, 0
+    nr, nb = len(rows), len(brk)
+    while ri < nr or bi < nb:
+        if bi < nb and (ri >= nr or rows[ri][0] > brk[bi][0] + ptol):
+            a, _b, _kind = brk[bi]
+            bi += 1
+            if cur is not None:
+                close(cur["exit"] if cur["exit"] is not None else max(a, cur["last"]))
+            continue
+        ts, v = rows[ri]
+        ri += 1
+        if cur is not None and cur["exit"] is not None \
+                and (ts - cur["exit"]).total_seconds() > tol:
+            close(cur["exit"])          # выход дольше допуска — отрезок кончился на его начале
+        if v < pct:
+            if cur is None:
+                cur = {"_s": ts, "carried": False, "exit": None, "_pts": [], "last": ts}
+            cur["exit"] = None
+            cur["_pts"].append((ts, v, None))
+            cur["last"] = ts
+        elif cur is not None:
+            if cur["exit"] is None:
+                cur["exit"] = ts
+            cur["last"] = ts
+    if cur is not None:
+        if cur["exit"] is not None:
+            close(cur["exit"])          # на краю окна идёт выход — отрезок кончился на нём
+        else:
+            close(t1, ongoing=True)
+    out: list[dict[str, Any]] = []
+    for r in runs:
+        c_sec = float(carry_sec) if r["carried"] and r["_s"] == t0 else 0.0
+        # Идущий отрезок — до последнего пакета в нём (не до края окна)
+        ev = r["_e"]
+        if r["ongoing"]:
+            j = bisect.bisect_left(pk, r["_e"]) - 1
+            ev = max(r["_s"], r["last"], pk[j] if j >= 0 and pk[j] >= r["_s"] else r["_s"])
+        total = visible_sec(r["_s"], ev, gl) + c_sec
+        if total <= limit:
+            continue
+        vs = r["_s"] + timedelta(seconds=max(0.0, limit - c_sec))
+        if r["_e"] <= vs or ev <= vs:
+            continue
+        # Отсчёты нарушения и удержанный на его начало (значения для vmin/vmax)
+        before = [p for p in r["_pts"] if p[0] < vs]
+        pts = ([before[-1]] if before else []) + [p for p in r["_pts"] if p[0] >= vs]
+        out.append({"_s": vs, "_e": r["_e"], "_ev": ev, "ongoing": r["ongoing"],
+                    "carried": bool(c_sec and vs == t0), "role": "LOAD_PCT", "_pts": pts,
+                    "run_start": r["_s"], "run_sec": round(total, 1), "carry_sec": round(c_sec, 1)})
+    return out
+
+
 # ── Кластеры ────────────────────────────────────────────────────────────────
 
 def _union_sec(iv: list[tuple[datetime, datetime]]) -> float:
@@ -574,9 +816,36 @@ def _clusters(spans: list[dict], gl: list[tuple[datetime, datetime]], key: str,
                 c["hard_until"] = _iso(lh["_e"])
                 c["hard_ongoing"] = bool(lh["ongoing"])
         else:
-            vals = [p[1] for s in sp for p in s["_pts"]]
+            vals = [p[1] for s in sp for p in s["_pts"] if p[1] is not None]
             c["vmin"] = _rnd(min(vals)) if vals else None
             c["vmax"] = _rnd(max(vals)) if vals else None
+        if key in _EVENT_KEYS:
+            # v5.1.30: видимое время нарушения (объединение участков без дыр),
+            # самый длинный непрерывный участок без дыр (квалификация ряда фаз)
+            # и устойчивый максимум — держался хотя бы два отсчёта подряд
+            # (ревью E1: на переходном кадре одна фаза приходит раньше двух других)
+            # Ревью v5.1.30: конец идущего участка — последний реальный отсчёт
+            # (_evidence_end), а не край окна; пара максимума — соседние отсчёты
+            # одного участка без дыры между ними
+            iv = sorted((s["_s"], _evidence_end(s)) for s in sp)
+            merged: list[list[datetime]] = []
+            for a, b in iv:
+                if merged and a <= merged[-1][1]:
+                    merged[-1][1] = max(merged[-1][1], b)
+                else:
+                    merged.append([a, b])
+            c["visible_sec"] = round(sum(visible_sec(a, b, gl) for a, b in merged), 1)
+            c["longest_sec"] = round(max(_longest_free(s["_s"], _evidence_end(s), gl) for s in sp), 1)
+            pairs = [min(p[1], q[1]) for s in sp for p, q in zip(s["_pts"], s["_pts"][1:])
+                     if p[1] is not None and q[1] is not None and not _covered(gl, p[0], q[0])]
+            c["smax"] = _rnd(max(pairs)) if pairs else c["vmax"]
+        if key == "NO_LOAD_TOO_LONG":
+            # Отрезок первого нарушения — того, что даёт начало кластера и
+            # t_detected (ревью v5.1.30: «28 мин подряд» брались от второго)
+            first = min(sp, key=lambda s: s["_s"])
+            c["run_sec"] = first.get("run_sec")
+            c["run_start"] = _iso(first["run_start"]) if first.get("run_start") else None
+            c["carry_sec"] = first.get("carry_sec") or 0.0
         if key == "LIMIT_PROXIMITY":
             roles: dict[str, Any] = {}
             for r in sorted({s["role"] for s in sp if s.get("role")}):
@@ -604,6 +873,9 @@ def segment_spans(
     held: dict[str, Any] | None = None,
     carry: bool = False,
     horizon: datetime | None = None,
+    noload_carry_sec: float = 0.0,
+    noload_break_sec: float = 0.0,
+    phase_out: dict | None = None,
 ) -> dict[str, list[dict[str, Any]] | None]:
     """Участки и кластеры нарушений рабочей части сегмента [t0, t1): {ключ: [кластер]}.
 
@@ -620,6 +892,12 @@ def segment_spans(
     п.7): каждый ключ считается в своём try, сбой одного не гасит соседей,
     детектор этого ключа идёт по подсегменту, как при live_spans=None. Сбой
     общей части (пакеты, разрывы) — исключение наружу, в страховку сегментатора.
+    noload_carry_sec / noload_break_sec (v5.1.30, В-27.2) — отрезок «без
+    нагрузки» и короткий выход в нём на начало окна по аккумулятору нагара
+    (CokingRisk.noload_run_sec / noload_break_sec), только при carry.
+    phase_out — сюда кладётся посчитанный ряд фаз ("series": [(момент, I₂,
+    перекос, нейтраль)]): сегментатор отдаёт его срезы метрикам подсегментов,
+    чтобы не строить тот же ряд второй раз (v5.1.30, время цикла).
     O(n) по строкам адреса."""
     t0, t1 = _tz(t0), _tz(t1)
     if t1 <= t0:
@@ -695,6 +973,45 @@ def segment_spans(
     # Паспорт давления масла (OIL_DILUTION)
     guarded("OIL_DILUTION", lambda: add("OIL_DILUTION", _passport_spans(
         seg_by_addr, cfg, t0, t1, gaps, held, carry, packets, trail_pause)))
+
+    # Ряд фаз (v5.1.30, В-27.1): I₂, перекос фаз, ток нейтрали — один ряд по
+    # пакетам на три ключа; кластер — эпизод, только если в нём есть участок
+    # непрерывно не короче выдержки KB. Сбой ряда — None у всех трёх
+    phase_keys = [pk for pk in _PHASE_KEYS if cfg.det(pk[0], "enabled", default=True)]
+    ser: tuple[list[tuple], dict] | None = None
+    if phase_keys:
+        try:
+            ser = _phase_series(seg_by_addr, cfg, t0, t1, gaps, packets)
+        except Exception:
+            for pk in phase_keys:
+                out[pk[0]] = None
+            logger.warning("Ряд фаз [%s, %s) не посчитан — I₂, перекос и нейтраль по подсегменту",
+                           _iso(t0), _iso(t1), exc_info=True)
+            phase_keys = []
+
+    def _phase(key: str, idx: int, thr_key: str, role: str) -> None:
+        series, pprm = ser  # type: ignore[misc]
+        min_run = float(cfg.det(key, "duration_warning_sec", default=60.0))
+        add(key, _phase_spans(series, idx, pprm[thr_key], t0, t1, brk, role))
+        if out.get(key):
+            # Короткий кластер (нет участка непрерывно ≥ выдержки) — не эпизод
+            out[key] = [c for c in out[key] if c["longest_sec"] >= min_run]
+            if not out[key]:
+                del out[key]
+    if ser is not None:
+        if phase_out is not None:
+            phase_out["series"] = ser[0]
+        for key, idx, thr_key, role in phase_keys:
+            guarded(key, (lambda k, i, tk, r: (lambda: _phase(k, i, tk, r)))(key, idx, thr_key, role))
+
+    # Без нагрузки дольше нормы (v5.1.30, В-27.2): нарушение — с момента
+    # превышения нормы, перенос через рез — по аккумулятору нагара
+    if cfg.det("NO_LOAD_TOO_LONG", "enabled", default=True):
+        guarded("NO_LOAD_TOO_LONG", lambda: add("NO_LOAD_TOO_LONG", _noload_spans(
+            seg_by_addr, cfg, t0, t1, brk, gl, held, carry,
+            float(noload_carry_sec or 0.0) if carry else 0.0,
+            float(noload_break_sec or 0.0) if carry else 0.0,
+            packets, float(prm["packet_max_gap_sec"]))))
     return out
 
 
