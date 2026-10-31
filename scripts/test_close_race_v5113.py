@@ -173,7 +173,7 @@ check(not LOG["marked"] and extra["applied"] is False and "снятие не з�
 reset(supp_ok=True)
 out = asyncio.run(mgr._analyze_warning_claude("SN", "pcc", 1, dict(STRUCT), "h2"))
 ev = LOG["events"][-1]
-check(out == mgr.GATE_OK and ev["decision_applied"] is True and LOG["marked"] == [["LIMIT_PROXIMITY"]]
+check(out == mgr.GATE_OK and ev["decision_applied"] is True and LOG["marked"] == [["LIMIT_PROXIMITY|OIL_TEMP"]]
       and "применён (на момент разбора)" in LOG["saved"][-1][0], f"4в: записано — применено: {out}, {ev}")
 
 # 4г. Разбор с незаписанным снятием — не «разобран»: состав спросят снова после паузы

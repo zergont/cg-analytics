@@ -700,6 +700,14 @@ def build_structural_status(
             elif not description:
                 description = (d.get("values") or {}).get("fault_name") or None
 
+        # Параметр близости к уставке (v5.1.31, В-26.1): свои эпизоды, счётчики и
+        # снятия гейтом — по паре (сценарий, роль); роль — values.role, у старых
+        # детекций без неё — по уставке
+        param_role = None
+        if scenario == "LIMIT_PROXIMITY":
+            from analytics.live import limit_role_of
+            param_role = limit_role_of(d)
+
         # Аналитику не подписывать именем кода Cummins: «Высокая температура масла 1»
         # у сигнала «близко к порогу» (v5.1.6, решение B)
         if not description and scenario != "CONTROLLER_FAULT":
@@ -715,6 +723,7 @@ def build_structural_status(
         det_vals = d.get("values") or {}
         alarm = {
             "scenario":          scenario,
+            "param_role":        param_role,
             "severity":          severity,
             "trigger":           trigger,
             "fault_codes":       fault_codes,
@@ -1110,7 +1119,7 @@ def build_warning_prompt(
                              f"{e.get('scenario')}: разовое событие {t_open_s}")
                 continue
             lines.append(
-                f"  [{cap_severity(e.get('scenario'), e.get('severity'))}] {e.get('scenario')}: {span}, "
+                f"  [{cap_severity(e.get('scenario'), e.get('severity'))}] {_timeline_name(e)}: {span}, "
                 f"воздействие {_fmt_duration(e.get('active_sec') or 0)}"
                 f"{_blind_note(e.get('blind_sec'))}{supp}"
             )
@@ -1143,8 +1152,13 @@ def build_warning_prompt(
         for al in trip_context.get("open_alarms", []):
             supp = (" — снималась гейтом (прошлое решение, не довод)"
                     if al.get("gate_suppressed") else "")
+            # v5.1.31 (В-26.1): у близости к уставке — параметр
+            _pr = al.get("param_role")
+            if _pr:
+                from analytics.labels import role_label
+                _pr = f" ({role_label(_pr)})"
             lines.append(
-                f"  Висела тревога: {al.get('scenario')} "
+                f"  Висела тревога: {al.get('scenario')}{_pr or ''} "
                 f"[{cap_severity(al.get('scenario'), al.get('severity'))}]"
                 f" {_fmt_duration(al.get('active_sec') or 0)}"
                 f"{_blind_note(al.get('blind_sec'))}{supp}"
@@ -1290,6 +1304,21 @@ def build_warning_prompt(
         "на что обратить внимание оператору. Ответ на русском языке.",
     ]
     return "\n".join(lines)
+
+
+def _timeline_name(e: dict) -> str:
+    """Сценарий эпизода в хронологии гейта; у близости к уставке — с параметром
+    (v5.1.31, В-26.1: у ролей свои эпизоды). Сбой — сценарий."""
+    sc = e.get("scenario") or "?"
+    if sc != "LIMIT_PROXIMITY":
+        return sc
+    try:
+        from analytics.labels import role_label
+        from analytics.live import limit_role_of
+        r = limit_role_of(e)
+        return f"{sc} ({role_label(r)})" if r else sc
+    except Exception:
+        return sc
 
 
 def _fmt_num(v) -> str:

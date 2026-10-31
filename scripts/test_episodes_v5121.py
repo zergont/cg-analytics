@@ -519,40 +519,40 @@ def cl(res, key="LIMIT_PROXIMITY"):
 check(LIVE_RECENT_SEC == 600 and PASSPORT_RECENT_SEC == LIVE_RECENT_SEC,
       "2: N = 600 с (В2), PASSPORT_RECENT_SEC — псевдоним")
 
-# ── 2а. Удержание 99,0007 без новых строк 20 мин при идущих пакетах — участок идёт ──
-r = sp(PL + [h(OILT, S(L0, 60), 97.0), h(OILT, S(L0, 600), 99.0007)])
+# ── 2а. Удержание 100,0007 без новых строк 20 мин при идущих пакетах — участок идёт ──
+r = sp(PL + [h(OILT, S(L0, 60), 97.0), h(OILT, S(L0, 600), 100.0007)])
 c = cl(r)
 check(len(c) == 1 and c[0]["start"] == iso(S(L0, 600)) and c[0]["end"] == iso(L1) and c[0]["ongoing"]
       and c[0]["blind_sec"] == 0 and set(c[0]["roles"]) == {"OIL_TEMP"} and not c[0]["carried"],
       f"2а: удержание при идущих пакетах — участок идёт до края окна: {c}")
-check(c and c[0]["viol_sec"] == 1200 and c[0]["vmax"] == 99.0007, f"2а: чистое время и значение: {c}")
+check(c and c[0]["viol_sec"] == 1200 and c[0]["vmax"] == 100.0007, f"2а: чистое время и значение: {c}")
 
 # ── 2б. Пауза пакетов > 90 с без data_gaps — конец на последнем пакете, слепой доли нет ──
 Pp = pings(S(L0, -300), S(L1, 60), skip=(S(L0, 900), S(L0, 1100)))
-c = cl(sp(Pp + [h(OILT, S(L0, 600), 99.0007)]))
+c = cl(sp(Pp + [h(OILT, S(L0, 600), 100.0007)]))
 check(len(c) == 1 and c[0]["end"] == iso(S(L0, 900)) and not c[0]["ongoing"] and c[0]["blind_sec"] == 0
       and c[0]["viol_sec"] == 300, f"2б: пауза — конец на последнем пакете, слепой доли нет: {c}")
 # После паузы свежая строка — новый участок (пауза 200 с < N — тот же кластер)
-c = cl(sp(Pp + [h(OILT, S(L0, 600), 99.0007), h(OILT, S(L0, 1101), 99.0007)]))
+c = cl(sp(Pp + [h(OILT, S(L0, 600), 100.0007), h(OILT, S(L0, 1101), 100.0007)]))
 check(len(c) == 1 and c[0]["spans"] == 2 and c[0]["viol_sec"] == 300 + 699 and c[0]["ongoing"],
       f"2б: после паузы — новый участок того же кластера: {c}")
 
 # ── 2в. Дыра data_gaps участок не рвёт: слепая доля, конец — первый пакет после дыры ──
 G = [{"gap_start": S(L0, 900), "gap_end": S(L0, 1100)}]
-c = cl(sp(Pp + [h(OILT, S(L0, 600), 99.0007)], gaps=G))
+c = cl(sp(Pp + [h(OILT, S(L0, 600), 100.0007)], gaps=G))
 check(len(c) == 1 and c[0]["end"] == iso(S(L0, 1100)) and c[0]["blind_sec"] == 200 and not c[0]["ongoing"]
       and c[0]["viol_sec"] == 500, f"2в: дыра — до первого пакета после неё, слепо 200 с: {c}")
-c = cl(sp(Pp + [h(OILT, S(L0, 600), 99.0007), h(OILT, S(L0, 1101), 99.5)], gaps=G))
+c = cl(sp(Pp + [h(OILT, S(L0, 600), 100.0007), h(OILT, S(L0, 1101), 99.5)], gaps=G))
 check(len(c) == 1 and c[0]["spans"] == 1 and c[0]["ongoing"] and c[0]["blind_sec"] == 200,
       f"2в: в первом пакете после дыры — нарушение: участок продолжается: {c}")
-c = cl(sp(Pp + [h(OILT, S(L0, 600), 99.0007), h(OILT, S(L0, 1101), 97.0)], gaps=G))
+c = cl(sp(Pp + [h(OILT, S(L0, 600), 100.0007), h(OILT, S(L0, 1101), 97.0)], gaps=G))
 check(len(c) == 1 and c[0]["end"] == iso(S(L0, 1101)), f"2в: после дыры — норма: конец на ней: {c}")
 # Открытая дыра (синтетический хвост открытого окна) — нарушение «идёт», хвост — слепая доля
 Pt = pings(S(L0, -300), S(L0, 1000))
-c = cl(sp(Pt + [h(OILT, S(L0, 600), 99.0007)], gaps=[{"gap_start": S(L0, 990), "gap_end": None}]))
+c = cl(sp(Pt + [h(OILT, S(L0, 600), 100.0007)], gaps=[{"gap_start": S(L0, 990), "gap_end": None}]))
 check(len(c) == 1 and c[0]["ongoing"] and c[0]["end"] == iso(L1) and c[0]["blind_sec"] == 810,
       f"2в: обрыв связи на нарушении — идёт, слепая доля — хвост: {c}")
-c = cl(sp(Pt + [h(OILT, S(L0, 600), 99.0007)]))
+c = cl(sp(Pt + [h(OILT, S(L0, 600), 100.0007)]))
 check(len(c) == 1 and not c[0]["ongoing"] and c[0]["end"] == iso(S(L0, 990)),
       f"2в: пакеты кончились без data_gaps — конец на последнем пакете: {c}")
 
@@ -611,7 +611,7 @@ def _rec_spans(*a, **k):
 _sg.segment_spans = _rec_spans
 RS_REP = [rs(3, T(0, 0))]                       # режим начался до окна — REPORT_START
 RS_CHG = [rs(0, T(0, 0), L0), rs(3, L0)]        # смена режима на начале окна
-seed_ot = {"held": {"OIL_TEMP": {"ts": S(L0, -600), "value": 99.0007}}, "held_gaps": []}
+seed_ot = {"held": {"OIL_TEMP": {"ts": S(L0, -600), "value": 100.0007}}, "held_gaps": []}
 SPANS_CALLS.clear()
 s_rep = seg3(work_rows(extra=[h(OILT, S(L0, 300), 97.0)]), RS_REP, seed=seed_ot)
 d_rep = dets(s_rep, "LIMIT_PROXIMITY")
@@ -619,7 +619,7 @@ check(SPANS_CALLS and SPANS_CALLS[-1][1].get("carry") is True, "2е: REPORT_STAR
 check(len(d_rep) == 1 and d_rep[0][1].t_detected == iso(L0)
       and d_rep[0][1].values["live"]["clusters"][0]["carried"]
       and d_rep[0][1].values["live"]["clusters"][0]["end"] == iso(S(L0, 300)),
-      f"2е: удержанные 99,0007 переносятся с 09:00 до первой строки в норме: "
+      f"2е: удержанные 100,0007 переносятся с 09:00 до первой строки в норме: "
       f"{[(d.t_detected, d.values.get('live')) for _, d in d_rep]}")
 SPANS_CALLS.clear()
 s_chg = seg3(work_rows(extra=[h(OILT, S(L0, 300), 97.0)]), RS_CHG, seed=seed_ot)
@@ -707,8 +707,8 @@ check(len(d_rp) == 1 and d_rp[0][1].values["live"]["clusters"][0]["run_sec"] == 
 # ══ 3. Кластеры ═════════════════════════════════════════════════════════════
 # ── 3а. Пауза 666 с между участками — два кластера (ДЭС №3 13.10 17:45:52 → 17:56:58) ──
 def two(gap_s, gaps=None, pk=PL):
-    return cl(sp(pk + [h(OILT, S(L0, 100), 99.0007), h(OILT, S(L0, 160), 97.0),
-                       h(OILT, S(L0, 160 + gap_s), 99.0007), h(OILT, S(L0, 200 + gap_s), 97.0)], gaps=gaps))
+    return cl(sp(pk + [h(OILT, S(L0, 100), 100.0007), h(OILT, S(L0, 160), 97.0),
+                       h(OILT, S(L0, 160 + gap_s), 100.0007), h(OILT, S(L0, 200 + gap_s), 97.0)], gaps=gaps))
 
 
 check(len(two(666)) == 2, f"3а: пауза 666 с > N — два кластера: {two(666)}")
@@ -719,14 +719,16 @@ Pg = pings(S(L0, -300), S(L1, 60), skip=(S(L0, 300), S(L0, 500)))
 c = two(700, gaps=[{"gap_start": S(L0, 300), "gap_end": S(L0, 500)}], pk=Pg)
 check(len(c) == 1 and c[0]["blind_sec"] == 200, f"3б: 700 с, из них 200 без связи — один кластер: {c}")
 check(len(two(700, pk=Pg)) == 2, "3б: те же 700 с без data_gaps — два кластера")
-# ── 3в. Близость — объединение ролей, участки по ролям внутри кластера ──
-r = sp(PL + [h(OILT, S(L0, 100), 99.0007), h(OILT, S(L0, 400), 97.0),
+# ── 3в. Близость — кластеры по ролям раздельно (v5.1.31, В-26.1; до неё — один на три роли) ──
+r = sp(PL + [h(OILT, S(L0, 100), 100.0007), h(OILT, S(L0, 400), 97.0),
              h(COOL3, S(L0, 50), 85.0), h(COOL3, S(L0, 300), 94.0), h(COOL3, S(L0, 500), 85.0)])
 c = cl(r)
-check(len(c) == 1 and c[0]["start"] == iso(S(L0, 100)) and c[0]["end"] == iso(S(L0, 500))
-      and c[0]["viol_sec"] == 400 and c[0]["roles"]["OIL_TEMP"]["viol_sec"] == 300
-      and c[0]["roles"]["COOLANT_TEMP"]["viol_sec"] == 200 and c[0]["roles"]["COOLANT_TEMP"]["vmax"] == 94.0,
-      f"3в: один кластер на три роли, участки по ролям: {c}")
+check(len(c) == 2 and [x.get("role") for x in c] == ["OIL_TEMP", "COOLANT_TEMP"]
+      and c[0]["start"] == iso(S(L0, 100)) and c[0]["end"] == iso(S(L0, 400)) and c[0]["viol_sec"] == 300
+      and set(c[0]["roles"]) == {"OIL_TEMP"} and c[0]["roles"]["OIL_TEMP"]["viol_sec"] == 300
+      and c[1]["start"] == iso(S(L0, 300)) and c[1]["end"] == iso(S(L0, 500)) and c[1]["viol_sec"] == 200
+      and set(c[1]["roles"]) == {"COOLANT_TEMP"} and c[1]["vmax"] == 94.0,
+      f"3в: по кластеру на роль, начало — своей роли: {c}")
 cf = cl(r, "COOLING_FAILURE")
 check(len(cf) == 1 and cf[0]["start"] == iso(S(L0, 300)) and cf[0]["end"] == iso(S(L0, 500)),
       f"3в: COOLING_FAILURE — свой ключ (≥ 0,9·HCT): {cf}")
@@ -743,12 +745,12 @@ def run_det(chars, sub_a, sub_b, live, derived=DM0, cfg=CFG3):
 
 
 # ── 4а. Участок пересекает подсегмент — детекция есть; не пересекает — нет ──
-live_lp = sp(PL + [h(OILT, S(L0, 100), 99.0007), h(OILT, S(L0, 400), 97.0)])
+live_lp = sp(PL + [h(OILT, S(L0, 100), 100.0007), h(OILT, S(L0, 400), 97.0)])
 chars_hot = {"OIL_TEMP": {"min": 95.0, "max": 99.5, "median": 97.0}}
 dA = [d for d in run_det(chars_hot, S(L0, 300), S(L0, 600), live_lp) if d.scenario == "LIMIT_PROXIMITY"]
 dB = [d for d in run_det(chars_hot, S(L0, 400), S(L0, 600), live_lp) if d.scenario == "LIMIT_PROXIMITY"]
 check(len(dA) == 1 and dA[0].t_detected == iso(S(L0, 100)) and dA[0].values["role"] == "OIL_TEMP"
-      and dA[0].values["value"] == 99.0007 and dA[0].trigger.startswith("Температура масла: 99.00"),
+      and dA[0].values["value"] == 100.0007 and dA[0].trigger.startswith("Температура масла: 100.00"),
       f"4а: участок в подсегменте — детекция, начало кластера, значение по отсчётам: {[d.values for d in dA]}")
 check(not dB, f"4а: участок кончился на начале подсегмента — детекции нет (max 99,5 в характеристиках): {dB}")
 lvA = dA[0].values["live"] if dA else {}
@@ -772,7 +774,7 @@ by_sc = {d.scenario: d for d in d_old}
 check(set(by_sc) >= {"LIMIT_PROXIMITY", "RPM_UNDERSPEED", "COOLING_FAILURE"}
       and all(d.t_detected == iso(S(L0, 300)) and "live" not in d.values for d in d_old),
       f"4б: None — по характеристикам, начало подсегмента, без live: {[(d.scenario, d.t_detected) for d in d_old]}")
-check(set(by_sc["LIMIT_PROXIMITY"].values) == {"value", "shutdown_limit", "proximity_pct"}
+check(set(by_sc["LIMIT_PROXIMITY"].values) == {"value", "shutdown_limit", "proximity_pct", "role"}
       and by_sc["RPM_UNDERSPEED"].trigger == "RPM мин. 1473 об/мин — на 12 ниже порога 1485 "
       "(размах 37 об/мин от макс. 1510), фронтов: 1" and "freq_rpm_min" not in by_sc["RPM_UNDERSPEED"].values,
       f"4б: прежние поля и текст: {by_sc['RPM_UNDERSPEED'].trigger}")
@@ -1142,6 +1144,8 @@ def cyc(e, dets, now, gaps=(), gf=F0, rs=3, ca=None):
 
 
 LP = "LIMIT_PROXIMITY"
+# v5.1.31 (В-26.1): ключ эпизода близости — с ролью
+LPK = "LIMIT_PROXIMITY|OIL_TEMP"
 
 
 async def _gd_empty(*a, **k):
@@ -1534,7 +1538,7 @@ check(all(len(k["open_values"]["live"]["clusters"]) == 1
           and k["open_values"]["live"]["onset"] == k["t_open"].isoformat() for k in db7.ins),
       "7а: open_values — live только своего кластера")
 check(db7.ov_calls == [(S(F0, -1), S(F0, 3600))], f"7а: один запрос пересечений на окно сегмента: {db7.ov_calls}")
-check(so7 == {(LP, C1[0]), (LP, C2[0]), (LP, C3[0])}, f"7а: засеянное — пары (ключ, начало): {so7}")
+check(so7 == {(LPK, C1[0]), (LPK, C2[0]), (LPK, C3[0])}, f"7а: засеянное — пары (ключ, начало): {so7}")
 check(set(db7.asked[0]) >= {C1[0], C2[0], C3[0]}, "7а: онсеты кластеров — в existing_episode_onsets")
 
 # ── 7б. Покрыт онсетом или пересечением — не сеется ──
@@ -1902,7 +1906,7 @@ seg9c.subsegments[-1].detections.append(
               source="CONTROLLER_FAULT", trigger="CommonAlarm (Общая авария) (addr=40408, bit=11)",
               related_roles=[], fault_codes=[1453], description_key="k", values=dict(CA)))
 cl9 = eng._segment_clusters(seg9c)
-lp9 = sorted((c["start"], c["end"], c["ongoing"]) for (k, _), c in cl9.items() if k == LP)
+lp9 = sorted((c["start"], c["end"], c["ongoing"]) for (k, _), c in cl9.items() if k == LPK)
 check(lp9 == [(S(L0, 600), S(L0, 762), False), (S(L0, 1428), S(L0, 1446), False),
               (S(L0, 2172), S(L0, 2369), False), (S(L0, 6000), L2, True)],
       f"9в: 4 кластера близости — пауза 666 с больше N: {lp9}")
@@ -1916,7 +1920,7 @@ PANEL9 = "CONTROLLER_FAULT|40408|11"
 SEED9 = [(S(L0, 600), S(L0, 762), 162.0), (S(L0, 1428), S(L0, 1446), 18.0),
          (S(L0, 2172), S(L0, 2369), 197.0), (S(L0, 4000), S(L0, 4090), 90.0)]
 lk9 = eng._live_alert_keys(seg9c)
-check(lk9 >= {LP, "OIL_DILUTION", PANEL9}, f"9в: живые на конец: {lk9}")
+check(lk9 >= {LPK, "OIL_DILUTION", PANEL9}, f"9в: живые на конец: {lk9}")
 
 
 def ep_row(k):
@@ -1950,14 +1954,14 @@ def check9(p, tag):
 # Живой цикл вёл эпизоды по идущим кластерам (как на проде): они в памяти и в БД открыты
 OPEN9 = [{"id": 101, "scenario": LP, "source": "analytics", "severity": "CAUTION", "gate_suppressed": False,
           "t_open": S(L0, 6000), "t_close": None, "active_sec": 1170.0, "blind_sec": 0.0,
-          "open_values_json": _json.dumps({"live": {"until": S(L2, -30).isoformat()}})},
+          "open_values_json": _json.dumps({"role": "OIL_TEMP", "live": {"until": S(L2, -30).isoformat()}})},
          {"id": 102, "scenario": "OIL_DILUTION", "source": "analytics", "severity": "CAUTION", "gate_suppressed": False,
           "t_open": S(L0, 7110), "t_close": None, "active_sec": 60.0, "blind_sec": 0.0,
           "open_values_json": _json.dumps({"live": {"until": S(L2, -30).isoformat()}})}]
-MEM9 = {LP: {"id": 101, "exact": True, "until": S(L2, -30), "t_open": S(L0, 6000), "miss": 0},
+MEM9 = {LPK: {"id": 101, "exact": True, "until": S(L2, -30), "t_open": S(L0, 6000), "miss": 0},
         "OIL_DILUTION": {"id": 102, "exact": True, "until": S(L2, -30), "t_open": S(L0, 7110), "miss": 0}}
 db9 = SeedDB(ov=OPEN9)
-collect(seg9c, db9, carry=True, mem=MEM9, open_keys={PANEL9, LP, "OIL_DILUTION"})
+collect(seg9c, db9, carry=True, mem=MEM9, open_keys={PANEL9, LPK, "OIL_DILUTION"})
 check(ins_iv(db9) == SEED9, f"9в (память): посев — кончившиеся кластеры, идущие ведёт живой эпизод: {ins_iv(db9)}")
 p9c, syn9 = summary9([ep_row(k) for k in db9.ins] + [dict(e) for e in OPEN9] + [PANEL_EP9], MEM9)
 check(not syn9, "9в (память): синтетика не нужна — эпизоды открыты")
@@ -2084,7 +2088,7 @@ def live_run(e_, rows_, secs, a=L0, trace=None):
                                          cleared_at=eng._analytics_cleared_at(segs_, e_._episodes),
                                          gaps_from=a, run_state=segs_[-1].run_state))
         if trace is not None:
-            m_ = e_._episodes.get(LP)
+            m_ = e_._episodes.get(LPK)
             trace[x] = (dict(m_) if m_ else None, bool(gps))
 
 
@@ -2186,7 +2190,7 @@ try:
                               _op[2]["open_values"]["live"], until=_u_json.isoformat())), default=str)}]
         e2 = mk_engine(db2)
         asyncio.run(e2._restore_live_state())
-        m_r = dict(e2._episodes.get(LP) or {})
+        m_r = dict(e2._episodes.get(LPK) or {})
         live_run(e2, rows_, range(down[1], end_s, 30))
         return _u_json, m_r, db2
 
@@ -2212,26 +2216,26 @@ try:
     # 09:00:00–…, 15 мин 41 с потеряно
     db_x = FakeDB()
     e_x = mk_engine(db_x)
-    e_x._episodes = {LP: {"id": 31, "severity": "CAUTION", "miss": 0, "first_miss_ts": None,
+    e_x._episodes = {LPK: {"id": 31, "severity": "CAUTION", "miss": 0, "first_miss_ts": None,
                           "t_open": S(F0, -4528), "until": S(F0, -941), "until_kind": "horizon",
                           "exact": True}}
     seg_cut = SEG([SUB(-7200, 0, [LDET(LP, [(S(F0, -4528), F0, True)], ROLE_OT)])])
     e_x._refine_until([seg_cut])
-    check(e_x._episodes[LP]["until"] == F0 and e_x._episodes[LP]["until_kind"] == "end",
-          f"11б: закрываемое окно — until = край окна (кластер шёл на резе): {e_x._episodes[LP]}")
+    check(e_x._episodes[LPK]["until"] == F0 and e_x._episodes[LPK]["until_kind"] == "end",
+          f"11б: закрываемое окно — until = край окна (кластер шёл на резе): {e_x._episodes[LPK]}")
     db_sd = SeedDB(ov=[{"id": 31, "scenario": LP, "t_open": S(F0, -4528), "t_close": None,
                         "open_values_json": _json.dumps({"live": {"until": S(F0, -941).isoformat()}})}])
     collect(seg_cut, db_sd, mem=e_x._episodes)
     check(not db_sd.ins, f"11б: кластер на резе покрыт открытым эпизодом — не сеется: {ins_iv(db_sd)}")
     for n in _DB_NAMES:
         setattr(eng.online_db, n, getattr(db_x, n))
-    cyc(e_x, [ldet(LP, F0, S(F0, 1200), ongoing=True)], S(F0, 1200), gf=F0)
-    check(not db_x.of("close") and not db_x.of("open") and e_x._episodes[LP]["until"] == S(F0, 1200),
+    cyc(e_x, [ldet(LP, F0, S(F0, 1200), ongoing=True, extra=ROLE_OT)], S(F0, 1200), gf=F0)
+    check(not db_x.of("close") and not db_x.of("open") and e_x._episodes[LPK]["until"] == S(F0, 1200),
           f"11б: перенос с 09:00 — продолжение того же эпизода: {db_x.calls}")
     # Горизонт смешанного ключа (детекция без live) по карте не уточняется
-    e_x._episodes[LP].update(until=S(F0, 1300), until_kind="plain")
-    e_x._refine_until([SEG([SUB(0, 1800, [DET(LP, F0, S(F0, 1200))])])])
-    check(e_x._episodes[LP]["until"] == S(F0, 1300), "11б: «plain» — until не уточняется картой")
+    e_x._episodes[LPK].update(until=S(F0, 1300), until_kind="plain")
+    e_x._refine_until([SEG([SUB(0, 1800, [DET(LP, F0, S(F0, 1200), values=ROLE_OT)])])])
+    check(e_x._episodes[LPK]["until"] == S(F0, 1300), "11б: «plain» — until не уточняется картой")
     _cw, _uw = (inspect.getsource(eng.OnlinePollEngine._close_window),
                 inspect.getsource(eng.OnlinePollEngine._update_open_window))
     check(_cw.index("self._refine_until(segments)") < _cw.index("_collect_and_enrich_detections(")

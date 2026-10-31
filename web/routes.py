@@ -62,6 +62,20 @@ def _cap_sev(scenario: str | None, severity: str | None) -> str | None:
     return cap_severity(scenario, severity)
 
 
+def _param_role(e: dict) -> str | None:
+    """Параметр близости к уставке у открытого эпизода (v5.1.31, В-26.2):
+    OIL_TEMP / COOLANT_TEMP / OIL_PRESS из open_values_json.role, у старых
+    строк без роли — по уставке (shutdown_limit). У прочих — None. Сбой — None."""
+    if e.get("scenario") != "LIMIT_PROXIMITY":
+        return None
+    try:
+        from analytics.live import limit_role_of
+        return limit_role_of(e)
+    except Exception:
+        logger.warning("api_machines: роль близости к уставке не определена", exc_info=True)
+        return None
+
+
 def _alarm_name(e: dict, key: str | None = None) -> str | None:
     """Имя открытого эпизода для бегущей строки (active_alarms[].name).
 
@@ -2434,6 +2448,9 @@ async def api_machines():
                     # per-fault: панельные аварии различаются по addr/bit
                     "addr":            e.get("addr"),
                     "bit":             e.get("bit"),
+                    # v5.1.31 (В-26.1, В-26.2): параметр близости к уставке —
+                    # из open_values_json.role, у старых строк — по уставке; колонки нет
+                    "param_role":      _param_role(e),
                     # v5.1.23 (В5): панель с привязанным кодом — имя кода из
                     # справочника KB и «(код N)», как в карточке; без кода — как было
                     "name":            _alarm_name(e, key),

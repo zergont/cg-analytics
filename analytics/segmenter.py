@@ -35,7 +35,7 @@ from .config import AnalyticsConfig
 from .contract import Characteristic, RiskAccumulators, Segment, Subsegment
 from .forward_fill import apply_forward_fill
 from .metrics import compute_characteristics, compute_derived_metrics
-from .accumulators import update_accumulators
+from .accumulators import _gap_overlap_sec, update_accumulators
 from .detectors import run_all_detectors
 from .live import held_before, segment_spans
 
@@ -919,6 +919,9 @@ def _build_subsegments_for_running(
     # Ряд фаз рабочей части (v5.1.30): посчитан для участков — его срезы идут в
     # метрики подсегментов, второй раз тот же ряд не строится
     _phase_out: dict = {}
+    # Отрезок «без нагрузки» начат с начала окна по удержанной нагрузке (v5.1.31,
+    # ревью В-30.3): аккумулятор нагара досчитывает его до первой строки
+    _nl_out: dict = {}
     try:
         _carry_sp = cause_open == "REPORT_START" and head_end == seg_t0
         # Отрезок «без нагрузки», шедший на суточном резе (v5.1.30, В-27.2): длина
@@ -931,11 +934,17 @@ def _build_subsegments_for_running(
             noload_carry_sec=float(getattr(_cr, "noload_run_sec", 0.0) or 0.0) if _carry_sp else 0.0,
             noload_break_sec=float(getattr(_cr, "noload_break_sec", 0.0) or 0.0) if _carry_sp else 0.0,
             phase_out=_phase_out,
+            seg_start=seg_t0, noload_out=_nl_out,
         )
     except Exception:
         logger.warning("Участки нарушений сегмента %s не посчитаны — детекторы по подсегменту",
                        seg_id, exc_info=True)
     _phase_ser = _phase_out.get("series") if live_spans is not None else None
+    # v5.1.31 (ревью В-30.3): кусок отрезка до первой строки нагрузки — в
+    # noload_run_sec аккумулятора, иначе перенос через рез его терял (пара
+    # «закрыт/открыт» на 09:00) и детектор по подсегменту с участками расходился
+    _nl_head: str | None = _nl_out.get("head") if live_spans is not None else None
+    _nl_until = _nl_out.get("head_until") if _nl_head is not None else None
     _phase_ts = [p[0] for p in _phase_ser] if _phase_ser is not None else None
 
     n_stab = int(cfg.seg("boundary_confirmation", "n_stab", default=3))
@@ -1050,7 +1059,18 @@ def _build_subsegments_for_running(
         _ph = (_phase_ser[bisect.bisect_left(_phase_ts, t_sub_start):bisect.bisect_left(_phase_ts, t_sub_end)]
                if _phase_ser is not None else None)
         derived      = compute_derived_metrics(sub_win, t_sub_start, t_sub_end, gaps, cfg, phase=_ph)
-        accumulators = update_accumulators(accumulators, sub_win, t_sub_start, t_sub_end, zone, run_state, cfg, gaps)
+        accumulators = update_accumulators(accumulators, sub_win, t_sub_start, t_sub_end, zone, run_state,
+                                           cfg, gaps, noload_head=_nl_head, noload_head_until=_nl_until)
+        if _nl_head is not None:
+            # Строка нагрузки пришла, дыра связи или отрезок кончился (по участкам) —
+            # дальше аккумулятор по строкам
+            _la = cfg.role_to_addr("LOAD_PCT")
+            if (any(_fv(r) is not None for r in sub_win.get(_la) or [])
+                    or _gap_overlap_sec(gaps or [], t_sub_start, t_sub_end) > 0
+                    or (_nl_until is not None and _tz(_nl_until) <= t_sub_end)):
+                _nl_head = None
+            else:
+                _nl_head = "cont"
 
         faults_in_sub = [
             fp for fp in fault_periods_in_seg

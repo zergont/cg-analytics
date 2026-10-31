@@ -495,8 +495,9 @@ _s3d = seg(_r3d, CUT, BC, cr=CokingRisk(noload_run_sec=870.0), seed=_seed)
 _c3d = clusters(_s3d, NLK)
 check(len(_c3d) == 1 and _c3d[0]["start"] == iso(S(CUT, 30)) and _c3d[0]["end"] == iso(S(CUT, 600))
       and _c3d[0]["carried"] is False and _c3d[0]["carry_sec"] == 870.0 and _c3d[0]["run_sec"] == 1470.0
-      and _c3d[0]["run_start"] == iso(CUT),
-      f"3д: перенос 870 с — нарушение с t0 + 30 с (участок начался в окне, не перенесён): {_c3d}")
+      and _c3d[0]["run_start"] == iso(S(CUT, -870)),
+      f"3д: перенос 870 с — нарушение с t0 + 30 с (участок начался в окне, не перенесён); начало "
+      f"отрезка — до реза, t0 − перенос (ревью v5.1.31): {_c3d}")
 # Перенос 1000 с — нарушение уже идёт на резе: с самого t0, перенесённый участок
 _c3d1 = clusters(seg(_r3d, CUT, BC, cr=CokingRisk(noload_run_sec=1000.0), seed=_seed), NLK)
 check(len(_c3d1) == 1 and _c3d1[0]["start"] == iso(CUT) and _c3d1[0]["carried"] is True,

@@ -1255,14 +1255,50 @@ async def insert_detection_events(
 
 # ── alarm_episodes ────────────────────────────────────────────────────────────
 
-def episode_key(scenario: str | None, addr, bit) -> str:
-    """Ключ тревоги: панельные — по-битно, аналитика — по сценарию.
+def episode_key(scenario: str | None, addr, bit, role: str | None = None) -> str:
+    """Ключ тревоги: панельные — по-битно, аналитика — по сценарию, близость к
+    уставке — по сценарию и роли (v5.1.31, В-26.1: «LIMIT_PROXIMITY|OIL_TEMP»).
 
-    Должен совпадать с engine._alert_key (тот берёт addr/bit из detection.values).
+    Должен совпадать с engine._alert_key (тот берёт addr/bit из detection.values,
+    роль — analytics.live.limit_role_of). role — из строки (_lp_role_sql: роль
+    JSON, у старых строк — по уставке); без роли у близости — сценарий.
     """
     if scenario == "CONTROLLER_FAULT":
         return f"CONTROLLER_FAULT|{addr}|{bit}"
+    if scenario == "LIMIT_PROXIMITY":
+        from analytics.live import lp_key
+        return lp_key(role)
     return scenario or "?"
+
+
+def _lp_role_sql(js: str = "open_values_json") -> str:
+    """SQL-выражение роли близости к уставке у строки (v5.1.31, решение В-26.2):
+    колонки param_role нет — роль из JSON (js->>'role'), у старых строк без
+    роли — по уставке shutdown_limit (та же таблица, что analytics.live.
+    limit_role: 110 — масло, 103,9 — ОЖ, 172 и 241,3 — давление). NULL — не
+    близость или роль не определить. Литералы — константы кода, не ввод."""
+    from analytics.live import LIMIT_ROLE_BY_SETPOINT, LIMIT_SETPOINT_TOL
+    lim = (f"(CASE WHEN jsonb_typeof({js}->'shutdown_limit') = 'number' "
+           f"THEN ({js}->>'shutdown_limit')::float8 END)")
+    whens = " ".join(f"WHEN abs({lim} - {float(v)!r}) < {float(LIMIT_SETPOINT_TOL)!r} THEN '{r}'"
+                     for v, r in LIMIT_ROLE_BY_SETPOINT)
+    # Роль JSON — только непустая строка (как analytics.live.limit_role)
+    role = f"(CASE WHEN jsonb_typeof({js}->'role') = 'string' THEN NULLIF({js}->>'role', '') END)"
+    return (f"(CASE WHEN scenario = 'LIMIT_PROXIMITY' THEN "
+            f"COALESCE({role}, CASE {whens} END) END)")
+
+
+def _lp_has_role_sql(js: str = "open_values_json") -> str:
+    """У строки роль в JSON (непустая строка) — v5.1.31; FALSE — запись до неё."""
+    return (f"COALESCE(jsonb_typeof({js}->'role') = 'string' AND {js}->>'role' <> '', FALSE)")
+
+
+def _key_match_sql(param: str) -> str:
+    """Строка эпизода — под списком ключей param (v5.1.31, В-26.1): сценарий
+    целиком (у близости без роли — все роли, как до v5.1.31) или ключ
+    «сценарий|роль» — только своя роль."""
+    return (f"(scenario = ANY({param}::text[]) OR "
+            f"(scenario || '|' || COALESCE({_lp_role_sql()}, '')) = ANY({param}::text[]))")
 
 
 async def open_episode(
@@ -1325,14 +1361,15 @@ async def existing_episode_onsets(
         return set()
     conn = await _connect()
     try:
-        rows = await conn.fetch("""
-            SELECT scenario, addr, bit, t_open
+        # v5.1.31 (В-26.1): у близости — ключ с ролью (JSON или по уставке)
+        rows = await conn.fetch(f"""
+            SELECT scenario, addr, bit, t_open, {_lp_role_sql()} AS lp_role
             FROM alarm_episodes
             WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
               AND t_open = ANY($4::timestamptz[])
         """, router_sn, equip_type, panel_id, onsets)
         return {
-            (episode_key(r["scenario"], r["addr"], r["bit"]), r["t_open"])
+            (episode_key(r["scenario"], r["addr"], r["bit"], r["lp_role"]), r["t_open"])
             for r in rows
         }
     finally:
@@ -1342,6 +1379,7 @@ async def existing_episode_onsets(
 async def find_episode_by_onset(
     router_sn: str, equip_type: str, panel_id: int, *,
     scenario: str, addr: int | None, bit: int | None, t_open: datetime,
+    role: str | None = None,
 ) -> dict[str, Any] | None:
     """Последний эпизод той же тревоги с тем же онсетом (t_open до микросекунды).
 
@@ -1351,10 +1389,13 @@ async def find_episode_by_onset(
     v5.1.25 (П6): заодно код «Общей аварии» строки и его смены
     (open_values_json → last_fault_code, code_changes) — переоткрытие с другим
     кодом пишет «код сменился» тем же UPDATE, без нового запроса.
+
+    v5.1.31 (В-26.1): role — у близости к уставке только строка своей роли
+    (роль JSON, у старых строк — по уставке); None — без отбора по роли.
     """
     conn = await _connect()
     try:
-        row = await conn.fetchrow("""
+        row = await conn.fetchrow(f"""
             SELECT id, t_close, severity,
                    open_values_json->>'last_fault_code' AS last_fault_code,
                    open_values_json->'code_changes' AS code_changes
@@ -1363,9 +1404,10 @@ async def find_episode_by_onset(
               AND scenario = $4
               AND addr IS NOT DISTINCT FROM $5 AND bit IS NOT DISTINCT FROM $6
               AND t_open = $7
+              AND ($8::text IS NULL OR {_lp_role_sql()} = $8::text)
             ORDER BY id DESC
             LIMIT 1
-        """, router_sn, equip_type, panel_id, scenario, addr, bit, t_open)
+        """, router_sn, equip_type, panel_id, scenario, addr, bit, t_open, role)
         return dict(row) if row else None
     finally:
         await conn.close()
@@ -1667,20 +1709,25 @@ async def set_episodes_gate_suppressed(
     позже него (новые эпизоды той же строки, открытые, пока шёл разбор). src —
     источник снятия {ts, segment_id, kind} в gate_suppressed_src; у уже снятого
     эпизода сохраняется первое решение. Возвращает id помеченных эпизодов.
+
+    v5.1.31 (В-26.1): scenarios — ключи тревог: у близости к уставке
+    «LIMIT_PROXIMITY|роль» — только эпизоды своей роли (снятая близость ОЖ не
+    переносится на масло); сценарий без роли — все его эпизоды, как раньше.
     """
+    from analytics.live import key_scenario
     from online.status_assembler import GATE_EXCLUDED_SCENARIOS
-    scenarios = [s for s in scenarios or [] if s not in GATE_EXCLUDED_SCENARIOS]
+    scenarios = [s for s in scenarios or [] if key_scenario(s) not in GATE_EXCLUDED_SCENARIOS]
     if not scenarios or (ids is not None and not ids):
         return []
     conn = await _connect()
     try:
-        rows = await conn.fetch("""
+        rows = await conn.fetch(f"""
             UPDATE alarm_episodes
             SET gate_suppressed = TRUE,
                 gate_suppressed_src = COALESCE(gate_suppressed_src, $5::jsonb),
                 updated_at = now()
             WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
-              AND t_close IS NULL AND scenario = ANY($4::text[])
+              AND t_close IS NULL AND {_key_match_sql("$4")}
               AND ($6::bigint[] IS NULL OR id = ANY($6::bigint[]))
               AND ($7::timestamptz IS NULL OR t_open <= $7)
               AND ($8::timestamptz IS NULL OR t_open > $8)
@@ -1741,16 +1788,17 @@ async def clear_episodes_gate_suppressed(
 ) -> int:
     """Снять пометку «снято гейтом» с открытых эпизодов машины (v5.1.12): тревога
     стала нарушением паспорта — снятие на неё больше не действует. Источник
-    снятия обнуляется вместе с пометкой (v5.1.22)."""
+    снятия обнуляется вместе с пометкой (v5.1.22). scenarios — ключи тревог,
+    как у set_episodes_gate_suppressed (v5.1.31)."""
     if not scenarios:
         return 0
     conn = await _connect()
     try:
-        status = await conn.execute("""
+        status = await conn.execute(f"""
             UPDATE alarm_episodes
             SET gate_suppressed = FALSE, gate_suppressed_src = NULL, updated_at = now()
             WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3
-              AND t_close IS NULL AND gate_suppressed AND scenario = ANY($4::text[])
+              AND t_close IS NULL AND gate_suppressed AND {_key_match_sql("$4")}
         """, router_sn, equip_type, panel_id, scenarios)
         try:
             return int(str(status).split()[-1])
@@ -1907,6 +1955,9 @@ async def count_episodes_batch(
     считается, как её закроет close_episode: exact — конец − начало (слепая
     доля не больше), иначе — не меньше начисленного. БД не трогается; пустые
     массивы — прежний результат.
+
+    v5.1.31 (В-26.1, В-26.2): у близости к уставке счётчики по роли — ключ
+    результата «LIMIT_PROXIMITY|роль» (роль JSON, у старых строк — по уставке).
     """
     if not scenarios:
         return {}
@@ -1919,12 +1970,12 @@ async def count_episodes_batch(
         _ex.append(bool(_x))
     conn = await _connect()
     try:
-        rows = await conn.fetch("""
+        rows = await conn.fetch(f"""
             WITH u AS (
                 SELECT * FROM unnest($8::bigint[], $9::timestamptz[], $10::bool[])
                     AS u(id, t_end, exact)
             ), e AS (
-                SELECT scenario, addr, bit, t_open,
+                SELECT scenario, addr, bit, {_lp_role_sql()} AS lp_role, t_open,
                        MAX(CASE WHEN u.id IS NULL THEN active_sec
                                 WHEN u.exact THEN GREATEST(0, EXTRACT(EPOCH FROM (u.t_end - t_open)))
                                 ELSE GREATEST(active_sec, EXTRACT(EPOCH FROM (u.t_end - t_open)))
@@ -1939,9 +1990,9 @@ async def count_episodes_batch(
                        OR ($6::timestamptz IS NOT NULL AND t_open >= $6))
                   AND ($7::timestamptz IS NULL OR source IS DISTINCT FROM 'analytics'
                        OR t_open >= $7)
-                GROUP BY scenario, addr, bit, t_open
+                GROUP BY scenario, addr, bit, lp_role, t_open
             )
-            SELECT scenario, addr, bit,
+            SELECT scenario, addr, bit, lp_role,
                    COUNT(*) FILTER (
                        WHERE t_open > now() - ($5 || ' days')::interval) AS count_window,
                    COALESCE(SUM(active_sec) FILTER (
@@ -1953,13 +2004,13 @@ async def count_episodes_batch(
                    COALESCE(SUM(active_sec) FILTER (
                        WHERE $6::timestamptz IS NOT NULL AND t_open >= $6), 0) AS dur_since
             FROM e
-            GROUP BY scenario, addr, bit
+            GROUP BY scenario, addr, bit, lp_role
         """, router_sn, equip_type, panel_id, scenarios, str(window_days), since_ts,
              analytics_since, _ids, _ends, _ex)
         # Ключ — per-fault (совпадает с engine._alert_key)
         result: dict[str, dict[str, float]] = {}
         for r in rows:
-            result[episode_key(r["scenario"], r["addr"], r["bit"])] = {
+            result[episode_key(r["scenario"], r["addr"], r["bit"], r["lp_role"])] = {
                 "count_window": int(r["count_window"]),
                 "dur_window":   float(r["dur_window"]),
                 "blind_window": float(r["blind_window"]),
@@ -2025,17 +2076,39 @@ async def get_active_alerts(
     восстановления живых тревог после рестарта. segment_id не поддерживается
     (открытая строка удаляется при закрытии сегмента, ссылка не
     перецеливается). Источник правды по тревогам — alarm_episodes.
+
+    v5.1.31 (В-26.1): у близости к уставке — последнее событие своей роли
+    (DISTINCT ON с ролью). Роль записи журнала без роли (до v5.1.31) — по
+    уставке (_lp_role_sql), иначе её OPENED без роли висел бы отдельно от
+    CLOSED с ролью и тревога восстанавливалась бы «вечно открытой».
+    До v5.1.31 у близости была одна тревога на машину, и OPENED с CLOSED одной
+    тревоги несли значения разных ролей (ДГУ №1 06.07: OPENED с уставкой 103,9,
+    CLOSED с уставкой 110) — по роли OPENED остался бы висеть. Поэтому записи
+    близости без роли в JSON, кроме CLOSED, не берутся, если они раньше
+    последнего CLOSED близости этой машины: старая тревога тогда уже закрыта
+    (ревью v5.1.31). Переход «OPENED без роли → CLOSED с ролью» и OPENED без
+    роли позже всех CLOSED (живая на выкладке) — как раньше.
     """
+    _role = _lp_role_sql("values_json")
+    _has = _lp_has_role_sql("values_json")
     conn = await _connect()
     try:
-        rows = await conn.fetch("""
-            SELECT DISTINCT ON (scenario, values_json->>'addr', values_json->>'bit')
+        rows = await conn.fetch(f"""
+            WITH j AS (
+                SELECT scenario, event_type, ts, severity, trigger_text, values_json, segment_id,
+                       max(ts) FILTER (WHERE scenario = 'LIMIT_PROXIMITY' AND event_type = 'CLOSED')
+                           OVER () AS lp_closed
+                FROM alert_journal
+                WHERE router_sn = $1
+                  AND equip_type = $2
+                  AND panel_id   = $3
+            )
+            SELECT DISTINCT ON (scenario, values_json->>'addr', values_json->>'bit', {_role})
                 scenario, event_type, ts, severity, trigger_text, values_json, segment_id
-            FROM alert_journal
-            WHERE router_sn = $1
-              AND equip_type = $2
-              AND panel_id   = $3
-            ORDER BY scenario, values_json->>'addr', values_json->>'bit', ts DESC
+            FROM j
+            WHERE NOT (scenario = 'LIMIT_PROXIMITY' AND event_type <> 'CLOSED' AND NOT {_has}
+                       AND lp_closed IS NOT NULL AND ts < lp_closed)
+            ORDER BY scenario, values_json->>'addr', values_json->>'bit', {_role}, ts DESC
         """, router_sn, equip_type, panel_id)
         result = []
         for r in rows:

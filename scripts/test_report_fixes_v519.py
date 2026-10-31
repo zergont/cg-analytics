@@ -108,7 +108,7 @@ row = {"id": 35771, "gate_suppressed_hash": "b73fbb556aef",
 check(mgr._cancelled_hashes(row) == {"5cf22d2ee7d6", "b73fbb556aef"}, "1: снятые составы — из журнала гейта")
 _engine = NS(router_sn="R", equip_type="pcc", panel_id=1)
 asyncio.run(mgr.OnlineManager._reapply_cancel(None, _engine, row, struct, "5cf22d2ee7d6"))
-check([c[0] for c in calls] == ["supp", "mark", "log"] and calls[1][1] == ("OIL_DILUTION", "LIMIT_PROXIMITY")
+check([c[0] for c in calls] == ["supp", "mark", "log"] and calls[1][1] == ("OIL_DILUTION", "LIMIT_PROXIMITY|OIL_TEMP")
       and calls[2][1:] == ("cancel", "repeat"), f"1б: снятие применено заново, эпизоды помечены, журнал: {calls}")
 from online.status_assembler import compute_analytics_hash  # noqa: E402
 calls.clear()

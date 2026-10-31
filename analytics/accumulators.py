@@ -84,6 +84,8 @@ def update_accumulators(
     run_state: int,
     cfg: AnalyticsConfig,
     gaps: list[dict] | None = None,
+    noload_head: str | None = None,
+    noload_head_until: datetime | None = None,
 ) -> RiskAccumulators:
     """Обновить аккумуляторы рисков по данным одного подсегмента.
 
@@ -91,6 +93,13 @@ def update_accumulators(
     В дырах связи риски НЕ накапливаются (мы не знаем, что делала машина):
     накопление идёт по effective-длительности (минус дыры), спад теплового
     риска — по стенному времени (мотор остывает независимо от телеметрии).
+    noload_head (v5.1.31, ревью В-30.3) — у «Работы» не через рез отрезок
+    «без нагрузки» начат с начала окна по удержанной нагрузке ниже порога
+    (live._noload_spans): кусок подсегмента до первой строки LOAD_PCT идёт в
+    noload_run_sec (_update_coking). "start" — первый рабочий подсегмент
+    (отрезок с его начала), "carry" — первый подсегмент окна после реза
+    (прибавляется к переносу), "cont" — следующий, пока строки нагрузки нет.
+    noload_head_until — конец этого отрезка по участкам (None — до края окна).
     """
     new_acc = acc.copy()
     gaps = gaps or []
@@ -98,7 +107,8 @@ def update_accumulators(
     effective_sec = max(0.0, duration_sec - _gap_overlap_sec(gaps, seg_start, seg_end))
 
     _update_coking(new_acc.coking_risk, by_addr, seg_start, seg_end,
-                   load_zone, run_state, effective_sec, cfg, gaps)
+                   load_zone, run_state, effective_sec, cfg, gaps, noload_head=noload_head,
+                   noload_head_until=noload_head_until)
     _update_thermal(new_acc.thermal_risk, by_addr, seg_start, seg_end,
                     load_zone, effective_sec, duration_sec, cfg, gaps)
 
@@ -135,6 +145,8 @@ def _update_coking(
     duration_sec: float,   # effective: стенное время минус дыры связи
     cfg: AnalyticsConfig,
     gaps: list[dict] | None = None,
+    noload_head: str | None = None,
+    noload_head_until: datetime | None = None,
 ) -> None:
     """Риск нагара — долг до прожига (v5.1.3, решения 11.10.2026).
 
@@ -152,6 +164,20 @@ def _update_coking(
     обрыве. Отрезок идёт сквозь границы подсегментов, обрывается сменой
     режима, разрывом связи, малой нагрузкой и холодной ОЖ. Гасится долг
     пропорционально по всем счётчикам; погашен целиком — полный прожиг.
+
+    noload_head (v5.1.31, ревью В-30.3): отрезок «без нагрузки» идёт с начала
+    окна без строки нагрузки (у «Работы» со стоянки LOAD_PCT не пишется до
+    изменения; через рез — удержанная ниже порога). Кусок [начало, первая
+    строка) — не дальше конца отрезка по участкам (noload_head_until: выход
+    сверх допуска, дыра связи, пауза пакетов) — идёт в noload_run_sec:
+    "start" — начало отрезка (сброс прежнего, как у участков: отрезок с t0 без
+    переноса), "carry" — прибавляется к переносу через рез, "cont" — его
+    продолжение в следующем подсегменте без строк. Отрезок кончился раньше
+    первой строки — счётчик сбрасывается (после дыры и паузы значение
+    неизвестно до свежей строки, как у участков). Иначе перенос через
+    суточный рез терял этот кусок, и эпизод рвался на резе на пару
+    «закрыт/открыт». Только счётчик «без нагрузки»: долг нагара, прожиг и
+    прочие счётчики — по строкам, как раньше.
     """
     gaps = gaps or []
     t_start = _tz(seg_start)
@@ -244,6 +270,21 @@ def _update_coking(
 
     # 3. Нагрузка под работой: построчно — малая копит долг, достаточная гасит
     load_addr = cfg.role_to_addr("LOAD_PCT")
+    # v5.1.31 (ревью В-30.3): начало отрезка «без нагрузки» до первой строки
+    if run_state == 3 and noload_head and load_addr:
+        _first = min((_tz(r["ts"]) for r in by_addr.get(load_addr) or []
+                      if t_start <= _tz(r["ts"]) < t_end and _fv(r) is not None), default=t_end)
+        _hu = _tz(noload_head_until) if noload_head_until is not None else None
+        if noload_head == "start":
+            noload_reset()
+        _end = min(_first, _hu) if _hu is not None else _first
+        if _end > t_start and _gap_overlap_sec(gaps, t_start, _end) <= 0:
+            cr.noload_run_sec += (_end - t_start).total_seconds()
+            cr.noload_break_sec = 0.0
+        # Отрезок кончился до первой строки (дыра, пауза пакетов): дальше значение
+        # неизвестно — счёт со свежей строки, как у участков
+        if _hu is not None and (_hu < _first or (_first >= t_end and _hu <= t_end)):
+            noload_reset()
     if run_state != 3:
         break_run()
         noload_reset()

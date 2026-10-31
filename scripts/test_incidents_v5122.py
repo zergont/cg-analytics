@@ -147,6 +147,8 @@ LP = {"scenario": "LIMIT_PROXIMITY", "severity": "CAUTION", "fault_codes": [], "
 RPM = {"scenario": "RPM_UNDERSPEED", "severity": "CAUTION", "fault_codes": [], "ref_codes": [1448],
        "trigger": "Обороты", "values": {}}
 H_LP = sa.compute_analytics_hash([LP])
+# v5.1.31 (В-26.1): ключ эпизода и тревоги близости — с ролью (роль LP — по коду 214)
+LPK = "LIMIT_PROXIMITY|OIL_TEMP"
 H_RPM = sa.compute_analytics_hash([RPM])
 
 
@@ -336,8 +338,8 @@ OWN_LOG = [{"ts": iso(M(14, 9, 59)), "kind": "llm", "decision": "cancel", "decis
 db = FakeDB()
 e = mk_engine(db)
 db.row = row_with(H_LP, R0, log=OWN_LOG)
-e._episodes = {"LIMIT_PROXIMITY": {"id": 99}}
-asyncio.run(e._inherit_gate_suppression([("LIMIT_PROXIMITY", 99, M(14, 10, 5))], [LP], ts=M(14, 10, 6)))
+e._episodes = {LPK: {"id": 99}}
+asyncio.run(e._inherit_gate_suppression([(LPK, 99, M(14, 10, 5))], [LP], ts=M(14, 10, 6)))
 _mk, _ev = db.of("mark"), db.of("event")
 check(len(_mk) == 1 and _mk[0][2] == [99] and _mk[0][3].get("kind") == "inherited"
       and _mk[0][3].get("ts") == iso(M(14, 9, 59)),
@@ -350,8 +352,8 @@ check(len(_ev) == 1 and _ev[0][1]["kind"] == "inherited" and _ev[0][1]["episodes
 # Отказ по панели: ни пометки, ни записи, id в памяти
 db.calls.clear()
 _W = panel("WARNING", 1464, M(14, 10, 0))
-e._episodes = {"LIMIT_PROXIMITY": {"id": 100}}
-asyncio.run(e._inherit_gate_suppression([("LIMIT_PROXIMITY", 100, M(14, 10, 2))], [LP, _W]))
+e._episodes = {LPK: {"id": 100}}
+asyncio.run(e._inherit_gate_suppression([(LPK, 100, M(14, 10, 2))], [LP, _W]))
 check(not db.of("mark") and not db.of("event") and 100 in e._supp_refused,
       f"1в: сигнал панели — ни пометки, ни записи, id в памяти: {db.calls}, {e._supp_refused}")
 # Пока сигнал панели горит — повтора нет (и запроса строки тоже)
@@ -360,7 +362,7 @@ check(e._refused_retry_due([LP, _W]) is False, "1в: WARNING горит — по
 db.calls.clear()
 e._episode_accrual_ts = M(14, 10, 30)
 e._active_alerts = {}
-e._episodes = {"LIMIT_PROXIMITY": {"id": 100, "severity": "CAUTION", "miss": 0, "first_miss_ts": None,
+e._episodes = {LPK: {"id": 100, "severity": "CAUTION", "miss": 0, "first_miss_ts": None,
                                    "t_open": M(14, 10, 2), "exact": False}}
 asyncio.run(e._process_episodes([LP], M(14, 11, 0), []))
 _mk = db.of("mark")
@@ -368,15 +370,15 @@ check(len(_mk) == 1 and _mk[0][2] == [100] and not e._supp_refused,
       f"1в: запрет снят — наследование повторено для отказанного id: {db.calls}")
 # Тот же состав и та же строка после повтора — без запроса
 db.calls.clear()
-e._supp_refused = {101: ("LIMIT_PROXIMITY", 101, M(14, 11, 2))}
+e._supp_refused = {101: (LPK, 101, M(14, 11, 2))}
 e._supp_refused_sig = e._retry_sig([LP])
-e._episodes = {"LIMIT_PROXIMITY": {"id": 101, "severity": "CAUTION", "miss": 0, "first_miss_ts": None,
+e._episodes = {LPK: {"id": 101, "severity": "CAUTION", "miss": 0, "first_miss_ts": None,
                                    "t_open": M(14, 11, 2), "exact": False}}
 asyncio.run(e._process_episodes([LP], M(14, 11, 30), []))
 check(not db.of("get"), f"1в: условия не менялись — повтор без запроса не идёт: {db.calls}")
 # Отказанный эпизод закончился — забыт без запроса
 db.calls.clear()
-e._supp_refused = {102: ("LIMIT_PROXIMITY", 102, M(14, 11, 2))}
+e._supp_refused = {102: (LPK, 102, M(14, 11, 2))}
 e._supp_refused_sig = None
 e._episodes = {}
 asyncio.run(e._process_episodes([], M(14, 12, 0), []))
@@ -386,8 +388,8 @@ check(not e._supp_refused and not db.of("get"), "1в: отказанный эп�
 db.calls.clear()
 _C = panel("CAUTION", 1453, M(14, 9, 30), 40405, 1)
 e._supp_refused, e._supp_refused_sig = {}, None
-e._episodes = {"LIMIT_PROXIMITY": {"id": 103}}
-asyncio.run(e._inherit_gate_suppression([("LIMIT_PROXIMITY", 103, M(14, 9, 40))], [LP, _C]))
+e._episodes = {LPK: {"id": 103}}
+asyncio.run(e._inherit_gate_suppression([(LPK, 103, M(14, 9, 40))], [LP, _C]))
 check(103 in e._supp_refused and not db.of("mark"), "1в: свежая «Общая авария» — отказ")
 check(e._refused_retry_due([LP, _C]) is False and e._refused_retry_due([LP]) is True,
       "1в: та же «Общая авария» — повтора нет; ушла — повтор")
@@ -396,8 +398,8 @@ check(e._refused_retry_due([LP, _C]) is False and e._refused_retry_due([LP]) is 
 db.calls.clear()
 db.row = row_with(H_LP, R0, chars_code0(1453), log=LOG_35891)
 e._supp_refused = {}
-e._episodes = {"LIMIT_PROXIMITY": {"id": 104}}
-asyncio.run(e._inherit_gate_suppression([("LIMIT_PROXIMITY", 104, M(14, 10, 8))],
+e._episodes = {LPK: {"id": 104}}
+asyncio.run(e._inherit_gate_suppression([(LPK, 104, M(14, 10, 8))],
                                         [LP, panel("CAUTION", 1453, M(13, 15, 0), 40405, 1)]))
 _mk = db.of("mark")
 check(len(_mk) == 1 and _mk[0][2] == [104] and _mk[0][3]["ts"] == "2026-10-14T06:01:59.698684+00:00",
@@ -407,7 +409,7 @@ check(len(_mk) == 1 and _mk[0][2] == [104] and _mk[0][3]["ts"] == "2026-10-14T06
 db.calls.clear()
 _LPh = dict(LP, values={"limit": {"kind": "passport", "hard": True}})
 db.row = row_with(sa.compute_analytics_hash([_LPh]), R0, log=[dict(OWN_LOG[0], suppressed_hash=sa.compute_analytics_hash([_LPh]))])
-asyncio.run(e._inherit_gate_suppression([("LIMIT_PROXIMITY", 105, M(14, 10, 8))], [_LPh]))
+asyncio.run(e._inherit_gate_suppression([(LPK, 105, M(14, 10, 8))], [_LPh]))
 check(not db.of("mark"), "1в: нарушение паспорта — снятие не наследуется")
 
 # Перенесённое снятие: новый эпизод в строке не наследует — хеш снимается
@@ -641,11 +643,11 @@ check(_st.get("gate_suppressed_hash") == H_RPM and _st["gate_log"][-1]["source"]
       and cw.src_seg == [([14916], 35901)],
       f"1д: решение в закрываемом сегменте — его номер в записи и в источнике эпизода: {cw.appended}, {cw.src_seg}")
 # ДЭС №3 15.10: близость кончилась в 08:36:42 — на резе не идёт, хеша нет (14920 разберёт гейт)
-_lp_end = mkseg(M(14, 9, 0), B, 3, [mkdet("LIMIT_PROXIMITY", M(15, 8, 9, 8), M(15, 8, 36, 42), False)])
+_lp_end = mkseg(M(14, 9, 0), B, 3, [mkdet(LPK, M(15, 8, 9, 8), M(15, 8, 36, 42), False)])
 _gs_lp = [{"ts": iso(M(15, 8, 10)), "kind": "llm", "decision": "cancel", "decision_applied": True,
            "suppressed_hash": H_LP, "fault_hash": "a36ac7f457e4", "episodes": [14919]}]
 cw, _ = close_window([_lp_end], open_row(_gs_lp, M(14, 9, 0), H_LP),
-                     {"LIMIT_PROXIMITY": {"id": 14919}}, M(14, 9, 0), B)
+                     {LPK: {"id": 14919}}, M(14, 9, 0), B)
 _st = dict(cw.appended[0][1]) if cw.appended else {}
 check(not _st.get("gate_suppressed_hash") and not _st.get("gate_log"),
       f"1д: ДЭС №3 15.10 — 14919 кончился до 09:00, хеш не переходит, хвоста нет: {cw.appended}")
@@ -2189,7 +2191,9 @@ class GStore:
     async def set_episodes_gate_suppressed(self, r, e, p, scenarios, ids=None, until=None, after=None, src=None):
         out = []
         for x in self.eps:
-            if x["t_close"] is not None or x["scenario"] not in scenarios:
+            # v5.1.31: как db._key_match_sql — сценарий целиком или ключ с ролью
+            if x["t_close"] is not None or (x["scenario"] not in scenarios
+                                            and eng._episode_key(x) not in scenarios):
                 continue
             if ids is not None and x["id"] not in ids:
                 continue
@@ -2261,19 +2265,19 @@ try:
         _st = GStore({"id": 1, "t_start": M(16, 9, 0), "run_state": 3, "gate_suppressed_hash": None,
                       "gate_log": [], "warning_analyses": [], "characteristics_json": {},
                       "active_detections_json": [LP]},
-                     [{"id": 4001, "scenario": "LIMIT_PROXIMITY", "t_open": M(16, 9, 10), "t_close": None,
+                     [{"id": 4001, "scenario": "LIMIT_PROXIMITY", "open_values_json": {"role": "OIL_TEMP"}, "t_open": M(16, 9, 10), "t_close": None,
                        "gate_suppressed": False}])
         gs_bind(_st)
-        _eg = gs_engine({"LIMIT_PROXIMITY": {"id": 4001, "t_open": M(16, 9, 10)}})
+        _eg = gs_engine({LPK: {"id": 4001, "t_open": M(16, 9, 10)}})
 
         async def _llm_4a(prompt, model, depth=None, meta=None, _st=_st, _eg=_eg, _d=_dets_during):
             # Во время разбора: прежний эпизод кончился, пришёл сигнал (или сменился
             # состав), открылся новый эпизод того же сценария
             _st.eps[0]["t_close"] = datetime.now(U)
             _t2 = datetime.now(U) + timedelta(seconds=1)
-            _st.eps.append({"id": 4002, "scenario": "LIMIT_PROXIMITY", "t_open": _t2, "t_close": None,
+            _st.eps.append({"id": 4002, "scenario": "LIMIT_PROXIMITY", "open_values_json": {"role": "OIL_TEMP"}, "t_open": _t2, "t_close": None,
                             "gate_suppressed": False})
-            _eg._episodes = {"LIMIT_PROXIMITY": {"id": 4002, "t_open": _t2}}
+            _eg._episodes = {LPK: {"id": 4002, "t_open": _t2}}
             _st.row["active_detections_json"] = list(_d)
             return "Анализ: близость к уставке ложная.", "cancel", "ложное", 10, 5
         mgr._run_warning_gate_llm = _llm_4a
@@ -2301,7 +2305,7 @@ try:
     _st = GStore({"id": 2, "t_start": M(16, 9, 0), "run_state": 3, "gate_suppressed_hash": None,
                   "gate_log": [], "warning_analyses": [], "characteristics_json": {},
                   "active_detections_json": [LP]},
-                 [{"id": 4101, "scenario": "LIMIT_PROXIMITY", "t_open": M(16, 9, 10), "t_close": None,
+                 [{"id": 4101, "scenario": "LIMIT_PROXIMITY", "open_values_json": {"role": "OIL_TEMP"}, "t_open": M(16, 9, 10), "t_close": None,
                    "gate_suppressed": False}])
     gs_bind(_st)
     _SNAP: dict = {}
@@ -2313,17 +2317,17 @@ try:
         _row = await odb.get_open_segment("SN", "pcc", 1)
         _SNAP["log"] = [(e.get("kind"), e.get("suppressed_hash"), e.get("episodes")) for e in _row["gate_log"]]
         _bnd = datetime.now(U)
-        _sg = mkseg(M(16, 9, 0), _bnd, 3, [mkdet("LIMIT_PROXIMITY", M(16, 9, 10), _bnd, True)])
+        _sg = mkseg(M(16, 9, 0), _bnd, 3, [mkdet(LPK, M(16, 9, 10), _bnd, True)])
         _SNAP["carry"] = eng._gate_carry({"suppressed_hash": _row["gate_suppressed_hash"],
                                           "gate_log": _row["gate_log"]},
-                                         [(_sg, 35950, M(16, 9, 0), _bnd)], {"LIMIT_PROXIMITY": {"id": 4101}},
-                                         {"LIMIT_PROXIMITY"}, {"LIMIT_PROXIMITY"}, 5, _bnd,
+                                         [(_sg, 35950, M(16, 9, 0), _bnd)], {LPK: {"id": 4101}},
+                                         {LPK}, {LPK}, 5, _bnd,
                                          eng._extract_open_segment_data(_sg)[1])
         # Новый эпизод того же состава в этой строке, пока идёт очистка
-        _st.eps.append({"id": 4102, "scenario": "LIMIT_PROXIMITY", "t_open": datetime.now(U), "t_close": None,
+        _st.eps.append({"id": 4102, "scenario": "LIMIT_PROXIMITY", "open_values_json": {"role": "OIL_TEMP"}, "t_open": datetime.now(U), "t_close": None,
                         "gate_suppressed": False})
-        _e = gs_engine({"LIMIT_PROXIMITY": {"id": 4102}})
-        await _e._inherit_gate_suppression([("LIMIT_PROXIMITY", 4102, datetime.now(U))], [LP], ts=datetime.now(U))
+        _e = gs_engine({LPK: {"id": 4102}})
+        await _e._inherit_gate_suppression([(LPK, 4102, datetime.now(U))], [LP], ts=datetime.now(U))
         _SNAP["hash_after_engine"] = _st.row["gate_suppressed_hash"]
         return text.replace("remains active", "сохраняется")
     mgr._run_warning_gate_llm = _llm_4b
@@ -2420,8 +2424,8 @@ db4 = FakeDB()
 e4 = mk_engine(db4)
 try:
     db4.row = row_with(H_AB, M(16, 9, 0), log=_tailC.get("gate_log") or [], rid=35930)
-    e4._episodes = {"RPM_UNDERSPEED": {"id": 601}, "LIMIT_PROXIMITY": {"id": 603}}
-    asyncio.run(e4._inherit_gate_suppression([("LIMIT_PROXIMITY", 603, M(16, 8, 59, 40))], [RPM, LP],
+    e4._episodes = {"RPM_UNDERSPEED": {"id": 601}, LPK: {"id": 603}}
+    asyncio.run(e4._inherit_gate_suppression([(LPK, 603, M(16, 8, 59, 40))], [RPM, LP],
                                              ts=M(16, 9, 0, 30)))
     check(not db4.of("mark") and db4.of("clear_hash") == [("clear_hash", H_AB)],
           f"4г: gate-4 — LP 603 (живая в карточке B) перенесённым снятием не снимается, хеш снят — разберёт "
@@ -2429,7 +2433,7 @@ try:
     # Та же тревога, снятая в сводке B (синтетика своего решения), — переносится
     db4.calls.clear()
     db4.row = row_with(H_AB, M(16, 9, 0), log=[dict(_recC[-1], synthetic=["LIMIT_PROXIMITY"])], rid=35930)
-    asyncio.run(e4._inherit_gate_suppression([("LIMIT_PROXIMITY", 603, M(16, 8, 59, 40))], [RPM, LP],
+    asyncio.run(e4._inherit_gate_suppression([(LPK, 603, M(16, 8, 59, 40))], [RPM, LP],
                                              ts=M(16, 9, 0, 30)))
     _mk4 = db4.of("mark")
     check(len(_mk4) == 1 and _mk4[0][2] == [603] and _mk4[0][3]["kind"] == "carry" and not db4.of("clear_hash"),
@@ -2441,10 +2445,10 @@ try:
               "alarms": [{"scenario": "LIMIT_PROXIMITY"}, {"scenario": "RPM_UNDERSPEED"}]}]
     db4.calls.clear()
     db4.row = row_with(H_AB, M(16, 9, 0), log=_LATE, rid=35930)
-    asyncio.run(e4._inherit_gate_suppression([("LIMIT_PROXIMITY", 603, M(16, 8, 59, 40))], [RPM, LP]))
+    asyncio.run(e4._inherit_gate_suppression([(LPK, 603, M(16, 8, 59, 40))], [RPM, LP]))
     _ok_late = db4.of("mark") and db4.of("mark")[0][2] == [603]
     db4.calls.clear()
-    asyncio.run(e4._inherit_gate_suppression([("LIMIT_PROXIMITY", 604, M(16, 8, 59, 55))], [RPM, LP]))
+    asyncio.run(e4._inherit_gate_suppression([(LPK, 604, M(16, 8, 59, 55))], [RPM, LP]))
     check(_ok_late and not db4.of("mark") and db4.of("clear_hash"),
           f"4г: поздний вердикт — начавшийся до разбора переносится, после — нет: {db4.calls}")
 finally:

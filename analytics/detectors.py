@@ -23,7 +23,8 @@ from .contract import Detection, DerivedMetrics, RiskAccumulators
 from .config import AnalyticsConfig
 from .labels import fmt_number
 from .live import (
-    LIVE_RECENT_SEC, cooling_proximity, limit_checks, live_values, sub_hits, sub_samples,
+    LIVE_RECENT_SEC, cooling_proximity, limit_bad, limit_checks, live_values, sub_hits,
+    sub_samples,
 )
 from .rpm_freq import overspeed_params
 
@@ -1065,10 +1066,12 @@ def _detect_limit_proximity(
 ) -> list[Detection]:
     """Близость к уставкам останова панели — одна детекция на роль.
 
-    live — кластеры LIMIT_PROXIMITY сегмента (v5.1.21): три роли в одном наборе
-    кластеров, детекция роли — только при участке этой роли в подсегменте,
-    значение — по отсчётам участков; пол давления (В3) уже в участках. None —
-    по min/max подсегмента, как раньше. Пороги — live.limit_checks."""
+    live — кластеры LIMIT_PROXIMITY сегмента (v5.1.21): детекция роли — только
+    при участке этой роли в подсегменте, значение — по отсчётам участков; пол
+    давления (В3) уже в участках. С v5.1.31 (В-26.1) кластеры у ролей свои, и
+    начало детекции — начало кластера своей роли. None — по min/max
+    подсегмента, как раньше. Пороги и сравнение — live.limit_checks /
+    live.limit_bad (v5.1.31, В-26.3: с допуском compare_tol и в этой ветке)."""
     results: list[Detection] = []
     for chk in limit_checks(cfg):
         role, limit = chk["role"], chk["limit"]
@@ -1088,8 +1091,13 @@ def _detect_limit_proximity(
         val = char.get(chk["stat"])
         if val is None:
             continue
-        # Плохо: давление — val < limit·(1 + pct), температуры — val > limit·(1 − pct)
-        if (val < chk["near"]) if chk["below"] else (val > chk["near"]):
+        # Плохо: давление — val < limit·(1 + pct) − tol, температуры — val > limit·(1 − pct) + tol
+        # (v5.1.31, В-26.3: то же сравнение с допуском, что у участков)
+        try:
+            _bad = limit_bad(chk, float(val))
+        except (TypeError, ValueError):
+            continue
+        if _bad:
             results.append(_limit_detection(role, val, limit, chk["label"], chk["codes"], seg_start, cfg))
 
     return results
@@ -1097,13 +1105,14 @@ def _detect_limit_proximity(
 
 def _limit_detection(role, val, limit, label, fcodes, seg_start, cfg, hits=None) -> Detection:
     prox_pct = float(cfg.det("LIMIT_PROXIMITY", "proximity_pct", default=10.0))
-    values = {"value": val, "shutdown_limit": limit, "proximity_pct": prox_pct}
+    # v5.1.31 (В-26.1): роль в values всегда — по ней ключ эпизода, тревоги,
+    # счётчиков и снятия гейтом («LIMIT_PROXIMITY|роль»), и в ветке без участков
+    values = {"value": val, "shutdown_limit": limit, "proximity_pct": prox_pct, "role": role}
     t_det = _iso(seg_start)
     if hits:
-        # v5.1.21: начало — первый кластер (общий для трёх ролей ключа), роль —
-        # задел на ключ по параметру (v5.1.22)
+        # v5.1.21: начало — первый кластер; с v5.1.31 — кластер своей роли
         t_det = hits[0][0]["start"]
-        values.update(role=role, live=live_values(hits, seg_start))
+        values.update(live=live_values(hits, seg_start))
     return Detection(
         scenario="LIMIT_PROXIMITY",
         severity=cfg.det("LIMIT_PROXIMITY", "severity_default", default="CAUTION"),

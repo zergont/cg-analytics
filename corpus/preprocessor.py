@@ -185,6 +185,10 @@ def _group_worst(scenario: str, values_list: list[dict]) -> str | None:
     elif scenario == "LIMIT_PROXIMITY":
         vals, limits = _nums("value"), _nums("shutdown_limit")
         if vals and limits:
+            # Давление масла — близость снизу: худшее — минимум (v5.1.31, ревью)
+            from analytics.live import limit_role
+            if any(limit_role(v) == "OIL_PRESS" for v in values_list if isinstance(v, dict)):
+                return f"мин. {min(vals):.0f} при пороге {limits[0]:.0f}"
             return f"макс. {max(vals):.0f} при пороге {limits[0]:.0f}"
     elif scenario in ("PHASE_CURRENT_SPREAD", "NEUTRAL_CURRENT"):
         vals, thr = _nums("pct_max"), _nums("threshold_pct")

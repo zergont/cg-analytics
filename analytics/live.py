@@ -27,8 +27,10 @@
 опроса ниже порога, analytics/rpm_freq.py); RPM_OVERSPEED (v5.1.23, В2′) — то
 же сверху: обороты и k·f_max опроса выше порога (1575 об/мин = уставка разноса
 1725 − 150, 91,3 % уставки), без частоты заброса нет, без участков нет и
-детекции; LIMIT_PROXIMITY — три роли в одном
-наборе кластеров, участки по ролям внутри кластера; давление ниже уставки
+детекции; LIMIT_PROXIMITY — кластеры по ролям раздельно (v5.1.31, В-26.1:
+до неё три роли шли одним набором, и близость ОЖ в перегрев ДЭС №3 04–16.09
+пряталась за близостью масла), ключ эпизода — «LIMIT_PROXIMITY|роль»
+(scenario_key); давление ниже уставки
 останова — не замер (пол, В3); COOLING_FAILURE — ветка близости к HCT;
 OIL_DILUTION — паспорт давления (участки oil_passport_runs из metrics, начало
 эпизода — начало участка, В7).
@@ -51,6 +53,17 @@ v5.1.30 «По событию» (решения владельца В-27.1, В-2
   подсегмента, терялся (27 из 42 за 60 дней), а эпизод начинался с начала
   подсегмента.
 
+v5.1.31 «Близость по параметру» (решения владельца В-26.1–В-26.3, В-30.3):
+- близость к уставке останова — по роли: свои кластеры, ключ
+  «LIMIT_PROXIMITY|роль» (scenario_key), роль — values.role, у старых строк
+  без роли — по уставке (limit_role: 110 — масло, 103,9 — ОЖ, 172 и 241,3 —
+  давление);
+- допуск сравнения близости compare_tol (0,01): показания ДЭС №3 приходят с
+  хвостом пересчёта (40063 «99 °C» = 99,000712 > 110·0,9);
+- NO_LOAD_TOO_LONG у «Работы» не через рез: удержанная нагрузка на начало
+  окна ниже порога — отрезок с начала окна (LOAD_PCT не пишется до изменения,
+  после пуска первой строки нет 61–733 с).
+
 Окно — рабочая часть сегмента «Работа» [head_end, tail_start). Перенос через
 начало окна — только при продолжении режима (REPORT_START без разгона): иначе
 нули стоянки давали бы «нарушение с начала». Модуль без зависимостей от движка.
@@ -64,6 +77,7 @@ from __future__ import annotations
 
 import bisect
 import copy
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -120,30 +134,193 @@ def _iso(ts: datetime) -> str:
 
 # ── Пороги близости — одни для участков и детекторов ────────────────────────
 
+LIMIT_SCENARIO = "LIMIT_PROXIMITY"
+# Подписи параметров близости — имя вида «Приближение к уставке останова панели
+# (Температура масла)» и префикс триггера детекции
+LIMIT_LABELS = {"OIL_PRESS": "Давление масла", "COOLANT_TEMP": "Температура ОЖ",
+                "OIL_TEMP": "Температура масла"}
+# Роль строки без values.role — по уставке останова (v5.1.31, В-26.2): у всех
+# эпизодов близости с 16.10 роль в JSON есть, у старых строк и записей журнала
+# тревог её нет. Та же таблица — в SQL (online.db._lp_role_sql)
+LIMIT_ROLE_BY_SETPOINT = ((110.0, "OIL_TEMP"), (103.9, "COOLANT_TEMP"),
+                          (241.3, "OIL_PRESS"), (172.0, "OIL_PRESS"))
+LIMIT_SETPOINT_TOL = 0.05
+_LIMIT_ROLE_BY_CODE = {214: "OIL_TEMP", 151: "COOLANT_TEMP", 415: "OIL_PRESS"}
+# Допуск сравнения близости по умолчанию (v5.1.31, В-26.3; ключ KB compare_tol)
+LIMIT_COMPARE_TOL = 0.01
+
+
 def limit_checks(cfg) -> list[dict[str, Any]]:
     """Пороги близости к уставкам останова панели (LIMIT_PROXIMITY).
 
     near — порог близости (в пределах proximity_pct от уставки); below — плохо
     «ниже» (давление) или «выше» (температуры, строгое «>»). floor — у давления:
     значение ниже самой уставки останова на рабочих оборотах без останова
-    панели — не замер (В3: нулевой кадр ДЭС №3 13.10 14:59:56 давал близость)."""
+    панели — не замер (В3: нулевой кадр ДЭС №3 13.10 14:59:56 давал близость).
+    tol — допуск сравнения (v5.1.31, В-26.3, LIMIT_PROXIMITY.compare_tol)."""
     pct = float(cfg.det("LIMIT_PROXIMITY", "proximity_pct", default=10.0))
+    try:
+        tol = max(0.0, float(cfg.det("LIMIT_PROXIMITY", "compare_tol",
+                                     default=LIMIT_COMPARE_TOL)))
+    except (TypeError, ValueError):
+        tol = LIMIT_COMPARE_TOL
     p = float(cfg.thr("oil_pressure", "controller", "shutdown_rated_kpa", default=241.3))
     c = float(cfg.thr("coolant_temperature", "controller", "shutdown_c", default=103.9))
     o = float(cfg.thr("oil_temperature", "controller", "shutdown_c", default=110.0))
     return [
-        {"role": "OIL_PRESS", "stat": "min", "limit": p, "label": "Давление масла", "codes": [415],
-         "below": True, "near": p * (1 + pct / 100), "floor": p, "pct": pct},
-        {"role": "COOLANT_TEMP", "stat": "max", "limit": c, "label": "Температура ОЖ", "codes": [151],
-         "below": False, "near": c * (1 - pct / 100), "floor": None, "pct": pct},
-        {"role": "OIL_TEMP", "stat": "max", "limit": o, "label": "Температура масла", "codes": [214],
-         "below": False, "near": o * (1 - pct / 100), "floor": None, "pct": pct},
+        {"role": "OIL_PRESS", "stat": "min", "limit": p, "label": LIMIT_LABELS["OIL_PRESS"],
+         "codes": [415], "below": True, "near": p * (1 + pct / 100), "floor": p, "pct": pct,
+         "tol": tol},
+        {"role": "COOLANT_TEMP", "stat": "max", "limit": c, "label": LIMIT_LABELS["COOLANT_TEMP"],
+         "codes": [151], "below": False, "near": c * (1 - pct / 100), "floor": None, "pct": pct,
+         "tol": tol},
+        {"role": "OIL_TEMP", "stat": "max", "limit": o, "label": LIMIT_LABELS["OIL_TEMP"],
+         "codes": [214], "below": False, "near": o * (1 - pct / 100), "floor": None, "pct": pct,
+         "tol": tol},
     ]
 
 
 def limit_bad(chk: dict[str, Any], v: float) -> bool:
-    """Значение в пределах близости к уставке (строгие сравнения, как у детектора)."""
-    return v < chk["near"] if chk["below"] else v > chk["near"]
+    """Значение в пределах близости к уставке (строгие сравнения, как у детектора).
+
+    v5.1.31 (В-26.3): с допуском tol на погрешность пересчёта — температуры
+    v > near + tol, давление v < near − tol. Показание ДЭС №3 40063 «99 °C»
+    приходит как 99,000712 и было «строго выше» 110·0,9; с допуском близость
+    масла — с 100 °C. Для всех машин и ролей."""
+    tol = float(chk.get("tol", LIMIT_COMPARE_TOL) or 0.0)
+    return v < chk["near"] - tol if chk["below"] else v > chk["near"] + tol
+
+
+# ── Роль близости и ключ эпизода (v5.1.31, В-26.1, В-26.2) ──────────────────
+
+def limit_role_by_setpoint(limit: Any) -> str | None:
+    """Роль близости по уставке останова (shutdown_limit): 110 — масло, 103,9 —
+    ОЖ, 172 и 241,3 — давление. None — не число или не из таблицы.
+
+    Только число JSON (int / float, не bool и не строка) — как в SQL
+    (online.db._lp_role_sql: jsonb_typeof = 'number'): ключ строки в Python и в
+    БД один и тот же (ревью v5.1.31)."""
+    if isinstance(limit, bool) or not isinstance(limit, (int, float)):
+        return None
+    x = float(limit)
+    for lim, role in LIMIT_ROLE_BY_SETPOINT:
+        if abs(x - lim) < LIMIT_SETPOINT_TOL:
+            return role
+    return None
+
+
+def _json_dict(v: Any) -> dict:
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except (TypeError, ValueError):
+            return {}
+    return v if isinstance(v, dict) else {}
+
+
+def limit_role(values: dict | None = None, trigger: str | None = None,
+               codes: Any = None) -> str | None:
+    """Роль близости к уставке: values.role (непустая строка — как в SQL:
+    jsonb_typeof = 'string', NULLIF ''), иначе по уставке (shutdown_limit,
+    только число), иначе по справочному коду (214, 151, 415), иначе по префиксу
+    триггера («Температура масла: …»). None — роль не определить.
+
+    Запасные ветки (код, триггер) срабатывают, только когда нет ни роли, ни
+    числовой уставки — SQL у такой строки роли не даёт (NULL). Строки БД
+    (эпизоды, журнал тревог) их не получают (limit_role_of, fallback): ключ
+    строки сравнивается с ключами из SQL. Детекции с v5.1.31 несут роль и
+    уставку всегда — ветки только для старых словарей без них."""
+    v = values if isinstance(values, dict) else {}
+    r = v.get("role")
+    if isinstance(r, str) and r:
+        return r
+    r = limit_role_by_setpoint(v.get("shutdown_limit"))
+    if r:
+        return r
+    for c in codes or []:
+        try:
+            r = _LIMIT_ROLE_BY_CODE.get(int(c))
+        except (TypeError, ValueError):
+            r = None
+        if r:
+            return r
+    if trigger and ":" in trigger:
+        head = trigger.split(":", 1)[0].strip()
+        for role, label in LIMIT_LABELS.items():
+            if head == label:
+                return role
+    return None
+
+
+def limit_role_of(d: Any, fallback: bool = True) -> str | None:
+    """Роль близости у детекции (dict / Detection), тревоги статуса (param_role)
+    или строки эпизода (open_values_json; у синтетики сводки — param_role).
+
+    fallback — запасные ветки limit_role (код, триггер). У строки эпизода (нет
+    values, есть open_values_json) их нет никогда: её ключ сравнивается с
+    ключами строк из SQL (_lp_role_sql), где таких веток нет. False — и у
+    словаря с values (записи журнала тревог из БД). Тревога статуса и
+    журнала гейта (ни values, ни open_values_json) — param_role, иначе ветки."""
+    if d is None:
+        return None
+    if not isinstance(d, dict):
+        d = d.to_dict() if hasattr(d, "to_dict") else {}
+    r = d.get("param_role")
+    if isinstance(r, str) and r:
+        return r
+    vals = d.get("values")
+    if not isinstance(vals, dict):
+        vals = {}
+        if "open_values_json" in d:
+            # Строка эпизода — роль как в SQL, без запасных веток
+            vals = _json_dict(d.get("open_values_json"))
+            fallback = False
+    if not fallback:
+        return limit_role(vals)
+    return limit_role(vals, d.get("trigger"), d.get("ref_codes") or d.get("fault_codes"))
+
+
+def lp_key(role: str | None) -> str:
+    """Ключ эпизода близости роли; без роли — сценарий (строка «покрывает все роли»)."""
+    return f"{LIMIT_SCENARIO}|{role}" if role else LIMIT_SCENARIO
+
+
+def scenario_key(d: Any, fallback: bool = True) -> str:
+    """Ключ аналитической тревоги: сценарий, у близости к уставке —
+    «LIMIT_PROXIMITY|роль» (v5.1.31, В-26.1). Ключ панели здесь не строится
+    (engine._alert_key — по биту). fallback — как у limit_role_of."""
+    if d is None:
+        return "?"
+    if not isinstance(d, dict):
+        d = d.to_dict() if hasattr(d, "to_dict") else {}
+    sc = d.get("scenario") or "?"
+    if sc != LIMIT_SCENARIO:
+        return sc
+    return lp_key(limit_role_of(d, fallback))
+
+
+def key_scenario(key: str | None) -> str | None:
+    """Сценарий ключа тревоги («LIMIT_PROXIMITY|OIL_TEMP» → LIMIT_PROXIMITY)."""
+    return key.split("|", 1)[0] if isinstance(key, str) else key
+
+
+def key_role(key: str | None) -> str | None:
+    """Роль ключа близости; None — у прочих ключей и у ключа без роли."""
+    if not isinstance(key, str) or not key.startswith(LIMIT_SCENARIO + "|"):
+        return None
+    return key.split("|", 1)[1] or None
+
+
+def key_covers(cover: str | None, key: str | None) -> bool:
+    """Покрывает ли ключ cover ключ key: тот же ключ; ключ без роли
+    («LIMIT_PROXIMITY» — строка или запись до v5.1.31) покрывает все роли
+    своего сценария (v5.1.31: решение по составу с одной ролью остаётся в силе,
+    хеш состава роль уже различал)."""
+    if cover is None or key is None:
+        return False
+    if cover == key:
+        return True
+    return cover == LIMIT_SCENARIO and key_scenario(key) == LIMIT_SCENARIO
 
 
 def cooling_proximity(cfg) -> dict[str, float]:
@@ -630,7 +807,8 @@ def _noload_spans(seg_by_addr, cfg, t0: datetime, t1: datetime,
                   brk: list[tuple[datetime, datetime | None, str]],
                   gl: list[tuple[datetime, datetime]], held: dict[str, Any], carry: bool,
                   carry_sec: float, break_sec: float,
-                  packets: list[datetime] | None = None, max_gap: float = 90.0) -> list[dict]:
+                  packets: list[datetime] | None = None, max_gap: float = 90.0,
+                  seg_start: datetime | None = None, noload_out: dict | None = None) -> list[dict]:
     """Нарушения NO_LOAD_TOO_LONG рабочей части [t0, t1) (v5.1.30, В-27.2).
 
     Отрезок — строки LOAD_PCT ниже load_pct (значение держится между строками,
@@ -659,7 +837,25 @@ def _noload_spans(seg_by_addr, cfg, t0: datetime, t1: datetime,
     считает его видимым временем отрезка) и рвёт отрезок только на дыре
     data_gaps (пауза пакетов без строки data_gaps его не рвёт, участок — рвёт).
     Поэтому перенос — оценка снизу или сверху на величину коротких выходов и
-    пауз до реза; на окне сравнение с аккумулятором — не равенство."""
+    пауз до реза; на окне сравнение с аккумулятором — не равенство.
+
+    v5.1.31 (В-30.3): окно не через рез (carry False — «Работа» со стоянки,
+    смена режима) — удержанная нагрузка на начало окна (_start_held: строка
+    до t0 в окне истории или held_before на начало сегмента, без дыры и паузы
+    пакетов до t0) ниже порога — отрезок с t0, без переноса (LOAD_PCT не
+    пишется до изменения: после пуска нагрузка 0, первой строки нет 61–733 с,
+    ДГУ №1 29.09 16:13–16:39 и ДГУ №2 12.10 13:44–14:01 оставались без
+    эпизода). Удержанная не ниже порога или её нет — с первой строки, как
+    раньше. Дыра связи и пауза пакетов рвут отрезок, как и прежде.
+    seg_start — начало сегмента: строки до t0 берутся только с него (разгон),
+    раньше — удержанное held_before (ревью v5.1.31: строки преамбулы без пинга
+    остаются, и дыра до сегмента за ними не видна). noload_out — сюда
+    кладутся head ("start" — отрезок начат с t0 по удержанной нагрузке вне
+    переноса, "carry" — перенесён через рез) и head_until (конец этого отрезка,
+    None — идёт до края окна): сегментатор досчитывает аккумулятору нагара
+    кусок до первой строки, не дальше конца отрезка — перенос через рез
+    согласован с участками (ревью v5.1.31).
+    run_start перенесённого отрезка — t0 − перенос (оценка начала до реза)."""
     addr = cfg.role_to_addr("LOAD_PCT")
     if addr is None:
         return []
@@ -679,12 +875,16 @@ def _noload_spans(seg_by_addr, cfg, t0: datetime, t1: datetime,
         runs.append(cur)
         cur = None
 
+    # Отрезок, идущий с t0 без строки нагрузки (v5.1.31, ревью В-30.3): "start" —
+    # с t0 по удержанной («Работа» не через рез), "carry" — перенос через рез
+    head_mode: str | None = None
     h = held.get("LOAD_PCT") if carry else None
     if h is not None:
         hv = float(h[1])
         if hv < pct:
             cur = {"_s": t0, "carried": True, "exit": None, "_pts": [(_tz(h[0]), hv, None)],
                    "last": t0}
+            head_mode = "carry"
         elif carry_sec > 0 and 0 < break_sec <= tol:
             # На резе шёл короткий выход внутри отрезка (аккумулятор его помнит)
             cur = {"_s": t0, "carried": True, "exit": t0 - timedelta(seconds=break_sec),
@@ -699,6 +899,25 @@ def _noload_spans(seg_by_addr, cfg, t0: datetime, t1: datetime,
             cur = {"_s": t0, "carried": True,
                    "exit": t0 - timedelta(seconds=break_sec) if 0 < break_sec <= tol else None,
                    "_pts": [], "last": t0}
+            if cur["exit"] is None:
+                head_mode = "carry"
+    elif not carry:
+        # v5.1.31 (В-30.3): «Работа» не через рез — отрезок с начала окна по
+        # удержанной нагрузке ниже порога, без переноса (carry_sec не берётся).
+        # Строки до t0 — только самого сегмента (разгон), раньше — held_before
+        try:
+            sh = _start_held(_real_rows(seg_by_addr.get(addr), _tz(seg_start or t0), t0),
+                             held.get("LOAD_PCT"), t0, pk, gl, max_gap)
+        except Exception:
+            logger.warning("Удержанная нагрузка на начало окна [%s) не определена — отрезок "
+                           "«без нагрузки» с первой строки", _iso(t0), exc_info=True)
+            sh = None
+        if sh is not None and sh[1] < pct:
+            cur = {"_s": t0, "carried": False, "exit": None, "_pts": [(sh[0], sh[1], None)],
+                   "last": t0}
+            head_mode = "start"
+    if cur is not None and head_mode is not None:
+        cur["_head"] = True
     ri, bi = 0, 0
     nr, nb = len(rows), len(brk)
     while ri < nr or bi < nb:
@@ -728,6 +947,12 @@ def _noload_spans(seg_by_addr, cfg, t0: datetime, t1: datetime,
             close(cur["exit"])          # на краю окна идёт выход — отрезок кончился на нём
         else:
             close(t1, ongoing=True)
+    if noload_out is not None and head_mode is not None:
+        # Конец отрезка, идущего с t0 (ревью v5.1.31): аккумулятор нагара досчитывает
+        # кусок до первой строки не дальше него — дыра и пауза пакетов рвут отрезок
+        hr = next((r for r in runs if r.get("_head")), None)
+        noload_out["head"] = head_mode
+        noload_out["head_until"] = None if hr is None or hr["ongoing"] else hr["_e"]
     out: list[dict[str, Any]] = []
     for r in runs:
         c_sec = float(carry_sec) if r["carried"] and r["_s"] == t0 else 0.0
@@ -745,10 +970,46 @@ def _noload_spans(seg_by_addr, cfg, t0: datetime, t1: datetime,
         # Отсчёты нарушения и удержанный на его начало (значения для vmin/vmax)
         before = [p for p in r["_pts"] if p[0] < vs]
         pts = ([before[-1]] if before else []) + [p for p in r["_pts"] if p[0] >= vs]
+        # Начало отрезка: у перенесённого через рез — t0 − перенос (ревью v5.1.31:
+        # отрезок, начатый до реза, — с его начала, а не с 09:00)
+        rs0 = r["_s"] - timedelta(seconds=c_sec) if c_sec else r["_s"]
         out.append({"_s": vs, "_e": r["_e"], "_ev": ev, "ongoing": r["ongoing"],
                     "carried": bool(c_sec and vs == t0), "role": "LOAD_PCT", "_pts": pts,
-                    "run_start": r["_s"], "run_sec": round(total, 1), "carry_sec": round(c_sec, 1)})
+                    "run_start": rs0, "run_sec": round(total, 1), "carry_sec": round(c_sec, 1)})
     return out
+
+
+def _start_held(before: list[tuple[datetime, float]], h: tuple | None, t0: datetime,
+                packets: list[datetime], gl: list[tuple[datetime, datetime]],
+                max_gap: float) -> tuple[datetime, float] | None:
+    """Удержанное значение на начало окна t0 (v5.1.31, В-30.3): последняя
+    реальная строка до t0 среди строк сегмента (before — от начала сегмента до
+    t0, разгон) или удержанное на начало сегмента (held_before: оно уже
+    проверено до начала сегмента, у посева пакетов до истории не видно), что
+    позже. Между строкой и
+    t0 дыра data_gaps или пауза пакетов длиннее max_gap — значение неизвестно
+    (None), как у held_before. Пакеты — от строки (строка раньше первого
+    известного пакета — от первого пакета, как у посева)."""
+    cand = before[-1] if before else None
+    if h is not None:
+        hc = (_tz(h[0]), float(h[1]))
+        if cand is None or hc[0] > cand[0]:
+            cand = hc
+    if cand is None:
+        return None
+    ts = cand[0]
+    if ts >= t0 or _covered(gl, ts, t0):
+        return None
+    i = bisect.bisect_right(packets, ts)
+    j = bisect.bisect_left(packets, t0)
+    seq = list(packets[i:j])
+    if packets and ts >= packets[0]:
+        seq = [ts] + seq
+    if seq:
+        seq = seq + [t0]
+        if any((b - a).total_seconds() > max_gap for a, b in zip(seq, seq[1:])):
+            return None
+    return cand
 
 
 # ── Кластеры ────────────────────────────────────────────────────────────────
@@ -777,7 +1038,9 @@ def _clusters(spans: list[dict], gl: list[tuple[datetime, datetime]], key: str,
 
     Публичные поля (метки — ISO): start, end, ongoing, carried, viol_sec (чистое
     время — объединение участков), blind_sec (дыры внутри кластера), vmin, vmax,
-    spans (число участков); у LIMIT_PROXIMITY ещё roles — участки по ролям; у
+    spans (число участков); у LIMIT_PROXIMITY ещё role и roles — участки по
+    ролям (с v5.1.31 кластер одной роли, roles — из одной записи, как читают
+    отчёт и вход заключения); у
     паспорта — run_sec, hard, hard_min, hard_until, hard_ongoing, instep_min,
     last_value. Служебные (с «_») — участки и отсчёты, только в памяти."""
     groups: list[dict[str, Any]] = []
@@ -856,6 +1119,8 @@ def _clusters(spans: list[dict], gl: list[tuple[datetime, datetime]], key: str,
                             "vmin": _rnd(min(rv)) if rv else None,
                             "vmax": _rnd(max(rv)) if rv else None}
             c["roles"] = roles
+            if len(roles) == 1:
+                c["role"] = next(iter(roles))
         c["_s"], c["_e"], c["_spans"] = g["_s"], g["_e"], sp
         out.append(c)
     return out
@@ -876,6 +1141,8 @@ def segment_spans(
     noload_carry_sec: float = 0.0,
     noload_break_sec: float = 0.0,
     phase_out: dict | None = None,
+    seg_start: datetime | None = None,
+    noload_out: dict | None = None,
 ) -> dict[str, list[dict[str, Any]] | None]:
     """Участки и кластеры нарушений рабочей части сегмента [t0, t1): {ключ: [кластер]}.
 
@@ -898,6 +1165,10 @@ def segment_spans(
     phase_out — сюда кладётся посчитанный ряд фаз ("series": [(момент, I₂,
     перекос, нейтраль)]): сегментатор отдаёт его срезы метрикам подсегментов,
     чтобы не строить тот же ряд второй раз (v5.1.30, время цикла).
+    seg_start (v5.1.31) — начало сегмента (не позже t0): строки нагрузки на
+    разгоне решают удержанное на t0 значение «без нагрузки»; noload_out — сюда
+    кладётся head (отрезок «без нагрузки» начат с t0 по удержанной нагрузке,
+    _noload_spans).
     O(n) по строкам адреса."""
     t0, t1 = _tz(t0), _tz(t1)
     if t1 <= t0:
@@ -944,7 +1215,10 @@ def segment_spans(
         add("RPM_OVERSPEED", _spans(pts, t0, t1, brk, init, "RPM"))
     guarded("RPM_OVERSPEED", _over)
 
-    # Близость к уставкам: три роли — один набор кластеров, пол давления (В3)
+    # Близость к уставкам: пол давления (В3). v5.1.31 (В-26.1): кластеры по
+    # ролям раздельно — у каждой роли свои эпизоды; до неё три роли склеивались
+    # в один кластер, и близость ОЖ в перегрев ДЭС №3 04–16.09 пряталась за
+    # близостью масла. Один ключ в ответе, кластеры ролей — по началу
     def _limit() -> None:
         lp: list[dict] = []
         for chk in limit_checks(cfg):
@@ -953,9 +1227,14 @@ def segment_spans(
                 continue
             bad = (lambda c: (lambda v: limit_bad(c, v)))(chk)
             rows = _real_rows(seg_by_addr.get(addr), t0, t1)
-            lp += _spans(_value_points(rows, bad, chk["floor"]), t0, t1, brk,
-                         _held_init(held, chk["role"], carry, bad, chk["floor"]), chk["role"])
-        add("LIMIT_PROXIMITY", lp)
+            sp = _spans(_value_points(rows, bad, chk["floor"]), t0, t1, brk,
+                        _held_init(held, chk["role"], carry, bad, chk["floor"]), chk["role"])
+            for s in sp:
+                s["blind_sec"] = round(_overlap(gl, s["_s"], s["_e"]), 1)
+            if sp:
+                lp += _clusters(sp, gl, "LIMIT_PROXIMITY")
+        if lp:
+            out["LIMIT_PROXIMITY"] = sorted(lp, key=lambda c: (c["_s"], c["_e"], c.get("role") or ""))
     guarded("LIMIT_PROXIMITY", _limit)
 
     # ОЖ у уставки HCT Warning (COOLING_FAILURE, ветка близости)
@@ -1011,7 +1290,7 @@ def segment_spans(
             seg_by_addr, cfg, t0, t1, brk, gl, held, carry,
             float(noload_carry_sec or 0.0) if carry else 0.0,
             float(noload_break_sec or 0.0) if carry else 0.0,
-            packets, float(prm["packet_max_gap_sec"]))))
+            packets, float(prm["packet_max_gap_sec"]), seg_start, noload_out)))
     return out
 
 
@@ -1141,7 +1420,10 @@ def alive_detections(subs: list | None, horizon: Any = None, gaps: Any = None) -
     только в подсегментах, которые пересекает его участок. Самый поздний
     подсегмент несёт и самый поздний кластер, дальше назад не смотрим.
     horizon — по умолчанию конец последнего подсегмента; gaps — по умолчанию
-    дыры подсегментов. Всё в памяти, без запросов."""
+    дыры подсегментов. Всё в памяти, без запросов.
+    v5.1.31 (В-26.1): «уже найден» — по ключу (scenario_key), у близости к
+    уставке — по паре (сценарий, роль): живая близость масла в последнем
+    подсегменте больше не прячет живую близость ОЖ из прежнего."""
     subs = list(subs or [])
     if not subs:
         return []
@@ -1160,15 +1442,15 @@ def alive_detections(subs: list | None, horizon: Any = None, gaps: Any = None) -
         if alive is False:
             continue
         if alive:
-            found.add(dd.get("scenario"))
+            found.add(scenario_key(dd))
         out.append(dd)
     for sub in reversed(subs[:-1]):
         here: dict[Any, list[dict]] = {}
         for d in _sub_attr(sub, "detections") or []:
             dd = _det_dict(d)
-            if dd is None or live_block(dd) is None or dd.get("scenario") in found:
+            if dd is None or live_block(dd) is None or scenario_key(dd) in found:
                 continue
-            here.setdefault(dd.get("scenario"), []).append(dd)
+            here.setdefault(scenario_key(dd), []).append(dd)
         for sc, lst in here.items():
             found.add(sc)
             out.extend(x for x in lst if detection_live(x, horizon, gl))

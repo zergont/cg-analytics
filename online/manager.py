@@ -34,6 +34,8 @@ from pathlib import Path
 from typing import Any
 
 from analytics.contract import CokingRisk
+# v5.1.31 (В-26.1): ключ тревоги — у близости к уставке «LIMIT_PROXIMITY|роль»
+from analytics.live import key_role, key_scenario, scenario_key
 from config import settings
 from db import remote
 from online import db as online_db
@@ -1231,7 +1233,7 @@ class OnlineManager:
                 # Тревога стала нарушением паспорта — снятие гейтом на неё больше
                 # не действует: снять пометку «снято» с её открытого эпизода (v5.1.12)
                 from online.status_assembler import passport_hard_seen
-                _hard = [a.get("scenario") for a in struct.get("analytics_alarms") or []
+                _hard = [scenario_key(a) for a in struct.get("analytics_alarms") or []
                          if passport_hard_seen(a) and a.get("scenario")]
                 if _hard:
                     try:
@@ -1394,9 +1396,10 @@ class OnlineManager:
             if not await online_db.set_segment_gate_suppression(
                     r, e, p, suppressed_hash=supp, segment_id=seg.get("id"), ts=now):
                 return
+            # v5.1.31 (В-26.1): ключи тревог — у близости к уставке своя роль
             _ids = await online_db.set_episodes_gate_suppressed(
                 r, e, p,
-                [a.get("scenario") for a in alarms
+                [scenario_key(a) for a in alarms
                  if a.get("scenario") and a.get("scenario") not in UNCANCELLABLE_SCENARIOS
                  and not passport_hard_seen(a)],
                 src={**_source, "kind": "repeat"},
@@ -1415,7 +1418,8 @@ class OnlineManager:
                     "analytics_severity": struct.get("analytics_severity"),
                     "alarms": [
                         {"scenario": a.get("scenario"), "severity": a.get("severity"),
-                         "fault_codes": a.get("fault_codes"), "description": a.get("description")}
+                         "fault_codes": a.get("fault_codes"), "description": a.get("description"),
+                         **({"param_role": a["param_role"]} if a.get("param_role") else {})}
                         for a in struct.get("panel_alarms", []) + alarms
                     ],
                     "decision":         "cancel",
@@ -1713,12 +1717,15 @@ def _gate_mark_event(kind: str, ts: datetime, fault_hash: str | None, suppressed
                      reason: str) -> dict:
     """Запись журнала гейта без модели (v5.1.22): наследование или поздний
     вердикт — со ссылкой на исходный разбор и id помеченных эпизодов. fault_hash
-    — исходного разбора: состав панели здесь не строится."""
+    — исходного разбора: состав панели здесь не строится. scenarios — ключи
+    тревог (v5.1.31): у близости к уставке в записи ещё param_role."""
     from online.status_assembler import GATE_RULES_VERSION
     return {
         "ts": ts.isoformat(), "kind": kind,
         "fault_hash": fault_hash, "suppressed_hash": suppressed_hash,
-        "alarms": [{"scenario": sc} for sc in sorted(set(scenarios or []))],
+        "alarms": [{"scenario": key_scenario(sc),
+                    **({"param_role": key_role(sc)} if key_role(sc) else {})}
+                   for sc in sorted(set(scenarios or []))],
         "decision": "cancel", "decision_applied": True,
         "reason": reason, "rules": GATE_RULES_VERSION,
         "provider": kind, "model": None, "tokens_in": 0, "tokens_out": 0,
@@ -1741,9 +1748,10 @@ def _inherit_allowed(cur_row: dict | None, supp_hash: str | None) -> tuple[bool,
 
 
 def _refuse_after(engine, scenarios: list[str], gate_ts: datetime) -> list[int]:
-    """Эпизоды движка этих сценариев, открытые после момента разбора, — в
-    отказанные наследованию (engine._supp_refused, v5.1.22, ревью gate-1), как
-    отказывает сам движок: повтор — когда запрет снимется и состав совпадёт.
+    """Эпизоды движка этих сценариев (ключей тревог, v5.1.31), открытые после
+    момента разбора, — в отказанные наследованию (engine._supp_refused,
+    v5.1.22, ревью gate-1), как отказывает сам движок: повтор — когда запрет
+    снимется и состав совпадёт.
     Подпись прошлой попытки сбрасывается — первая же смена условий даст повтор
     (иначе после ухода сигнала подпись совпала бы с той, что была до него).
     Без запроса: id и начало — из памяти эпизодов движка."""
@@ -2033,21 +2041,24 @@ async def _analyze_warning_claude(
             except Exception:
                 pass
 
+        # v5.1.31 (В-26.1): ключи тревог — у близости к уставке «LIMIT_PROXIMITY|роль»:
+        # счётчики, снятие и пересчёт сводки — по своей роли
         _alarm_scenarios = [
-            a.get("scenario") for a in struct.get("analytics_alarms", []) if a.get("scenario")
+            scenario_key(a) for a in struct.get("analytics_alarms", []) if a.get("scenario")
         ]
         if _alarm_scenarios:
             try:
                 # Аналитика — с даты выкладки v5.1.21 (ALARM_EPISODES.analytics_counts_since)
                 _counts = await online_db.count_episodes_batch(
-                    router_sn, equip_type, panel_id, _alarm_scenarios, 30, _run_origin_ts,
+                    router_sn, equip_type, panel_id,
+                    sorted({key_scenario(k) for k in _alarm_scenarios}), 30, _run_origin_ts,
                     analytics_since=analytics_since,
                 )
             except Exception:
                 logger.warning("WarningGate: счётчики эпизодов не получены", exc_info=True)
                 _counts = {}  # fail-open: счётчик не критичен
             for alarm in struct.get("analytics_alarms", []):
-                sc = alarm.get("scenario")
+                sc = scenario_key(alarm)
                 c = _counts.get(sc)
                 if c:
                     # Текущий эпизод уже в alarm_episodes — без +1
@@ -2167,10 +2178,11 @@ async def _analyze_warning_claude(
                 reasons = reasons + [{"code": "not_written",
                                       "text": "снятие не записано — сегмент не найден"}]
             if _supp_written:
-                _hard_seen = {a.get("scenario") for a in struct.get("analytics_alarms", [])
+                _hard_seen = {scenario_key(a) for a in struct.get("analytics_alarms", [])
                               if passport_hard_seen(a)}
                 _cancel_sc = [sc for sc in _alarm_scenarios
-                              if sc not in UNCANCELLABLE_SCENARIOS and sc not in _hard_seen]
+                              if key_scenario(sc) not in UNCANCELLABLE_SCENARIOS
+                              and sc not in _hard_seen]
                 # Куда лёг вердикт: открытая строка (разбор успел) или закрытый
                 # сегмент (строку закрыли, пока шёл разбор) — по тому же
                 # (сегмент, момент), что разбор и журнал этого вызова
@@ -2205,7 +2217,7 @@ async def _analyze_warning_claude(
                                    "снятие как есть", exc_info=True)
                     _su_now = []
                 if _su_now:
-                    _cancel_sc = [sc for sc in _cancel_sc if sc not in _su_now]
+                    _cancel_sc = [sc for sc in _cancel_sc if key_scenario(sc) not in _su_now]
                     logger.info("WarningGate: %s/%s/%s — пуск стал неустойчивым, пока шёл разбор: "
                                 "%s не снимаются", router_sn, equip_type, panel_id, _su_now)
                 # Эпизод живёт и меряется, но помечен: из severity исключён,
@@ -2308,7 +2320,9 @@ async def _analyze_warning_claude(
                 "analytics_severity": struct.get("analytics_severity"),
                 "alarms": [
                     {"scenario": a.get("scenario"), "severity": a.get("severity"),
-                     "fault_codes": a.get("fault_codes"), "description": a.get("description")}
+                     "fault_codes": a.get("fault_codes"), "description": a.get("description"),
+                     # v5.1.31 (В-26.1): параметр близости к уставке
+                     **({"param_role": a["param_role"]} if a.get("param_role") else {})}
                     for a in struct.get("panel_alarms", []) + struct.get("analytics_alarms", [])
                 ],
                 # v5.1.22: вид записи, хеш снятия и снятые эпизоды — основание

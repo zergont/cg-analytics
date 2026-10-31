@@ -781,10 +781,19 @@ def build_summary_parts(
                         for g in (getattr(sub, "data_gaps", None) or [])
                         if _dt(g.get("start")) and _dt(g.get("end"))])
 
+    def _ek(e: dict) -> str:
+        """Ключ аналитики эпизода (v5.1.31, В-26.1): сценарий, у близости к
+        уставке — «LIMIT_PROXIMITY|роль» (роль open_values_json, у старых строк —
+        по уставке, у синтетики — param_role)."""
+        from .live import LIMIT_SCENARIO, scenario_key
+        sc = e.get("scenario") or "?"
+        return scenario_key(e) if sc == LIMIT_SCENARIO else sc
+
     def _group_key(e: dict):
         if e.get("source") == "panel":
             return ("panel", e.get("addr"), e.get("bit"))
-        return ("analytics", e.get("scenario"))
+        # v5.1.31 (В-26.1): близость к уставке — вид на параметр
+        return ("analytics", _ek(e))
 
     # Код панели фронта по детекциям сегментов (v5.1.23, решение В5): эпизод,
     # открытый до привязки кода (код встал циклом позже) или синтетический
@@ -899,6 +908,12 @@ def build_summary_parts(
                 name = vals.get("fault_name")
             return name or f"Неисправность панели (addr={e.get('addr')}, bit={e.get('bit')})"
         sc = e.get("scenario") or "?"
+        # v5.1.31 (В-26.1): «Приближение к уставке останова панели (Температура масла)»;
+        # роль без подписи (не из трёх) кодом не печатается — имя без параметра
+        from .live import LIMIT_LABELS, key_role
+        _role = key_role(_ek(e))
+        if _role in LIMIT_LABELS:
+            return f"{SCENARIO_RU.get(sc, sc)} ({LIMIT_LABELS[_role]})"
         return SCENARIO_RU.get(sc, sc)
 
     # Что висит на конец окна — по данным последнего подсегмента, как раньше
@@ -909,7 +924,8 @@ def build_summary_parts(
     # детекция есть в последнем подсегменте. v5.1.21 (П4): детекция с участками
     # (values.live) — по свежести кластера и со взглядом назад через смену зоны,
     # той же функцией, что живой состав движка (analytics.live.alive_detections):
-    # «активен на конец» в отчёте совпадает с движком
+    # «активен на конец» в отчёте совпадает с движком. v5.1.31 (В-26.1): по
+    # ключу — у близости к уставке своя роль
     last_sub = None
     if segments and getattr(segments[-1], "subsegments", None):
         last_sub = segments[-1].subsegments[-1]
@@ -928,13 +944,14 @@ def build_summary_parts(
                 if not _fe or (_end is not None and _fe >= _end):
                     panel_live.add((v.get("addr"), v.get("bit")))
         try:
-            from .live import alive_detections
+            from .live import alive_detections, scenario_key
             for dd in alive_detections(segments[-1].subsegments):
                 if dd.get("scenario") != "CONTROLLER_FAULT":
-                    analytics_at_end.add(dd.get("scenario"))
+                    analytics_at_end.add(scenario_key(dd))
         except Exception:
             # Сбой свежести — как до v5.1.21: по последнему подсегменту
-            analytics_at_end = {_as_dict(d).get("scenario") for d in last_dets
+            from .live import scenario_key
+            analytics_at_end = {scenario_key(_as_dict(d)) for d in last_dets
                                 if _as_dict(d).get("scenario") != "CONTROLLER_FAULT"}
 
     # Строки одного фронта — один эпизод (дубли до v5.1.1: «Общая авария» 8 строк на
@@ -976,10 +993,12 @@ def build_summary_parts(
     # v5.1.21 (П9): детекция с участками (values.live) подтверждает эпизод своим
     # кластером нарушения, а не всем подсегментом (одиночный отсчёт давал
     # «подтверждено» на весь подсегмент); детекция без live — подсегментом, как
-    # раньше (смешанный ключ: комбинированная ветка OIL_DILUTION, прогноз COOLING)
+    # раньше (смешанный ключ: комбинированная ветка OIL_DILUTION, прогноз COOLING).
+    # v5.1.31 (В-26.1, L5): по ключу — у близости к уставке кластер своей роли
+    from .live import scenario_key as _sk
     _subs = [sub for s in segments for sub in (getattr(s, "subsegments", None) or [])]
     _sub_scs = []
-    _live_iv: dict[str, dict[datetime, tuple]] = {}   # сценарий → {начало: (конец, идёт)}
+    _live_iv: dict[str, dict[datetime, tuple]] = {}   # ключ → {начало: (конец, идёт)}
     for sub in _subs:
         _plain_scs = set()
         for d in (getattr(sub, "detections", None) or []):
@@ -990,9 +1009,9 @@ def build_summary_parts(
                 if isinstance(lv, dict) else []
             _cl = [c for c in _cl if c[0] is not None and c[1] is not None]
             if not _cl:
-                _plain_scs.add(dd.get("scenario"))
+                _plain_scs.add(_sk(dd))
                 continue
-            m = _live_iv.setdefault(dd.get("scenario"), {})
+            m = _live_iv.setdefault(_sk(dd), {})
             for cs, ce, og in _cl:
                 pe, po = m.get(cs, (ce, og))
                 m[cs] = (max(pe, ce), po or og)
@@ -1000,6 +1019,19 @@ def build_summary_parts(
                          _plain_scs))
     # Сверять не с чем — подсегменты без сведений о детекциях (не из сегментатора)
     _can_confirm = any(getattr(sub, "detections", None) is not None for sub in _subs)
+    from .live import key_covers as _kc
+
+    def _iv_of(k: str) -> dict:
+        """Кластеры ключа; у строки близости без роли (до v5.1.31) — всех ролей."""
+        if k in _live_iv:
+            return _live_iv[k]
+        out: dict = {}
+        for ck, m in _live_iv.items():
+            if _kc(k, ck):
+                for cs, (ce, og) in m.items():
+                    pe, po = out.get(cs, (ce, og))
+                    out[cs] = (max(pe, ce), po or og)
+        return out
 
     def _confirmed(e: dict) -> bool:
         if (not _can_confirm or e.get("source") == "panel"
@@ -1010,12 +1042,12 @@ def build_summary_parts(
             a0 = w0
         if w1 is not None and (a1 is None or a1 > w1):
             a1 = w1
-        sc = e.get("scenario")
+        sc = _ek(e)
         if any((a1 is None or cs <= a1) and (a0 is None or ce >= a0)
-               for cs, (ce, _og) in (_live_iv.get(sc) or {}).items()):
+               for cs, (ce, _og) in _iv_of(sc).items()):
             return True
         return any(
-            sc in scs
+            any(_kc(sc, x) for x in scs)
             and (a1 is None or s0 is None or s0 <= a1)
             and (a0 is None or s1 is None or s1 >= a0)
             for s0, s1, scs in _sub_scs
@@ -1028,9 +1060,9 @@ def build_summary_parts(
         подсегмента), а не конец окна: воздействие в сводке — то, что эпизод
         получит при закрытии. Кластеров сценария в сегменте нет — None (до конца
         окна, как раньше); есть, но ни один не пересекает эпизод (мост после
-        реза) — пустой период."""
-        sc = e.get("scenario")
-        iv = _live_iv.get(sc)
+        реза) — пустой период. v5.1.31: по ключу (у близости — своя роль)."""
+        sc = _ek(e)
+        iv = _iv_of(sc)
         if not iv or w1 is None or e.get("source") == "panel" or sc == "CONTROLLER_FAULT":
             return None
         a0 = _dt(e.get("t_open"))
@@ -1040,7 +1072,8 @@ def build_summary_parts(
             a0 = w0
         ends = [w1 if og else ce for cs, (ce, og) in iv.items() if ce >= a0 and cs <= w1]
         ends += [s1 or w1 for s0, s1, scs in _sub_scs
-                 if sc in scs and (s1 is None or s1 >= a0) and (s0 is None or s0 <= w1)]
+                 if any(_kc(sc, x) for x in scs) and (s1 is None or s1 >= a0)
+                 and (s0 is None or s0 <= w1)]
         if not ends:
             return a0
         return max(a0, min(max(ends), w1))
@@ -1050,6 +1083,10 @@ def build_summary_parts(
         g = groups.setdefault(_group_key(e), {
             "name": _group_name(e), "source": e.get("source"),
             "scenario": e.get("scenario"),
+            # v5.1.31 (В-26.1): ключ вида и параметр близости к уставке — по ним
+            # поздний вердикт гейта снимает только свою роль
+            **({"key": _ek(e), "param_role": _ek(e).split("|", 1)[1]}
+               if e.get("source") != "panel" and "|" in _ek(e) else {}),
             "sev_rank": 0, "severity": e.get("severity"),
             "count": 0, "active_sec": 0.0, "blind_sec": 0.0,
             "suppressed": 0, "unconfirmed": 0, "unconfirmed_at": [], "open": 0, "open_live": 0,
@@ -1119,7 +1156,8 @@ def build_summary_parts(
                 if e.get("source") == "panel":
                     hangs = panel_live is None or (e.get("addr"), e.get("bit")) in panel_live
                 else:
-                    hangs = analytics_at_end is None or e.get("scenario") in analytics_at_end
+                    hangs = analytics_at_end is None or any(
+                        _kc(_ek(e), k) for k in analytics_at_end)
                 if hangs:
                     g["at_end"] = True
         # Фаза относительно сегмента: было до начала / появилось в нём
@@ -1687,10 +1725,23 @@ def apply_gate_suppression(parts: dict[str, Any], scenarios, until=None,
     начавшиеся не позже него (части с open_live_t; в старых — все открытые, как
     раньше). src — источник для подписи: разбор лёг в этот сегмент, подпись
     «снято ИИ (разбор ЧЧ:ММ)».
+
+    v5.1.31 (В-26.1): scenarios — ключи тревог; группа близости к уставке с
+    ролью (key) снимается только ключом своей роли или сценарием без роли.
+    Группа частей до v5.1.31 (без key) — по сценарию ключа, как раньше.
     """
     from online.status_assembler import GATE_EXCLUDED_SCENARIOS, UNCANCELLABLE_SCENARIOS
+    from .live import key_covers, key_scenario
     sc = {x for x in scenarios
-          if x not in UNCANCELLABLE_SCENARIOS and x not in GATE_EXCLUDED_SCENARIOS}
+          if key_scenario(x) not in UNCANCELLABLE_SCENARIOS
+          and key_scenario(x) not in GATE_EXCLUDED_SCENARIOS}
+    _sc_base = {key_scenario(x) for x in sc}
+
+    def _hit_group(g: dict) -> bool:
+        k = g.get("key")
+        if k:
+            return any(key_covers(x, k) for x in sc)
+        return g.get("scenario") in _sc_base
     if not sc or not parts or parts.get("no_data"):
         return parts
     out = json.loads(json.dumps(parts))
@@ -1701,7 +1752,7 @@ def apply_gate_suppression(parts: dict[str, Any], scenarios, until=None,
     for g in remarks:
         if g.get("kind") == "event":
             continue   # разовое событие перехода гейт не снимает (v5.1.10)
-        if g.get("source") == "analytics" and g.get("scenario") in sc:
+        if g.get("source") == "analytics" and _hit_group(g):
             # Вердикт гейта касается открытых эпизодов: закрывшиеся раньше в
             # этом же сегменте остаются замечаниями, как и при живой пометке
             n = g.get("open_live")
@@ -2227,6 +2278,11 @@ def _det_worst(entries: list[tuple[int, dict]]) -> tuple[int, dict] | None:
     if not entries:
         return None
     rule = _WORST_KEY.get(entries[0][1].get("scenario"))
+    if entries[0][1].get("scenario") == "LIMIT_PROXIMITY":
+        # Давление масла близко к уставке снизу — худшее минимум (v5.1.31, ревью)
+        from .live import limit_role_of
+        if limit_role_of(entries[0][1]) == "OIL_PRESS":
+            rule = ("value", min)
     if not rule:
         return None
     key, pick = rule

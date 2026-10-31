@@ -1600,8 +1600,9 @@ tick5(_row_c2x)
 check(_cleared == [["RPM_OVERSPEED", "RPM_UNDERSPEED"]],
       f"5е: (для сравнения, 1552,5) после реза — снимает пометку и с заброса: {_cleared}")
 _src_gate = inspect.getsource(_mgr._analyze_warning_claude)
-check("start_unstable_scenarios(" in _src_gate and "_cancel_sc = [sc for sc in _cancel_sc if sc not in _su_now]"
-      in _src_gate and "get_segment_by_id(_landed)" in _src_gate,
+# v5.1.31: сравнение по сценарию ключа тревоги (у близости ключ с ролью)
+check("start_unstable_scenarios(" in _src_gate
+      and "_cancel_sc = [sc for sc in _cancel_sc if key_scenario(sc) not in _su_now]" in _src_gate and "get_segment_by_id(_landed)" in _src_gate,
       "5е: гейт — сценарии, ставшие под запретом, пока шёл разбор, не метит (свежая строка или поздний сегмент)")
 # Сводка и поздний вердикт — раздел 6е
 
@@ -2206,11 +2207,11 @@ check(_an == {"new": f"{_N234} (код 234)", "old": f"{_N1464} (код 1464)", 
 # ══ 9. Изоляция ключей segment_spans (п.7) ══════════════════════════════════
 check(not hasattr(_lv, "LIVE_KEYS"), "9: неиспользуемая константа LIVE_KEYS удалена")
 
-# Окно, где срабатывают все четыре ключа (ДЭС №3): масло 99,0007 у уставки
+# Окно, где срабатывают все четыре ключа (ДЭС №3): масло 100,0007 у уставки
 # [100, 400), ОЖ 94 у HCT [300, 500), паспорт 236 < 242 [560, 640), провал
 # оборотов 1418 при 47,3 Гц в 900
 _ROWS9 = work_rows(extra=[
-    h(OILT, S(L0, 0), 95.0), h(OILT, S(L0, 100), 99.0007), h(OILT, S(L0, 400), 97.0),
+    h(OILT, S(L0, 0), 95.0), h(OILT, S(L0, 100), 100.0007), h(OILT, S(L0, 400), 97.0),
     h(COOL3, S(L0, 0), 85.0), h(COOL3, S(L0, 300), 94.0), h(COOL3, S(L0, 500), 85.0),
     h(PRESS3, S(L0, 0), 250.0), h(PRESS3, S(L0, 560), 236.0), h(PRESS3, S(L0, 640), 250.0),
     h(RPM, S(L0, 900), 1418.0), h(FREQ, S(L0, 900), 47.3),

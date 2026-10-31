@@ -33,6 +33,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from analytics.contract import CokingRisk, EVENT_SCENARIOS, STATE_SCENARIOS
+# v5.1.31 (В-26.1): ключ близости к уставке — по роли («LIMIT_PROXIMITY|роль»)
+from analytics.live import (
+    LIMIT_SCENARIO, key_covers, key_role, key_scenario, limit_role_of, scenario_key,
+)
 from db import remote
 from online import db as online_db
 
@@ -106,9 +110,15 @@ def _episode_has_live(ep: dict) -> bool:
 
 
 def _episode_key(ep: dict) -> str:
-    """Ключ эпизода из строки alarm_episodes — тот же, что _alert_key детекции."""
+    """Ключ эпизода из строки alarm_episodes — тот же, что _alert_key детекции.
+
+    v5.1.31 (В-26.1, В-26.2): близость к уставке — «LIMIT_PROXIMITY|роль»; роль —
+    open_values_json.role (у синтетики сводки — param_role), у старых строк без
+    роли — по уставке shutdown_limit (online.db._lp_role_sql — то же в SQL)."""
     if ep.get("scenario") == "CONTROLLER_FAULT":
         return f'CONTROLLER_FAULT|{ep.get("addr")}|{ep.get("bit")}'
+    if ep.get("scenario") == LIMIT_SCENARIO:
+        return scenario_key(ep)
     return ep.get("scenario", "?")
 
 
@@ -656,6 +666,8 @@ def _gate_suppressed_scenarios(gate_state: dict | None, seg,
     closed — все сегменты, закрываемые этим циклом (ревью gate-3): при догонке
     [Работа (решение) → Стоп → Работа] стоп между решением и сегментом снятие
     не пропускает, как и перенос (_gate_carry).
+    v5.1.31 (В-26.1): ключи тревог (_alert_key), у близости к уставке —
+    «LIMIT_PROXIMITY|роль»: снятие одной роли не помечает другую.
     """
     h = (gate_state or {}).get("suppressed_hash")
     if not h:
@@ -677,10 +689,11 @@ def _gate_suppressed_scenarios(gate_state: dict | None, seg,
     if not suppression_active(_ban_row(open_row, seg, h), dets):
         return set()
     # Режимные замечания гейт не снимает (решение 12.10)
-    return ({d.get("scenario") for d in dets
-             if d.get("scenario") and d.get("scenario") != "CONTROLLER_FAULT"
-             and not passport_hard_seen(d)}
-            - UNCANCELLABLE_SCENARIOS - GATE_EXCLUDED_SCENARIOS)
+    return {_alert_key(d) for d in dets
+            if d.get("scenario") and d.get("scenario") != "CONTROLLER_FAULT"
+            and not passport_hard_seen(d)
+            and d.get("scenario") not in UNCANCELLABLE_SCENARIOS
+            and d.get("scenario") not in GATE_EXCLUDED_SCENARIOS}
 
 
 def _gate_own_src(gate_state: dict | None) -> dict | None:
@@ -722,6 +735,8 @@ def _gate_carry(gate_state: dict | None, closed: list[tuple], episodes: dict[str
     снятыми (синтетика, _gate_suppressed_scenarios): в записи carry ключом
     synthetic — их живой эпизод, заведённый после закрытия, получает снятие
     переносом; прочие тревоги, появившиеся до границы, — нет (ревью gate-4).
+    v5.1.31 (В-26.1): synthetic и состав на конце — ключи тревог (у близости —
+    с ролью).
     """
     from online.status_assembler import (
         GATE_CARRY_KINDS, GATE_RULES_VERSION, gate_decision_source, gate_record_episodes,
@@ -748,7 +763,7 @@ def _gate_carry(gate_state: dict | None, closed: list[tuple], episodes: dict[str
         # Журнал до v5.1.22: снятые — эпизоды состава на конце, если он тот же
         if not is_analytics_suppressed({"gate_suppressed_hash": h}, dets_end or []):
             return None
-        _sc = {d.get("scenario") for d in dets_end or []
+        _sc = {_alert_key(d) for d in dets_end or []
                if isinstance(d, dict) and d.get("scenario") != "CONTROLLER_FAULT"}
         ids = {m.get("id") for k, m in (episodes or {}).items() if k in _sc}
     ongoing = sorted(m["id"] for k, m in (episodes or {}).items()
@@ -782,7 +797,12 @@ def _carry_scope(gate_log: list | None, h: str | None) -> tuple[set[int], set[st
     эпизодов из записей carry / late с этим хешем; сценарии тревог, снятых в
     сводке закрытого сегмента без живого эпизода (synthetic у carry); у позднего
     вердикта — сценарии записи с моментом разбора (снимал начавшиеся не позже).
-    Тревога, которую закрытая карточка не снимала, сюда не входит."""
+    Тревога, которую закрытая карточка не снимала, сюда не входит.
+
+    v5.1.31 (В-26.1): ключи тревог — у близости «LIMIT_PROXIMITY|роль» (synthetic
+    — ключом, у тревог позднего вердикта — scenario и param_role); запись до
+    v5.1.31 без роли — сценарием, он покрывает все роли (key_covers: решение по
+    составу с одной ролью остаётся в силе, хеш состава роль уже различал)."""
     from online.status_assembler import gate_entry_kind
     ids: set[int] = set()
     synth: set[str] = set()
@@ -805,7 +825,7 @@ def _carry_scope(gate_log: list | None, h: str | None) -> tuple[set[int], set[st
             _t = _as_utc(((e.get("source") or {}) if isinstance(e.get("source"), dict) else {}).get("ts")
                          or e.get("ts"))
             for a in e.get("alarms") or []:
-                sc = a.get("scenario") if isinstance(a, dict) else None
+                sc = scenario_key(a) if isinstance(a, dict) and a.get("scenario") else None
                 if sc and _t is not None and (sc not in late or _t > late[sc]):
                     late[sc] = _t
     return ids, synth, late
@@ -831,6 +851,10 @@ def _live_new_episodes(segments: list, eps: list[dict], live_keys: set[str],
 
     v5.1.22: supp_src — источник снятия (своё решение строки) для подписи
     «снято ИИ (разбор ЧЧ:ММ)».
+
+    v5.1.31 (В-26.1): снятый состав — ключами тревог, у близости к уставке по
+    роли (снятие одной роли не помечает другую); у синтетики близости роль — в
+    param_role и open_values_json (группа сводки, ключ эпизода).
     """
     if not live_keys:
         return []
@@ -859,7 +883,8 @@ def _live_new_episodes(segments: list, eps: list[dict], live_keys: set[str],
             for d in sub.detections:
                 dd = d.to_dict()
                 key = _alert_key(dd)
-                if (key not in live_keys or key in have or key in out
+                # v5.1.31: открытая строка близости без роли (до v5.1.31) — все роли
+                if (key not in live_keys or key in out or any(key_covers(x, key) for x in have)
                         or dd.get("scenario") in STATE_SCENARIOS
                         or dd.get("scenario") in EVENT_SCENARIOS):
                     continue
@@ -877,6 +902,8 @@ def _live_new_episodes(segments: list, eps: list[dict], live_keys: set[str],
                 if not panel and key in live_on:
                     t_open = live_on[key]
                 same = closed_onsets.get((key, t_open))
+                _supp = not panel and key in (suppressed_sc or ())
+                _role = key_role(key)
                 out[key] = {
                     "scenario": dd.get("scenario"),
                     "source": "panel" if panel else "analytics",
@@ -886,11 +913,12 @@ def _live_new_episodes(segments: list, eps: list[dict], live_keys: set[str],
                     "t_open": t_open, "t_close": None,
                     "active_sec": max(0.0, (_tz_utc(t_end) - t_open).total_seconds()),
                     "blind_sec": float((same or {}).get("blind_sec") or 0.0),
-                    "gate_suppressed": not panel and dd.get("scenario") in (suppressed_sc or ()),
-                    "gate_suppressed_src": (supp_src if not panel
-                                            and dd.get("scenario") in (suppressed_sc or ())
-                                            else None),
-                    "open_values_json": {"fault_name": v.get("fault_name")} if panel else None,
+                    "gate_suppressed": _supp,
+                    "gate_suppressed_src": supp_src if _supp else None,
+                    "open_values_json": ({"fault_name": v.get("fault_name")} if panel
+                                         else {"role": _role, "shutdown_limit": v.get("shutdown_limit")}
+                                         if _role else None),
+                    "param_role": _role,
                 }
     return list(out.values())
 
@@ -1405,18 +1433,33 @@ def _put_counts(d, c: dict, run_origin_ts) -> None:
         d.values["startup_since"] = _tz_utc(run_origin_ts).isoformat()
 
 
-def _alert_key(d: dict) -> str:
+def _alert_key(d: dict, fallback: bool = True) -> str:
     """Ключ живой тревоги: панельные — по-битно (scenario|addr|bit),
     аналитические — по сценарию (он уникален в снимке).
 
     Один scenario CONTROLLER_FAULT покрывает все биты панели — без per-bit
     ключа аварии затирают друг друга в словаре живых тревог и эпизодах.
     Совпадает с online_db.episode_key.
+
+    v5.1.31 (В-26.1): близость к уставке — по роли, «LIMIT_PROXIMITY|роль»
+    (values.role; у записей журнала без роли — по уставке): у каждой роли свои
+    эпизоды, счётчики и снятия гейтом. До v5.1.31 две роли сразу давали одну
+    тревогу — вторая затиралась в словаре. fallback=False — запись журнала из
+    БД: роль только из JSON и уставки, как в SQL (analytics.live.limit_role_of).
     """
     if d.get("scenario") == "CONTROLLER_FAULT":
         v = d.get("values") or {}
         return f'CONTROLLER_FAULT|{v.get("addr")}|{v.get("bit")}'
+    if d.get("scenario") == LIMIT_SCENARIO:
+        return scenario_key(d, fallback)
     return d.get("scenario", "?")
+
+
+def _gate_alarm(key: str) -> dict:
+    """Тревога записи журнала гейта по ключу (v5.1.31, В-26.1): {scenario}, у
+    близости к уставке — ещё param_role (по ним _carry_scope строит ключ)."""
+    role = key_role(key)
+    return {"scenario": key_scenario(key), **({"param_role": role} if role else {})}
 
 
 def _accrual_split(
@@ -2432,13 +2475,16 @@ async def _seed_clusters(
     # память уточнена по кластерам окна — _refine_until)
     mem_until = {ep.get("id"): ep.get("until") for ep in (live_episodes or {}).values()
                  if ep.get("exact") and ep.get("until") is not None}
-    covers: list[tuple] = []     # (сценарий, начало, конец закрытого | None, until открытого | None)
+    # v5.1.31 (В-26.1): покрытие — по ключу тревоги, у близости к уставке — по
+    # роли (роль строки — JSON, у старых — по уставке; строка без роли — ключ
+    # сценария, покрывает все роли: key_covers)
+    covers: list[tuple] = []     # (ключ, начало, конец закрытого | None, until открытого | None)
     for e in ov:
         if e.get("scenario") == "CONTROLLER_FAULT" or e.get("t_open") is None:
             continue
         a = _tz_utc(e["t_open"])
         if e.get("t_close") is not None:
-            covers.append((e.get("scenario"), a, _tz_utc(e["t_close"]), None))
+            covers.append((_episode_key(e), a, _tz_utc(e["t_close"]), None))
             continue
         lv = _episode_open_values(e).get("live")
         u = None
@@ -2447,11 +2493,11 @@ async def _seed_clusters(
             mu = mem_until.get(e.get("id"))
             if mu is not None:
                 u = _tz_utc(mu)
-        covers.append((e.get("scenario"), a, None, u))   # u None — до бесконечности
+        covers.append((_episode_key(e), a, None, u))   # u None — до бесконечности
 
     def _covered(c: dict) -> bool:
-        for sc, a, b, u in covers:
-            if sc != c["scenario"] or c["end"] < a:
+        for ck, a, b, u in covers:
+            if not key_covers(ck, c["key"]) or c["end"] < a:
                 continue
             if b is not None:
                 # Закрытый — только настоящим пересечением (ревью v5.1.21, engine-2):
@@ -2465,7 +2511,9 @@ async def _seed_clusters(
         return False
 
     for (k, s), c in sorted(clusters.items(), key=lambda x: x[0][1]):
-        if (k, s) in open_keys or (k, s) in already or _covered(c):
+        # v5.1.31: онсет строки близости без роли (до v5.1.31) — все роли
+        if ((k, s) in open_keys or (k, s) in already or _covered(c)
+                or (key_role(k) and (key_scenario(k), s) in already)):
             continue
         # Идёт на конец окна, эпизода по нему нет — новое окно продолжит его
         # переносом с 09:00 (ошибка начала — около цикла)
@@ -2488,7 +2536,7 @@ async def _seed_clusters(
         if seeded_out is not None:
             seeded_out.add((k, s))
         # Засеянный кластер покрывает свой интервал (поздние строки сдвинули начало)
-        covers.append((c["scenario"], s, e_, None))
+        covers.append((c["key"], s, e_, None))
 
 
 async def _collect_and_enrich_detections(
@@ -2664,7 +2712,9 @@ async def _collect_and_enrich_detections(
                         router_sn, equip_type, panel_id, info["t_open"], info["first_run_end"])
                 except Exception:
                     _ov = []
-                if any(e.get("scenario") == info["scenario"] for e in _ov):
+                # v5.1.31: по ключу (у близости — своя роль; строка без роли — все)
+                if any(key_covers(_episode_key(e), k) for e in _ov
+                       if e.get("scenario") == info["scenario"]):
                     continue
             t_open = info["t_open"] or _tz_utc(seg_t_end)
             # Снятая панелью тревога закрывается временем снятия, а не концом
@@ -2710,9 +2760,10 @@ async def _collect_and_enrich_detections(
             except Exception:
                 logger.warning("Не удалось создать эпизод для %s", k, exc_info=True)
 
-    # Счётчики по эпизодам: WHERE по scenario, результат — per-fault ключом;
-    # у аналитики — с даты выкладки v5.1.21 (В5, переходный месяц); открытые
-    # строки с известным концом — от него (v5.1.25, P2-3)
+    # Счётчики по эпизодам: WHERE по scenario, результат — per-fault ключом
+    # (у близости к уставке — по роли, v5.1.31); у аналитики — с даты выкладки
+    # v5.1.21 (В5, переходный месяц); открытые строки с известным концом — от
+    # него (v5.1.25, P2-3)
     try:
         _ends = _known_ends_arg(known_ends)
         counts = await online_db.count_episodes_batch(
@@ -3061,7 +3112,8 @@ class OnlinePollEngine:
             active = await online_db.get_active_alerts(
                 self.router_sn, self.equip_type, self.panel_id
             )
-            self._active_alerts = {_alert_key(a): a for a in active}
+            # v5.1.31: ключ записи журнала — роль как в SQL (без запасных веток)
+            self._active_alerts = {_alert_key(a, fallback=False): a for a in active}
             if self._active_alerts:
                 logger.info(
                     "OnlineEngine[%s]: восстановлены активные тревоги: %s",
@@ -3109,7 +3161,11 @@ class OnlinePollEngine:
             # а старший висел бы открытым вечно. Закрываем старший явно.
             self._episodes = {}
             for e in eps:
-                k = online_db.episode_key(e["scenario"], e.get("addr"), e.get("bit"))
+                # v5.1.31 (В-26.1): ключ близости — с ролью из open_values_json (у
+                # старых строк — по уставке). Эпизод, открытый до выкладки под
+                # ключом «LIMIT_PROXIMITY», продолжается как «LIMIT_PROXIMITY|роль»:
+                # та же строка, без пары «закрыт/открыт» и двойного счёта
+                k = _episode_key(e)
                 prev = self._episodes.get(k)
                 if prev is not None:
                     try:
@@ -3233,7 +3289,9 @@ class OnlinePollEngine:
 
         False — открытой строки нет (проверку надо повторить после upsert).
 
-        v5.1.22 (P1-1 п. 2–4). new_eps — [(сценарий, id эпизода, начало)].
+        v5.1.22 (P1-1 п. 2–4). new_eps — [(ключ тревоги, id эпизода, начало)]
+        (v5.1.31, В-26.1: у близости к уставке «LIMIT_PROXIMITY|роль» — снятие,
+        пометка и запись только своей роли; до v5.1.31 — сценарий).
         - Снятие действует (suppression_active: состав совпал, запретов нет) и
           решение принято в этой строке (разбор моделью или повтор) — помечаются
           только эти id (и отказанные раньше, ещё идущие), запись inherited со
@@ -3265,13 +3323,14 @@ class OnlinePollEngine:
             _alive = {m.get("id") for m in (self._episodes or {}).values()}
             for _i in [i for i in refused if i not in _alive]:
                 refused.pop(_i, None)
-            _hard = {d.get("scenario") for d in curr_dets or []
+            _hard = {_alert_key(d) for d in curr_dets or []
                      if isinstance(d, dict) and passport_hard_seen(d)}
             cand: dict[int, tuple] = {}
             for c in list(new_eps or []) + list(refused.values()):
                 sc, ep_id = c[0], c[1]
-                if (ep_id is None or sc in UNCANCELLABLE_SCENARIOS
-                        or sc in GATE_EXCLUDED_SCENARIOS or sc in _hard):
+                _bsc = key_scenario(sc)
+                if (ep_id is None or _bsc in UNCANCELLABLE_SCENARIOS
+                        or _bsc in GATE_EXCLUDED_SCENARIOS or sc in _hard):
                     continue
                 cand[ep_id] = c
             # Подпись условий этой попытки — повтор отказанных только при её смене
@@ -3301,9 +3360,11 @@ class OnlinePollEngine:
                 _ids, _synth, _late = _carry_scope(_log, h)
 
                 def _carried(c: tuple) -> bool:
-                    if c[1] in _ids or c[0] in _synth:
+                    # v5.1.31: ключ с ролью; запись до v5.1.31 (сценарий) — все роли
+                    if c[1] in _ids or any(key_covers(x, c[0]) for x in _synth):
                         return True
-                    _u = _late.get(c[0])
+                    _us = [u for k_, u in _late.items() if key_covers(k_, c[0])]
+                    _u = max(_us) if _us else None
                     return _u is not None and _tz_utc(c[2]) <= _u
 
                 take = [c for c in cand.values()
@@ -3342,7 +3403,7 @@ class OnlinePollEngine:
                     event={
                         "ts": _ts.isoformat(), "kind": kind,
                         "fault_hash": src.get("fault_hash"), "suppressed_hash": h,
-                        "alarms": [{"scenario": sc} for sc in sorted({c[0] for c in take})],
+                        "alarms": [_gate_alarm(k) for k in sorted({c[0] for c in take})],
                         "decision": "cancel", "decision_applied": True,
                         "reason": ("новый эпизод того же состава в этой строке — снятие "
                                    "по исходному разбору" if kind == "inherited" else
@@ -3466,7 +3527,8 @@ class OnlinePollEngine:
         self._episode_accrual_ts = now_ts
 
         # Открытие новых / обновление живущих
-        # Новые эпизоды аналитики: (сценарий, id, начало) — наследование снятия по id (v5.1.22)
+        # Новые эпизоды аналитики: (ключ, id, начало) — наследование снятия по id
+        # (v5.1.22); с v5.1.31 ключ тревоги, у близости — с ролью
         _new_analytics: list[tuple] = []
         _hc: dict = {}    # кэш разрывов до окна (голова эпизода)
         for key, d in curr_map.items():
@@ -3542,10 +3604,11 @@ class OnlinePollEngine:
                 # заводилась заново — у ДЭС №3 8 строк на одну неисправность.
                 prev = None
                 try:
+                    # v5.1.31 (В-26.1): у близости — строка своей роли
                     prev = await online_db.find_episode_by_onset(
                         self.router_sn, self.equip_type, self.panel_id,
                         scenario=sc, addr=_vals.get("addr"), bit=_vals.get("bit"),
-                        t_open=t_open,
+                        t_open=t_open, role=key_role(key),
                     )
                 except Exception:
                     logger.warning("OnlineEngine[%s]: не удалось проверить онсет %s",
@@ -3608,7 +3671,7 @@ class OnlinePollEngine:
                                            "miss": 0, "first_miss_ts": None,
                                            "t_open": t_open, **_mem_live, **_mem_code}
                     if sc != "CONTROLLER_FAULT":
-                        _new_analytics.append((sc, ep_id, t_open))
+                        _new_analytics.append((key, ep_id, t_open))
                     else:
                         self._mark_panel_seeded(key, t_open)
                     continue
@@ -3638,7 +3701,7 @@ class OnlinePollEngine:
                                        "miss": 0, "first_miss_ts": None,
                                        "t_open": t_open, **_mem_live, **_mem_code}
                 if sc != "CONTROLLER_FAULT":
-                    _new_analytics.append((sc, ep_id, t_open))
+                    _new_analytics.append((key, ep_id, t_open))
                 else:
                     self._mark_panel_seeded(key, t_open)
                 logger.info("OnlineEngine[%s]: эпизод открыт — %s (severity=%s%s)",
@@ -4003,6 +4066,9 @@ class OnlinePollEngine:
             open_alarms = [
                 {
                     "scenario":        e["scenario"],
+                    # v5.1.31 (В-26.1): параметр близости к уставке
+                    "param_role":      (limit_role_of(e) if e["scenario"] == LIMIT_SCENARIO
+                                        else None),
                     "severity":        e.get("severity"),
                     "since":           _tz_utc(e["t_open"]).isoformat(),
                     "active_sec":      round(e.get("active_sec") or 0),
