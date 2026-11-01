@@ -38,6 +38,8 @@ from analytics.contract import CokingRisk, EVENT_SCENARIOS, STATE_SCENARIOS
 from analytics.live import (
     LIMIT_SCENARIO, key_covers, key_role, key_scenario, limit_role_of, scenario_key,
 )
+# v5.1.34 (В1): пуск режима — в обрыве связи (run_origin_unknown, origin_from)
+from analytics.serializer import run_origin_valid
 from db import remote
 from online import db as online_db
 
@@ -1010,8 +1012,12 @@ def _make_seg_hint(db_row: dict):
 
     def _iso(v):
         return v.isoformat() if hasattr(v, "isoformat") else v
+    # v5.1.34 (перепроверка, п. 1): причина закрытия — привязке обрыва с допуском смены
+    # режима (_changed_by_mode): после рестарта предок, закрытый сменой режима, отдаёт
+    # обрыв, кончившийся за 0–90 с до него, открытому сегменту
     return SimpleNamespace(run_state=db_row.get("run_state"),
                            run_state_label=label, stop_kind=kind,
+                           cause_close=db_row.get("cause_close"),
                            t_start=_iso(db_row.get("t_start")), t_end=_iso(db_row.get("t_end")),
                            closed_by_trip=trip if isinstance(trip, dict) else None,
                            start_profile=sprof if isinstance(sprof, dict) else None)
@@ -1220,6 +1226,180 @@ def _rs_carry(inh: dict[int, float] | None, rs: int | None) -> dict[int, float]:
     «Время в останове 18 ч» в сегменте работы)."""
     v = (inh or {}).get(rs) if rs is not None else None
     return {rs: float(v)} if v else {}
+
+
+def _load_run_origin_from_ff(ff: dict | None, run_state) -> dict | None:
+    """Признак «пуск режима — в обрыве связи» цепочки из forward_fill_json
+    (_run_origin, v5.1.34, В1) — только своего режима."""
+    from analytics.serializer import run_origin_valid
+    ro = ff.get("_run_origin") if isinstance(ff, dict) else None
+    return dict(ro) if run_origin_valid(ro, run_state) else None
+
+
+def _counter_rows(history: list[dict] | None, cfg) -> dict[str, list[tuple[datetime, float]]]:
+    """Показания счётчиков панели (попытки и успешные пуски, наработка) из уже
+    загруженной истории окна — {роль: [(метка, значение)]} по времени (v5.1.34,
+    В1). Без запросов; роли, которой у машины нет, в ответе нет."""
+    addrs = _counter_addrs(cfg)
+    out: dict[str, list[tuple[datetime, float]]] = {r: [] for r in addrs.values()}
+    if not addrs:
+        return out
+    for r in history or []:
+        role = addrs.get(r.get("addr"))
+        if role is None or r.get("ts") is None or r.get("value") is None:
+            continue
+        try:
+            out[role].append((_tz_utc(r["ts"]), float(r["value"])))
+        except (TypeError, ValueError):
+            continue
+    for v in out.values():
+        v.sort(key=lambda x: x[0])
+    return out
+
+
+def _outage_tol(cfg) -> float:
+    """Допуск привязки обрыва к сегменту: режим часто отмечается на 0–1 с позже
+    конца разрыва (ДЭС №3 29.09 15:44:48 / 15:44:49, ревью v5.1.34, п. 1) — тот же
+    heartbeat × множитель, что у синтетического разрыва (≈ 90 с)."""
+    try:
+        hb = float(cfg.seg("data_quality", "heartbeat_nominal_sec", default=30) or 30)
+        mult = float(cfg.seg("data_quality", "heartbeat_max_multiplier", default=3) or 3)
+        return hb * mult
+    except Exception:
+        return 90.0
+
+
+def _real_gaps(gaps: list[dict] | None) -> list[tuple[datetime, datetime]]:
+    """Кончившиеся разрывы data_gaps по времени; синтетический хвост (обрыв идёт)
+    и разрыв пустого окна (начало неизвестно) — не в счёт, смежные записи одного
+    обрыва (конец = начало следующей) склеены (v5.1.34, В1)."""
+    rows = []
+    for g in gaps or []:
+        if g.get("start_unknown") or g.get("gap_end") is None:
+            continue
+        gs, ge = _as_utc(g.get("gap_start")), _as_utc(g.get("gap_end"))
+        if gs is None or ge is None or ge <= gs:
+            continue
+        rows.append((gs, ge))
+    rows.sort()
+    merged: list[list[datetime]] = []
+    for gs, ge in rows:
+        if merged and gs <= merged[-1][1] + timedelta(seconds=1):
+            merged[-1][1] = max(merged[-1][1], ge)
+        else:
+            merged.append([gs, ge])
+    return [(gs, ge) for gs, ge in merged]
+
+
+def _merge_blinks(spans: list[tuple[datetime, datetime]], rows: dict | None,
+                  max_sec: float) -> list[tuple[datetime, datetime]]:
+    """«Мигание» связи — один обрыв (ревью v5.1.34, п. 5): соседние разрывы ближе
+    max_sec, между которыми нет ни одного показания счётчика пусков (кадр
+    застывших часов режет обрыв надвое; у ДГУ счётчик приходит через 5 мин после
+    переподключения), склеиваются. Без показаний счётчика пусков в окне вовсе —
+    не склеиваем (сказать нечего)."""
+    from analytics.serializer import OUTAGE_START_ROLES
+    pts = sorted(t for r in OUTAGE_START_ROLES for t, _ in (rows or {}).get(r) or [])
+    if not pts or len(spans) < 2:
+        return list(spans)
+    import bisect
+    out = [list(spans[0])]
+    for gs, ge in spans[1:]:
+        pe = out[-1][1]
+        if (gs - pe).total_seconds() <= max_sec:
+            i = bisect.bisect_left(pts, pe)
+            if not (i < len(pts) and pts[i] <= gs):
+                out[-1][1] = max(pe, ge)
+                continue
+        out.append([gs, ge])
+    return [(a, b) for a, b in out]
+
+
+def _forced_gaps(gaps: list[dict] | None) -> list[tuple[datetime, datetime]]:
+    """Разрывы, перенесённые через суточный рез (forced): кончились до реза, но
+    показаний счётчиков пусков после них до реза не было — решает продолжение."""
+    out = []
+    for g in gaps or []:
+        if isinstance(g, dict) and g.get("forced"):
+            gs, ge = _as_utc(g.get("gap_start")), _as_utc(g.get("gap_end"))
+            if gs is not None and ge is not None and ge > gs:
+                out.append((gs, ge))
+    return out
+
+
+def _outage_spans(gaps: list[dict] | None, t0: datetime, t1: datetime,
+                  rows: dict | None = None, tol: float = 0.0,
+                  head_change: bool = False, tail_change: bool = False) -> list[tuple[datetime, datetime]]:
+    """Обрывы связи, первые данные после которых — в сегменте [t0, t1) (v5.1.34,
+    В1). Ревью v5.1.34, п. 1: режим отмечается на 0–1 с позже конца разрыва —
+    сегмент, закрытый сменой режима (tail_change) в пределах tol после конца
+    разрыва, обрыв отдаёт следующему; сегмент, начатый сменой режима
+    (head_change), берёт обрывы, кончившиеся не раньше чем за tol до него.
+    Рез и снятие неисправности режим не меняют — без допуска. «Мигание» связи —
+    один обрыв (_merge_blinks)."""
+    from analytics.serializer import OUTAGE_AFTER_MAX_SEC
+    spans = _merge_blinks(_real_gaps(gaps), rows, OUTAGE_AFTER_MAX_SEC)
+    t0, t1 = _tz_utc(t0), _tz_utc(t1)
+    lo = t0 - timedelta(seconds=tol) if head_change else t0
+    hi = t1 - timedelta(seconds=tol) if tail_change else t1
+    # Перенесённые через рез (v5.1.34, решение 01.11) — этому сегменту, где бы ни кончились
+    forced = _forced_gaps(gaps)
+    return [(gs, ge) for gs, ge in spans if (lo <= ge < hi)
+            or (ge < hi and any(gs <= fg0 and fg1 <= ge for fg0, fg1 in forced))]
+
+
+_MEM_KEEP = 3
+
+
+def _mem_points(v) -> list[tuple[datetime, float]]:
+    """Показания роли в памяти движка: (метка, значение) или список таких (v5.1.34)."""
+    if not v:
+        return []
+    if isinstance(v, tuple) and len(v) == 2 and isinstance(v[0], datetime):
+        return [v]
+    out = []
+    for x in v:
+        try:
+            if isinstance(x, (tuple, list)) and len(x) == 2:
+                out.append((_tz_utc(x[0]) if isinstance(x[0], datetime) else _as_utc(x[0]), float(x[1])))
+        except (TypeError, ValueError):
+            continue
+    return [x for x in out if x[0] is not None]
+
+
+def _changed_by_mode(seg) -> bool:
+    """Сегмент закрыт сменой режима (не резом и не снятием неисправности)."""
+    return getattr(seg, "cause_close", None) == "RUN_STATE_CHANGE"
+
+
+def _counter_addrs(cfg) -> dict[int, str]:
+    """Регистры счётчиков панели машины → роль (v5.1.34, В1)."""
+    from analytics.serializer import OUTAGE_COUNTER_ROLES
+    out: dict[int, str] = {}
+    for role in OUTAGE_COUNTER_ROLES:
+        try:
+            a = cfg.role_to_addr(role)
+        except Exception:
+            a = None
+        if a:
+            out[int(a)] = role
+    return out
+
+
+def _mark_origin_unknown(seg, ro: dict | None) -> None:
+    """Счётчик «с пуска» от первых данных после обрыва — пометка у детекций
+    (values.startup_origin_unknown): «Срабатываний с 26.10 18:56 (пуск в обрыве
+    связи)» вместо «с пуска» (v5.1.34, В1)."""
+    if not ro or seg is None:
+        return
+    o = _as_utc(ro.get("origin_from"))
+    if o is None:
+        return
+    for sub in getattr(seg, "subsegments", None) or []:
+        for d in getattr(sub, "detections", None) or []:
+            v = getattr(d, "values", None)
+            if isinstance(v, dict) and v.get("startup_since") and _as_utc(v["startup_since"]) == o:
+                v["startup_origin_unknown"] = True
 
 
 def _load_rs_sec_from_ff(ff: dict | None) -> dict[int, float]:
@@ -1580,17 +1760,34 @@ def _diff_alerts(
     curr_list: list[dict],
     ts: datetime,
     segment_id: int | None,
+    keep_missing: bool = False,
 ) -> tuple[list[dict], list[dict]]:
     """Сравнить предыдущий снимок активных тревог с текущим набором детекций.
 
     Возвращает (new_active, journal_events).
     new_active  — список детекций, которые должны быть в active_detections_json.
     journal_events — события для записи в alert_journal.
+
+    keep_missing (v5.1.34, В3, решение владельца 01.11) — окно без своих строк
+    (обрыв связи после реза): тревоги «вслепую» не закрываются, как эпизоды с
+    v5.1.30. Пропавшие из детекций остаются активными, CLOSED не пишется: при
+    возврате связи тревога продолжается без повторного OPENED, рестарт внутри
+    обрыва поднимает её из журнала живой (ДЭС №3 29.10: CLOSED LIMIT_PROXIMITY
+    09:00:31 / OPENED 12:12:17 при непрерывном эпизоде 15057).
+
+    Событию — коды тревоги (alert: fault_codes, ref_codes, t_detected,
+    related_roles, description_key; ревью v5.1.34): поднятая из журнала после
+    рестарта тревога держится весь обрыв (keep_missing), и без кодов хеш состава
+    расходился — снятие гейтом не совпадало.
     """
     # Ключ per-fault: панельные аварии не затирают друг друга (все — CONTROLLER_FAULT)
     curr_map: dict[str, dict] = {_alert_key(d): d for d in curr_list}
     journal: list[dict] = []
     new_active: list[dict] = []
+
+    def _codes(d: dict) -> dict:
+        return {k: d.get(k) for k in ("fault_codes", "ref_codes", "t_detected", "related_roles",
+                                      "description_key") if d.get(k) is not None}
 
     for key, d in curr_map.items():
         if key not in prev_map:
@@ -1601,6 +1798,7 @@ def _diff_alerts(
                 "severity":    d.get("severity"),
                 "trigger":     d.get("trigger"),
                 "values":      d.get("values"),
+                "alert":       _codes(d),
                 "segment_id":  segment_id,
             })
         else:
@@ -1614,12 +1812,16 @@ def _diff_alerts(
                     "severity":    curr_sev,
                     "trigger":     d.get("trigger"),
                     "values":      d.get("values"),
+                    "alert":       _codes(d),
                     "segment_id":  segment_id,
                 })
         new_active.append(d)
 
     for key, d in prev_map.items():
         if key not in curr_map:
+            if keep_missing:
+                new_active.append(d)
+                continue
             journal.append({
                 "scenario":    d.get("scenario"),
                 "event_type":  "CLOSED",
@@ -1902,6 +2104,13 @@ async def _run_segment(
                     HOLE_MIN_SEC)
             except Exception:
                 logger.warning("Дыры после памяти свежести не найдены", exc_info=True)
+        # Показания счётчиков панели окна — фактам обрыва связи на закрытии
+        # (v5.1.34, В1): из уже загруженной истории, без запросов
+        try:
+            last_ts_out["counters"] = _counter_rows(history, cfg)
+            last_ts_out["rows_from"] = _tz_utc(ts_from) - timedelta(seconds=_PREAMBLE_LOOKBACK_SEC)
+        except Exception:
+            logger.warning("Показания счётчиков панели окна не собраны", exc_info=True)
     if load_seed is _SEED_UNSET:
         load_seed = await _load_seed(router_sn, equip_type, panel_id, ts_from, cfg)
     synth_gap = _synth_connectivity_gap(history, ts_from, ts_to, cfg)
@@ -2889,6 +3098,9 @@ class OnlinePollEngine:
     last_cycle_error: str | None = None
     beat_mono: float = 0.0
     live_ok_real = False
+    # Пуск режима цепочки — в обрыве связи (v5.1.34, В1): {run_origin_unknown,
+    # origin_from, gap_from, gap_to, run_state} или None
+    inherited_run_origin: dict | None = None
 
     def __init__(
         self,
@@ -2919,6 +3131,9 @@ class OnlinePollEngine:
         self.cursor_ts: datetime | None          = None
         self.inherited_coking_risk: CokingRisk   = CokingRisk()
         self.inherited_run_state_sec: dict[int, float] = {}
+        # Пуск режима цепочки — в обрыве связи (v5.1.34, В1): идёт по цепочке
+        # вместе с inherited_run_state_sec (forward_fill_json._run_origin)
+        self.inherited_run_origin: dict | None = None
         self.forward_fill_memory: dict | None    = None
         self.continued_from_id: int | None       = None  # предок в DAILY_BOUNDARY цепочке
         self.prev_poll_ts: datetime | None        = None
@@ -3045,6 +3260,7 @@ class OnlinePollEngine:
                 self.inherited_coking_risk = await _coking_before(
                     self.router_sn, self.equip_type, self.panel_id, requested)
                 self.inherited_run_state_sec = {}
+                self.inherited_run_origin = None
                 self.forward_fill_memory = None
                 self.continued_from_id = None
                 logger.info(
@@ -3083,10 +3299,29 @@ class OnlinePollEngine:
                     self.continued_from_id = None if _dq_last == 0.0 else last["id"]
                     self.inherited_run_state_sec = _rs_carry(_load_rs_sec_from_ff(ff),
                                                              last.get("run_state"))
+                    # Обрыв, отложенный на рез (v5.1.34, решение 01.11), — окну с курсора
+                    try:
+                        _chl = last.get("characteristics_json")
+                        _chl = json.loads(_chl) if isinstance(_chl, str) else _chl
+                        if isinstance(_chl, dict) and _chl.get("outage_deferred"):
+                            self._defer_outage_to(last_end, _chl["outage_deferred"])
+                    except Exception:
+                        logger.warning("OnlineEngine[%s]: отложенный на рез обрыв не поднят",
+                                       self.key, exc_info=True)
+                    # Пуск режима в обрыве связи — признак цепочки (v5.1.34, В1)
+                    try:
+                        self.inherited_run_origin = (
+                            _load_run_origin_from_ff(ff, last.get("run_state"))
+                            if self.continued_from_id is not None else None)
+                    except Exception:
+                        logger.warning("OnlineEngine[%s]: признак пуска в обрыве не поднят",
+                                       self.key, exc_info=True)
+                        self.inherited_run_origin = None
                 else:
                     self.forward_fill_memory = None
                     self.continued_from_id = None
                     self.inherited_run_state_sec = {}
+                    self.inherited_run_origin = None
                 logger.info(
                     "OnlineEngine[%s]: возобновление с %s (coking=%s, причина_закрытия=%s)",
                     self.key, self.cursor_ts,
@@ -3097,6 +3332,7 @@ class OnlinePollEngine:
             self.cursor_ts = _tz_utc(start_date)
             self.inherited_coking_risk = CokingRisk()
             self.inherited_run_state_sec = {}
+            self.inherited_run_origin = None
             self.forward_fill_memory = None
             self.continued_from_id = None
             logger.info(
@@ -3194,6 +3430,24 @@ class OnlinePollEngine:
                             self.key, self._act_done_for)
         except Exception:
             logger.warning("OnlineEngine[%s]: не удалось проверить акт открытого сегмента",
+                           self.key, exc_info=True)
+
+        # Снимки показаний до обрыва и разрывы открытого сегмента (v5.1.34, В1,
+        # решение Р1): решение по обрыву после рестарта — то же, без запроса
+        try:
+            _row2 = await online_db.get_open_segment(self.router_sn, self.equip_type, self.panel_id)
+            _ch2 = (_row2 or {}).get("characteristics_json")
+            if isinstance(_ch2, str):
+                _ch2 = json.loads(_ch2)
+            if (isinstance(_ch2, dict) and self.cursor_ts is not None and _row2.get("t_start") is not None
+                    and _as_utc(_row2["t_start"]) == _tz_utc(self.cursor_ts)):
+                if isinstance(_ch2.get("_outage_before"), dict):
+                    self._outage_before = {**(getattr(self, "_outage_before", None) or {}),
+                                           **_ch2["_outage_before"]}
+                if isinstance(_ch2.get("_outage_carry"), dict):
+                    self._outage_carry = dict(_ch2["_outage_carry"])
+        except Exception:
+            logger.warning("OnlineEngine[%s]: снимки показаний до обрыва не восстановлены",
                            self.key, exc_info=True)
 
         # Восстановить открытые эпизоды тревог (переживают рестарт)
@@ -4174,8 +4428,13 @@ class OnlinePollEngine:
         closing: bool = False, live_keys: set[str] | None = None,
         suppressed_sc: set[str] | None = None,
         supp_src: dict | None = None,
+        outage_facts: list[dict] | None = None,
     ) -> tuple[str | None, dict | None]:
         """Сводка сегмента: (report_summary_md, части) — вердикт, замечания, показатели.
+
+        outage_facts (v5.1.34, В1) — факты обрывов связи по счётчикам панели,
+        кончившихся в сегменте: часть outage_facts [{text, starts_changed, …}],
+        строки ℹ️ вне счёта замечаний и вердикта.
 
         Части (report_summary_json) — единый источник вердикта сегмента, md
         печатается из них. closing — сводка закрываемого сегмента: открытые
@@ -4238,6 +4497,8 @@ class OnlinePollEngine:
                                         # «Работа идёт N с» вместо «Короткая работа» (v5.1.25)
                                         is_open=not closing,
                                         common_alarm=_ca)
+            if outage_facts:
+                parts["outage_facts"] = [dict(f) for f in outage_facts if isinstance(f, dict)]
             return render_summary_md(parts), parts
         except Exception:
             logger.warning("OnlineEngine[%s]: не удалось построить summary-отчёт",
@@ -4700,6 +4961,378 @@ class OnlinePollEngine:
                            "получена — заглушка без неё", self.key, exc_info=True)
             return None
 
+    # ── Обрыв связи по счётчикам панели (v5.1.34, В1; решение Р1 01.11) ────────
+
+    def _note_counters(self, rows: list[dict] | None) -> None:
+        """Память последних показаний счётчиков панели (40069 / 40074 / 40070) —
+        из уже прочитанной истории цикла, без запросов (решение Р1). Только вперёд."""
+        mem = getattr(self, "_counter_mem", None)
+        if mem is None:
+            mem = self._counter_mem = {}
+        addrs = _counter_addrs(self.cfg)
+        if not addrs:
+            return
+        # Несколько последних показаний на роль (перепроверка v5.1.34, п. 3): строки
+        # после обрыва иногда приняты раньше записи data_gaps (до 9 с) — снимку нужно
+        # показание не позже начала обрыва, а не самое свежее
+        for r in rows or []:
+            role = addrs.get(r.get("addr"))
+            if role is None or r.get("ts") is None or r.get("value") is None:
+                continue
+            try:
+                t, v = _tz_utc(r["ts"]), float(r["value"])
+            except (TypeError, ValueError):
+                continue
+            pts = _mem_points(mem.get(role))
+            if any(t == a for a, _b in pts):
+                continue
+            pts.append((t, v))
+            pts.sort(key=lambda x: x[0])
+            mem[role] = pts[-_MEM_KEEP:]
+
+    def _note_outage_before(self, gaps: list[dict] | None) -> None:
+        """Снимок показаний до обрыва — из памяти, при первом цикле, где обрыв
+        кончился (запись data_gaps появляется с первым пакетом после него, а память
+        цикла ещё не обновлена): по нему решается сразу, без запроса (решение Р1).
+        Память позже начала обрыва (рестарт, поздняя пачка) — снимка нет, запасной
+        путь на закрытии. Старше трёх суток — забываются."""
+        snaps = getattr(self, "_outage_before", None)
+        if snaps is None:
+            snaps = self._outage_before = {}
+        mem = getattr(self, "_counter_mem", None) or {}
+        for gs, ge in _real_gaps(gaps):
+            k = gs.isoformat()
+            if k in snaps:
+                continue
+            vals = {}
+            for r, v in mem.items():
+                b = next(((t, x) for t, x in reversed(_mem_points(v)) if t <= gs), None)
+                if b is not None:
+                    vals[r] = [b[0].isoformat(), b[1]]
+            snaps[k] = {"ge": ge.isoformat(), "vals": vals}
+        try:
+            # Отсчёт — от последних данных в памяти, а не от часов сервиса (догонка)
+            _ref = max((pt[0] for v in mem.values() for pt in _mem_points(v)), default=None)
+            _old = (_ref - timedelta(days=3)) if _ref is not None else None
+            for k in [k for k, v in snaps.items() if _old is not None and _as_utc(v.get("ge"))
+                      and _as_utc(v["ge"]) < _old]:
+                snaps.pop(k, None)
+        except Exception:
+            logger.debug("OnlineEngine[%s]: снимки до обрыва не прорежены", self.key, exc_info=True)
+
+    def _outage_carry_for(self, t_start) -> list[dict]:
+        """Разрывы, отнесённые к сегменту с этим началом в прошлых циклах (v5.1.34,
+        В1): после смены режима окно читает data_gaps с нового курсора, и разрыв,
+        кончившийся за 0–90 с до него, в окно уже не попадает (ревью п. 1)."""
+        c = getattr(self, "_outage_carry", None)
+        if not isinstance(c, dict) or not t_start:
+            return []
+        try:
+            if _as_utc(c.get("t0")) != _as_utc(t_start):
+                return []
+        except Exception:
+            return []
+        return [dict(g) for g in c.get("gaps") or [] if isinstance(g, dict)]
+
+    def _defer_outage_to(self, t0: datetime, deferred: list[dict] | None) -> None:
+        """Перенести обрывы, отложенные на суточный рез, в окно с началом t0
+        (v5.1.34, решение 01.11): разрыв — с пометкой forced (сегмент-продолжение
+        берёт его, хотя кончился он до своего начала), показания до него — в
+        снимки. Без отложенных — перенос прежнего сегмента сбрасывается."""
+        if not deferred:
+            return
+        snaps = getattr(self, "_outage_before", None)
+        if snaps is None:
+            snaps = self._outage_before = {}
+        gaps = []
+        for d in deferred:
+            if not isinstance(d, dict) or not d.get("gap_start") or not d.get("gap_end"):
+                continue
+            gaps.append({"gap_start": d["gap_start"], "gap_end": d["gap_end"], "forced": True})
+            if d.get("before") or d.get("after"):
+                cur = snaps.get(d["gap_start"]) or {}
+                vals = dict(d.get("before") or {})
+                vals.update(cur.get("vals") or {})
+                aft = dict(cur.get("after") or {})
+                aft.update(d.get("after") or {})
+                snaps[d["gap_start"]] = {"ge": d["gap_end"], "vals": vals, **({"after": aft} if aft else {})}
+        if gaps:
+            self._outage_carry = {"t0": _tz_utc(t0).isoformat(), "gaps": gaps}
+            logger.info("OnlineEngine[%s]: обрыв %s перенесён через рез — показаний счётчиков пусков "
+                        "после него до %s нет", self.key,
+                        ", ".join(f"{g['gap_start']}–{g['gap_end']}" for g in gaps), t0.isoformat())
+
+    def _deferred_from_carry(self, t_start) -> list[dict]:
+        """Отложенные на рез обрывы этого сегмента — дальше по цепочке (перепроверка
+        v5.1.34, п. 4): сегмент без связи (заглушка) их не решает, следующий — решит."""
+        out = []
+        snaps = getattr(self, "_outage_before", None) or {}
+        for gs, ge in _forced_gaps(self._outage_carry_for(t_start)):
+            sn = snaps.get(gs.isoformat()) or {}
+            out.append({"gap_start": gs.isoformat(), "gap_end": ge.isoformat(),
+                        "before": dict(sn.get("vals") or {}),
+                        **({"after": dict(sn["after"])} if sn.get("after") else {})})
+        return out
+
+    def _keep_outage_carry(self, t_start, gaps: list[dict] | None) -> None:
+        """Запомнить кончившиеся разрывы, относящиеся к открытому сегменту (с
+        допуском до его начала), — для следующих циклов и его закрытия."""
+        try:
+            t0 = _as_utc(t_start)
+            if t0 is None:
+                return
+            lo = t0 - timedelta(seconds=_outage_tol(self.cfg))
+            forced = set(_forced_gaps(gaps))
+            keep = {(gs, ge) for gs, ge in _real_gaps(gaps) if ge >= lo} | forced
+            if not keep:
+                if _as_utc((getattr(self, "_outage_carry", None) or {}).get("t0")) != t0:
+                    self._outage_carry = None
+                return
+            self._outage_carry = {"t0": t0.isoformat(),
+                                  "gaps": [{"gap_start": gs.isoformat(), "gap_end": ge.isoformat(),
+                                            **({"forced": True} if (gs, ge) in forced else {})}
+                                           for gs, ge in sorted(keep)]}
+        except Exception:
+            logger.warning("OnlineEngine[%s]: разрывы открытого сегмента не запомнены", self.key,
+                           exc_info=True)
+
+    def _outage_persist(self, t_start) -> dict:
+        """Снимки и перенос разрывов открытого сегмента — в его характеристики
+        (_outage_before, _outage_carry): рестарт поднимает их (_restore_live_state)."""
+        out: dict = {}
+        try:
+            c = getattr(self, "_outage_carry", None)
+            if isinstance(c, dict) and _as_utc(c.get("t0")) == _as_utc(t_start):
+                out["_outage_carry"] = c
+            snaps = getattr(self, "_outage_before", None) or {}
+            t0 = _as_utc(t_start)
+            lo = (t0 - timedelta(seconds=_outage_tol(self.cfg))) if t0 is not None else None
+            _fk = {g0.isoformat() for g0, _g1 in _forced_gaps((c or {}).get("gaps")
+                                                              if isinstance(c, dict) else None)}
+            keep = {k: v for k, v in snaps.items() if isinstance(v, dict) and v.get("vals")
+                    and (k in _fk or lo is None or (_as_utc(v.get("ge")) or lo) >= lo)}
+            if keep:
+                out["_outage_before"] = keep
+        except Exception:
+            logger.warning("OnlineEngine[%s]: снимки до обрыва не сохранены", self.key, exc_info=True)
+        return out
+
+    def _window_counters(self, ts_from: datetime, rows_new: list[dict] | None,
+                         cold: bool) -> dict[str, list]:
+        """Показания счётчиков открытого окна — накопленно по строкам цикла (note-в
+        перепроверки v5.1.34): разбирается только дочитанный хвост истории, а не вся
+        история окна каждый цикл. Холодная загрузка или новый курсор — заново."""
+        c = getattr(self, "_win_cnt", None)
+        key = _tz_utc(ts_from).isoformat()
+        if cold or not isinstance(c, dict) or c.get("t0") != key:
+            c = self._win_cnt = {"t0": key, "rows": {}}
+        acc = c["rows"]
+        for role, pts in _counter_rows(rows_new, self.cfg).items():
+            d = acc.setdefault(role, {})
+            for t, v in pts:
+                d[t] = v
+        return {r: sorted(d.items()) for r, d in acc.items()}
+
+    async def _outage_live(self, open_seg, ts_to: datetime, gaps: list[dict],
+                           history: list[dict] | dict | None, rows_from: datetime,
+                           head_change: bool = False) -> tuple[list[dict], dict | None]:
+        """Решение по обрыву в открытом сегменте (решение Р1): без запросов.
+        Показания окна разбираются, только пока у сегмента есть кончившиеся
+        разрывы; решение, у которого окно показаний после всех разрывов уже
+        истекло, берётся из памяти цикла (без нового разбора истории)."""
+        from analytics.serializer import OUTAGE_AFTER_MAX_SEC
+        real = _real_gaps(gaps)
+        t0 = _as_utc(open_seg.t_start)
+        lo = t0 - timedelta(seconds=_outage_tol(self.cfg)) if t0 is not None else None
+        _fz = _forced_gaps(gaps)
+        real = [(a, b) for a, b in real if lo is None or b >= lo
+                or any(a <= f0 and f1 <= b for f0, f1 in _fz)]
+        if not real:
+            self._outage_live_cache = None
+            return [], None
+        key = (open_seg.t_start, open_seg.run_state, bool(head_change), tuple(real))
+        cache = getattr(self, "_outage_live_cache", None)
+        settled = all(b + timedelta(seconds=OUTAGE_AFTER_MAX_SEC) <= _tz_utc(ts_to) for _a, b in real)
+        if settled and isinstance(cache, tuple) and cache[0] == key:
+            return [dict(f) for f in cache[1]], (dict(cache[2]) if cache[2] else None)
+        rows = history if isinstance(history, dict) else _counter_rows(history, self.cfg)
+        res = await self._outage_facts(t0, _tz_utc(ts_to), gaps, rows,
+                                       rows_from, open_seg.run_state, head_change=head_change, live=True)
+        self._outage_live_cache = (key, res[0], res[1]) if settled else None
+        return res
+
+    async def _outage_facts(self, seg_t0: datetime, seg_t1: datetime,
+                            gaps: list[dict] | None,
+                            rows: dict[str, list] | None,
+                            rows_from: datetime | None,
+                            run_state: int | None,
+                            head_change: bool = False,
+                            tail_change: bool = False,
+                            live: bool = False,
+                            defer_cut: bool = False) -> tuple[list[dict], dict | None]:
+        """Обрывы связи, первые данные после которых — в сегменте, по счётчикам
+        панели (v5.1.34, В1, решения владельца 01.11).
+
+        rows — показания счётчиков из уже загруженной истории окна
+        (_counter_rows), rows_from — с какого момента история загружена.
+        Привязка к сегменту — _outage_spans с допуском смены режима (ревью п. 1).
+
+        Показание после обрыва — в [конец обрыва, min(+OUTAGE_AFTER_MAX_SEC,
+        конец сегмента, начало следующего разрыва)) (ревью п. 2: видимый пуск
+        кончает сегмент — его показание не «после обрыва»): у счётчиков пусков —
+        последнее в этом окне (устоявшееся: нулевой кадр после переподключения не
+        решает), у наработки — первое. Показание до обрыва — последнее в rows не
+        позже его начала, затем снимок памяти (_note_outage_before, решение Р1),
+        затем — только на закрытии (live=False) — один запрос get_last_values_before
+        (как у заглушки П10, не старше lookback_sec), не больше одного на сегмент.
+
+        defer_cut=True — закрытие суточным резом (v5.1.34, решение 01.11): обрыв,
+        у которого окно показаний после него заходит за рез, а показаний
+        счётчиков пусков до реза нет (у ДГУ они приходят через 5 мин после
+        переподключения), здесь не решается — уходит продолжению
+        (self._outage_deferred_out: разрыв и показания до него), строки фактов в
+        двух сегментах нет.
+
+        live=True — открытое окно (решение Р1): без запросов; обрывы, кончившиеся
+        позже чем за допуск до живого края, ещё не решаются (режим мог смениться),
+        и обрыв, у которого показания после ещё не пришли, — тоже, пока не
+        истечёт окно показаний.
+
+        Возвращает (факты, признак начала режима): факты — со строкой text, если
+        счётчик пусков вырос или сбит или обрыв не короче outage_facts_min_sec;
+        признак {run_origin_unknown, origin_from, gap_from, gap_to, run_state} —
+        по последнему обрыву с ростом счётчика пусков, не короче
+        outage_origin_min_sec, только у «Работы» и «Стопа» и не у сегмента,
+        начатого видимой сменой режима внутри обрыва. Сбой — ([], None) с
+        предупреждением."""
+        try:
+            from analytics.serializer import (
+                OUTAGE_AFTER_MAX_SEC, OUTAGE_COUNTER_ROLES, OUTAGE_START_ROLES,
+                outage_counter_facts, outage_facts_params, outage_facts_text,
+            )
+            self._outage_deferred_out = []
+            prm = outage_facts_params(self.cfg)
+            if not prm["facts_enabled"]:
+                return [], None
+            rows = rows or {}
+            tol = _outage_tol(self.cfg)
+            _t0, _t1 = _tz_utc(seg_t0), _tz_utc(seg_t1)
+            spans = _outage_spans(gaps, _t0, (_t1 - timedelta(seconds=tol)) if live else _t1, rows, tol,
+                                  head_change=head_change, tail_change=tail_change and not live)
+            if not spans:
+                return [], None
+            roles = {r: self.cfg.role_to_addr(r) for r in OUTAGE_COUNTER_ROLES}
+            roles = {r: int(a) for r, a in roles.items() if a}
+            if not roles:
+                return [], None
+            has_start = any(r in roles for r in OUTAGE_START_ROLES)
+            allspans = _merge_blinks(_real_gaps(gaps), rows, OUTAGE_AFTER_MAX_SEC)
+            snaps = getattr(self, "_outage_before", None) or {}
+            _rf = _as_utc(rows_from)
+            queried = False
+            facts: list[dict] = []
+            origin: dict | None = None
+            self._outage_deferred_out = []
+            for gs, ge in spans:
+                nxt = min((a for a, _b in allspans if a > ge), default=None)
+                upper = min(t for t in (ge + timedelta(seconds=OUTAGE_AFTER_MAX_SEC), _t1, nxt)
+                            if t is not None)
+                before: dict[str, tuple | None] = {}
+                after: dict[str, tuple | None] = {}
+                _sn = snaps.get(gs.isoformat()) or {}
+                _sa = _sn.get("after") or {}
+                for role in roles:
+                    pts = rows.get(role) or []
+                    before[role] = next(((t, v) for t, v in reversed(pts) if t <= gs), None)
+                    aft = [(t, v) for t, v in pts if ge <= t < upper]
+                    # Показания после обрыва, сохранённые при переносе через рез (до реза)
+                    if _sa.get(role):
+                        _ts0 = _as_utc(_sa[role][0])
+                        if _ts0 is not None and ge <= _ts0 < upper:
+                            aft = sorted(aft + [(_ts0, float(_sa[role][1]))], key=lambda x: x[0])
+                    if not aft:
+                        after[role] = None
+                    elif role == "ENGINE_HOURS":
+                        after[role] = aft[0]
+                    else:
+                        # Перепроверка v5.1.34, п. 2: максимум окна — одно сбитое показание
+                        # (нулевой кадр) решение не переключает; «сбит» — только если все
+                        # показания окна ниже показания до обрыва
+                        after[role] = max(aft, key=lambda x: (x[1], x[0]))
+                if live and ge + timedelta(seconds=OUTAGE_AFTER_MAX_SEC) > _t1 and any(
+                        after[r] is None for r in roles if r in OUTAGE_START_ROLES):
+                    continue      # показания после обрыва ещё в пути (у ДГУ — до 15 мин)
+                # Снимок памяти до обрыва (решение Р1)
+                _sv = (snaps.get(gs.isoformat()) or {}).get("vals") or {}
+                for r in roles:
+                    if before[r] is None and _sv.get(r):
+                        _ts = _as_utc(_sv[r][0])
+                        if _ts is not None and _ts <= gs:
+                            before[r] = (_ts, float(_sv[r][1]))
+                # Начало обрыва — до загруженной истории или у её края: показания
+                # до обрыва — одним запросом (П10), только на закрытии
+                _need = [r for r in roles if before[r] is None and after[r] is not None]
+                if (_need and not live and not queried
+                        and (_rf is None or gs < _rf + timedelta(seconds=1800))):
+                    queried = True
+                    from analytics import source as _src
+                    got = await _src.get_last_values_before(
+                        self.router_sn, self.equip_type, self.panel_id,
+                        [roles[r] for r in _need], gs + timedelta(seconds=1), prm["lookback_sec"])
+                    for r in _need:
+                        g = got.get(roles[r])
+                        if g and g.get("value") is not None and g.get("ts") is not None:
+                            before[r] = (_tz_utc(g["ts"]), float(g["value"]))
+                # Показания до обрыва, найденные в истории окна или запросом, — в снимок:
+                # после рестарта (окно уже без них) решение то же, без запроса
+                if any(before.values()):
+                    _cur = snaps.get(gs.isoformat()) if isinstance(snaps, dict) else None
+                    _vals = dict((_cur or {}).get("vals") or {})
+                    for r, v in before.items():
+                        if v and r not in _vals:
+                            _vals[r] = [v[0].isoformat(), v[1]]
+                    _store = getattr(self, "_outage_before", None)
+                    if _store is None:
+                        _store = self._outage_before = {}
+                    _store[gs.isoformat()] = {**(_cur or {}), "ge": ge.isoformat(), "vals": _vals}
+                # Окно показаний после обрыва заходит за суточный рез, а счётчиков
+                # пусков до реза нет — решает продолжение (v5.1.34, решение 01.11)
+                if (defer_cut and ge + timedelta(seconds=OUTAGE_AFTER_MAX_SEC) > _t1 and any(
+                        after[r] is None for r in roles if r in OUTAGE_START_ROLES)):
+                    self._outage_deferred_out.append({
+                        "gap_start": gs.isoformat(), "gap_end": ge.isoformat(),
+                        "before": {r: [v[0].isoformat(), v[1]] for r, v in before.items() if v},
+                        # Показания после обрыва до реза (наработка — первая после конца
+                        # обрыва, перепроверка, note-а)
+                        "after": {r: [v[0].isoformat(), v[1]] for r, v in after.items() if v}})
+                    continue
+                f = outage_counter_facts(gs, ge, before, after, start_roles=has_start,
+                                         origin_min_sec=prm["origin_min_sec"])
+                if f is None:
+                    continue
+                if (not f.get("starts_changed") and not f.get("counter_glitch")
+                        and f["gap_sec"] < prm["facts_min_sec"]):
+                    continue
+                f["text"] = outage_facts_text(f, self.tz)
+                facts.append(f)
+                # Видимая смена режима внутри обрыва — начало режима видно
+                _vis = head_change and gs < _t0 < ge
+                if (f.get("starts_changed") and f.get("origin_possible") and run_state in (0, 3)
+                        and not _vis):
+                    origin = {"run_origin_unknown": True, "origin_from": ge.isoformat(),
+                              "gap_from": gs.isoformat(), "gap_to": ge.isoformat(),
+                              "run_state": int(run_state)}
+            if facts and not live:
+                logger.info("OnlineEngine[%s]: обрыв связи по счётчикам панели — %s%s", self.key,
+                            "; ".join(f.get("text") or "" for f in facts),
+                            (f" — начало режима не видно, время в режиме с {origin['origin_from']}"
+                             if origin else ""))
+            return facts, origin
+        except Exception:
+            logger.warning("OnlineEngine[%s]: факты обрыва связи по счётчикам панели не получены — "
+                           "сегмент без них", self.key, exc_info=True)
+            return [], None
+
     def _fill_coking_accum_end(self, t_from: datetime) -> None:
         """Конец накопления нагара, если в перенесённом состоянии его нет (v5.1.9).
 
@@ -4915,12 +5548,44 @@ class OnlinePollEngine:
             # i==0 — прямое продолжение предыдущей цепочки; i>0 — новый RS (смена).
             seg_inherited_rs = _rs_carry(running_rs_sec, seg.run_state) if i == 0 else {}
 
+            # Обрыв связи, кончившийся в сегменте, — по счётчикам панели (v5.1.34,
+            # В1): строка фактов; сменился счётчик пусков — начало режима не видно,
+            # время в режиме — от первых данных после обрыва («не меньше»), цепочка
+            # с предком до обрыва рвётся (пуск — новый режим, как переход в обрыве
+            # на резе, v5.1.6). Показания — из истории окна, до обрыва — один запрос
+            _of, _ro_new = (([], None) if _seg_no_data else await self._outage_facts(
+                _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end,
+                gaps + self._outage_carry_for(seg.t_start),
+                _win_last.get("counters"), _win_last.get("rows_from"), seg.run_state,
+                # Режим отмечается на 0–1 с позже конца разрыва (ревью v5.1.34, п. 1)
+                head_change=(_changed_by_mode(segments[i - 1]) if i > 0
+                             else _changed_by_mode(_prev_hint_i0)),
+                tail_change=seg_cause_close == "RUN_STATE_CHANGE",
+                # Показания после обрыва — за резом: решает продолжение (v5.1.34)
+                defer_cut=is_last and close_reason == "DAILY_BOUNDARY"))
+            # Заглушка (нет связи весь период) отложенное не решает — несёт дальше (п. 4)
+            _deferred = (list(getattr(self, "_outage_deferred_out", None) or [])
+                         if not _seg_no_data else self._deferred_from_carry(seg.t_start))
+            _link = (None if _seg_no_data or _ro_new
+                     else _chain_link(i, self.continued_from_id, _prev_hint_i0, seg))
+            _ro = _ro_new or (getattr(self, "inherited_run_origin", None)
+                              if _link is not None and run_origin_valid(
+                                  getattr(self, "inherited_run_origin", None), seg.run_state)
+                              else None)
+            if _ro_new:
+                seg_inherited_rs = {}
+
             # forward-fill память + накопленное время RS для суточного реза
             # (пустой сегмент память не строит — значения до обрыва не переносятся)
             ff_json = None
             updated_rs_sec: dict[int, float] | None = None
             if is_last and close_reason == "DAILY_BOUNDARY" and not _seg_no_data:
-                if i == 0:
+                if _ro_new:
+                    # Пуск в обрыве (v5.1.34, В1): накопленное — от первых данных после него
+                    updated_rs_sec = {seg.run_state: max(0.0, (
+                        seg_t_end - _tz_utc(datetime.fromisoformat(_ro_new["origin_from"]))
+                    ).total_seconds())}
+                elif i == 0:
                     # Только время своего режима: чужой ключ — устаревший остаток
                     updated_rs_sec = {seg.run_state:
                                       seg_inherited_rs.get(seg.run_state, 0.0) + seg.duration_sec}
@@ -4932,11 +5597,16 @@ class OnlinePollEngine:
                 else:
                     ff_json = {}
                 ff_json["_run_state_sec"] = {str(k): v for k, v in updated_rs_sec.items()}
+                # Признак «пуск в обрыве» идёт по цепочке вместе со временем режима
+                if _ro is not None:
+                    ff_json["_run_origin"] = dict(_ro)
 
-            # Начало запуска: i==0 продолжает цепочку, i>0 — новый запуск
+            # Начало запуска: i==0 продолжает цепочку, i>0 — новый запуск; пуск в
+            # обрыве — от первых данных после него (v5.1.34, В1)
             _run_origin = (
-                (chain_origin_ts or _tz_utc(datetime.fromisoformat(seg.t_start)))
-                if _chain_link(i, self.continued_from_id, _prev_hint_i0, seg) is not None
+                _tz_utc(datetime.fromisoformat(_ro["origin_from"])) if _ro is not None
+                else (chain_origin_ts or _tz_utc(datetime.fromisoformat(seg.t_start)))
+                if _link is not None
                 else _tz_utc(datetime.fromisoformat(seg.t_start))
             )
 
@@ -4958,10 +5628,21 @@ class OnlinePollEngine:
                 seeded_out=_seeded, gaps=gaps, live_episodes=self._episodes,
                 carry_end=_carry_end, known_ends=_kn_seg,
             )
+            _mark_origin_unknown(seg, _ro)
 
             seg_dict = seg.to_dict()
             seg_dict["t_end"] = seg_t_end.isoformat()
             seg_dict["cause_close"] = seg_cause_close
+            # Голова цепочки с пуском в обрыве (v5.1.34, В1): начало режима не
+            # видно, время в режиме — от первых данных после обрыва
+            if _ro_new:
+                seg_dict["run_origin_unknown"] = True
+                seg_dict["origin_from"] = _ro_new["origin_from"]
+                seg_dict["origin_gap"] = {"from": _ro_new["gap_from"], "to": _ro_new["gap_to"]}
+            # Обрыв, отложенный на рез, — продолжению (v5.1.34, решение 01.11): разрыв и
+            # показания до него, чтобы после рестарта решить без запроса
+            if _deferred:
+                seg_dict["outage_deferred"] = _deferred
 
             # prev_seg для отчёта: предыдущий в текущем батче или хинт из движка
             ps = segments[i - 1] if i > 0 else self._prev_seg_hint
@@ -5000,6 +5681,7 @@ class OnlinePollEngine:
                         # после 09:00)», а не «(идёт)»
                         last_close=(seg_cause_close, seg_t_end),
                         equip_name=getattr(self, "equip_name", None),
+                        run_origin=_ro, outage_facts=_of,
                     )
                 except Exception:
                     logger.exception("OnlineEngine[%s]: не удалось построить отчёт закрытого сегмента, сохраняю без report_md", self.key)
@@ -5010,6 +5692,7 @@ class OnlinePollEngine:
                     live_keys=_live_keys if is_last else None,
                     suppressed_sc=_supp_sc,
                     supp_src=_gate_own_src(_gate_state) if _supp_sc else None,
+                    **({"outage_facts": _of} if _of else {}),
                 )
 
             db_id = await online_db.insert_closed_segment({
@@ -5023,9 +5706,9 @@ class OnlinePollEngine:
                 "split_reason":       "DAILY_BOUNDARY" if seg_cause_close == "DAILY_BOUNDARY" else None,
                 # Голова окна в том же режиме — продолжение суточной цепочки. Без
                 # ссылки начало пуска обрывалось на каждом резе: «Срабатываний с
-                # пуска: 0» у эпизода, открытого в момент пуска (v5.1.6)
-                "continued_from":     (None if _seg_no_data
-                                       else _chain_link(i, self.continued_from_id, _prev_hint_i0, seg)),
+                # пуска: 0» у эпизода, открытого в момент пуска (v5.1.6). Пуск в
+                # обрыве связи — новая цепочка (v5.1.34, В1)
+                "continued_from":     _link,
                 "coking_risk_json":   coking_risk.to_dict(),
                 "forward_fill_json":  ff_json,
                 "analytics_version":  ANALYTICS_VERSION,
@@ -5105,6 +5788,12 @@ class OnlinePollEngine:
                 last_saved_id = db_id
                 self.cursor_ts = _tz_utc(t_to)
                 self.inherited_coking_risk = coking_risk
+                # Отложенный на рез обрыв — следующему окну (v5.1.34, решение 01.11)
+                try:
+                    self._defer_outage_to(_tz_utc(t_to), _deferred)
+                except Exception:
+                    logger.warning("OnlineEngine[%s]: обрыв на резе не перенесён", self.key,
+                                   exc_info=True)
                 # Пустой сегмент рвёт суточную цепочку: forward-fill и счётчик
                 # «с пуска» из данных до обрыва — не контекст, а устаревшие данные.
                 if close_reason == "DAILY_BOUNDARY" and not _seg_no_data:
@@ -5112,13 +5801,17 @@ class OnlinePollEngine:
                     if seg.run_state in {0, 3}:  # стабильные состояния: тянем цепочку
                         self.continued_from_id = db_id
                         self.forward_fill_memory = ff_json
+                        # Пуск в обрыве — по цепочке (v5.1.34, В1)
+                        self.inherited_run_origin = dict(_ro) if _ro is not None else None
                     else:
                         self.continued_from_id = None
                         self.forward_fill_memory = None
+                        self.inherited_run_origin = None
                 else:
                     self.inherited_run_state_sec = {}
                     self.continued_from_id = None
                     self.forward_fill_memory = None
+                    self.inherited_run_origin = None
 
                 # Верификация: сравниваем сохранённые инкрементальные vs reference
                 from online.verifier import fire_verify as _fire_verify
@@ -5307,6 +6000,7 @@ class OnlinePollEngine:
                     split_ts, ts_to_utc, self.cfg.whitelist_analog, meta=_fetched,
                 )
                 history = stable + tail
+                _rows_new = tail
                 logger.debug(
                     "TIMING[%s]: history кэш=%d + хвост=%d за %.2fs",
                     self.key, len(stable), len(tail), _time.perf_counter() - _t0,
@@ -5319,6 +6013,7 @@ class OnlinePollEngine:
                     self.router_sn, self.equip_type, self.panel_id,
                     preamble_floor, ts_to_utc, self.cfg.whitelist_analog, meta=_fetched,
                 )
+                _rows_new = history
                 logger.debug(
                     "TIMING[%s]: history полная загрузка=%d строк за %.2fs",
                     self.key, len(history), _time.perf_counter() - _t0,
@@ -5391,6 +6086,15 @@ class OnlinePollEngine:
             synth_gap = _synth_connectivity_gap(history, ts_from_utc, ts_to_utc, self.cfg)
             if synth_gap is not None:
                 gaps = gaps + [synth_gap]
+
+            # Память показаний счётчиков панели (v5.1.34, В1, решение Р1): снимок до
+            # обрыва — до обновления памяти строками этого цикла; без запросов
+            try:
+                self._note_outage_before(gaps)
+                self._note_counters(_rows_new)
+            except Exception:
+                logger.warning("OnlineEngine[%s]: память показаний счётчиков панели не обновлена",
+                               self.key, exc_info=True)
 
             # 40012/40013 — состояния: сегментатор берёт их из enum_periods (v5.1.1)
 
@@ -5517,6 +6221,13 @@ class OnlinePollEngine:
                 _rs_supp_sc = set()
             # Уже засеянные в этом окне — см. тот же накопитель в _close_window
             _seeded: set[str] = set()
+            # Показания счётчиков панели окна — фактам обрыва связи (v5.1.34, В1)
+            try:
+                _rs_counters = _counter_rows(history, self.cfg)
+            except Exception:
+                logger.warning("OnlineEngine[%s]: показания счётчиков панели окна не собраны",
+                               self.key, exc_info=True)
+                _rs_counters = None
             for ci, seg in enumerate(closed_segs):
                 coking_risk = _extract_coking_risk_from_segments([seg])
                 seg_t_end_rs = _tz_utc(datetime.fromisoformat(seg.t_end))
@@ -5524,12 +6235,34 @@ class OnlinePollEngine:
                 # Пустой сегмент (нет связи весь период): заглушка, без corpus-анализа
                 _rs_no_data = seg.data_quality == 0.0
 
+                # Обрыв связи, кончившийся в сегменте, — по счётчикам панели
+                # (v5.1.34, В1, как в _close_window): пуск в обрыве — новая цепочка
+                if _rs_no_data:
+                    # Отложенный на рез обрыв — дальше, сегменту после заглушки (п. 4)
+                    try:
+                        self._defer_outage_to(seg_t_end_rs, self._deferred_from_carry(seg.t_start))
+                    except Exception:
+                        logger.warning("OnlineEngine[%s]: отложенный обрыв не перенесён за заглушку",
+                                       self.key, exc_info=True)
+                _rs_of, _rs_ro_new = (([], None) if _rs_no_data else await self._outage_facts(
+                    _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end_rs,
+                    gaps + self._outage_carry_for(seg.t_start),
+                    _rs_counters, ts_from_utc - timedelta(seconds=_PREAMBLE_LOOKBACK_SEC),
+                    seg.run_state,
+                    # Режим отмечается на 0–1 с позже конца разрыва (ревью v5.1.34, п. 1)
+                    head_change=_changed_by_mode(ps_rs), tail_change=_changed_by_mode(seg)))
+
                 # Начало запуска: голова окна продолжает цепочку только в том же
                 # режиме (как в _close_window), иначе — новый запуск
-                _rs_link = (None if _rs_no_data
+                _rs_link = (None if _rs_no_data or _rs_ro_new
                             else _chain_link(ci, carry_continued_from, _prev_hint_rs0, seg))
+                _rs_ro = _rs_ro_new or (getattr(self, "inherited_run_origin", None)
+                                        if _rs_link is not None and run_origin_valid(
+                                            getattr(self, "inherited_run_origin", None), seg.run_state)
+                                        else None)
                 _rs_run_origin = (
-                    (chain_origin_ts or _tz_utc(datetime.fromisoformat(seg.t_start)))
+                    _tz_utc(datetime.fromisoformat(_rs_ro["origin_from"])) if _rs_ro is not None
+                    else (chain_origin_ts or _tz_utc(datetime.fromisoformat(seg.t_start)))
                     if _rs_link is not None
                     else _tz_utc(datetime.fromisoformat(seg.t_start))
                 )
@@ -5547,6 +6280,7 @@ class OnlinePollEngine:
                     seeded_out=_seeded, gaps=gaps, live_episodes=self._episodes,
                     known_ends=_kn_rs,
                 )
+                _mark_origin_unknown(seg, _rs_ro)
 
                 if _rs_no_data:
                     from analytics.serializer import build_no_data_report as _nd_report
@@ -5581,10 +6315,11 @@ class OnlinePollEngine:
                             ANALYTICS_VERSION, tz=self.tz, prev_seg=ps_rs,
                             fault_ref=self._fault_ref,
                             inherited_run_state_sec=(_rs_carry(_rs_inherited_before, seg.run_state)
-                                                     if ci == 0 else {}),
+                                                     if ci == 0 and not _rs_ro_new else {}),
                             # Причина и конец — как в строке БД (v5.1.25, «(до конца работы)»)
                             last_close=(seg.cause_close or "RUN_STATE_CHANGE", seg_t_end_rs),
                             equip_name=getattr(self, "equip_name", None),
+                            run_origin=_rs_ro, outage_facts=_rs_of,
                         )
                     except Exception:
                         logger.exception("OnlineEngine[%s]: не удалось построить отчёт сегмента RUN_STATE_CHANGE, сохраняю без report_md", self.key)
@@ -5596,9 +6331,16 @@ class OnlinePollEngine:
                         live_keys=_live_keys if ci == len(closed_segs) - 1 else None,
                         suppressed_sc=_rs_supp_sc,
                         supp_src=_gate_own_src(_rs_gate_state) if _rs_supp_sc else None,
+                        **({"outage_facts": _rs_of} if _rs_of else {}),
                     )
 
                 _rs_seg_dict = seg.to_dict()
+                # Пуск в обрыве связи (v5.1.34, В1) — признак головы цепочки
+                if _rs_ro_new:
+                    _rs_seg_dict["run_origin_unknown"] = True
+                    _rs_seg_dict["origin_from"] = _rs_ro_new["origin_from"]
+                    _rs_seg_dict["origin_gap"] = {"from": _rs_ro_new["gap_from"],
+                                                  "to": _rs_ro_new["gap_to"]}
                 _rs_incident = None
                 _rs_chronology = None
                 # Пустой сегмент не исключение — см. суточный путь
@@ -5723,6 +6465,7 @@ class OnlinePollEngine:
                 self.cursor_ts = _tz_utc(datetime.fromisoformat(seg.t_end))
                 self.inherited_coking_risk = coking_risk
                 self.inherited_run_state_sec = {}  # смена RS — счётчик сбрасывается
+                self.inherited_run_origin = None   # и признак пуска в обрыве (v5.1.34, В1)
                 self._prev_seg_hint = seg
                 self._transition_ctx = _push_transition(self._transition_ctx, seg)
                 carry_continued_from = None   # только первый сегмент несёт ссылку
@@ -5750,7 +6493,37 @@ class OnlinePollEngine:
             None if closed_segs
             else _chain_link(0, self.continued_from_id, self._prev_seg_hint, open_seg)
         )
-        if closed_segs:
+        # Обрыв связи, кончившийся в открытом сегменте, — сразу при возврате связи
+        # (v5.1.34, В1, решение Р1): показания до обрыва — из памяти движка, после —
+        # из истории окна, без запросов; признак, «не меньше» и строка фактов — с
+        # этого цикла. Без памяти (рестарт внутри обрыва) — на закрытии сегмента
+        _open_of: list[dict] = []
+        _open_ro_new: dict | None = None
+        try:
+            _ogaps = gaps + self._outage_carry_for(open_seg.t_start)
+            _open_of, _open_ro_new = await self._outage_live(
+                open_seg, ts_to_utc, _ogaps, self._window_counters(ts_from_utc, _rows_new,
+                                                                   _rows_new is history),
+                ts_from_utc - timedelta(seconds=_PREAMBLE_LOOKBACK_SEC),
+                head_change=(_changed_by_mode(closed_segs[-1]) if closed_segs
+                             else _changed_by_mode(self._prev_seg_hint)))
+            self._keep_outage_carry(open_seg.t_start, _ogaps)
+        except Exception:
+            logger.warning("OnlineEngine[%s]: обрыв связи в открытом сегменте не разобран",
+                           self.key, exc_info=True)
+            _open_of, _open_ro_new = [], None
+        if _open_ro_new is not None:
+            open_continued_from = None      # пуск в обрыве — новая цепочка
+        # Пуск режима цепочки — в обрыве связи (v5.1.34, В1): время в режиме и
+        # «с пуска» — от первых данных после обрыва, «не меньше»
+        _open_ro = _open_ro_new or (getattr(self, "inherited_run_origin", None)
+                                    if (not closed_segs and open_continued_from is not None
+                                        and run_origin_valid(getattr(self, "inherited_run_origin", None),
+                                                             open_seg.run_state))
+                                    else None)
+        if _open_ro is not None:
+            _open_run_origin = _tz_utc(datetime.fromisoformat(_open_ro["origin_from"]))
+        elif closed_segs:
             _open_run_origin = _tz_utc(datetime.fromisoformat(open_seg.t_start))
         elif open_continued_from is not None or self.continued_from_id is None:
             _open_run_origin = chain_origin_ts or _tz_utc(self.cursor_ts)
@@ -5810,6 +6583,7 @@ class OnlinePollEngine:
             open_seg, self.router_sn, self.equip_type, self.panel_id, self.cfg,
             run_origin_ts=_open_run_origin, known_ends=_kn_open,
         )
+        _mark_origin_unknown(open_seg, _open_ro)
         logger.debug(
             "TIMING[%s]: enrich за %.3fs",
             self.key, _time.perf_counter() - _t0,
@@ -5831,10 +6605,13 @@ class OnlinePollEngine:
         # Диффузия живых тревог: вычисляем diff до upsert; segment_id подставим после
         # Риск нагара — состояние, не тревога: в журнал и живые тревоги не идёт
         # (иначе «тревога» мигала бы с каждым подсегментом без недогруза)
+        # Окно без своих строк (флаг v5.1.30) — тревоги не закрывать вслепую
+        # (v5.1.34, В3): прежние активные сохраняются, CLOSED не пишется
         active_detections, _alert_events = _diff_alerts(
             self._active_alerts,
             [d for d in _curr_dets if d.get("scenario") not in STATE_SCENARIOS],
             ts=_tz_utc(t_to), segment_id=None,
+            keep_missing=_own_rows is False,
         )
         self._active_alerts = {_alert_key(d): d for d in active_detections}
 
@@ -5851,6 +6628,7 @@ class OnlinePollEngine:
                 fault_ref=self._fault_ref,
                 inherited_run_state_sec=_rs_carry(self.inherited_run_state_sec, open_seg.run_state),
                 equip_name=getattr(self, "equip_name", None),
+                run_origin=_open_ro, outage_facts=_open_of,
             )
         except Exception:
             logger.exception("OnlineEngine[%s]: не удалось построить отчёт открытого сегмента", self.key)
@@ -5858,6 +6636,7 @@ class OnlinePollEngine:
 
         open_summary_md, open_summary_parts = await self._build_summary_md_for(
             [open_seg], self.cursor_ts, t_to, live_keys=_open_live_keys,
+            **({"outage_facts": _open_of} if _open_of else {}),
         )
         logger.debug(
             "TIMING[%s]: to_markdown за %.3fs",
@@ -5934,10 +6713,21 @@ class OnlinePollEngine:
                 **open_seg.to_dict(),
                 "_total_run_state_sec": {
                     open_seg.run_state: (
+                        # Пуск в обрыве, решённый в этом сегменте (Р1), — от первых данных
+                        max(0.0, (_tz_utc(datetime.fromisoformat(open_seg.t_start))
+                                  + timedelta(seconds=float(open_seg.duration_sec or 0))
+                                  - _tz_utc(datetime.fromisoformat(_open_ro_new["origin_from"]))
+                                  ).total_seconds())
+                        if _open_ro_new is not None else
                         _rs_carry(self.inherited_run_state_sec, open_seg.run_state)
                         .get(open_seg.run_state, 0.0) + open_seg.duration_sec
                     ),
                 },
+                # Пуск режима — в обрыве связи (v5.1.34, В1): статус «Работа ≥ …»
+                **({"_run_origin": dict(_open_ro)} if _open_ro is not None else {}),
+                # Снимки показаний до обрыва и разрывы сегмента — переживают рестарт
+                # (решение Р1): после него решение то же, без запроса
+                **self._outage_persist(open_seg.t_start),
             },
             "report_md":              open_report_md,
             "report_summary_md":      open_summary_md,

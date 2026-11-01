@@ -59,7 +59,8 @@ _KEY_ROLES: dict[int, list[str]] = {
 _PANEL_SEV_RANK: dict[str, int] = {"SHUTDOWN": 3, "WARNING": 2}
 
 # Общий ранг для сортировки итогового уровня
-# предупреждение (аналитика) < внимание (панель WARNING) < авария (панель SHUTDOWN)
+# предупреждение (аналитика; панельный CAUTION — v5.1.34, В2) < внимание (панель
+# WARNING) < авария (панель SHUTDOWN)
 _OVERALL_RANK: dict[str, int] = {
     "авария":         4,
     "внимание":       3,
@@ -128,14 +129,29 @@ def compute_analytics_severity(active_dets: list[dict]) -> str:
     return "предупреждение" if analytics else "норма"
 
 
-def compute_severity_level(active_dets: list[dict]) -> str:
+def panel_caution_dets(active_dets: list[dict]) -> list[dict]:
+    """Панельный CAUTION: «Общая авария» при несброшенном коде (CommonAlarm +
+    40012 ≠ 0, решение 11.10) — v5.1.34, В2."""
+    return [d for d in active_dets or [] if isinstance(d, dict)
+            and d.get("scenario") == "CONTROLLER_FAULT" and d.get("severity") == "CAUTION"]
+
+
+def compute_severity_level(active_dets: list[dict], panel_caution: bool = True) -> str:
     """Итоговый уровень — максимум из панели и аналитики.
 
     норма < предупреждение < внимание < авария
+
+    v5.1.34 (В2, решение владельца 01.11): панельный CAUTION («Общая авария» с
+    кодом) поднимает уровень до «предупреждение» — тот же уровень, что в вердикте
+    сводки и календаре (решение 11.10, 1а). Источник панели (compute_panel_severity)
+    при этом остаётся «норма»: гейт на одну Общую аварию не запускается.
+    panel_caution=False — как до v5.1.34 (календарь сегментов без частей сводки,
+    до 10.10: история не перекрашивается).
     """
     panel     = compute_panel_severity(active_dets)
     analytics = compute_analytics_severity(active_dets)
-    return max(panel, analytics, key=lambda x: _OVERALL_RANK.get(x, 0))
+    caution   = "предупреждение" if panel_caution and panel_caution_dets(active_dets) else "норма"
+    return max(panel, analytics, caution, key=lambda x: _OVERALL_RANK.get(x, 0))
 
 
 def _hash_codes(d: dict) -> tuple:
@@ -634,6 +650,15 @@ def build_structural_status(
     time_in_mode_sec = float(
         total_rs_sec.get(run_state) or total_rs_sec.get(str(run_state)) or 0.0
     )
+    # Пуск режима — в обрыве связи (v5.1.34, В1, решение владельца 01.11): время
+    # в режиме — от первых данных после обрыва (движок уже считает от них), «не меньше»
+    run_origin = None
+    try:
+        from analytics.serializer import run_origin_valid
+        _ro = chars.get("_run_origin")
+        run_origin = dict(_ro) if run_origin_valid(_ro, run_state) else None
+    except Exception:
+        logger.warning("Признак пуска в обрыве связи не прочитан", exc_info=True)
     if not time_in_mode_sec:
         raw_ts = origin_ts or seg_row.get("t_start")
         if raw_ts:
@@ -752,6 +777,13 @@ def build_structural_status(
             alarm["fresh"] = bool(
                 severity == "CAUTION" and _caution_fresh(
                     det_vals.get("fault_start"), fault_codes, seg_t0, code_at_start))
+            # Строка статуса панельного CAUTION (v5.1.34, В2): «Общая авария — код
+            # 1453 «…» с 24.10 16:00»; в состав гейта и его хеши не входит
+            if severity == "CAUTION":
+                try:
+                    alarm["caution_text"] = _panel_caution_text(det_vals, fault_codes, description)
+                except Exception:
+                    logger.warning("Строка панельного CAUTION не собрана", exc_info=True)
             panel_alarms.append(alarm)
         elif scenario in GATE_EXCLUDED_SCENARIOS:
             regime_alarms.append(alarm)
@@ -791,6 +823,9 @@ def build_structural_status(
         "analytics_severity": analytics_sev,
         "analytics_suppressed": suppressed,
         "time_in_mode_sec":   time_in_mode_sec,
+        # Пуск режима — в обрыве связи (v5.1.34, В1): время в режиме «не меньше»
+        "run_origin":         run_origin,
+        "time_in_mode_at_least": run_origin is not None,
         "panel_alarms":       panel_alarms,
         # Состав гейта (без режимных замечаний); режимные — отдельно, для строки
         "analytics_alarms":   analytics_alarms,
@@ -812,6 +847,50 @@ def build_structural_status(
         # реза посреди «Работы» — профиль предка (ревью R1)
         "start":              start_profile_of(chars),
     }
+
+
+def _panel_caution_text(vals: dict, fault_codes: list, description: str | None) -> str:
+    """«Общая авария — код 1453 «Отказ отключения автомата генераторной
+    установки» с 24.10 16:00» (v5.1.34, В2): панельный CAUTION в строке статуса.
+
+    Имя кода — как в сводке (values.code_name из справочника KB,
+    labels.panel_fault_name), иначе расшифровка статуса («код N «…»»); с —
+    позднее из начала «Общей аварии» и начала текущего кода (код сменился
+    позже лампы — с момента кода). Время — местное, без секунд."""
+    vals = vals if isinstance(vals, dict) else {}
+    try:
+        code = int(vals.get("last_fault_code") or (fault_codes or [0])[0] or 0)
+    except (TypeError, ValueError, IndexError):
+        code = 0
+    # У «Общей аварии» с кодом — её имя и у старых строк («CommonAlarm (Общая авария)»)
+    head = ("Общая авария" if vals.get("last_fault_code")
+            else vals.get("fault_name") or "Общая авария")
+    cname = vals.get("code_name")
+    if code > 0 and cname:
+        body = f"{head} — код {code} «{cname}»"
+    elif description and str(description).startswith("код "):
+        body = f"{head} — {description}"
+    elif code > 0:
+        body = f"{head} — код {code}"
+    else:
+        body = description or head
+    starts = [t for t in (_as_dt(vals.get("fault_start")), _as_dt(vals.get("last_fault_code_since")))
+              if t is not None]
+    if starts:
+        from analytics.labels import fmt_local
+        _s = fmt_local(max(starts), day=True, seconds=False)
+        if _s:
+            body += f" с {_s}"
+    return body
+
+
+def panel_caution_alarms(s: dict) -> list[dict]:
+    """Панельные тревоги CAUTION статуса (v5.1.34, В2) — только когда панель не
+    говорит громче (WARNING / SHUTDOWN печатаются своей строкой)."""
+    if s.get("panel_severity", "норма") != "норма":
+        return []
+    return [a for a in s.get("panel_alarms") or []
+            if isinstance(a, dict) and a.get("severity") == "CAUTION"]
 
 
 def _as_dt(raw) -> datetime | None:
@@ -942,21 +1021,35 @@ def format_status_text(s: dict) -> str:
     analytics_alarms  = s.get("analytics_alarms", [])
     dur               = s.get("time_in_mode_sec", 0)
 
-    # Режим + время в режиме
+    # Режим + время в режиме; пуск в обрыве связи — «не меньше» (v5.1.34, В1):
+    # «Работа ≥ 124 ч 59 мин (последний пуск — в обрыве 25–26.10)»
     base = mode
+    _ro = s.get("run_origin")
     if dur > 60:
-        base += f" {_fmt_duration(dur)}"
+        base += f" {'≥ ' if _ro else ''}{_fmt_duration(dur)}"
+    if _ro:
+        _note = run_origin_note(_ro, s.get("run_state"))
+        if _note:
+            base += f" ({_note})"
 
     parts = []
 
     if s.get("emergency_text"):
         parts.append(f"🔴 панель: {s['emergency_text']}")
-    elif panel_sev == "авария" and panel_alarms:
-        desc = panel_alarms[0].get("description") or panel_alarms[0]["scenario"]
-        parts.append(f"🔴 панель: {desc}")
-    elif panel_sev == "внимание" and panel_alarms:
-        desc = panel_alarms[0].get("description") or panel_alarms[0]["scenario"]
-        parts.append(f"🟠 панель: {desc}")
+    elif panel_sev in ("авария", "внимание") and panel_alarms:
+        # Подпись — тревога панели наибольшего ранга, а не первая в списке
+        # (ревью v5.1.34, В2 п. 5: CAUTION первым подписывал аварию)
+        top = max(panel_alarms, key=lambda a: _PANEL_SEV_RANK.get(a.get("severity") or "", 0))
+        desc = top.get("description") or top["scenario"]
+        parts.append(f"{'🔴' if panel_sev == 'авария' else '🟠'} панель: {desc}")
+    else:
+        # Панельный CAUTION — «Общая авария» с кодом (v5.1.34, В2, решение 01.11):
+        # как в вердикте сводки, «🟡 панель: Общая авария — код 1453 «…» с 24.10 16:00»
+        _pc = panel_caution_alarms(s)
+        if _pc:
+            desc = (_pc[0].get("caution_text") or _pc[0].get("description")
+                    or _pc[0]["scenario"])
+            parts.append(f"🟡 панель: {desc}")
 
     # Снятый состав — «проверено ИИ»; режимное замечание рядом остаётся живым
     regime = s.get("regime_alarms") or []
@@ -976,6 +1069,27 @@ def format_status_text(s: dict) -> str:
     if parts:
         return f"{base} — {' | '.join(parts)}."
     return f"{base} — параметры в норме."
+
+
+def run_origin_note(ro: dict | None, run_state=None) -> str | None:
+    """«последний пуск — в обрыве 25–26.10» (у стоянки — «останов — …»): пуск
+    режима был в обрыве связи (v5.1.34, В1). Перед тире — неразрывный пробел:
+    UI режет строку состояния по первому « — » после подписи режима
+    (AnalyticsStrip.stateTail), скобка с обычным пробелом её бы разрезала."""
+    if not isinstance(ro, dict):
+        return None
+    try:
+        from analytics.labels import _local_tz
+        from analytics.serializer import run_origin_days, run_origin_event
+        days = run_origin_days(ro, _local_tz(None))
+        rs = ro.get("run_state", run_state)
+        ev = run_origin_event(rs)
+    except Exception:
+        logger.warning("Подпись пуска в обрыве связи не собрана", exc_info=True)
+        return None
+    if not days:
+        return None
+    return f"{'последний пуск' if ev == 'пуск' else 'останов'}\u00a0— в обрыве {days}"
 
 
 def _coking_status_part(ck: dict | None, run_state) -> str | None:
@@ -1025,8 +1139,23 @@ def _monthly_overdue_days(ck: dict) -> float | None:
 def extract_alarm_text(s: dict) -> str | None:
     """Текст главной тревоги для карточки внешнего UI: панель важнее аналитики.
 
-    None — тревог нет (норма или срабатывание подавлено гейтом).
+    None — тревог нет (норма или срабатывание подавлено гейтом). Подпись
+    разборов гейта (warning_analyses, вход «предыдущие разборы») — как до
+    v5.1.34: панельный CAUTION сюда не идёт, состав и тексты гейта прежние.
     """
+    return _alarm_text(s, panel_caution=False)
+
+
+def status_alarm_text(s: dict) -> str | None:
+    """Текст главной тревоги строки статуса (status_struct.alarm_text) — v5.1.34,
+    В2, решения владельца 01.11: панельный CAUTION («Общая авария» с кодом) —
+    главная тревога карточки, когда живой аналитики нет или код свежий (появился
+    в этом сегменте); иначе первой — аналитика, в конце «+ код 1453 не сброшен»
+    (решение Р2)."""
+    return _alarm_text(s, panel_caution=True)
+
+
+def _alarm_text(s: dict, panel_caution: bool = False) -> str | None:
     panel_sev        = s.get("panel_severity", "норма")
     analytics_sev    = s.get("analytics_severity", "норма")
     panel_alarms     = s.get("panel_alarms", [])
@@ -1041,8 +1170,22 @@ def extract_alarm_text(s: dict) -> str | None:
         return _compose_alarm_text(panel_alarms)
     regime = s.get("regime_alarms") or []
     shown = regime if s.get("analytics_suppressed") else analytics_alarms + regime
-    if analytics_sev == "предупреждение" and shown:
-        return _compose_alarm_text(shown)
+    _pc = panel_caution_alarms(s) if panel_caution else []
+    _live = shown if analytics_sev == "предупреждение" else []
+    if _pc and (not _live or any(a.get("fresh") for a in _pc)):
+        # Решение Р2 (01.11): «Общая авария» с кодом первой — когда живой аналитики
+        # нет или код появился в этом сегменте
+        return _compose_alarm_text(
+            [dict(a, description=a.get("caution_text") or a.get("description")) for a in _pc]
+            + _live)
+    if _live:
+        txt = _compose_alarm_text(_live)
+        if _pc and txt:
+            # Висящий давно код — в конце: «… + код 1453 не сброшен» (Р2)
+            codes = sorted({str(c) for a in _pc for c in a.get("fault_codes") or []})
+            txt += (f" + код {', '.join(codes)} не сброшен" if codes
+                    else " + Общая авария не сброшена")
+        return txt
     return None
 
 
@@ -1176,7 +1319,11 @@ def build_warning_prompt(
 
     dur = s.get("time_in_mode_sec", 0)
     if dur > 60:
-        lines.append(f"Время в режиме: {_fmt_duration(dur)}")
+        # Пуск в обрыве связи (v5.1.34, В1): начало режима не видно
+        _ro = s.get("run_origin")
+        _note = run_origin_note(_ro, s.get("run_state")) if _ro else None
+        lines.append(f"Время в режиме: {'не меньше ' if _ro else ''}{_fmt_duration(dur)}"
+                     + (f" ({_note.replace(chr(160), ' ')})" if _note else ""))
 
     # Профиль пуска этой «Работы» (v5.1.23, п.4): факты окна пуска — время МСК
     sp = s.get("start")

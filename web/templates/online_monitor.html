@@ -409,10 +409,10 @@ async function refreshStatus() {
       const statusLine = row.querySelector('.status-line');
       if (statusLine) {
         if (item.status_text) {
-          // 4-уровневая схема: норма < предупреждение(аналитика) < внимание(панель WARNING) < авария
+          // 4-уровневая схема: норма < предупреждение(аналитика или Общая авария с кодом) < внимание(панель WARNING) < авария
           const sevColor = {
             'норма':         'text-secondary',
-            'предупреждение':'text-warning',   // аналитика — жёлтый 🟡
+            'предупреждение':'text-warning',   // аналитика или Общая авария с кодом — жёлтый 🟡
             'внимание':      'text-orange',    // панель WARNING — оранжевый 🟠
             'авария':        'text-danger',
           };

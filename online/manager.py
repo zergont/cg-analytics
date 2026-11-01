@@ -311,6 +311,7 @@ class OnlineManager:
             engine.inherited_coking_risk = prev_coking
             engine.forward_fill_memory = None
             engine.continued_from_id = None
+            engine.inherited_run_origin = None   # v5.1.34, В1: цепочка рвётся
             # initialize() пропущен, но живые тревоги и эпизоды поднять надо:
             # без этого память движка пуста при непустой БД — открытые эпизоды
             # висят вечно, а на те же тревоги заводятся новые
@@ -1192,7 +1193,7 @@ class OnlineManager:
         """Один тик: детерминированный статус + детектор новых предупреждений → Claude."""
         from online.status_assembler import (
             build_structural_status,
-            compute_fault_hash, format_status_text, extract_alarm_text,
+            compute_fault_hash, format_status_text, run_origin_note, status_alarm_text,
         )
         from online import db as online_db
         from db.analytics import get_app_setting
@@ -1319,7 +1320,13 @@ class OnlineManager:
                         "run_state":            struct.get("run_state"),
                         "mode_label":           struct.get("mode_label"),
                         "time_in_mode_sec":     struct.get("time_in_mode_sec"),
-                        "alarm_text":           extract_alarm_text(struct),
+                        # Пуск режима — в обрыве связи (v5.1.34, В1): время «не меньше»
+                        "time_in_mode_at_least": bool(struct.get("time_in_mode_at_least")),
+                        "run_origin_note":      (run_origin_note(struct.get("run_origin"),
+                                                                 struct.get("run_state"))
+                                                 if struct.get("run_origin") else None),
+                        # Панельный CAUTION — главная тревога карточки (v5.1.34, В2)
+                        "alarm_text":           status_alarm_text(struct),
                         "analytics_suppressed": struct.get("analytics_suppressed", False),
                         "coking":               struct.get("coking"),
                     },
@@ -1371,7 +1378,9 @@ class OnlineManager:
                     continue
                 # Только режимные замечания (без нагрузки, холостой ход) или состав
                 # уже снят — гейту разбирать нечего (решение 12.10; уровень при
-                # снятии держит режимное замечание, а не снятый состав)
+                # снятии держит режимное замечание, а не снятый состав). Одна
+                # «Общая авария» с кодом поднимает уровень до «предупреждение»
+                # (v5.1.34, В2), но источник панели — «норма»: гейт не запускается
                 if ((not struct.get("analytics_alarms") or struct.get("analytics_suppressed"))
                         and struct.get("panel_severity") == "норма"):
                     self._warning_tracker.pop(key, None)

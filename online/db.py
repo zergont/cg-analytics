@@ -437,6 +437,8 @@ async def insert_closed_segment(data: dict[str, Any]) -> int:
                   AND t_start = $4
                   AND t_end IS NOT NULL
                   AND continued_from IS NULL
+                  -- Голова с пуском в обрыве связи (v5.1.34, В1) — новая цепочка
+                  AND NOT COALESCE(characteristics_json->'run_origin_unknown' = 'true'::jsonb, false)
                   AND id != $5
                 LIMIT 1
             """,
@@ -787,19 +789,31 @@ async def get_run_state_origin_ts(seg_id: int):
     Нужно для корректного расчёта времени в режиме: суточный срез создаёт
     новый сегмент с тем же run_state, поэтому t_start текущего сегмента
     не отражает реальное время начала режима.
+
+    v5.1.34 (В1): пуск режима — в обрыве связи (признак головы origin_from, у
+    открытой строки — _run_origin.origin_from) — первые данные после обрыва;
+    цепочка дальше такой строки не идёт (ссылку на предка до обрыва могла
+    восстановить перечитка, insert_closed_segment).
     """
     conn = await _connect()
     try:
         row = await conn.fetchrow("""
             WITH RECURSIVE chain AS (
-                SELECT id, t_start, continued_from
+                SELECT id, t_start, continued_from, 0 AS depth,
+                       COALESCE(characteristics_json->>'origin_from',
+                                characteristics_json->'_run_origin'->>'origin_from') AS origin_from
                   FROM auto_segments WHERE id = $1
                 UNION ALL
-                SELECT s.id, s.t_start, s.continued_from
+                SELECT s.id, s.t_start, s.continued_from, c.depth + 1,
+                       COALESCE(s.characteristics_json->>'origin_from',
+                                s.characteristics_json->'_run_origin'->>'origin_from')
                   FROM auto_segments s
                   JOIN chain c ON s.id = c.continued_from
+                 WHERE c.origin_from IS NULL
             )
-            SELECT t_start FROM chain WHERE continued_from IS NULL LIMIT 1
+            SELECT COALESCE(origin_from::timestamptz, t_start) AS t_start FROM chain
+             WHERE origin_from IS NOT NULL OR continued_from IS NULL
+             ORDER BY depth LIMIT 1
         """, seg_id)
         return row["t_start"] if row else None
     finally:
@@ -2024,6 +2038,18 @@ async def count_episodes_batch(
 
 # ── alert_journal ─────────────────────────────────────────────────────────────
 
+def _journal_values(ev: dict) -> Any:
+    """values_json записи журнала: значения тревоги и её коды под ключом _alert
+    (v5.1.34, ревью В3: тревога, поднятая после рестарта, — с теми же кодами,
+    что у детекции, хеш состава гейта сходится). Без кодов — как раньше."""
+    v = ev.get("values")
+    al = ev.get("alert")
+    if isinstance(al, dict) and al:
+        v = dict(v) if isinstance(v, dict) else {}
+        v["_alert"] = al
+    return v
+
+
 async def insert_alert_events(
     router_sn: str,
     equip_type: str,
@@ -2054,8 +2080,8 @@ async def insert_alert_events(
                 ev["ts"],
                 ev.get("severity"),
                 ev.get("trigger"),
-                json.dumps(ev.get("values"), ensure_ascii=False)
-                    if ev.get("values") is not None else None,
+                json.dumps(_journal_values(ev), ensure_ascii=False, default=str)
+                    if _journal_values(ev) is not None else None,
                 ev.get("segment_id"),
             )
             for ev in events
@@ -2114,12 +2140,18 @@ async def get_active_alerts(
         for r in rows:
             if r["event_type"] != "CLOSED":
                 vj = r["values_json"]
+                vals = json.loads(vj) if isinstance(vj, str) else (vj or {})
+                # Коды тревоги (v5.1.34, ревью В3) — на верхний уровень, как у детекции
+                al = vals.pop("_alert", None) if isinstance(vals, dict) else None
                 result.append({
                     "scenario":  r["scenario"],
                     "severity":  r["severity"],
                     "trigger":   r["trigger_text"],
-                    "values":    json.loads(vj) if isinstance(vj, str) else (vj or {}),
+                    "values":    vals,
                     "segment_id": r["segment_id"],
+                    **({k: v for k, v in al.items()
+                        if k in ("fault_codes", "ref_codes", "t_detected", "related_roles",
+                                 "description_key")} if isinstance(al, dict) else {}),
                 })
         return result
     finally:

@@ -1706,7 +1706,9 @@ async def online_calendar(
 
     def _violation_level(characteristics_json, summary_json=None) -> str | None:
         """None = нет данных/открытый; иначе итоговый уровень как в status_assembler:
-        норма / предупреждение (аналитика) / внимание (панель WARNING) / авария (панель SHUTDOWN)."""
+        норма / предупреждение (аналитика; у частей сводки — и Общая авария с кодом) /
+        внимание (панель WARNING) / авария (панель SHUTDOWN). Сегменты без частей
+        сводки (до 10.10) — без панельного CAUTION, как раньше (v5.1.34, В2)."""
         characteristics_json = _parse_json(characteristics_json, ctx="characteristics_json в календаре")
         if not characteristics_json or not isinstance(characteristics_json, dict):
             return None
@@ -1726,7 +1728,9 @@ async def online_calendar(
         # Стоп красится по активному на конец окна, прочие режимы — по максимуму
         dets = (_seg_active_dets(characteristics_json) if _stop_kind == "SIMPLE"
                 else _seg_collect_dets(characteristics_json))
-        level = compute_severity_level(dets)
+        # Сегменты без частей сводки (до 10.10) — как раньше: панельный CAUTION
+        # их не перекрашивает (v5.1.34, В2 — только живой статус и новые сводки)
+        level = compute_severity_level(dets, panel_caution=False)
         # Проваленная sequence-проверка без детекции — тоже сигнал аналитики;
         # обрыв связи и наблюдения (профиль останова) на уровень не влияют
         from analytics.serializer import _NO_VERDICT_CHECKS
@@ -2287,6 +2291,11 @@ async def api_online_status():
                 dets = level_dets(dets, suppressed)
                 severity_level     = compute_severity_level(dets)
                 analytics_severity = compute_analytics_severity(dets)
+                # Аварийный стоп — авария панели и без маски в детекциях (1452), как
+                # в /api/machines и статусе (ревью v5.1.34, В2 п. 4)
+                _ch_os = _parse_json(open_seg.get("characteristics_json"), ctx="characteristics_json")
+                if isinstance(_ch_os, dict) and _ch_os.get("stop_kind") == "EMERGENCY":
+                    severity_level = panel_severity = "авария"
             except Exception:
                 logger.warning("api_online_status: не удалось вычислить severity", exc_info=True)
 
@@ -2432,8 +2441,8 @@ async def api_machines():
             "stop_kind":     _stop_kind,
             "run_state_label": _seg_label(run_state, _stop_kind, _m_chars),
             **_attempt_fields(_m_chars),
-            # Уровень однозначно кодирует источник: предупреждение — только аналитика,
-            # внимание/авария — только панель
+            # Предупреждение — аналитика или панельный CAUTION («Общая авария» с
+            # кодом, v5.1.34, В2); внимание/авария — только панель
             "severity_level":    severity_level,       # норма / предупреждение / внимание / авария
             # Срабатывание аналитики проверено и отменено гейтом Claude
             "gate_checked":      gate_checked,
@@ -2444,6 +2453,10 @@ async def api_machines():
             # Структурный статус для карточки: режим, время в режиме, текст тревоги
             "mode_label":       status_struct.get("mode_label"),
             "time_in_mode_sec": status_struct.get("time_in_mode_sec"),
+            # Пуск режима — в обрыве связи (v5.1.34, В1): время в режиме «не меньше»
+            # («≥»), подпись «последний пуск — в обрыве 25–26.10»
+            "time_in_mode_at_least": bool(status_struct.get("time_in_mode_at_least")),
+            "run_origin_note":  status_struct.get("run_origin_note"),
             "alarm_text":       status_struct.get("alarm_text"),
             "status_updated":  status_updated,
             "coking_risk":     coking_risk,            # GREEN / YELLOW / RED

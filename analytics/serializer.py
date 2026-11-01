@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 from .contract import Segment, Subsegment, cap_severity
 from .labels import (
-    fault_code_close_text, fmt_duration, fmt_local, fmt_number, gate_supp_label,
+    engine_hours_text, fault_code_close_text, fmt_duration, fmt_local, fmt_number, gate_supp_label,
     number_decimals, role_label, run_trip_name, run_trip_text, tz_label, unit_ru,
 )
 
@@ -1970,6 +1970,16 @@ def render_summary_md(parts: dict[str, Any]) -> str:
         _hold = parts.get("common_alarm_hold")
         if isinstance(_hold, dict) and _hold.get("text"):
             a(f"- ℹ️ {_hold['text']}")
+    # Обрывы связи по счётчикам панели (v5.1.34, В1) — сведения, вне счёта
+    # замечаний и вердикта; без замечаний — своим блоком «К сведению»
+    _of = [f.get("text") for f in parts.get("outage_facts") or []
+           if isinstance(f, dict) and f.get("text")]
+    if _of:
+        if not parts.get("has_remarks"):
+            a("")
+            a("### К сведению")
+        for x in _of:
+            a(f"- ℹ️ {x}")
 
     km = parts.get("key_metrics")
     if km and km.get("rows"):
@@ -2184,6 +2194,254 @@ def no_data_run_estimate(
 def _tz_utc(t: Any) -> datetime:
     t = t if isinstance(t, datetime) else datetime.fromisoformat(str(t))
     return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
+# ── Обрыв связи по счётчикам панели (v5.1.34, В1, решение владельца 01.11) ────
+#
+# Пуски внутри обрыва не видны по режиму (40011 в дыре молчит): ДЭС №3
+# 25.10 00:11:03 → 26.10 18:55:59 — попыток 961 → 963, успешных 951 → 953,
+# наработка +40 ч 06 мин. Строка фактов — в первом сегменте после обрыва; вырос
+# счётчик пусков — время в режиме считается от первых данных после обрыва «не
+# меньше» (run_origin_unknown, origin_from). Решение Р1 (01.11): движок решает
+# сразу при возврате связи по показаниям, которые помнит до обрыва; без памяти
+# (рестарт внутри обрыва) — на закрытии сегмента одним запросом.
+
+OUTAGE_COUNTER_ROLES = ("START_ATTEMPTS_TOTAL", "START_SUCCESS_TOTAL", "ENGINE_HOURS")
+OUTAGE_START_ROLES = ("START_ATTEMPTS_TOTAL", "START_SUCCESS_TOTAL")
+# Показание после обрыва — не дальше этого от его конца: счётчик пусков PCC3300
+# пишется раз в 15 мин и при переподключении (ДЭС №3 — сразу, ДГУ — медиана
+# 289–340 с, максимум 893 с за 30 дней); позже — уже не «после обрыва»
+OUTAGE_AFTER_MAX_SEC = 1200.0
+
+
+def outage_facts_params(cfg) -> dict[str, Any]:
+    """Строка фактов обрыва (KB: segmentation.yaml → no_data_estimate):
+    outage_facts_enabled — выключатель (ревью v5.1.34, п. 8); outage_facts_min_sec
+    — с какой длины обрыва строка печатается, когда счётчики пусков не менялись
+    (выросли или сбиты — при любой длине); outage_origin_min_sec — с какой длины
+    обрыва пуск в нём ставит «не меньше» (в более коротком пуск виден в данных
+    после него, ревью п. 7); lookback_sec — докуда искать показание до обрыва
+    (то же, что у заглушки П10)."""
+    prm = no_data_estimate_params(cfg)
+
+    def g(key: str, default: Any) -> Any:
+        try:
+            v = cfg.seg("no_data_estimate", key, default=default)
+        except Exception:
+            v = default
+        return default if v is None else v
+    prm["facts_enabled"] = bool(g("outage_facts_enabled", True))
+    prm["facts_min_sec"] = float(g("outage_facts_min_sec", 1800))
+    prm["origin_min_sec"] = float(g("outage_origin_min_sec", 60))
+    return prm
+
+
+def outage_counter_facts(
+    gap_from: Any, gap_to: Any,
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+    start_roles: bool | None = None,
+    origin_min_sec: float = 60.0,
+) -> dict[str, Any] | None:
+    """Факты обрыва связи [gap_from, gap_to] по счётчикам панели (v5.1.34, В1).
+
+    before / after — {роль: (метка, значение) | None} последнего показания до
+    обрыва и показания после (роли OUTAGE_COUNTER_ROLES; наработка — в секундах,
+    как в БД). start_roles — счётчики пусков у машины заведены (по KB; None —
+    по наличию показаний).
+
+    starts_changed: True — счётчик пусков вырос, остальные не убыли (ревью
+    v5.1.34, п. 3: уменьшение — нулевой кадр, сброс панели, кадр застывших часов
+    — не пуск); False — счётчики есть и не выросли; None — пар показаний
+    счётчиков пусков нет. counter_glitch — какой-то счётчик убыл: строка «счётчик
+    сбит», без признака. origin_possible — обрыв не короче origin_min_sec (пуск в
+    более коротком виден в данных после него). start_missing — у машины счётчики
+    пусков есть, но показания нет: «before» / «after». None — сказать нечего."""
+    try:
+        t0, t1 = _tz_utc(gap_from), _tz_utc(gap_to)
+    except (TypeError, ValueError):
+        return None
+    if t1 <= t0:
+        return None
+    before, after = before or {}, after or {}
+
+    def _pair(role: str) -> list[float] | None:
+        b, a = before.get(role), after.get(role)
+        if not b or not a or b[1] is None or a[1] is None:
+            return None
+        try:
+            return [float(b[1]), float(a[1])]
+        except (TypeError, ValueError):
+            return None
+
+    att = _pair("START_ATTEMPTS_TOTAL")
+    suc = _pair("START_SUCCESS_TOTAL")
+    hrs = _pair("ENGINE_HOURS")
+    if att is None and suc is None and hrs is None:
+        return None
+    known = [p for p in (att, suc) if p is not None]
+    # Убыль наработки — отдельно (перепроверка v5.1.34, note-б): строка называет
+    # сбитый счётчик, а рост счётчиков пусков признак пуска ставит
+    hrs_dec = hrs is not None and hrs[1] < hrs[0]
+    dec = any(p[1] < p[0] for p in known)
+    inc = any(p[1] > p[0] for p in known)
+    changed = (None if not known else bool(inc and not dec))
+    has_roles = bool(known) if start_roles is None else bool(start_roles)
+    missing = None
+    if has_roles and not known:
+        missing = ("before" if not any(before.get(r) for r in OUTAGE_START_ROLES) else "after")
+    gap_sec = (t1 - t0).total_seconds()
+    return {
+        "gap_from": t0.isoformat(), "gap_to": t1.isoformat(),
+        "gap_sec": gap_sec,
+        "attempts": att, "success": suc,
+        "worked_sec": (max(0.0, hrs[1] - hrs[0]) if hrs is not None and not hrs_dec else None),
+        "starts_changed": changed,
+        "counter_glitch": bool(dec),
+        "hours_glitch": [hrs[0], hrs[1]] if hrs_dec else None,
+        "origin_possible": gap_sec >= float(origin_min_sec or 0),
+        "start_roles": has_roles,
+        "start_missing": missing,
+        "n_attempts": (int(att[1] - att[0]) if att is not None else None),
+        "n_success": (int(suc[1] - suc[0]) if suc is not None else None),
+    }
+
+
+def _cnt(v: Any) -> str:
+    try:
+        return str(int(float(v)))
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def _gap_len_text(sec: Any) -> str | None:
+    """Длина обрыва — до минуты округлением; короче полуминуты — «< 1 мин»
+    (ревью v5.1.34, п. 7: было «(0 с)»)."""
+    try:
+        m = round(float(sec or 0) / 60.0)
+    except (TypeError, ValueError):
+        return None
+    return "< 1 мин" if m < 1 else fmt_duration(m * 60, seconds=False)
+
+
+def outage_facts_text(f: dict[str, Any] | None, tz=None) -> str | None:
+    """«Обрыв связи 25.10 00:11:03 – 26.10 18:55:59 (42 ч 45 мин): по счётчикам 2
+    пуска (попыток 961 → 963, успешных 951 → 953), наработка 40 ч 06 мин; когда
+    был последний пуск — не видно» (v5.1.34, В1). Длина обрыва — до минуты
+    (округлением), наработка — по счётчику. Убывший счётчик — «счётчик сбит»;
+    у коротких обрывов (короче outage_origin_min_sec) пуск виден в данных — без
+    «не видно». None — фактов нет."""
+    if not isinstance(f, dict) or not f.get("gap_from") or not f.get("gap_to"):
+        return None
+    span = _fmt_span(f["gap_from"], f["gap_to"], tz)
+    dur = _gap_len_text(f.get("gap_sec"))
+    att, suc = f.get("attempts"), f.get("success")
+    ch = f.get("starts_changed")
+    ws = f.get("worked_sec")
+    hours = None
+    if ws is not None:
+        hours = "наработки нет" if float(ws) < 60 else f"наработка {fmt_duration(ws, seconds=False)}"
+    tail = ""
+    nums = []
+    if att is not None:
+        nums.append(f"попыток {_cnt(att[0])} → {_cnt(att[1])}" if att[0] != att[1]
+                    else f"попыток {_cnt(att[0])}")
+    if suc is not None:
+        nums.append(f"успешных {_cnt(suc[0])} → {_cnt(suc[1])}" if suc[0] != suc[1]
+                    else f"успешных {_cnt(suc[0])}")
+    _nums = f" ({', '.join(nums)})" if nums else ""
+    _seen = f.get("origin_possible", True)
+    _hg = f.get("hours_glitch")
+    if isinstance(_hg, (list, tuple)) and len(_hg) == 2:
+        # Наработка убыла (note-б): назвать сбитый счётчик, часы — как на панели
+        _h0, _h1 = (engine_hours_text(float(x) / 3600.0) or _cnt(x) for x in _hg)
+        hours = f"наработка сбита ({_h0} → {_h1})"
+    if f.get("counter_glitch"):
+        # Счётчик пусков убыл: нулевой кадр, сброс панели, кадр застывших часов (ревью п. 3)
+        body = f"счётчик пусков сбит{_nums} — пуски по нему не оценить"
+        if hours:
+            body += f"; {hours}"
+    elif ch is None:
+        if hours is None:
+            return None
+        if f.get("start_roles"):
+            side = "до" if f.get("start_missing") == "before" else "после"
+            body = (f"{hours.replace('наработка ', 'наработка по счётчику ', 1)}; показаний счётчика "
+                    f"пусков {side} обрыва нет — были ли пуски, не видно")
+        else:
+            body = (f"{hours.replace('наработка ', 'наработка по счётчику ', 1)}; счётчика пусков у "
+                    f"машины нет — были ли пуски, не видно")
+    else:
+        ns, na = f.get("n_success"), f.get("n_attempts")
+        if not ch:
+            body = f"по счётчикам пусков не было{_nums}"
+        elif ns is not None and ns > 0:
+            body = f"по счётчикам {ns} {_plural(ns, 'пуск', 'пуска', 'пусков')}{_nums}"
+            tail = "; когда был последний пуск — не видно" if _seen else ""
+        elif ns == 0 and na is not None and na > 0:
+            body = (f"по счётчикам {na} {_plural(na, 'попытка', 'попытки', 'попыток')} пуска без "
+                    f"успешного{_nums}")
+            tail = "; когда была последняя попытка — не видно" if _seen else ""
+        else:
+            body = f"по счётчикам {na or 1} {_plural(na or 1, 'попытка', 'попытки', 'попыток')} пуска{_nums}"
+            tail = "; когда был последний пуск — не видно" if _seen else ""
+        if hours:
+            body += f", {hours}"
+    return f"Обрыв связи {span}" + (f" ({dur})" if dur else "") + f": {body}{tail}"
+
+
+def run_origin_days(ro: dict[str, Any] | None, tz=None) -> str | None:
+    """Дни обрыва, в котором был пуск: «25–26.10», «29.10», «30.09–01.10»."""
+    if not isinstance(ro, dict):
+        return None
+    try:
+        a, b = _tz_utc(ro.get("gap_from")), _tz_utc(ro.get("gap_to"))
+    except (TypeError, ValueError):
+        return None
+    if tz is not None:
+        a, b = a.astimezone(tz), b.astimezone(tz)
+    if a.date() == b.date():
+        return b.strftime("%d.%m")
+    if (a.year, a.month) == (b.year, b.month):
+        return f"{a.day:02d}–{b.strftime('%d.%m')}"
+    return f"{a.strftime('%d.%m')}–{b.strftime('%d.%m')}"
+
+
+def run_origin_valid(ro: Any, run_state: Any = None) -> bool:
+    """Признак «начало режима неизвестно» годен (v5.1.34, В1): есть origin_from и,
+    если задан режим, — того же режима."""
+    if not isinstance(ro, dict) or not ro.get("run_origin_unknown") or not ro.get("origin_from"):
+        return False
+    try:
+        _tz_utc(ro["origin_from"])
+    except (TypeError, ValueError):
+        return False
+    if run_state is not None and ro.get("run_state") is not None:
+        try:
+            return int(ro["run_state"]) == int(run_state)
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def run_origin_event(run_state: Any) -> str:
+    """Что случилось в обрыве для подписи: у стоянки — останов, иначе — пуск."""
+    try:
+        return "останов" if int(run_state) == 0 else "пуск"
+    except (TypeError, ValueError):
+        return "пуск"
+
+
+def fmt_dm_round(t: Any, tz=None) -> str | None:
+    """«26.10 18:56» — метка до минуты округлением (18:55:59 → 18:56)."""
+    try:
+        dt = _tz_utc(t)
+    except (TypeError, ValueError):
+        return None
+    dt = (dt + timedelta(seconds=30)).replace(second=0, microsecond=0)
+    if tz is not None:
+        dt = dt.astimezone(tz)
+    return dt.strftime("%d.%m %H:%M")
 
 
 def build_no_data_report(
@@ -2412,7 +2670,7 @@ def _group_detections(subsegments: list) -> list[dict]:
                   key=lambda g: (-_SEV_RANK_MD.get(g["severity"] or "", 0), g["first_sub"]))
 
 
-def _det_counter_lines(d: dict, fmt_ts) -> list[str]:
+def _det_counter_lines(d: dict, fmt_ts, tz=None) -> list[str]:
     v = d.get("values") or {}
     out = []
     count_30d = v.get("history_count_30d")
@@ -2432,7 +2690,12 @@ def _det_counter_lines(d: dict, fmt_ts) -> list[str]:
         onset, since = v.get("fault_start") or d.get("t_detected"), v.get("startup_since")
         if not startup_count and onset and since and str(onset) < str(since):
             suffix = f" (активна с {fmt_ts(onset)} — до пуска)"
-        out.append(f"  - Срабатываний с пуска: **{startup_count}**{suffix}")
+        # Пуск — в обрыве связи (v5.1.34, В1): счёт от первых данных после обрыва
+        _since = fmt_dm_round(since, tz) if v.get("startup_origin_unknown") and since else None
+        if _since:
+            out.append(f"  - Срабатываний с {_since} (пуск в обрыве связи): **{startup_count}**{suffix}")
+        else:
+            out.append(f"  - Срабатываний с пуска: **{startup_count}**{suffix}")
     return out
 
 
@@ -2554,7 +2817,7 @@ def _append_detections(lines: list[str], seg: Segment, idx: int, fmt_ts, tz=None
         a(f"  - Источник: `{', '.join(g['sources'])}`")
         if g["codes"]:
             a(f"  - Код панели (выставлен): {g['codes']}")
-        lines.extend(_det_counter_lines(g["last"], fmt_ts))
+        lines.extend(_det_counter_lines(g["last"], fmt_ts, tz))
     a("")
 
 
@@ -2603,6 +2866,8 @@ def to_markdown(
     inherited_run_state_sec: "dict[int, float] | None" = None,
     last_close: "tuple | None" = None,
     equip_name: str | None = None,
+    run_origin: "dict | None" = None,
+    outage_facts: "list[dict] | None" = None,
 ) -> str:
     """Сформировать Markdown-отчёт.
 
@@ -2613,6 +2878,10 @@ def to_markdown(
     движок (v5.1.25): подпись идущего нарушения «(до конца работы)» /
     «(продолжается после 09:00)» вместо «(идёт)»; None — по сегменту.
     equip_name — имя машины из реестра для заголовка (v5.1.32); None — без имени.
+    run_origin — пуск режима головы был в обрыве связи (v5.1.34, В1;
+    run_origin_unknown, origin_from): «с начала состояния (с 26.10 18:56, пуск в
+    обрыве)» — от первых данных после обрыва, не меньше. outage_facts — факты
+    обрывов по счётчикам панели, кончившихся в этом окне (строки ℹ️).
     """
     fmt_ts = _make_fmt_ts(tz)
 
@@ -2665,7 +2934,21 @@ def to_markdown(
         a(f"| {_rs_time_label(rs)} за период | {_fmt_duration(period_rs[rs])}{_tn} |")
     head = segments[0] if segments else None
     inh = float((inherited_run_state_sec or {}).get(head.run_state) or 0.0) if head else 0.0
-    if inh > 0:
+    # Пуск режима — в обрыве связи (v5.1.34, В1): с первых данных после обрыва
+    _ro_row = None
+    if head is not None and run_origin_valid(run_origin, head.run_state):
+        try:
+            _o = _tz_utc(run_origin["origin_from"])
+            _h_end = _tz_utc(head.t_start) + timedelta(seconds=float(head.duration_sec or 0))
+            if _h_end > _o:
+                _ro_row = (f"| {_rs_time_label(head.run_state)} с начала состояния "
+                           f"(с {fmt_dm_round(_o, tz)}, {run_origin_event(head.run_state)} в обрыве) | "
+                           f"не меньше {_fmt_duration((_h_end - _o).total_seconds())} |")
+        except (TypeError, ValueError):
+            _ro_row = None
+    if _ro_row:
+        a(_ro_row)
+    elif inh > 0:
         try:
             t0 = (datetime.fromisoformat(head.t_start) - timedelta(seconds=inh)).isoformat()
             since = f" (с {_fmt_dm(t0, tz)})"
@@ -2688,6 +2971,16 @@ def to_markdown(
     if hits:
         a("*Уровни у обнаружений — уровни детекторов до разбора ИИ; вердикт периода — "
           "в сводке сегмента.*")
+        a("")
+    # Обрывы связи, кончившиеся в окне, — по счётчикам панели (v5.1.34, В1)
+    try:
+        _of = [x for x in (outage_facts_text(f, tz) for f in outage_facts or []) if x]
+    except Exception:
+        logger.warning("Строка фактов обрыва связи в отчёте не собрана", exc_info=True)
+        _of = []
+    for x in _of:
+        a(f"- ℹ️ {x}")
+    if _of:
         a("")
 
     # ── Панель: аварии и предупреждения (свёрнуто по фронтам) ──
@@ -2719,7 +3012,10 @@ def to_markdown(
             except (TypeError, IndexError):
                 _cl = None
         _append_segment(lines, seg, seg_idx, fmt_ts, prev_seg=ps, fault_ref=fault_ref, tz=tz,
-                        close=_cl)
+                        close=_cl,
+                        # Пуск в обрыве связи у головы окна (v5.1.34, ревью п. 11)
+                        origin_gap=(run_origin if seg_idx == 1 and run_origin_valid(
+                            run_origin, seg.run_state) else None))
 
     return "\n".join(lines)
 
@@ -2733,6 +3029,7 @@ def _append_segment(
     fault_ref=None,
     tz=None,
     close: tuple | None = None,
+    origin_gap: dict | None = None,
 ) -> None:
     a = lines.append
     state_label = (
@@ -2777,7 +3074,22 @@ def _append_segment(
                 prev_seg.run_state_label
                 or RUN_STATE_RU.get(prev_seg.run_state, f"RUN_STATE={prev_seg.run_state}")
             )
-            a(f"- **Предыдущее состояние:** ← {prev_label} (RUN_STATE={prev_seg.run_state}) [суточный рез]")
+            # Между ними — обрыв связи с пусками (v5.1.34, ревью п. 11): это не
+            # продолжение того же режима
+            _og = ""
+            try:
+                # Только у сегмента, где обрыв кончился или куда перенесён через рез
+                # (v5.1.34: кончился за минуты до 09:00); у продолжений цепочки — нет
+                _in = (isinstance(origin_gap, dict)
+                       and _tz_utc(origin_gap.get("gap_to"))
+                       >= _tz_utc(seg.t_start) - timedelta(seconds=OUTAGE_AFTER_MAX_SEC))
+            except (TypeError, ValueError):
+                _in = False
+            if _in:
+                _d = run_origin_days(origin_gap, tz)
+                _og = (f" (между ними обрыв связи с пусками{' ' + _d if _d else ''} — "
+                       f"начало режима не видно)")
+            a(f"- **Предыдущее состояние:** ← {prev_label} (RUN_STATE={prev_seg.run_state}) [суточный рез]{_og}")
         else:
             a(f"- **Предыдущее состояние:** ← начало окна анализа")
     a(f"- **Причина открытия:** {seg.cause_open}")

@@ -209,4 +209,7 @@ no_data_estimate:
   enabled: true
   engine_hours_step_sec: 180   # шаг счётчика 40070 у PCC3300 — 0,05 ч
   lookback_sec: 172800         # докуда искать последнее показание до обрыва
+  outage_facts_enabled: true   # v5.1.34 (В1): строка фактов обрыва и «не меньше», см. _defaults
+  outage_facts_min_sec: 1800
+  outage_origin_min_sec: 60
   _source: OWNER
