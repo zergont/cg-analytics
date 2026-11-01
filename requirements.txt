@@ -15,3 +15,6 @@ apscheduler>=3.11.0
 
 # Конфигурация из config.yml
 pyyaml>=6.0.2
+
+# Сервер телеметрии для моделей (MCP, v5.2.0): SDK 2.x (MCPServer, streamable HTTP)
+mcp>=2.0,<3

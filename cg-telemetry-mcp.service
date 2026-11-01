@@ -1,0 +1,22 @@
+[Unit]
+Description=cg-telemetry-mcp — сервер телеметрии для моделей (MCP), рядом с cg-analytics
+# Таблицы карты установок и журнала вызовов создаёт cg-analytics при старте
+# (db/online_schema.sql) — сервер телеметрии сам схему не играет, только читает
+# и пишет журнал mcp_calls. Пулы к БД открываются при первом запросе.
+After=network.target postgresql.service cg-analytics.service
+
+[Service]
+Type=simple
+User=cg-analytics
+WorkingDirectory=/opt/cg-analytics
+ExecStart=/opt/cg-analytics/.venv/bin/python -m telemetry_mcp
+Restart=on-failure
+RestartSec=10
+
+# Конфигурация — config.yml в рабочей директории, секция telemetry_mcp
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
