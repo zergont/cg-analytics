@@ -311,6 +311,9 @@ app = FastAPI(
 
 app.mount("/static", StaticFiles(directory="web/static"), name="static")
 app.include_router(router)
+# Карта установок (v5.2.0, MCP Э1): /api/units и формы карточки «Установки»
+from web.units_routes import router as _units_router  # noqa: E402
+app.include_router(_units_router)
 
 
 if __name__ == "__main__":

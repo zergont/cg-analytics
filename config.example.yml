@@ -91,3 +91,33 @@ web:
 # Уровни: DEBUG, INFO, WARNING, ERROR
 logging:
   level: INFO
+
+# ── Сервер телеметрии для моделей (MCP, v5.2.0; docs/telemetry_mcp.md) ───────
+# Отдельный процесс `python -m telemetry_mcp` (юнит cg-telemetry-mcp), только
+# чтение, свой пул к тем же БД. Секция и все ключи необязательны — ниже умолчания.
+telemetry_mcp:
+  host: 0.0.0.0
+  port: 8095
+  path: /mcp
+  # Типы оборудования, которые считаются панелью установки (остальные — датчики)
+  panel_types: [pcc]
+  # Разрешённые инструменты по источнику (заголовок X-Source): "*" — все
+  sources:
+    default: "*"
+  # Лимиты сервера (проект, разд. 5.3; решение Р12) — сервисные, не KB
+  limits:
+    series_raw_window_hours: 48     # окно сырого ряда; длиннее — укрупнение шага
+    series_max_points: 150          # точек на колонку
+    series_max_params: 8            # параметров на вызов
+    series_max_window_days: 31
+    snapshot_max_registers: 400     # снимок «все»
+    timeline_max_rows: 300          # строк ленты
+    trend_max_points: 400
+    trend_max_window_days: 400
+    result_max_tokens: 8000         # размер результата (оценка 1,7 зн/ток)
+    call_timeout_sec: 20            # один вызов; дольше — частичный ответ «не успел»
+    state_max_age_days: 14          # снимок: как давно искать последнее значение
+    debounce_sec: 60                # лента: дребезг — переключения чаще …
+    debounce_min_count: 3           # … и не меньше стольких подряд
+  journal: true                     # журнал вызовов в mcp_calls (БД аналитики)
+  log_level: INFO

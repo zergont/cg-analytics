@@ -311,3 +311,56 @@ ALTER TABLE auto_segments
 -- 14.10 03:36 (#35876)». Файл играется целиком при каждом старте — без CHECK.
 ALTER TABLE alarm_episodes
     ADD COLUMN IF NOT EXISTS gate_suppressed_src JSONB;
+
+-- ── Карта установок (v5.2.0, MCP Э1; design_mcp_telemetry.md, решения Р6–Р8) ──
+-- Установка = панель (строка equipment_registry типа панели) + её датчики.
+-- Привязка KB остаётся у панели в equipment_registry (controller_id/engine_id/kb_path).
+-- Только расширяющая миграция, без CHECK (ловушка 21.09: схема играется при каждом старте).
+CREATE TABLE IF NOT EXISTS units (
+    id          SERIAL      PRIMARY KEY,
+    router_sn   TEXT        NOT NULL,
+    name        TEXT,
+    panel_type  TEXT        NOT NULL,
+    panel_id    INT         NOT NULL,
+    notes       TEXT,
+    active      BOOLEAN     NOT NULL DEFAULT true,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (router_sn, panel_type, panel_id)
+);
+
+-- Явные решения владельца о датчиках: unit_id = установка; NULL = «не привязан».
+-- Датчик без строки здесь привязывается правилом по умолчанию (тот же router_sn и panel_id).
+CREATE TABLE IF NOT EXISTS unit_sensors (
+    router_sn   TEXT        NOT NULL,
+    equip_type  TEXT        NOT NULL,
+    panel_id    INT         NOT NULL,
+    unit_id     INT         REFERENCES units(id) ON DELETE SET NULL,
+    role        TEXT,
+    name        TEXT,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (router_sn, equip_type, panel_id)
+);
+
+ALTER TABLE online_observations ADD COLUMN IF NOT EXISTS unit_id INT;
+
+-- Журнал вызовов сервера телеметрии (MCP): один вызов — одна строка; task_id сквозной с хостом
+CREATE TABLE IF NOT EXISTS mcp_calls (
+    id           BIGSERIAL   PRIMARY KEY,
+    ts           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    task_id      TEXT,
+    source       TEXT,
+    tool         TEXT        NOT NULL,
+    unit_id      INT,
+    args_json    JSONB,
+    window_from  TIMESTAMPTZ,
+    window_to    TIMESTAMPTZ,
+    rows         INT,
+    bytes        INT,
+    truncated    TEXT,
+    dropped_json JSONB,
+    duration_ms  INT,
+    status       TEXT,
+    error        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_calls_ts ON mcp_calls (ts DESC);

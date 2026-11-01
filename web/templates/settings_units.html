@@ -1,0 +1,112 @@
+<!-- Карта установок (v5.2.0, MCP Э1): объект → установки → панель + датчики.
+     Данные грузятся с /api/units, правки — формами /settings/units/*. -->
+<div class="row g-3 mt-0" id="units">
+    <div class="col-12">
+        <div class="card mb-3">
+            <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
+                🏭 Установки — панель и её датчики
+                <form method="post" action="/settings/units/ensure" class="d-inline">
+                    <button type="submit" class="btn btn-sm btn-outline-primary"
+                            title="Завести установки для всех панелей реестра, у которых их ещё нет">
+                        Завести по реестру
+                    </button>
+                </form>
+            </div>
+            <div class="card-body">
+                <p class="text-muted small mb-2">
+                    Установка = панель из реестра оборудования + датчики того же объекта. Датчик без явного
+                    решения привязывается правилом «тот же роутер и номер панели». Имена установок видят модели
+                    и диспетчерский UI (<code>/api/units</code>); привязка KB остаётся у панели в реестре.
+                </p>
+                <div id="units-tree" class="small text-muted">Загрузка…</div>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+(async function () {
+    const box = document.getElementById("units-tree");
+    const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+    let tree;
+    try {
+        const r = await fetch("/api/units");
+        tree = await r.json();
+    } catch (e) {
+        box.textContent = "Карта не загружена: " + e;
+        return;
+    }
+    const objects = tree.objects || [];
+    if (!objects.length) {
+        box.innerHTML = "<span class='text-muted'>Реестр оборудования пуст — сначала синхронизируйте его с основной БД.</span>";
+        return;
+    }
+    const h = [];
+    for (const o of objects) {
+        h.push(`<h6 class="mt-2 mb-1">Объект «${esc(o.name)}» <small class="text-muted">${esc(o.router_sn)}</small></h6>`);
+        h.push(`<table class="table table-sm align-middle mb-2"><thead class="table-light"><tr>
+                 <th style="width:28%">Установка</th><th>Панель</th><th>Датчики</th><th style="width:34%">Правка</th></tr></thead><tbody>`);
+        const unitOpts = (sel) => o.units.filter(u => u.id !== null).map(u =>
+            `<option value="${u.id}" ${sel === u.id ? "selected" : ""}>${esc(u.name)}</option>`).join("");
+        for (const u of o.units) {
+            const p = u.panel;
+            const kb = p.binding ? `<span class="badge bg-primary-subtle text-primary-emphasis">${esc(p.binding)}</span>`
+                                 : `<span class="badge bg-secondary-subtle text-secondary-emphasis">KB не задана</span>`;
+            const last = p.last_data_ts ? new Date(p.last_data_ts).toLocaleString("ru-RU") : "—";
+            const sensors = (u.sensors || []).map(s =>
+                `<div class="mb-1">${esc(s.name)} <small class="text-muted">${esc(s.equip_type)}/${s.panel_id}
+                   · ${s.attached === "explicit" ? "явно" : "по умолчанию"}</small>
+                   <form method="post" action="/settings/units/sensor" class="d-inline ms-1">
+                     <input type="hidden" name="router_sn" value="${esc(o.router_sn)}">
+                     <input type="hidden" name="equip_type" value="${esc(s.equip_type)}">
+                     <input type="hidden" name="panel_id" value="${s.panel_id}">
+                     <input type="hidden" name="name" value="${esc(s.name)}">
+                     <input type="text" name="role" value="${esc(s.role || "")}" placeholder="роль" class="form-control form-control-sm d-inline" style="width:7em">
+                     <select name="unit_id" class="form-select form-select-sm d-inline" style="width:11em">
+                       <option value="default">по умолчанию</option>
+                       <option value="">не привязан</option>${unitOpts(u.id)}
+                     </select>
+                     <button class="btn btn-sm btn-outline-secondary">✓</button>
+                   </form></div>`).join("") || "<span class='text-muted'>нет</span>";
+            const edit = u.id === null
+                ? `<form method="post" action="/settings/units/create" class="d-flex gap-1">
+                     <input type="hidden" name="router_sn" value="${esc(o.router_sn)}">
+                     <input type="hidden" name="panel_type" value="${esc(p.equip_type)}">
+                     <input type="hidden" name="panel_id" value="${p.panel_id}">
+                     <input type="text" name="name" value="${esc(u.name)}" class="form-control form-control-sm">
+                     <button class="btn btn-sm btn-outline-primary">Завести</button></form>`
+                : `<form method="post" action="/settings/units/update" class="d-flex flex-wrap gap-1 align-items-center">
+                     <input type="hidden" name="unit_id" value="${u.id}">
+                     <input type="text" name="name" value="${esc(u.name)}" class="form-control form-control-sm" style="width:12em" title="Имя установки">
+                     <input type="text" name="notes" value="${esc(u.notes || "")}" placeholder="примечание" class="form-control form-control-sm" style="width:12em">
+                     <label class="form-check-label small"><input type="checkbox" name="active" ${u.active ? "checked" : ""}> активна</label>
+                     <button class="btn btn-sm btn-outline-primary">Сохранить</button></form>
+                   <form method="post" action="/settings/units/delete" class="d-inline"
+                         onsubmit="return confirm('Удалить запись установки «${esc(u.name)}»? Панель вернётся к правилу по умолчанию.')">
+                     <input type="hidden" name="unit_id" value="${u.id}">
+                     <button class="btn btn-sm btn-outline-danger mt-1">🗑</button></form>`;
+            h.push(`<tr><td><strong>${esc(u.name)}</strong> ${u.id !== null ? `<small class="text-muted">id ${u.id}</small>` : `<span class="badge bg-warning-subtle text-warning-emphasis">не заведена</span>`}
+                    ${u.active ? "" : "<span class='badge bg-secondary'>выкл</span>"}<br>
+                    <small class="text-muted">соседи: ${esc((u.neighbors || []).join(", ") || "—")}</small></td>
+                    <td><small>${esc(p.equip_type)}/${p.panel_id}</small><br>${esc([p.manufacturer, p.model].filter(Boolean).join(" ") || "—")}
+                        ${p.engine_sn ? `<br><small>двигатель ${esc(p.engine_sn)}</small>` : ""}<br>${kb}<br><small class="text-muted">данные: ${esc(last)}</small></td>
+                    <td>${sensors}</td><td>${edit}</td></tr>`);
+        }
+        for (const s of (o.unattached || [])) {
+            h.push(`<tr class="table-warning"><td colspan="2"><em>не привязан:</em> ${esc(s.name)} <small class="text-muted">${esc(s.equip_type)}/${s.panel_id}</small></td>
+                    <td colspan="2"><form method="post" action="/settings/units/sensor" class="d-inline">
+                     <input type="hidden" name="router_sn" value="${esc(o.router_sn)}">
+                     <input type="hidden" name="equip_type" value="${esc(s.equip_type)}">
+                     <input type="hidden" name="panel_id" value="${s.panel_id}">
+                     <input type="hidden" name="name" value="${esc(s.name)}">
+                     <input type="text" name="role" value="${esc(s.role || "")}" placeholder="роль" class="form-control form-control-sm d-inline" style="width:7em">
+                     <select name="unit_id" class="form-select form-select-sm d-inline" style="width:11em">
+                       <option value="">не привязан</option>${unitOpts(null)}
+                     </select>
+                     <button class="btn btn-sm btn-outline-secondary">Привязать</button></form></td></tr>`);
+        }
+        h.push("</tbody></table>");
+    }
+    box.classList.remove("text-muted");
+    box.innerHTML = h.join("");
+})();
+</script>
