@@ -56,6 +56,17 @@ async def get_app_setting(key: str, default: str = "") -> str:
         await conn.close()
 
 
+async def get_app_setting_row(key: str) -> dict[str, Any] | None:
+    """Настройка со временем сохранения: {value, updated_at}; нет ключа — None
+    (v5.2.1: «текст владельца от 03.10 18:21» в /settings и журнале старта)."""
+    conn = await _connect()
+    try:
+        row = await conn.fetchrow("SELECT value, updated_at FROM app_settings WHERE key = $1", key)
+        return dict(row) if row else None
+    finally:
+        await conn.close()
+
+
 async def set_app_setting(key: str, value: str) -> None:
     """Сохранить настройку в БД (upsert)."""
     conn = await _connect()

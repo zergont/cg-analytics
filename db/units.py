@@ -205,13 +205,16 @@ def build_tree(
     panel_types: frozenset[str] = DEFAULT_PANEL_TYPES,
     object_names: dict[str, str] | None = None,
     freshness: dict[tuple[str, str, int], Any] | None = None,
+    observation_status: dict[tuple[str, str, int], Any] | None = None,
 ) -> dict[str, Any]:
     """Собрать дерево из реестра аналитики, явных установок и явных решений о
     датчиках. Чистая функция — без БД, проверяется тестами.
 
     registry — строки equipment_registry; units — строки units; sensors — строки
     unit_sensors; object_names — {router_sn: имя объекта} из телеметрии (не
-    обязательно); freshness — {тройка: last_data_ts} наблюдений движка.
+    обязательно); freshness — {тройка: last_data_ts} наблюдений движка;
+    observation_status — {тройка: status} строк online_observations (v5.2.1:
+    «наблюдение остановлено» у соседа в картине объекта; нет строки — None).
 
     Возвращает {"objects": [{router_sn, name, units: [...], unattached: [...]}]}.
     Установка без строки units (ещё не материализована) идёт с id None и именем
@@ -219,6 +222,7 @@ def build_tree(
     """
     object_names = object_names or {}
     freshness = freshness or {}
+    observation_status = observation_status or {}
     unit_rows = {(u["router_sn"], u["panel_type"], int(u["panel_id"])): u for u in units}
     units_by_id = {int(u["id"]): u for u in units if u.get("id") is not None}
     explicit = {_triple(s): s for s in sensors}
@@ -261,6 +265,7 @@ def build_tree(
                 "kb_path": eq.get("kb_path"),
                 "analysis_active": bool(eq.get("active", True)),
                 "last_data_ts": last.isoformat() if hasattr(last, "isoformat") else last,
+                "observation": observation_status.get(key),
             },
             "sensors": [],
         }
@@ -286,12 +291,20 @@ def build_tree(
                 target = unit_index.get((eq["router_sn"], pt, int(eq["panel_id"])))
                 if target is not None:
                     break
+        last = freshness.get(key)
         sensor = {
+            "router_sn": eq["router_sn"],
             "equip_type": eq["equip_type"], "panel_id": int(eq["panel_id"]),
             "name": (s.get("name") if s else None) or eq.get("name") or eq["equip_type"],
             "role": (s.get("role") if s else None),
             "manufacturer": eq.get("manufacturer"), "model": eq.get("model"),
             "attached": how,
+            # v5.2.1 (В11): картина объекта во входе моделей — что меряет датчик
+            # (слой KB его привязки) и «данных нет», если источник молчит
+            # (свежесть датчика — из телеметрии, llm/object_picture.load_context)
+            "controller_id": eq.get("controller_id"), "kb_path": eq.get("kb_path"),
+            "last_data_ts": last.isoformat() if hasattr(last, "isoformat") else last,
+            "observation": observation_status.get(key),
         }
         if target is not None:
             target["sensors"].append(sensor)
@@ -330,14 +343,17 @@ async def get_tree(*, panel_types: frozenset[str] = DEFAULT_PANEL_TYPES,
             units = await list_units()
     sensors = await list_unit_sensors()
     freshness: dict[tuple[str, str, int], Any] = {}
+    status: dict[tuple[str, str, int], Any] = {}
     try:
         from online.db import list_observations
         for ob in await list_observations():
-            freshness[(ob["router_sn"], ob["equip_type"], int(ob["panel_id"]))] = ob.get("last_data_ts")
+            k = (ob["router_sn"], ob["equip_type"], int(ob["panel_id"]))
+            freshness[k] = ob.get("last_data_ts")
+            status[k] = ob.get("status")
     except Exception:
         logger.debug("Карта установок: свежесть наблюдений не прочитана", exc_info=True)
     return build_tree(registry, units, sensors, panel_types=panel_types,
-                      object_names=object_names, freshness=freshness)
+                      object_names=object_names, freshness=freshness, observation_status=status)
 
 
 def flat_units(tree: dict[str, Any]) -> list[dict[str, Any]]:

@@ -87,12 +87,46 @@ async def lifespan(app: FastAPI):
         max_tokens=     int(await get_app_setting("claude_max_tokens",     str(_claude_defaults["max_tokens"]))),
         proxy=          await get_app_setting("claude_proxy",          _claude_defaults["proxy"]),
     )
-    # Загружаем маршрутизацию AI-задач из БД
+    # Загружаем маршрутизацию AI-задач из БД. v5.2.1: нет ключа — "" (следовать
+    # коду), а не копия умолчания; дата сохранения — для версии промпта и /settings
+    from db.analytics import get_app_setting_row as _get_setting_row
+    from llm import prompts as _prompts
     for _task_id, (_label, _def_provider, _def_prompt) in _ROUTER_TASKS.items():
         _provider = await get_app_setting(f"ai_task_{_task_id}_provider", _def_provider)
-        _prompt   = await get_app_setting(f"ai_task_{_task_id}_prompt",   _def_prompt)
-        apply_task(_task_id, _provider, _prompt)
+        _prow = await _get_setting_row(f"ai_task_{_task_id}_prompt")
+        apply_task(_task_id, _provider, (_prow or {}).get("value") or "")
+        _prompts.note_saved(_task_id, (_prow or {}).get("updated_at")
+                            if _prompts.normalize((_prow or {}).get("value")) else None)
     logger.info("AI router загружен (%d задач)", len(_ROUTER_TASKS))
+    # Механизм промптов (v5.2.1): выключатель блока «Правила системы» (В15) и
+    # разовая миграция сохранённых промптов по маркеру ai_prompts_version (§4.5,
+    # В2/В5/В6/В7): резервные копии, «равно умолчанию» → следовать коду, замены
+    # строк по таблице. Маркер — только после успеха; повтор ничего не меняет
+    _prompts.set_rules_enabled(
+        await get_app_setting(_prompts.RULES_ENABLED_KEY, "true") != "false")
+    if not _prompts.rules_enabled():
+        logger.warning("Блок «Правила системы» выключен (ai_prompt_rules_enabled = false)")
+    try:
+        def _apply_migrated(_t: str, _text: str) -> None:
+            from llm.router import get_provider as _gp
+            apply_task(_t, _gp(_t), _text)
+            from datetime import datetime as _dtm, timezone as _tzm
+            _prompts.note_saved(_t, _dtm.now(_tzm.utc) if _text else None)
+        _prompts.set_migration_info(await get_app_setting(_prompts.MIGRATION_INFO_KEY, ""))
+        _mig = await _prompts.run_prompts_migration(
+            get_app_setting, set_app_setting, list(_ROUTER_TASKS), apply=_apply_migrated,
+            owner_saved_at=_prompts.saved_at)
+        if not _mig["skipped"]:
+            for _t, _notes in _mig["notes"].items():
+                logger.info("Миграция промптов %s · %s: %s", _prompts.PROMPTS_MIGRATION_VERSION,
+                            _t, "; ".join(_notes) or "без изменений")
+            logger.info("Миграция промптов %s выполнена: изменено %d (%s); копии — ключи "
+                        "ai_task_<задача>_prompt%s", _prompts.PROMPTS_MIGRATION_VERSION,
+                        len(_mig["changes"]), ", ".join(_mig["changes"]) or "—",
+                        _prompts.BACKUP_SUFFIX)
+    except Exception:
+        logger.warning("Миграция промптов %s не выполнена — повторится при следующем старте",
+                       _prompts.PROMPTS_MIGRATION_VERSION, exc_info=True)
     # Зачистка ключей удалённой задачи daily_agent (суточный агент выпилен в v4.9.3)
     from db.analytics import delete_app_settings_by_prefix as _del_settings
     _orphaned = await _del_settings("ai_task_daily_agent_")
@@ -235,6 +269,15 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.warning("Снятие гейтом по своим эпизодам (5.1.22): перенос не выполнен — "
                            "повторится при следующем старте", exc_info=True)
+    # Версия промпта каждой задачи — в журнал старта (v5.2.1, В13), противоречия
+    # текста владельца правилам — WARNING; действующие тексты — в историю по
+    # отпечатку (В14, app_settings.ai_prompt_history, не больше 50)
+    _pr_sfx = {"warning_claude": {"шлюз (маркер вердикта)": _online_mgr._LLM_VERDICT_SUFFIX}}
+    _prompts.log_startup(list(_ROUTER_TASKS), _pr_sfx)
+    try:
+        await _prompts.record_history(get_app_setting, set_app_setting, list(_ROUTER_TASKS), _pr_sfx)
+    except Exception:
+        logger.warning("История промптов не записана", exc_info=True)
     # Сироты: status_auto (задачи нет с v4.x), llm_system_prompt (не читается)
     for _orph in ("ai_task_status_auto_", "llm_system_prompt"):
         _n = await _del_settings(_orph)

@@ -34,9 +34,14 @@ async def humanize(conclusion_md: str, task_id: str = "human_auto",
     if not block2_text:
         return ""
 
-    from llm.router import claude_model_for, format_ai_signature, get_prompt, get_route
+    from llm.prompts import system_for
+    from llm.router import claude_model_for, format_ai_signature, get_route
     provider = get_route("humanize").get("provider", "llm")
-    system_prompt = get_prompt(task_id)
+    # v5.2.1: system — одна сборка на всех путях (у пересказа блок правил пуст,
+    # §4.2); версия — meta["prompt"] (в debug_json.prompt_humanize)
+    system_prompt, _pm = system_for(task_id)
+    if meta is not None:
+        meta["prompt"] = _pm
     user_msg = f"Перепиши для оператора:\n\n{block2_text}"
 
     try:

@@ -622,7 +622,7 @@ async def stream_analysis(md_packet: str) -> AsyncIterator[str]:
     Yields:
         Строки-токены по мере генерации (или вся строка сразу при stream=False).
     """
-    from llm.router import get_prompt
-    system = get_prompt("analyze_page")
+    from llm.prompts import system_for
+    system = system_for("analyze_page")[0]
     async for token in chat_stream(system, md_packet, depth="manual", priority="interactive"):
         yield token

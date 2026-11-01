@@ -654,23 +654,76 @@
             <div class="card-body">
                 <div class="text-muted small mb-3">
                     Кто разбирает — таблица «Кто и как разбирает» ниже. Здесь — только текст установки
-                    для модели. Очистить поле — вернуть промпт по умолчанию.
+                    для модели. Очистить поле или оставить текст умолчания — задача следует коду
+                    (умолчание не замораживается). В конец системного промпта заключений и гейта код
+                    дописывает блок «Правила системы» — он виден под полем и здесь не правится; правило,
+                    которое уже есть в вашем тексте, не повторяется.
                 </div>
+                {% if prompts_notice %}
+                <div class="alert alert-warning small py-2 mb-3">⚠ {{ prompts_notice }}</div>
+                {% endif %}
                 <form method="post" action="/settings/ai-routing">
+                {# v5.2.1 (В8): вкладка, открытая до выката, без этого поля ничего не сохраняет #}
+                <input type="hidden" name="prompts_version" value="{{ prompts_form_version }}">
+                {# выключатель меняется, только если он был в форме (ревью v5.2.1, п. 19) #}
+                <input type="hidden" name="ai_prompt_rules_present" value="1">
+                <div class="form-check mb-3">
+                    <input class="form-check-input" type="checkbox" id="ai_prompt_rules_enabled"
+                           name="ai_prompt_rules_enabled" {% if ai_prompt_rules_enabled %}checked{% endif %}>
+                    <label class="form-check-label small" for="ai_prompt_rules_enabled">
+                        Блок «Правила системы» {{ prompt_rules_version }} включён (выключение снимает блок
+                        без отката кода — ключ <code>ai_prompt_rules_enabled</code>)
+                    </label>
+                </div>
                 {% for task_id, meta in ai_task_meta.items() %}
                 {% set r = ai_routing[task_id] %}
+                {% set pi = ai_prompts.get(task_id) %}
                 <div class="border rounded p-3 mb-3">
                     <div class="fw-semibold mb-1">{{ meta.label }}</div>
                     {% if meta.hint %}
                     <div class="text-muted small mb-2">{{ meta.hint }}</div>
                     {% endif %}
+                    {% if pi %}
+                    <div class="small mb-1">Действует: {{ pi.status }}{% for v in pi.variants %} · {{ v.label }}: {{ v.sha }}{% endfor %}</div>
+                    <div class="small text-muted mb-1">Версия промпта: <code>{{ pi.meta.version }}</code></div>
+                    {% if pi.conflicts_text %}
+                    {% if pi.conflicts_accepted %}
+                    <div class="small text-muted mb-1">Текст {{ pi.conflicts_text }} — известно, принято до удаления кнопки «Анализ».</div>
+                    {% else %}
+                    <div class="small text-danger mb-1">⚠ Текст {{ pi.conflicts_text }} — код его не правит, поправьте текст сами.</div>
+                    {% endif %}
+                    {% endif %}
+                    {% endif %}
+                    {# отпечаток показанного текста — всегда: «Сохранить» не откатывает правку из другой вкладки (п. 15, 2) #}
+                    {% set sh = (ai_shown or {}).get(task_id) or ({"text": pi.shown, "sha": pi.shown_sha} if pi else none) %}
+                    {% if sh %}<input type="hidden" name="ai_{{ task_id }}_shown" value="{{ sh.sha }}">{% endif %}
                     <details>
                         <summary class="text-muted small" style="cursor:pointer">Системный промпт</summary>
                         <textarea name="ai_{{ task_id }}_prompt"
                                   class="form-control form-control-sm mt-2"
                                   rows="6"
-                                  style="font-size:0.78rem;font-family:monospace">{{ r.prompt }}</textarea>
+                                  style="font-size:0.78rem;font-family:monospace">{{ sh.text if sh else r.prompt }}</textarea>
                     </details>
+                    {% if pi and pi.block %}
+                    <details>
+                        <summary class="text-muted small" style="cursor:pointer">Правила системы {{ prompt_rules_version }}{% if not pi.rules_on %} — ВЫКЛЮЧЕН{% endif %} (только чтение: {{ pi.block_ids|join(', ') }})</summary>
+                        <pre class="small mt-2 mb-0 p-2 bg-light border rounded{% if not pi.rules_on %} text-muted{% endif %}" style="white-space:pre-wrap;font-size:0.75rem{% if not pi.rules_on %};opacity:0.55{% endif %}">{% if not pi.rules_on %}[выключен — в system не идёт]
+{% endif %}{{ pi.block }}</pre>
+                    </details>
+                    {% endif %}
+                    {% if pi %}
+                    <details>
+                        <summary class="text-muted small" style="cursor:pointer">Умолчание кода</summary>
+                        <pre class="small mt-2 mb-0 p-2 bg-light border rounded" style="white-space:pre-wrap;font-size:0.75rem">{{ pi.default }}</pre>
+                    </details>
+                    {% if pi.backup %}
+                    <button type="submit" formaction="/settings/ai-routing/restore" name="task" value="{{ task_id }}"
+                            class="btn btn-sm btn-outline-secondary mt-2"
+                            onclick="return confirm('Вернуть текст этой задачи, каким он был до миграции 5.2.1?')">
+                        Вернуть копию 5.2.1
+                    </button>
+                    {% endif %}
+                    {% endif %}
                 </div>
                 {% endfor %}
                 <button type="submit" class="btn btn-sm btn-primary">Сохранить промпты</button>

@@ -207,24 +207,25 @@ async def get_unhumanized_segments(limit: int = 500) -> list[int]:
 
 
 async def set_humanized_md(auto_segment_id: int, humanized_md: str,
-                           lang_check: dict | None = None) -> None:
+                           lang_check: dict | None = None, prompt: dict | None = None) -> None:
     """Сохранить результат Qwen-обработки в существующую запись анализа.
 
     lang_check — отметка прохода «очистка / перевод» пересказа (v5.1.22, В4):
-    дописывается в debug_json ключом lang_check_humanize."""
+    дописывается в debug_json ключом lang_check_humanize; prompt — след system
+    пересказа (v5.2.1, В12) — ключом prompt_humanize."""
+    extra = {k: v for k, v in (("lang_check_humanize", lang_check), ("prompt_humanize", prompt)) if v}
     conn = await _connect()
     try:
-        if lang_check:
+        if extra:
             await conn.execute(
                 """
                 UPDATE segment_analyses
                 SET humanized_md = $2,
-                    debug_json = COALESCE(debug_json, '{}'::jsonb)
-                                 || jsonb_build_object('lang_check_humanize', $3::jsonb),
+                    debug_json = COALESCE(debug_json, '{}'::jsonb) || $3::jsonb,
                     updated_at = now()
                 WHERE auto_segment_id = $1
                 """,
-                auto_segment_id, humanized_md, json.dumps(lang_check, ensure_ascii=False),
+                auto_segment_id, humanized_md, json.dumps(extra, ensure_ascii=False),
             )
             return
         await conn.execute(

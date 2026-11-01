@@ -62,6 +62,12 @@ def init_manager() -> "OnlineManager":
     return _manager
 
 
+def current_manager() -> "OnlineManager | None":
+    """Менеджер сервиса или None (тесты, разовые скрипты) — без исключения
+    (v5.2.1: картина объекта для заключения и совета берётся из его кэша)."""
+    return _manager
+
+
 async def stop_manager() -> None:
     global _manager
     if _manager:
@@ -152,6 +158,16 @@ class OnlineManager:
         self._watchdog_task: asyncio.Task | None = None
         self._restart_tasks: set[asyncio.Task] = set()
         self._stopping = False
+        # Карта установок с подписями KB для картины объекта во входе моделей
+        # (v5.2.1, В11): грузится при сборке движка / ПУСК и правке карты, гейт
+        # берёт её из памяти — в горячем цикле запросов нет
+        self._picture_ctx: dict | None = None
+        self._picture_task: asyncio.Task | None = None
+        # Поколения загрузок карты (ревью v5.2.1, п. 7): результат пишется, только
+        # если загрузка начата позже той, что записана последней — фоновая,
+        # начатая до правки карты, не затирает перечитанную после правки
+        self._picture_seq = 0
+        self._picture_written = 0
 
     # ── Запуск всех активных наблюдений ───────────────────────────────────────
 
@@ -185,6 +201,10 @@ class OnlineManager:
                     "OnlineManager: ошибка старта движка %s/%s/%s — сторож повторит",
                     obs["router_sn"], obs["equip_type"], obs["panel_id"],
                 )
+
+        # Картина объекта (v5.2.1, В11): карта установок — один раз после сборки
+        # движков (подписи панелей — из их конфигов), фоном: старт не держит
+        self.schedule_picture_refresh()
 
         # Напоминание снять ключ переходного месяца v5.1.21 (решение В5): ключ
         # analytics_counts_since старше 35 дней — предупреждение, раз на значение
@@ -328,6 +348,8 @@ class OnlineManager:
         self._wanted.add(key)
         self._clear_down(key)
         logger.info("OnlineManager[%s]: движок запущен", key)
+        # ПУСК: картина объекта перечитывается (свежесть, подписи конфига) — фоном
+        self.schedule_picture_refresh()
 
     # ── СТОП ОНЛАЙН ───────────────────────────────────────────────────────────
 
@@ -372,6 +394,8 @@ class OnlineManager:
             self._clear_down(key)
 
         logger.info("OnlineManager[%s]: остановлен (OPERATOR_STOP)", key)
+        # СТОП: у соседей в картине объекта — «наблюдение остановлено» (ревью v5.2.1, Д)
+        self.schedule_picture_refresh()
 
     # ── Остановка всех ────────────────────────────────────────────────────────
 
@@ -387,6 +411,9 @@ class OnlineManager:
         # initialize, иначе запустила бы движок после обхода _engines)
         await remote.cancel_and_wait(self._watchdog_task, wait)
         self._watchdog_task = None
+        # Фоновая загрузка карты для картины объекта (v5.2.1) — снять
+        await remote.cancel_and_wait(self._picture_task, wait)
+        self._picture_task = None
         restarts = [t for t in self._restart_tasks if not t.done()]
         if restarts:
             for t in restarts:
@@ -486,10 +513,91 @@ class OnlineManager:
         )
         # Имя машины для заголовка отчёта (v5.1.32): «ДЭС №3», а не «ДГУ»
         engine.equip_name = eq.get("name") or None
+        # Двигатель из реестра — для запасного блока картины объекта, когда карта
+        # не загрузилась (v5.2.1, ревью п. 4); запроса нет — строка уже прочитана
+        engine.equip_engine = " ".join(
+            str(x) for x in (eq.get("manufacturer"), eq.get("model")) if x) or None
         # Свежесть телеметрии переживает рестарт (иначе до первого цикла — «нет данных»)
         if obs.get("last_data_ts"):
             engine.last_data_ts = obs["last_data_ts"]
         return engine
+
+    # ── Картина объекта во входе моделей (v5.2.1, В11) ────────────────────────
+
+    def _engine_cfgs(self) -> dict:
+        return {(e.router_sn, e.equip_type, int(e.panel_id)): e.cfg
+                for e in list(self._engines.values()) if getattr(e, "cfg", None) is not None}
+
+    def _engine_freshness(self) -> dict:
+        """Свежесть панелей по памяти движков — без запросов."""
+        return {(e.router_sn, e.equip_type, int(e.panel_id)): getattr(e, "last_data_ts", None)
+                for e in list(self._engines.values())}
+
+    async def refresh_object_pictures(self) -> bool:
+        """Перечитать карту установок (одна загрузка). Сбой — WARNING, кэш прежний.
+        Результат загрузки, начатой раньше уже записанной, отбрасывается (п. 7)."""
+        self._picture_seq += 1
+        seq = self._picture_seq
+        try:
+            from llm.object_picture import load_context
+            ctx = await load_context(self._engine_cfgs())
+        except Exception:
+            logger.warning("OnlineManager: карта установок для картины объекта не загружена — "
+                           "вход моделей с запасным блоком до следующей загрузки", exc_info=True)
+            return False
+        if seq < self._picture_written:
+            logger.debug("OnlineManager: устаревшая загрузка карты №%d отброшена (записана №%d)",
+                         seq, self._picture_written)
+            return False
+        self._picture_ctx, self._picture_written = ctx, seq
+        return True
+
+    def schedule_picture_refresh(self) -> None:
+        """Фоновая загрузка карты (не больше одной сразу); вне цикла событий — пропуск.
+        Только у менеджера сервиса: отдельные экземпляры (тесты, разовые скрипты)
+        карту не грузят — вход без картины, как до v5.2.1."""
+        if _manager is not self:
+            return
+        if self._stopping or (self._picture_task is not None and not self._picture_task.done()):
+            return
+        try:
+            self._picture_task = asyncio.get_running_loop().create_task(
+                self.refresh_object_pictures(), name="object_picture_refresh")
+        except RuntimeError:
+            self._picture_task = None
+
+    def _picture_stale(self) -> bool:
+        from llm.object_picture import CONTEXT_TTL_SEC
+        ctx = self._picture_ctx
+        if ctx is None:
+            return True
+        return time.monotonic() - float(ctx.get("at") or 0) > float(ctx.get("ttl") or CONTEXT_TTL_SEC)
+
+    def object_picture_cached(self, router_sn: str, equip_type: str, panel_id: int) -> str:
+        """Картина из памяти — для гейта: без запросов, свежесть живая; кэш пуст или
+        старый — фоновое обновление, а сейчас — что есть. Карты нет или сбой —
+        запасной блок по движку (ревью v5.2.1, п. 4)."""
+        from llm.object_picture import engine_fallback, render
+        try:
+            if self._picture_stale():
+                self.schedule_picture_refresh()
+            text = render(self._picture_ctx, router_sn, equip_type, int(panel_id),
+                          freshness=self._engine_freshness(), live=True)
+            if text:
+                return text
+        except Exception:
+            logger.warning("WarningGate: картина объекта не собрана — запасной блок", exc_info=True)
+        return engine_fallback(self, router_sn, equip_type, panel_id)
+
+    async def object_picture(self, router_sn: str, equip_type: str, panel_id: int, *,
+                             reload_stale: bool = False) -> str | None:
+        """Картина для заключения и совета: кэш пуст или старый и reload_stale —
+        одна загрузка карты на задачу. Свежесть — «сейчас» (период уже прошёл)."""
+        if reload_stale and self._picture_stale():
+            await self.refresh_object_pictures()
+        from llm.object_picture import render
+        return render(self._picture_ctx, router_sn, equip_type, int(panel_id),
+                      freshness=self._engine_freshness(), live=False)
 
     def _launch(self, engine: OnlinePollEngine) -> bool:
         """Запустить задачу движка. False — сервис останавливается (К5: движок,
@@ -1566,6 +1674,9 @@ class OnlineManager:
                 return None
             return self._engines.get(key) or engine
 
+        # Картина объекта (v5.2.1, В11) — из памяти менеджера, без запросов; карты
+        # нет — запасной блок по движку
+        _pic = self.object_picture_cached(engine.router_sn, engine.equip_type, engine.panel_id)
         try:
             try:
                 outcome = await asyncio.wait_for(
@@ -1574,6 +1685,7 @@ class OnlineManager:
                         struct, fault_hash,
                         **({"analytics_since": _since} if _since is not None else {}),
                         engine=_engine_now,
+                        **({"object_picture": _pic} if _pic else {}),
                     ),
                     _GATE_TIMEOUT_SEC,
                 )
@@ -2112,7 +2224,7 @@ async def _run_warning_gate_api(
     import anthropic
     import httpx
     from config import settings as app_settings
-    from llm.router import get_prompt
+    from llm.prompts import system_for
 
     http_client = None
     try:
@@ -2128,7 +2240,8 @@ async def _run_warning_gate_api(
             model=model,
             # Лимит из настроек Claude (веб-морда): 1024 обрезало анализ на полуслове
             max_tokens=claude_cfg["max_tokens"],
-            system=get_prompt("warning_claude"),
+            # Текст владельца + блок «Правила системы» (v5.2.1, В1); вердикт — инструментом
+            system=system_for("warning_claude")[0],
             tools=[_VERDICT_TOOL],
             messages=[{"role": "user", "content": user_prompt}],
         )
@@ -2189,9 +2302,10 @@ async def _run_warning_gate_llm(
     кладёт, какая голова шлюза реально ответила (для подписи и журнала гейта).
     """
     from llm.client import chat
-    from llm.router import get_prompt
+    from llm.prompts import system_for
 
-    system = get_prompt("warning_claude") + _LLM_VERDICT_SUFFIX
+    # Текст владельца + блок «Правила системы» (v5.2.1, В1); маркер — последним
+    system = system_for("warning_claude", suffix=_LLM_VERDICT_SUFFIX)[0]
     if meta is None:
         meta = {}
     raw = (await chat(system, user_prompt, model=model or None,
@@ -2226,8 +2340,12 @@ async def _analyze_warning_claude(
     struct: dict, fault_hash: str,
     analytics_since: "datetime | None" = None,
     engine=None,
+    object_picture: str | None = None,
 ) -> str:
     """Гейт предупреждений: анализирует сигнал и выносит вердикт cancel/pass.
+
+    object_picture — блок «Картина объекта» входа (v5.2.1, В11): менеджер берёт
+    его из памяти (_run_gate), в горячем цикле запросов нет.
 
     engine — движок машины (v5.1.22, ревью gate-1): эпизоды, открытые во время
     разбора, которым наследование снятия запрещено, передаются ему в отказанные.
@@ -2351,7 +2469,15 @@ async def _analyze_warning_claude(
             trip_context=_trip_ctx,
             prev_analyses=_prev_analyses,
             episode_timeline=_timeline,
+            object_picture=object_picture,
         )
+        # Версия промпта (v5.2.1, В12): тот же system, что уйдёт модели, — в
+        # журнал гейта и запись разбора. Хеши составов от неё не зависят
+        from llm.object_picture import is_full
+        from llm.prompts import prompt_version
+        _pver = prompt_version("warning_claude",
+                               suffix=_LLM_VERDICT_SUFFIX if provider == "llm" else "")
+        _pic_full = is_full(object_picture)
         from online.status_assembler import (
             GATE_RULES_VERSION, UNCANCELLABLE_SCENARIOS, gate_facts_md, passport_hard_seen,
             uncancellable_reasons,
@@ -2580,6 +2706,9 @@ async def _analyze_warning_claude(
                 "model":            model,
                 "tokens_in":        tokens_in,
                 "tokens_out":       tokens_out,
+                # v5.2.1 (В12): версия промпта разбора и признак картины объекта
+                "prompt":           _pver,
+                "picture":          _pic_full,
         }
         _logged = False
         for _i in range(_GATE_SAVE_RETRIES + 1):
@@ -2614,6 +2743,7 @@ async def _analyze_warning_claude(
                         fault_hash=fault_hash, alarm_text=extract_alarm_text(struct),
                         segment_id=_seg_id, ts=_gate_ts,
                         extra={"rules": GATE_RULES_VERSION, "decision": decision, "applied": applied,
+                               "prompt": _pver, "picture": _pic_full,
                                "lang_check": {"cleaned": False, "accepted": False,
                                               "error": "остановка сервиса во время очистки — сохранён исходник"}},
                     ))
@@ -2634,7 +2764,8 @@ async def _analyze_warning_claude(
 
         saved = None
         if analysis:
-            _wa_extra = {"rules": GATE_RULES_VERSION, "decision": decision, "applied": applied}
+            _wa_extra = {"rules": GATE_RULES_VERSION, "decision": decision, "applied": applied,
+                         "prompt": _pver, "picture": _pic_full}
             if "not_written" in rejected_by:
                 _wa_extra["not_written"] = True
             if _lang:

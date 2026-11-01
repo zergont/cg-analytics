@@ -45,17 +45,32 @@ async def _object_names() -> dict[str, str]:
         return {}
 
 
+async def _refresh_pictures() -> None:
+    """Карта поменялась — картина объекта во входе моделей перечитывается сразу
+    (v5.2.1, В11: кэш онлайн-менеджера). Сбой — WARNING, правка уже записана."""
+    try:
+        from online.manager import current_manager
+        mgr = current_manager()
+        if mgr is not None:
+            await mgr.refresh_object_pictures()
+    except Exception:  # noqa: BLE001
+        logger.warning("Картина объекта не обновлена после правки карты установок", exc_info=True)
+
+
 @router.get("/api/units", response_class=JSONResponse)
 async def api_units(ensure: int = 0):
     """Дерево установок. ensure=1 — сперва завести недостающие установки по реестру."""
     tree = await _units.get_tree(panel_types=_panel_types(), object_names=await _object_names(),
                                  ensure=bool(ensure))
+    if ensure:
+        await _refresh_pictures()      # заведены установки — картина объекта перечитывается
     return JSONResponse(tree)
 
 
 @router.post("/settings/units/ensure")
 async def units_ensure():
     await _units.get_tree(panel_types=_panel_types(), ensure=True)
+    await _refresh_pictures()
     return RedirectResponse(url="/settings#units", status_code=303)
 
 
@@ -70,6 +85,7 @@ async def units_update(
                                   active=(active == "on"))
     if not ok:
         logger.warning("Установка #%s не найдена при правке карточки", unit_id)
+    await _refresh_pictures()
     return RedirectResponse(url="/settings#units", status_code=303)
 
 
@@ -81,12 +97,14 @@ async def units_create(
     name: str = Form(""),
 ):
     await _units.upsert_unit(router_sn, panel_type, int(panel_id), name=name.strip() or None)
+    await _refresh_pictures()
     return RedirectResponse(url="/settings#units", status_code=303)
 
 
 @router.post("/settings/units/delete")
 async def units_delete(unit_id: int = Form(...)):
     await _units.delete_unit(int(unit_id))
+    await _refresh_pictures()
     return RedirectResponse(url="/settings#units", status_code=303)
 
 
@@ -105,4 +123,5 @@ async def units_sensor(
         uid = int(unit_id) if unit_id.strip() else None
         await _units.set_sensor(router_sn, equip_type, int(panel_id), unit_id=uid,
                                 role=role.strip() or None, name=name.strip() or None)
+    await _refresh_pictures()
     return RedirectResponse(url="/settings#units", status_code=303)

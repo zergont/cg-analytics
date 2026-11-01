@@ -177,6 +177,12 @@ GATE_EXCLUDED_SCENARIOS = frozenset({"NO_LOAD_TOO_LONG", "IDLE_TOO_LONG"})
 # (COOLING_FAILURE, 144), старое снятие глушило бы настоящий перегрев
 GATE_RULES_VERSION = "5.1.15"
 
+# Версия формата входа гейта (build_warning_prompt; v5.2.1, В12): любая правка
+# порядка или текста сборщика входа поднимает её — за этим следит эталонный тест
+# scripts/test_v521_prompts.py. В prompt_version, не в хеши составов: от текста
+# входа fault_hash / suppressed_hash не зависят, GATE_RULES_VERSION не трогаем
+GATE_INPUT_VERSION = "5.2.1"
+
 
 def _limit(d: dict) -> dict:
     return d.get("limit") or (d.get("values") or {}).get("limit") or {}
@@ -1212,8 +1218,13 @@ def build_warning_prompt(
     trip_context: dict | None = None,
     prev_analyses: list[dict] | None = None,
     episode_timeline: list[dict] | None = None,
+    object_picture: str | None = None,
 ) -> str:
     """Промпт для Claude-анализа предупреждения (новые fault-коды).
+
+    object_picture — блок «Картина объекта» (v5.2.1, В11): объект, установки в
+    одной сети, эта установка и её источники данных, соседи — вторым, после
+    «Выполни анализ…»; из памяти менеджера (без запросов).
 
     trip_context — контекст аварии с SHUTDOWN-эпизода (Фаза C): что машина
     делала до отключения. Передаётся только когда панель в аварийном останове.
@@ -1225,8 +1236,10 @@ def build_warning_prompt(
     lines = [
         "Выполни анализ неисправности дизель-генераторной установки.",
         "",
-        f"Режим работы: {s['mode_label']} (RUN_STATE={s['run_state']})",
     ]
+    if object_picture:
+        lines += [object_picture, ""]
+    lines.append(f"Режим работы: {s['mode_label']} (RUN_STATE={s['run_state']})")
 
     if prev_analyses:
         lines.append("")

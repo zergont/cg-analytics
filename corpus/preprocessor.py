@@ -16,6 +16,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
+# Версия формата входа заключения (build_claude_input; v5.2.1, В12): любая
+# правка порядка или текста сборщика входа поднимает её — за этим следит
+# эталонный тест scripts/test_v521_prompts.py. 5.2.1 — картина объекта (В11)
+CONCLUSION_INPUT_VERSION = "5.2.1"
+
 # Русские названия RUN_STATE (из analytics/serializer.py — дублируем чтобы не создавать зависимость)
 RUN_STATE_RU: dict[int, str] = {
     0: "Стоп",
@@ -756,7 +761,11 @@ def build_claude_input(segment_row: dict) -> str:
     """Сформировать полный вход для Claude: шапка вердикта + реконструкция + report_md.
 
     v5.1.22: факты шапки (conclusion_facts) — наработка по счётчику, снятие
-    аварии и код 40012 на закрытии, обрыв сегмента аварией."""
+    аварии и код 40012 на закрытии, обрыв сегмента аварией.
+    v5.2.1 (В11): первым — блок «Картина объекта» (segment_row["object_picture"],
+    кладёт воркер из кэша карты установок): объект, установки в одной сети, эта
+    установка и её источники данных, соседи; сжатый вход его сохраняет (шапка
+    до таблиц подсегментов не режется)."""
     chars_json = segment_row.get("characteristics_json")
     run_state = segment_row.get("run_state")
     report_md = segment_row.get("report_md") or ""
@@ -793,7 +802,9 @@ def build_claude_input(segment_row: dict) -> str:
     incident_md = _format_incident(segment_row.get("incident_json"))
     gate_md = _format_gate_analyses(segment_row)
     chrono_md = _format_chronology(segment_row.get("chronology_json"))
-    return header + incident_md + gate_md + chrono_md + report_md
+    picture = segment_row.get("object_picture")
+    picture_md = f"{picture}\n\n" if isinstance(picture, str) and picture.strip() else ""
+    return picture_md + header + incident_md + gate_md + chrono_md + report_md
 
 
 def extract_verdict_alarm(segment_row: dict) -> tuple[str, str]:

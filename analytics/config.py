@@ -203,6 +203,34 @@ class AnalyticsConfig:
         return str(name).strip() or None if name else None
 
     @property
+    def controller_short(self) -> str | None:
+        """«PCC3300» — короткое имя панели (ключ controller.short в mapping.yaml)
+        для строки соседей в картине объекта (v5.2.1, В11); нет ключа — полное."""
+        c = self.mapping.get("controller")
+        short = c.get("short") if isinstance(c, dict) else None
+        return (str(short).strip() or None) if short else self.controller_label
+
+    @property
+    def controller_measures(self) -> str | None:
+        """Что меряет панель — «двигатель, генератор, режимы, коды неисправностей»
+        (картина объекта во входе моделей, v5.2.1, В11): ключ controller.measures
+        в mapping.yaml; нет ключа (рабочая копия mapping.yaml на сервере
+        перекрывает эталон целиком и его не знает) — по ролям карты регистров."""
+        c = self.mapping.get("controller")
+        m = c.get("measures") if isinstance(c, dict) else None
+        if m and str(m).strip():
+            return str(m).strip()
+        roles = {meta.get("role") for meta in self._register_map.values()}
+        parts = [what for what, need in (
+            ("двигатель", {"RPM", "OIL_PRESS", "COOLANT_TEMP", "OIL_TEMP"}),
+            ("генератор", {"FREQUENCY", "VOLTAGE_LL_AVG", "CURRENT_AVG", "ACTIVE_POWER_TOTAL"}),
+            ("режимы", {"RUN_STATE"}),
+        ) if roles & need]
+        if self._whitelist_fault:
+            parts.append("коды неисправностей")
+        return ", ".join(parts) or None
+
+    @property
     def incident_state_registers(self) -> list[tuple[int, str]]:
         """Регистры «состояние на момент останова» для разбора аварии (v5.1.14):
         [(addr, описание)] — пометка incident_state: true в mapping.yaml."""

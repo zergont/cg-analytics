@@ -82,8 +82,9 @@ async def analyse_segment(
         _model          = model or claude_cfg["model"]
         _max_tool_calls = claude_cfg["max_tool_calls"]
         _max_tokens     = claude_cfg["max_tokens"]
-        from llm.router import get_prompt as _router_prompt
-        _system_prompt  = system_prompt or _router_prompt("seg_auto")
+        # Без system_prompt — текст владельца + блок «Правила системы» (v5.2.1, В1)
+        from llm.prompts import system_for as _system_for
+        _system_prompt  = system_prompt or _system_for("seg_auto")[0]
 
         while tool_calls_count < _max_tool_calls:
             loops_count += 1
@@ -336,4 +337,7 @@ def _build_conclusion(
         f"{dets_block}\n\n"
     )
 
-    return block1 + claude_block2 + block3
+    # Наработка — строкой кода после Блока 1, перед текстом модели (v5.2.1, В4);
+    # уже стоит в начале текста модели — второй раз не ставим
+    from corpus.worker import with_hours
+    return block1 + with_hours(segment_row, claude_block2) + block3

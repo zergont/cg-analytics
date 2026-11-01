@@ -139,7 +139,7 @@ async def _process_segment(
     force=True — разрешить анализ открытого сегмента (ручной запуск).
     """
     import corpus.db as corpus_db
-    from llm.router import get_prompt
+    from llm.prompts import system_for
 
     try:
         from analytics.runner import ANALYTICS_VERSION
@@ -184,7 +184,17 @@ async def _process_segment(
         seg_row["router_sn"], seg_row["equip_type"], seg_row["panel_id"]
     )
 
-    prompt = get_prompt(task_id)
+    # Картина объекта в начало входа (v5.2.1, В11): из кэша онлайн-менеджера,
+    # при пустом — одна загрузка карты на задачу; её видят все пути — цепочка,
+    # агент Claude, сжатый вход (build_claude_input). Карты нет — запасной блок
+    # «карта установок не загружена» (правила R-NAME/R-EQUIP не ссылаются в пустоту)
+    from llm.object_picture import picture_for
+    _pic, _pic_full = await picture_for(seg_row.get("router_sn"), seg_row.get("equip_type"),
+                                        seg_row.get("panel_id") or 0)
+    seg_row["object_picture"] = _pic
+
+    # Текст владельца + блок «Правила системы» (v5.2.1, В1); след — в debug_json
+    prompt, prompt_meta = system_for(task_id)
     depth = _segment_depth(seg_row, task_id)
 
     # Основной — строка таблицы (v5.1.11); цепочка реестра — запасные при отказе.
@@ -194,6 +204,10 @@ async def _process_segment(
     entries = _route_entries(task_id, depth)
     provider = entries[0]["name"] + (f" +{len(entries) - 1} запасн." if len(entries) > 1 else "")
     result = await _analyse_segment_chain(seg_row, kb_path, prompt, entries, depth=depth)
+    # Версия промпта и признак картины объекта (v5.2.1, В12) — при любом исходе:
+    # «до/после» по debug_json
+    result["debug_json"] = {**(result.get("debug_json") or {}), "prompt": prompt_meta,
+                            "picture": _pic_full}
 
     if result["error"]:
         logger.error("corpus ERROR #%d | %s", seg_id, result["error"])
@@ -226,6 +240,34 @@ async def _process_segment(
         result.get("tool_calls_count", 0),
         result.get("generation_time_sec", 0),
     )
+
+
+def _hours_line(seg_row: dict) -> str | None:
+    """Строка наработки кода перед текстом модели (v5.2.1, решение В4 (а)):
+    «*Наработка двигателя на конец периода: 13 643 ч (счётчик панели).*» — на
+    всех путях ИИ заключения; модели — «не повторяй» (R-HOURS). Счётчика нет —
+    строки нет. Пересказ её не получит: _extract_block2 начинается с «## »."""
+    try:
+        from analytics.labels import engine_hours_text
+        from corpus.preprocessor import _engine_hours_of
+        eh = engine_hours_text(_engine_hours_of(seg_row.get("characteristics_json"),
+                                                seg_row.get("analytics_version")))
+    except Exception:
+        logger.warning("corpus/worker: наработка для строки заключения не определена", exc_info=True)
+        return None
+    return f"*Наработка двигателя на конец периода: {eh} (счётчик панели).*" if eh else None
+
+
+def with_hours(seg_row: dict, text: str) -> str:
+    """Текст модели со строкой наработки кода впереди (В4); нет счётчика или
+    строка уже стоит в начале — как есть (ревью v5.2.1, п. 22)."""
+    line = _hours_line(seg_row)
+    if not line or (text or "").lstrip().startswith(_HOURS_PREFIX):
+        return text
+    return f"{line}\n\n{text}"
+
+
+_HOURS_PREFIX = "*Наработка двигателя на конец периода:"
 
 
 def _system_signature() -> str:
@@ -855,6 +897,8 @@ async def _analyse_segment_chain(
                 content, _lang = await _lang_clean(content, user_input, depth)
                 if _lang:
                     f["debug"]["lang_check"] = _lang
+                # Наработка — строкой кода перед текстом модели (v5.2.1, В4)
+                content = with_hours(seg_row, content)
                 content += format_ai_signature(f["label"])
                 result = {
                     "verdict":            verdict,

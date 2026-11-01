@@ -881,6 +881,37 @@ async def settings_page(request: Request):
     _llm_entries = _get_llm_entries()
     for _e in _llm_entries:   # ключи API в шаблон не отдаём — только признак наличия
         _e["has_api_key"] = bool(_e.pop("api_key", ""))
+    # Механизм промптов (v5.2.1, В8, В13): у каждой задачи — источник, отпечаток,
+    # блок «Правила системы» (только чтение), противоречия, умолчание кода, копия
+    from llm import prompts as _prompts
+    _ai_prompts: dict = {}
+    # Показанный текст и его отпечаток — всегда, вне карточки (ревью v5.2.1, п. 2):
+    # без отпечатка «Сохранить» сравнивает с действующим текстом
+    _ai_shown: dict = {}
+    for _t in _TASKS:
+        try:
+            _st = _prompts.shown_text(_t)
+            _ai_shown[_t] = {"text": _st, "sha": _prompts.fingerprint(_st)}
+        except Exception:
+            logger.warning("Настройки: показанный текст промпта %s не собран", _t, exc_info=True)
+        try:
+            _bk = await analytics.get_app_setting(f"ai_task_{_t}_prompt{_prompts.BACKUP_SUFFIX}", None)
+            _ai_prompts[_t] = _prompts.describe(_t, backup=_bk, suffixes=_prompt_suffixes().get(_t))
+        except Exception:
+            logger.warning("Настройки: карточка промпта %s не собрана", _t, exc_info=True)
+    # Итог сохранения формы промптов (ревью v5.2.1, п. 14–15): старая вкладка или
+    # правка поверх изменившегося текста — плашка, правка не сохранена
+    _pn = request.query_params.get("prompts")
+    _prompts_notice = None
+    if _pn == "stale":
+        _prompts_notice = ("Форма промптов устарела (вкладка открыта до обновления) — правка не "
+                           "сохранена. Обновите страницу и повторите.")
+    elif _pn in ("conflict", "defaulted"):
+        _ct = ", ".join(t for t in (request.query_params.get("tasks") or "").split(",") if t in _TASKS)
+        _prompts_notice = (f"Промпт ({_ct or '—'}) изменился после открытия страницы — ваша правка "
+                           "не сохранена. Обновите страницу и повторите." if _pn == "conflict" else
+                           f"Текст ({_ct or '—'}) совпал с прошлым умолчанием кода — задача следует "
+                           "коду (действует нынешнее умолчание).")
     return templates.TemplateResponse(request, "settings.html", {
         "settings": cfg,
         "registry": registry,
@@ -899,6 +930,12 @@ async def settings_page(request: Request):
         "data_stale_threshold_sec":  data_stale_threshold_sec,
         "ai_routing":   _get_router(),
         "ai_task_meta": {k: {"label": v[0], "hint": _HINTS.get(k, "")} for k, v in _TASKS.items()},
+        "ai_prompts":   _ai_prompts,
+        "ai_shown":     _ai_shown,
+        "prompts_form_version": _prompts.PROMPTS_FORM_VERSION,
+        "prompts_notice": _prompts_notice,
+        "prompt_rules_version": _prompts.PROMPT_RULES_VERSION,
+        "ai_prompt_rules_enabled": _prompts.rules_enabled(),
         "llm_registry": _llm_entries,
         "ai_chains":    _get_chains(),
         "chain_tasks":  list(_CHAIN_TASKS),
@@ -1081,21 +1118,69 @@ async def update_ai_chains(request: Request):
     return RedirectResponse(url="/settings#ai-routing", status_code=303)
 
 
+def _prompt_suffixes() -> dict[str, dict[str, str]]:
+    """Приписки точек вызова к system (v5.2.1): у гейта на шлюзе — маркер вердикта."""
+    try:
+        from online.manager import _LLM_VERDICT_SUFFIX
+        return {"warning_claude": {"шлюз (маркер вердикта)": _LLM_VERDICT_SUFFIX}}
+    except Exception:
+        return {}
+
+
 @router.post("/settings/ai-routing")
 async def update_ai_routing(request: Request):
     """Системные промпты задач. Кто разбирает — таблица «Кто и как разбирает»
     (v5.1.11), провайдер задачи здесь больше не выбирается.
 
-    Поля промпта нет в форме — промпт не трогаем; поле пустое — промпт по
-    умолчанию (llm.router.get_prompt).
+    v5.2.1 (В8): llm.prompts.save_prompts_form — вкладка без версии формы
+    (открытая до выката) ничего не пишет; поля нет — промпт не трогаем; текст,
+    равный умолчанию кода после нормализации CRLF, пишется как "" (следовать
+    коду — первое «Сохранить» не морозит промпт совета); пишется только
+    изменившееся; чекбокс — выключатель блока «Правила системы» (В15).
     """
-    from llm.router import apply_prompts_form
+    from llm.prompts import save_prompts_form
     form = await request.form()
-    accepted = apply_prompts_form(form)
-    for task_id, prompt in accepted.items():
-        await analytics.set_app_setting(f"ai_task_{task_id}_prompt", prompt)
-    logger.info("Системные промпты сохранены (%d задач)", len(accepted))
+    res = await save_prompts_form(form, get=analytics.get_app_setting,
+                                  put=analytics.set_app_setting, suffixes=_prompt_suffixes())
+    if res["stale"]:
+        return RedirectResponse(url="/settings?prompts=stale#ai-routing", status_code=303)
+    logger.info("Системные промпты сохранены: %s", ", ".join(res["saved"]) or "без изменений")
+    if res["conflicts"]:
+        return RedirectResponse(url="/settings?prompts=conflict&tasks=" + ",".join(res["conflicts"])
+                                + "#ai-routing", status_code=303)
+    if res.get("defaulted"):
+        return RedirectResponse(url="/settings?prompts=defaulted&tasks=" + ",".join(res["defaulted"])
+                                + "#ai-routing", status_code=303)
     return RedirectResponse(url="/settings#ai-routing", status_code=303)
+
+
+@router.post("/settings/ai-routing/restore")
+async def restore_ai_prompt(request: Request):
+    """«Вернуть копию 5.2.1» (v5.2.1, §4.5): текст владельца до миграции из
+    резервного ключа ai_task_<задача>_prompt_backup_5_2_1."""
+    from llm.prompts import restore_backup
+    form = await request.form()
+    task = str(form.get("task") or "")
+    res = await restore_backup(task, form, get=analytics.get_app_setting,
+                               put=analytics.set_app_setting, suffixes=_prompt_suffixes())
+    if not res and form.get("prompts_version") is None:
+        return RedirectResponse(url="/settings?prompts=stale#ai-routing", status_code=303)
+    if res.get("defaulted"):
+        return RedirectResponse(url=f"/settings?prompts=defaulted&tasks={task}#ai-routing",
+                                status_code=303)
+    return RedirectResponse(url="/settings#ai-routing", status_code=303)
+
+
+async def _refresh_object_pictures() -> None:
+    """Реестр поменялся — картина объекта во входе моделей перечитывается (v5.2.1,
+    ревью п. 12: кэш онлайн-менеджера). Сбой — WARNING, правка уже записана."""
+    try:
+        from online.manager import current_manager
+        mgr = current_manager()
+        if mgr is not None:
+            await mgr.refresh_object_pictures()
+    except Exception:
+        logger.warning("Картина объекта не обновлена после правки реестра", exc_info=True)
 
 
 @router.post("/settings/ai-depth")
@@ -1347,11 +1432,14 @@ async def update_equipment(
         _eng = get_manager()._engines.get(f"{router_sn}|{equip_type}|{panel_id}")
         if _eng is not None:
             _eng.equip_name = name or None
+            # v5.2.1: двигатель — для запасного блока картины объекта
+            _eng.equip_engine = " ".join(x for x in (manufacturer, model) if x) or None
     except RuntimeError:
         pass
     except Exception:
         logger.warning("Имя машины у живого движка %s/%s/%s не обновлено", router_sn, equip_type,
                        panel_id, exc_info=True)
+    await _refresh_object_pictures()
     return RedirectResponse(url="/settings", status_code=303)
 
 
@@ -1363,6 +1451,7 @@ async def toggle_equipment(
     active: str = Form("off"),
 ):
     await analytics.set_equipment_active(router_sn, equip_type, panel_id, active == "on")
+    await _refresh_object_pictures()
     return RedirectResponse(url="/settings", status_code=303)
 
 
@@ -1373,12 +1462,14 @@ async def delete_equipment(
     panel_id: int = Form(...),
 ):
     await analytics.delete_equipment(router_sn, equip_type, panel_id)
+    await _refresh_object_pictures()
     return RedirectResponse(url="/settings", status_code=303)
 
 
 @router.post("/settings/equipment/clear")
 async def clear_equipment():
     await analytics.clear_equipment_registry()
+    await _refresh_object_pictures()
     return RedirectResponse(url="/settings", status_code=303)
 
 
@@ -1396,6 +1487,7 @@ async def sync_equipment():
     except Exception as e:
         logger.exception("Ошибка синхронизации: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+    await _refresh_object_pictures()
     return RedirectResponse(url="/settings", status_code=303)
 
 

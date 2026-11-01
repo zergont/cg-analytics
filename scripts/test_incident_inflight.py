@@ -66,7 +66,8 @@ async def _append(sn, eq, panel, event, segment_id=None, ts=None):
     return True
 
 
-async def _save(sn, eq, panel, analysis_md, fault_hash, alarm_text=None, segment_id=None, ts=None):
+async def _save(sn, eq, panel, analysis_md, fault_hash, alarm_text=None, segment_id=None, ts=None,
+                extra=None):   # v5.2.1: в записи совета всегда extra (версия промпта, картина)
     DB["save_calls"] += 1
     if DB["save_fail"] > 0:
         DB["save_fail"] -= 1
@@ -112,7 +113,7 @@ def set_answers(*answers) -> None:
     ASK.update({"queue": list(answers), "calls": 0})
 
 
-async def _ask(prompt, meta):
+async def _ask(prompt, meta, system=None):   # v5.2.1: system приходит из _run_incident
     ASK["calls"] += 1
     a = ASK["queue"].pop(0) if ASK["queue"] else "Разбор"
     if isinstance(a, tuple) and a[0] == "sleep":

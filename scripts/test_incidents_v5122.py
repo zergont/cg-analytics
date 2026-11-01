@@ -2087,7 +2087,11 @@ finally:
         sys.modules["corpus.agent"] = _orig_agent_mod
     else:
         sys.modules.pop("corpus.agent", None)
-check(_rl["conclusion_md"].startswith(_GOOD2) and _rl["debug_json"]["lang_check"]["accepted"] is True,
+# v5.2.1 (В4): перед текстом модели — строка наработки кода (у SR31 счётчик есть)
+_rl_md = _rl["conclusion_md"]
+if _rl_md.startswith("*Наработка двигателя на конец периода:"):
+    _rl_md = _rl_md.split("\n\n", 1)[1]
+check(_rl_md.startswith(_GOOD2) and _rl["debug_json"]["lang_check"]["accepted"] is True,
       f"3ж: заключение (шлюз) — очищено до подписи, отметка в debug_json: {_rl['debug_json'].get('lang_check')}")
 check(_ra["conclusion_md"] == _GOOD2 and _ra["debug_json"]["lang_check"]["accepted"] and _ra["debug_json"]["x"] == 1,
       "3ж: заключение (Claude API) — тот же проход, без смены модели")

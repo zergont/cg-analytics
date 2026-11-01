@@ -467,11 +467,17 @@ def _fault_codes_line(incident: dict[str, Any]) -> str | None:
         f"{c} — {n}" if n else str(c) for c, n in seen.items())
 
 
+# Версия формата входа совета (build_incident_prompt; v5.2.1, В12): правка
+# порядка или текста сборщика поднимает её (эталонный тест test_v521_prompts)
+INCIDENT_INPUT_VERSION = "5.2.1"
+
+
 def build_incident_prompt(
     incident: dict[str, Any], seg_row: dict[str, Any] | None = None,
     cycle_segments: list[dict[str, Any]] | None = None,
     context: dict[str, Any] | None = None,
     tz=None,
+    object_picture: str | None = None,
 ) -> str:
     """Промпт разбора аварии из акта.
 
@@ -484,6 +490,12 @@ def build_incident_prompt(
     совет писал «06:26:23» при «09:26:23» в отчёте); ход цикла по сегментам
     вместо склейки по режимам и лента отсчётов сегмента падения (P1-4).
     tz — пояс подписей (None — пояс сервиса, config.get_tz).
+    object_picture — блок «Картина объекта» (v5.2.1, В11, «главное — совету»):
+    объект, установки в одной сети, источники данных этой установки, соседи; есть
+    — вместо блока «Оборудование (реестр)», нет (карта не загрузилась) — блок
+    реестра тем же составом: имя, двигатель, контроллер. Серийного номера
+    двигателя во входе совета нет ни там, ни там (политика MCP Р11, решение
+    владельца 01.11 по ревью v5.2.1).
     """
     from analytics.labels import tz_label
     tzl = tz_label(tz)
@@ -498,13 +510,19 @@ def build_incident_prompt(
         "остановом панели." if att else
         "Разбери аварийный останов дизель-генераторной установки.",
         f"Время во входе — {tzl}."]
-    if eq:
+    if object_picture:
+        out += ["", object_picture]
+    elif eq:
         out += ["", "Оборудование (реестр):"]
         if eq.get("name"):
-            out.append(f"  - Установка: {eq['name']}")
+            # Без серийных номеров роутера и двигателя (ревью v5.2.1, В)
+            from llm.object_picture import clean_name
+            _sn = {str(x) for x in (eq.get("router_sn"), eq.get("engine_sn")) if x and len(str(x)) >= 5}
+            _nm = clean_name(eq["name"], _sn, set())
+            if _nm:
+                out.append(f"  - Установка: {_nm}")
         if eq.get("engine"):
-            out.append(f"  - Двигатель: {eq['engine']}"
-                       + (f", s/n {eq['engine_sn']}" if eq.get("engine_sn") else ""))
+            out.append(f"  - Двигатель: {eq['engine']}")
         if eq.get("controller"):
             out.append(f"  - Контроллер (панель управления): {eq['controller']}")
     out += ["", f"Останов: {_day(stop_raw, tz) if stop_raw else '—'}"]
@@ -637,7 +655,7 @@ def build_incident_prompt(
     return "\n".join(out)
 
 
-async def _ask_claude(user_prompt: str, model: str) -> str:
+async def _ask_claude(user_prompt: str, model: str, system: str | None = None) -> str:
     """Разбор через Claude API. Без инструмента verdict: у аварии нечего
     отменять, вердикт «авария или нет» уже вынесен детерминированно."""
     import anthropic
@@ -645,7 +663,7 @@ async def _ask_claude(user_prompt: str, model: str) -> str:
 
     from config import settings as app_settings
     from corpus.settings import get_claude_settings
-    from llm.router import get_prompt
+    from llm.prompts import system_for
 
     cfg = get_claude_settings()
     http_client = None
@@ -660,7 +678,7 @@ async def _ask_claude(user_prompt: str, model: str) -> str:
         response = await client.messages.create(
             model=model or cfg["model"],
             max_tokens=cfg["max_tokens"],
-            system=get_prompt("incident"),
+            system=system if system is not None else system_for("incident")[0],
             messages=[{"role": "user", "content": user_prompt}],
         )
         if response.stop_reason == "max_tokens":
@@ -875,21 +893,28 @@ def _route() -> tuple[str, str]:
     return get_route("incident").get("provider", "llm"), route_label("incident")
 
 
-async def _ask(prompt: str, meta: dict) -> str:
-    """Спросить модель строки «Разбор аварии». Текст с подписью; пустой — ошибка."""
-    from llm.router import claude_model_for, format_ai_signature, get_prompt
+async def _ask(prompt: str, meta: dict, system: str | None = None) -> str:
+    """Спросить модель строки «Разбор аварии». Текст с подписью; пустой — ошибка.
+    v5.2.1: system — llm.prompts.system_for (у совета блок правил пуст, §4.2);
+    _run_incident передаёт system вместе с его версией на каждой попытке (ревью,
+    п. 4: повтор после правки промпта не уходит с прежней версией в записи).
+    Версию через meta не передаём: клиент шлюза её очищает (п. 13)."""
+    from llm.prompts import system_for
+    from llm.router import claude_model_for, format_ai_signature
     provider, label = _route()
+    _system = system if system is not None else system_for("incident")[0]
     if provider == "llm":
         from llm.client import chat, gateway_label
         # Модель, рассуждение и приоритет — строка таблицы (depth="incident")
         # Совет, принятый шлюзом, не пересылаем после обрыва: он живёт на шлюзе
         # и без соединения — перезаказ решает и учитывает _run_incident
-        text = (await chat(get_prompt("incident"), prompt, depth="incident",
+        text = (await chat(_system, prompt, depth="incident",
                            meta=meta, resend_accepted=False)).strip()
         label = gateway_label(meta, label)
     else:
         model = claude_model_for("incident")
-        text = (await _ask_claude(prompt, model)).strip()
+        text = (await (_ask_claude(prompt, model, _system) if system is not None
+                       else _ask_claude(prompt, model))).strip()
         label = model or "Claude API"
     if not text:
         raise EmptyIncidentAnswer("модель вернула пустой ответ")
@@ -1019,6 +1044,7 @@ async def _context(router_sn: str, equip_type: str, panel_id: int,
             "name": eq.get("name"),
             "engine": " ".join(str(x) for x in (eq.get("manufacturer"), eq.get("model")) if x) or None,
             "engine_sn": eq.get("engine_sn"),
+            "router_sn": router_sn,              # для очистки имени (v5.2.1), во вход не идёт
             "controller": (cfg.controller_label if cfg else None) or eq.get("controller_id"),
         }
         regs = cfg.incident_state_registers if cfg else []
@@ -1075,7 +1101,12 @@ async def _material(router_sn: str, equip_type: str, panel_id: int,
         # Блок оборудования — дополнение: его сбой не мешает разбору
         logger.warning("IncidentGate: контекст оборудования не собран", exc_info=True)
         context = {}
-    return build_incident_prompt(incident, seg_row, cycle_segments, context)
+    # Картина объекта (v5.2.1, В11): из кэша менеджера, при пустом — одна загрузка;
+    # карты нет — блок реестра (у совета он и есть запасной, без s/n)
+    from llm.object_picture import picture_for
+    picture, full = await picture_for(router_sn, equip_type, panel_id)
+    return build_incident_prompt(incident, seg_row, cycle_segments, context,
+                                 **({"object_picture": picture} if full else {}))
 
 
 async def _save(router_sn: str, equip_type: str, panel_id: int, stop_ts: datetime,
@@ -1150,6 +1181,13 @@ async def _run_incident(
     logger.info("IncidentGate: разбор аварии %s/%s/%s на %s (разбирает %s)",
                 router_sn, equip_type, panel_id, stop_ts.isoformat(), label)
     prompt = await _material(router_sn, equip_type, panel_id, incident, stop_ts, segment_id)
+    # v5.2.1 (В12, ревью п. 8 и 13): версия промпта и признак картины объекта —
+    # один раз на разбор, в отметку заказа и в запись разбора (не через meta:
+    # клиент шлюза её очищает)
+    from llm.object_picture import PICTURE_HEADER
+    from llm.prompts import system_for
+    has_picture = PICTURE_HEADER in (prompt or "")
+    pv: str | None = None
 
     attempt = 0
     prev_tid: str | None = None       # задача шлюза прошлой попытки (осталась жить на шлюзе)
@@ -1171,13 +1209,21 @@ async def _run_incident(
             await _reorder_conclusion(router_sn, equip_type, panel_id, stop_ts, segment_id)
             return INC_FAILED
         attempt += 1
+        # system и его версия — вместе, на каждой попытке (ревью v5.2.1, п. 4)
+        try:
+            _system, _pm = system_for("incident")
+            pv = _pm["version"]
+        except Exception:
+            logger.warning("IncidentGate: system совета не собран — умолчание _ask", exc_info=True)
+            _system, pv = None, None
         await _mark(router_sn, equip_type, panel_id, stop_ts, segment_id, INC_ORDERED,
-                    attempt=ordered + 1, model=label, prev_task_id=prev_tid)
+                    attempt=ordered + 1, model=label, prev_task_id=prev_tid,
+                    prompt=pv, picture=has_picture)
         meta: dict = {}
         reason = ""
         err: BaseException | None = None
         try:
-            analysis = await asyncio.wait_for(_ask(prompt, meta), INCIDENT_DEADLINE_SEC)
+            analysis = await asyncio.wait_for(_ask(prompt, meta, system=_system), INCIDENT_DEADLINE_SEC)
             outcome = "ok"
         except asyncio.TimeoutError:
             outcome, reason = INC_FAILED, f"нет ответа за {INCIDENT_DEADLINE_SEC // 3600} ч"
@@ -1191,8 +1237,10 @@ async def _run_incident(
                 _ok = False
                 try:
                     _lc = meta.get("lang_check")
+                    _ex = {k: v for k, v in (("lang_check", _lc), ("prompt", pv)) if v}
+                    _ex["picture"] = has_picture
                     _ok = await _save(router_sn, equip_type, panel_id, stop_ts, segment_id, _raw,
-                                      extra={"lang_check": _lc} if _lc else None, tries=1)
+                                      extra=_ex or None, tries=1)
                 except BaseException:
                     logger.warning("IncidentGate: исходник совета %s не сохранён", fh, exc_info=True)
                 logger.error("IncidentGate: разбор %s получен, очистка языка прервана остановкой "
@@ -1218,8 +1266,11 @@ async def _run_incident(
         if outcome == "ok":
             try:
                 _lc = meta.get("lang_check")
+                # v5.2.1 (В12): версия промпта и признак картины — в запись разбора
+                _ex = {k: v for k, v in (("lang_check", _lc), ("prompt", pv)) if v}
+                _ex["picture"] = has_picture
                 saved = await _save(router_sn, equip_type, panel_id, stop_ts, segment_id, analysis,
-                                    extra={"lang_check": _lc} if _lc else None)
+                                    extra=_ex or None)
             except asyncio.CancelledError:
                 # Остановка сервиса посреди повторов записи: текст уже получен —
                 # хотя бы в журнал сервиса. Отметки нет: восстановление закажет снова
