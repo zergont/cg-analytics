@@ -493,9 +493,10 @@ def build_incident_prompt(
     object_picture — блок «Картина объекта» (v5.2.1, В11, «главное — совету»):
     объект, установки в одной сети, источники данных этой установки, соседи; есть
     — вместо блока «Оборудование (реестр)», нет (карта не загрузилась) — блок
-    реестра тем же составом: имя, двигатель, контроллер. Серийного номера
-    двигателя во входе совета нет ни там, ни там (политика MCP Р11, решение
-    владельца 01.11 по ревью v5.2.1).
+    реестра тем же составом: имя, двигатель, контроллер. v5.2.2 (решение
+    владельца 01.11: «утечка серийников ни на что не влияет»): совету — и
+    серийный номер двигателя этой установки (документация Cummins бывает
+    привязана к серии двигателя; совет искал по нему руководства с v5.1.14).
     """
     from analytics.labels import tz_label
     tzl = tz_label(tz)
@@ -512,6 +513,8 @@ def build_incident_prompt(
         f"Время во входе — {tzl}."]
     if object_picture:
         out += ["", object_picture]
+        if eq.get("engine_sn"):
+            out.append(f"Серийный номер двигателя этой установки: {eq['engine_sn']}.")
     elif eq:
         out += ["", "Оборудование (реестр):"]
         if eq.get("name"):
@@ -522,7 +525,8 @@ def build_incident_prompt(
             if _nm:
                 out.append(f"  - Установка: {_nm}")
         if eq.get("engine"):
-            out.append(f"  - Двигатель: {eq['engine']}")
+            out.append(f"  - Двигатель: {eq['engine']}"
+                       + (f", s/n {eq['engine_sn']}" if eq.get("engine_sn") else ""))
         if eq.get("controller"):
             out.append(f"  - Контроллер (панель управления): {eq['controller']}")
     out += ["", f"Останов: {_day(stop_raw, tz) if stop_raw else '—'}"]
@@ -1102,7 +1106,7 @@ async def _material(router_sn: str, equip_type: str, panel_id: int,
         logger.warning("IncidentGate: контекст оборудования не собран", exc_info=True)
         context = {}
     # Картина объекта (v5.2.1, В11): из кэша менеджера, при пустом — одна загрузка;
-    # карты нет — блок реестра (у совета он и есть запасной, без s/n)
+    # карты нет — блок реестра (у совета он и есть запасной; s/n двигателя — v5.2.2)
     from llm.object_picture import picture_for
     picture, full = await picture_for(router_sn, equip_type, panel_id)
     return build_incident_prompt(incident, seg_row, cycle_segments, context,

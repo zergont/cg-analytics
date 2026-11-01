@@ -967,10 +967,14 @@ ctx_eq = {"equipment": {"name": "ДГУ №1 инв. 2569", "engine": "Cummins K
                         "controller": "Cummins PowerCommand PCC3300"}}
 ip_old = ig.build_incident_prompt(INC, None, [], ctx_eq)
 ip_new = ig.build_incident_prompt(INC, None, [], ctx_eq, object_picture=p1)
-check("Оборудование (реестр):" in ip_old and "  - Двигатель: Cummins KTA50" in ip_old and "25428546" not in ip_old
-      and "s/n" not in ip_old, "8п: без картины — блок реестра тем же составом, без s/n (ревью п. 2)")
-check(p1 in ip_new and "Оборудование (реестр):" not in ip_new and "25428546" not in ip_new
-      and ip_new.index(p1) < ip_new.index("Останов:"), "8р: совет — картина вместо блока реестра, без s/n")
+# v5.2.2 (решение владельца 01.11): совету — серийный номер двигателя этой установки,
+# в картине объекта его по-прежнему нет (картина общая для заключения, гейта и совета)
+check("Оборудование (реестр):" in ip_old and "  - Двигатель: Cummins KTA50, s/n 25428546" in ip_old,
+      "8п: без картины — блок реестра, у совета с s/n двигателя (v5.2.2)")
+check(p1 in ip_new and "Оборудование (реестр):" not in ip_new and "25428546" not in p1
+      and "Серийный номер двигателя этой установки: 25428546." in ip_new
+      and ip_new.index(p1) < ip_new.index("Серийный номер двигателя") < ip_new.index("Останов:"),
+      "8р: совет — картина вместо блока реестра, s/n двигателя строкой после неё (v5.2.2)")
 
 # ══ 9. Наработка кодом (В4) ══════════════════════════════════════════════════
 H_ROW = {"id": 3, "router_sn": "SN", "equip_type": "pcc", "panel_id": 1, "report_md": "отчёт", "run_state": 3,
