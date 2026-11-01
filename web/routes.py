@@ -2493,6 +2493,32 @@ async def api_machines():
     return JSONResponse(result)
 
 
+def _op_day(t_start, tz, daily_hour: int) -> str | None:
+    """Операционные сутки сегмента (YYYY-MM-DD): daily_split_hour local → следующие."""
+    from datetime import timedelta
+    if t_start is None:
+        return None
+    return (t_start.astimezone(tz) - timedelta(hours=daily_hour)).date().isoformat()
+
+
+def _calendar_month_bounds(year: int, month: int, tz, daily_hour: int):
+    """Месяц календаря — по операционным суткам (v5.1.33): окно выборки
+    [1-е число daily_split_hour local, 1-е число следующего месяца
+    daily_split_hour local) в UTC и границы op_day [day_from, day_to).
+
+    До v5.1.33 месяц резался по полуночи UTC, а UI раскладывает сегменты по
+    op_day: сегменты последних суток месяца, начавшиеся между 00:00 UTC и
+    daily_split_hour local 1-го числа, уходили в ответ следующего месяца с op_day
+    прошлого — в UI их не было видно ни там, ни там (Сининда, сутки 31.10:
+    разгрузка, охлаждение и стоп 01.11 04:06–04:29 и последний закрытый сегмент
+    суток #36219 04:29–09:00 МСК; сводка пересменки 9:30 его не находила)."""
+    from datetime import date, datetime, timezone
+    ny, nm = (year + 1, 1) if month == 12 else (year, month + 1)
+    ts_from = datetime(year, month, 1, daily_hour, tzinfo=tz).astimezone(timezone.utc)
+    ts_to = datetime(ny, nm, 1, daily_hour, tzinfo=tz).astimezone(timezone.utc)
+    return ts_from, ts_to, date(year, month, 1).isoformat(), date(ny, nm, 1).isoformat()
+
+
 @router.get("/api/machine/{router_sn}/{equip_type}/{panel_id}/segments", response_class=JSONResponse)
 async def api_machine_segments(
     router_sn: str,
@@ -2505,7 +2531,9 @@ async def api_machine_segments(
     """История сегментов машины — для построения календаря.
 
     Query-параметры:
-      year, month  — фильтр по календарному месяцу (оба или ни одного)
+      year, month  — фильтр по месяцу операционных суток (оба или ни одного):
+                     сегменты с op_day этого месяца (v5.1.33; до — календарный
+                     месяц по UTC, последние сутки месяца теряли хвост после 00:00 UTC)
       limit        — макс. число сегментов (дефолт 200)
 
     Возвращает массив сегментов от новых к старым. Поле `severity` кодирует
@@ -2526,20 +2554,20 @@ async def api_machine_segments(
     from db.analytics import get_app_setting
     import json as _json
 
-    ts_from = ts_to = None
-    if year and month:
-        ts_from = datetime(year, month, 1, tzinfo=timezone.utc)
-        if month == 12:
-            ts_to = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
-        else:
-            ts_to = datetime(year, month + 1, 1, tzinfo=timezone.utc)
-
     # Операционные сутки: daily_split_hour local → следующие daily_split_hour (дефолт 09:00)
     tz = get_tz()
     try:
         daily_hour = int(await get_app_setting("daily_split_hour", "9"))
     except Exception:
         daily_hour = 9
+    if not 0 <= daily_hour <= 23:
+        daily_hour = 9
+
+    # Месяц — по операционным суткам, как раскладывает UI (v5.1.33)
+    ts_from = ts_to = None
+    day_from = day_to = None
+    if year and month:
+        ts_from, ts_to, day_from, day_to = _calendar_month_bounds(year, month, tz, daily_hour)
 
     # Состояние разбора актов — вторым запросом на весь календарь, только при
     # наличии актов (значок акта, v5.1.25)
@@ -2585,10 +2613,11 @@ async def api_machine_segments(
             dur = (seg["t_end"] - seg["t_start"]).total_seconds()
 
         # Операционный день сегмента — как в календаре cg-analytics
-        op_day = (
-            (seg["t_start"].astimezone(tz) - timedelta(hours=daily_hour)).date().isoformat()
-            if seg.get("t_start") else None
-        )
+        op_day = _op_day(seg.get("t_start"), tz, daily_hour)
+        # Окно выборки по пересечению захватывает соседние сутки на границах
+        # месяца — в ответ только op_day своего месяца (v5.1.33)
+        if day_from and op_day and not (day_from <= op_day < day_to):
+            continue
 
         result.append({
             "id":            seg_id,
