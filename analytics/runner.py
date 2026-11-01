@@ -59,8 +59,11 @@ async def run_analysis(
     engine_id: str | None = None,
     kb_path: str | None = None,
     tz=None,
+    equip_name: str | None = None,
 ) -> dict[str, Any]:
     """Запустить аналитический прогон за период [ts_from, ts_to).
+
+    equip_name — имя машины из реестра для заголовка отчёта (v5.1.32).
 
     Возвращает словарь:
     {
@@ -137,7 +140,7 @@ async def run_analysis(
         )
         report_md = to_markdown(
             segments, router_sn, equip_type, panel_id, tf, tt, ANALYTICS_VERSION,
-            tz=tz, fault_ref=fault_ref,
+            tz=tz, fault_ref=fault_ref, equip_name=equip_name,
         )
 
         summary = build_run_summary(segments)

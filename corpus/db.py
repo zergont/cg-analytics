@@ -190,6 +190,11 @@ async def get_unhumanized_segments(limit: int = 500) -> list[int]:
             FROM segment_analyses
             WHERE status = 'done'
               AND conclusion_md IS NOT NULL
+              -- Пустое заключение пересказывать нечего (v5.1.32): строка
+              -- 1267 (#35030, 24.08) — '' вместо NULL, попадала в очередь
+              -- при каждом старте и пропускалась воркером. Есть хоть один
+              -- непробельный символ (ревью: btrim не снимает перевод строки)
+              AND conclusion_md ~ '\\S'
               AND (humanized_md IS NULL OR humanized_md = '')
             ORDER BY updated_at DESC
             LIMIT $1

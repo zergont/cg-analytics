@@ -29,6 +29,7 @@ import copy
 import json
 import logging
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -1462,6 +1463,25 @@ def _gate_alarm(key: str) -> dict:
     return {"scenario": key_scenario(key), **({"param_role": role} if role else {})}
 
 
+# Дыры в строках для «перерыва» (v5.1.32): короче — обычный шаг опроса; сколько помнить
+HOLE_MIN_SEC = 20.0
+HOLES_KEEP = 256
+
+
+def holes_between(old: datetime, ts: list[datetime], min_sec: float) -> list[tuple[datetime, datetime]]:
+    """Промежутки длиннее min_sec между old и метками ts (после old, любой порядок):
+    [(до, после)] по возрастанию (перепроверка ревью v5.1.32, п. 4)."""
+    out: list[tuple[datetime, datetime]] = []
+    prev = old
+    for t in sorted(set(ts)):
+        if t <= prev:
+            continue
+        if (t - prev).total_seconds() > min_sec:
+            out.append((prev, t))
+        prev = t
+    return out
+
+
 def _accrual_split(
     prev_base: datetime | None, now_ts: datetime, gaps: list[dict],
     window_from: datetime | None = None,
@@ -1869,6 +1889,19 @@ async def _run_segment(
              if r.get("ts") is not None and _tz_utc(r["ts"]) < _tz_utc(ts_to)),
             default=None,
         )
+        # Дыры после прежней памяти свежести (v5.1.32, ревью O5; перепроверка, п. 4 —
+        # все, не только первая): обрыв, кончившийся в закрытом окне (перед резом,
+        # догонка через рез), — «перерыв» по данным. Уже загруженная история окна
+        _after = last_ts_out.get("after")
+        if _after is not None:
+            try:
+                _after = _tz_utc(_after)
+                last_ts_out["holes"] = holes_between(
+                    _after, [_tz_utc(r["ts"]) for r in history
+                             if r.get("ts") is not None and _after < _tz_utc(r["ts"]) < _tz_utc(ts_to)],
+                    HOLE_MIN_SEC)
+            except Exception:
+                logger.warning("Дыры после памяти свежести не найдены", exc_info=True)
     if load_seed is _SEED_UNSET:
         load_seed = await _load_seed(router_sn, equip_type, panel_id, ts_from, cfg)
     synth_gap = _synth_connectivity_gap(history, ts_from, ts_to, cfg)
@@ -2878,6 +2911,9 @@ class OnlinePollEngine:
         self.daily_hour       = daily_hour
         self.tz               = tz
         self._fault_ref       = fault_ref  # справочник кодов неисправностей
+        # Имя машины из реестра (equipment_registry.name) — заголовок отчёта
+        # (v5.1.32): ставит менеджер при сборке движка, без запроса в цикле
+        self.equip_name: str | None = None
 
         # Изменяемое состояние — переинициализируется из БД при старте
         self.cursor_ts: datetime | None          = None
@@ -2934,6 +2970,15 @@ class OnlinePollEngine:
         # Свежесть телеметрии: максимальный ts строки history, виденной движком.
         # None = данных с момента старта ещё не было.
         self.last_data_ts: datetime | None = None
+        # Свежесть по прочитанному (v5.1.32, defects[5]): верхняя граница
+        # последнего успешного чтения истории открытого окна. Отставание данных —
+        # data_read_to − last_data_ts, а не «сейчас − last_data_ts»: правило N+1,
+        # закрытие реза и холодная загрузка после рестарта больше не выглядят
+        # обрывом связи. None — после старта ещё не читали. Только память
+        self.data_read_to: datetime | None = None
+        # Дыры в строках (v5.1.32, defects[6]): [(последняя метка до дыры, первая
+        # принятая после)], последние — «перерыв» в журнале по данным, а не по тику
+        self.data_holes: deque = deque(maxlen=HOLES_KEEP)
         # Живые тревоги: scenario → detection_dict (только активные, не закрытые)
         self._active_alerts: dict[str, dict] = {}
         # Эпизоды тревог: scenario → {"id", "severity", "miss", "first_miss_ts"}
@@ -4501,6 +4546,56 @@ class OnlinePollEngine:
                         fs.isoformat(), fe.isoformat())
         return n
 
+    # Дыра короче — обычный шаг опроса, «перерыв» не нужен (шаг ДГУ ~10 с)
+    # Дыра короче — обычный шаг опроса (ДГУ ~10 с, ДЭС №3 ~9 с), «перерыв» не нужен.
+    # Перепроверка ревью (п. 4): 20 с, а не 30 — одиночная строка внутри обрыва и
+    # 29 с тишины до возврата (18:10:10 → 18:10:39) — тоже часть обрыва
+    _HOLE_MIN_SEC = HOLE_MIN_SEC
+
+    def _note_data_hole(self, history: list[dict], seen_ts: datetime | None) -> None:
+        """Запомнить дыры в принятых строках между прежней памятью свежести и новой
+        (v5.1.32, defects[6]: «перерыв 4 мин» при дыре 11 с — от тика, заметившего
+        свежесть, а не по данным). Все промежутки длиннее _HOLE_MIN_SEC, а не только
+        первый (перепроверка ревью, п. 4: одиночная строка внутри обрыва, прочитанная
+        тем же циклом, что и возврат, занижала перерыв — «2 мин 42 с» вместо 3 мин
+        11 с). История окна — по возрастанию метки, обход с конца до прежней метки.
+        Без запросов; сбой — без дыр."""
+        try:
+            old = self.last_data_ts
+            if old is None or seen_ts is None:
+                return
+            old, seen = _tz_utc(old), _tz_utc(seen_ts)
+            if (seen - old).total_seconds() <= self._HOLE_MIN_SEC:
+                return
+            after: list[datetime] = []
+            for r in reversed(history):
+                t = r.get("ts")
+                if t is None:
+                    continue
+                t = _tz_utc(t)
+                if t <= old:
+                    break
+                after.append(t)
+            for a, b in holes_between(old, after, self._HOLE_MIN_SEC):
+                self._note_hole_pair(a, b)
+        except Exception:
+            logger.warning("OnlineEngine[%s]: дыра в данных не определена", self.key, exc_info=True)
+
+    def _note_hole_pair(self, old: datetime | None, first: datetime | None) -> None:
+        """Дыра (old, first) длиннее _HOLE_MIN_SEC — в data_holes (v5.1.32, ревью O5:
+        закрытое окно). Сбой — без дыры."""
+        try:
+            if old is None or first is None:
+                return
+            old, first = _tz_utc(old), _tz_utc(first)
+            if (first - old).total_seconds() > self._HOLE_MIN_SEC:
+                _dh = getattr(self, "data_holes", None)
+                if _dh is None:
+                    _dh = self.data_holes = deque(maxlen=HOLES_KEEP)
+                _dh.append((old, first))
+        except Exception:
+            logger.warning("OnlineEngine[%s]: дыра в данных не записана", self.key, exc_info=True)
+
     async def _advance_last_data_ts(self, ts: datetime | None) -> None:
         """Продвинуть память свежести (максимальный ts виденной history) — только
         вперёд — и сохранить в observation: после рестарта движок поднимет её
@@ -4652,7 +4747,7 @@ class OnlinePollEngine:
             # Удержанные значения перед окном — те же, что у открытого окна этого
             # курсора: один запрос на курсор, а не на каждый прогон (v5.1.21)
             _seed = await self._open_load_seed(t_from)
-            _win_last: dict = {}
+            _win_last: dict = {"after": getattr(self, "last_data_ts", None)}
             segments, incidents, gaps, chronologies = await _run_segment(
                 self.router_sn, self.equip_type, self.panel_id, self.engine_sn,
                 t_from, t_to, self.cfg,
@@ -4685,6 +4780,8 @@ class OnlinePollEngine:
         # Память свежести — и по закрытому окну (v5.1.26, ревью П10): при догонке
         # после простоя резы закрываются раньше открытого окна, и заглушка
         # следующего пустого окна напечатала бы момент остановки сервиса
+        for _ha, _hb in _win_last.get("holes") or []:
+            self._note_hole_pair(_ha, _hb)
         await self._advance_last_data_ts(_win_last.get("last_ts"))
 
         # Снять открытую строку: удалить и получить снимок одним запросом (v5.1.13) —
@@ -4887,7 +4984,7 @@ class OnlinePollEngine:
                 report_md, summary_md = _nd_report(
                     self.router_sn, self.equip_type, self.panel_id,
                     _tz_utc(datetime.fromisoformat(seg.t_start)), seg_t_end,
-                    tz=self.tz, last_data_ts=_nd_last,
+                    tz=self.tz, last_data_ts=_nd_last, equip_name=getattr(self, "equip_name", None),
                 )
             else:
                 try:
@@ -4902,6 +4999,7 @@ class OnlinePollEngine:
                         # суточном резе у сегмента cause_close нет — «(продолжается
                         # после 09:00)», а не «(идёт)»
                         last_close=(seg_cause_close, seg_t_end),
+                        equip_name=getattr(self, "equip_name", None),
                     )
                 except Exception:
                     logger.exception("OnlineEngine[%s]: не удалось построить отчёт закрытого сегмента, сохраняю без report_md", self.key)
@@ -5235,8 +5333,12 @@ class OnlinePollEngine:
             self._open_history_cache_ts = max(
                 (t for t in (_seen_ts, _fetched.get("max_ts")) if t is not None), default=None)
 
+            # Дыра в строках до продвижения памяти свежести (v5.1.32, defects[6])
+            self._note_data_hole(history, _seen_ts)
             # Свежесть телеметрии: продвинулась — фиксируем в памяти и в БД
             await self._advance_last_data_ts(_seen_ts)
+            # Свежесть по прочитанному (v5.1.32): история окна прочитана до ts_to
+            self.data_read_to = ts_to_utc
             # Есть ли в окне свои строки, а не только преамбула (v5.1.30, В-30.1):
             # окно без них — не живое время для дебаунса закрытия эпизодов
             try:
@@ -5468,6 +5570,7 @@ class OnlinePollEngine:
                         self.router_sn, self.equip_type, self.panel_id,
                         _nd_t0, seg_t_end_rs,
                         tz=self.tz, last_data_ts=_nd_last, run_estimate=_nd_est,
+                        equip_name=getattr(self, "equip_name", None),
                     )
                 else:
                     try:
@@ -5481,6 +5584,7 @@ class OnlinePollEngine:
                                                      if ci == 0 else {}),
                             # Причина и конец — как в строке БД (v5.1.25, «(до конца работы)»)
                             last_close=(seg.cause_close or "RUN_STATE_CHANGE", seg_t_end_rs),
+                            equip_name=getattr(self, "equip_name", None),
                         )
                     except Exception:
                         logger.exception("OnlineEngine[%s]: не удалось построить отчёт сегмента RUN_STATE_CHANGE, сохраняю без report_md", self.key)
@@ -5746,6 +5850,7 @@ class OnlinePollEngine:
                 ANALYTICS_VERSION, tz=self.tz, prev_seg=self._prev_seg_hint,
                 fault_ref=self._fault_ref,
                 inherited_run_state_sec=_rs_carry(self.inherited_run_state_sec, open_seg.run_state),
+                equip_name=getattr(self, "equip_name", None),
             )
         except Exception:
             logger.exception("OnlineEngine[%s]: не удалось построить отчёт открытого сегмента", self.key)

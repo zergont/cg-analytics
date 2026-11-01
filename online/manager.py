@@ -136,6 +136,12 @@ class OnlineManager:
         # журнале — от них, а не от входа (рестарт посреди обрыва давал 4 ч 51 мин
         # вместо 6 ч 51 мин, ДЭС №3 24.10)
         self._stale_last_data: dict[str, datetime | None] = {}
+        # v5.1.32 (defects[5]): после старта свежесть ещё не прочитана — одно INFO
+        # на движок; движок не читает дольше порога — с какого момента (одно WARNING)
+        self._unread_logged: set[str] = set()
+        self._lag_since: dict[str, datetime] = {}
+        # Ревью v5.1.32 (O3): с какого момента «ещё не читали» — у «unread» есть срок
+        self._unread_since: dict[str, datetime] = {}
         # Машины, у которых идёт перезапуск сторожем (повтор не создаётся)
         self._restarting: set[str] = set()
         # Эпизод, уже описанный в журнале, когда сторож движок не трогает (выключен;
@@ -477,6 +483,8 @@ class OnlineManager:
             tz=get_tz(),
             fault_ref=fault_ref,
         )
+        # Имя машины для заголовка отчёта (v5.1.32): «ДЭС №3», а не «ДГУ»
+        engine.equip_name = eq.get("name") or None
         # Свежесть телеметрии переживает рестарт (иначе до первого цикла — «нет данных»)
         if obs.get("last_data_ts"):
             engine.last_data_ts = obs["last_data_ts"]
@@ -514,8 +522,10 @@ class OnlineManager:
             self._tasks.pop(key, None)
             if engine is None or self._engines.get(key) is engine:
                 self._engines.pop(key, None)
+                self._forget_status_state(key)
         elif engine is not None and self._engines.get(key) is engine:
             self._engines.pop(key, None)
+            self._forget_status_state(key)
         if engine is not None:
             self._remember_live_ok(key, engine)
         expected = (engine is None or not getattr(engine, "_running", False)
@@ -547,6 +557,7 @@ class OnlineManager:
         Память гейта и эпоха сбрасываются ВСЕГДА — даже если движка нет."""
         engine = self._engines.pop(key, None)
         task   = self._tasks.pop(key, None)
+        self._forget_status_state(key, full=True)
         # СТОП / ПУСК с перечиткой: сегменты, по которым помним разбор, удаляются
         # и строятся заново — память гейта по машине больше не про них. Разбор,
         # который сейчас в работе, забываем: вернувшись, он увидит другую эпоху
@@ -679,6 +690,22 @@ class OnlineManager:
         for d in (self._down, self._fail_streak, self._next_try, self._cycle_warned,
                   self._progress_mark, self._diag_open):
             d.pop(key, None)
+
+    def _forget_status_state(self, key: str, full: bool = False) -> None:
+        """Память статус-тика по машине при снятии движка (перепроверка ревью v5.1.32,
+        п. 1): срок «ещё не читали» — всегда (новый движок считает его от своего
+        старта). «Устарело» и «простой» — только при СТОП (full): у сторожа и конца
+        задачи обрыв и простой продолжаются, иначе после перезапуска сторожем нет
+        «данные снова свежие (перерыв …)», а «устарели» повторяется на тот же обрыв
+        (финальная проверка, п. 1)."""
+        names = ("_unread_since",) + (("_lag_since", "_stale_since", "_stale_last_data") if full else ())
+        for name in names:
+            d = getattr(self, name, None)
+            if isinstance(d, dict):
+                d.pop(key, None)
+        s = getattr(self, "_unread_logged", None)
+        if isinstance(s, set):
+            s.discard(key)
 
     def _remember_live_ok(self, key: str, engine) -> None:
         lok = getattr(engine, "live_ok_at", None)
@@ -985,6 +1012,7 @@ class OnlineManager:
             done = await remote.cancel_and_wait(task, wait)
         if self._engines.get(key) is engine:
             self._engines.pop(key, None)
+            self._forget_status_state(key)
         if task is not None and self._tasks.get(key) is task:
             self._tasks.pop(key, None)
         self._remember_live_ok(key, engine)
@@ -1177,12 +1205,76 @@ class OnlineManager:
 
         for key, engine in list(self._engines.items()):
             try:
+                # Свежесть по прочитанному (v5.1.32, defects[5]): «устарели» — только
+                # когда принятые строки отстают от границы чтения больше порога.
+                # После старта (ещё не читали) и при движке, который не читает
+                # дольше порога «аналитика не обновляется», статус и гейт тоже
+                # заморожены, но это не обрыв связи: без «устарели» и «перерыва»
+                try:
+                    _fs, _fsec = data_freshness(engine, now, stale_sec,
+                                                getattr(engine, "poll_interval_sec", None))
+                except Exception:
+                    # Сбой — как до v5.1.32: от «сейчас»
+                    logger.warning("StatusScheduler[%s]: свежесть по прочитанному не "
+                                   "посчитана — по последним данным", key, exc_info=True)
+                    _ld = engine.last_data_ts
+                    _fsec = (now - _ld).total_seconds() if _ld is not None else None
+                    _fs = "stale" if _fsec is not None and _fsec > stale_sec else "fresh"
+                if _fs == "unread":
+                    # Срок «ещё не читали» (ревью O3: source-БД недоступна со старта,
+                    # первое чтение всегда падает) — от старта движка; дольше порога
+                    # «аналитика не обновляется» — то же WARNING, что у «lag»
+                    # От старта ТЕКУЩЕГО движка (перепроверка ревью, п. 1: ПУСК после СТОП
+                    # через 2 ч давал «не обновляется 7220 с»); к порогу — законная
+                    # догонка (п. 2: рестарт посреди раздутых суток ДЭС №3 31.10 18:43 —
+                    # окно прочитано на 181-й секунде)
+                    _st0 = getattr(engine, "started_at", None)
+                    _us = self._unread_since.get(key)
+                    if isinstance(_st0, _DT):
+                        _st0 = _aware(_st0)
+                        if _us is None or _us < _st0:
+                            _us = _st0
+                    elif _us is None:
+                        _us = now
+                    self._unread_since[key] = _us
+                    _ul = (now - _us).total_seconds()
+                    if _ul > (analytics_stale_threshold(stale_sec, getattr(engine, "poll_interval_sec", None))
+                              + _catchup_estimate_sec(engine)):
+                        if key not in self._lag_since:
+                            self._lag_since[key] = _us
+                            logger.warning("StatusScheduler[%s]: аналитика не обновляется %.0f с (с "
+                                           "запуска окно не прочитано) — статус и гейт заморожены (%s)",
+                                           key, _ul, self._engine_progress_text(key, engine, now))
+                    elif key not in self._unread_logged:
+                        self._unread_logged.add(key)
+                        logger.info("StatusScheduler[%s]: свежесть данных после запуска ещё не "
+                                    "прочитана — статус и гейт ждут первого цикла", key)
+                    continue
+                self._unread_logged.discard(key)
+                self._unread_since.pop(key, None)
+                if _fs == "lag":
+                    if key not in self._lag_since:
+                        # «Простой» — от последнего живого обновления (ревью O7)
+                        self._lag_since[key] = _lag_base(engine) or now
+                        logger.warning("StatusScheduler[%s]: аналитика не обновляется %.0f с — "
+                                       "статус и гейт заморожены (%s)", key, _fsec,
+                                       self._engine_progress_text(key, engine, now))
+                    continue
+                _lag_from = self._lag_since.pop(key, None)
+                if _lag_from is not None:
+                    logger.info("StatusScheduler[%s]: аналитика снова обновляется (простой %s)",
+                                key, _fmt_dur((now - _lag_from).total_seconds()))
+                if _fs == "hold":
+                    # W7 (перепроверка ревью, п. 3): движок не читал окно дольше порога
+                    # телеметрии и опроса — UI уже прячет живой статус (analytics_stale);
+                    # тик так же замораживает статус и гейт, молча
+                    logger.debug("StatusScheduler[%s]: окно не читалось %.0f с — статус и гейт "
+                                 "ждут чтения", key, _fsec or 0.0)
+                    continue
                 # Телеметрия устарела → статус не пересчитываем (остаётся со своим
                 # timestamp'ом), гейт не запускаем — «норма от ИИ» без данных подрывает доверие
-                if engine.last_data_ts is not None and (
-                    (now - engine.last_data_ts).total_seconds() > stale_sec
-                ):
-                    _age = (now - engine.last_data_ts).total_seconds()
+                if _fs == "stale":
+                    _age = _fsec or 0.0
                     if key not in self._stale_since:
                         # Вход в «устарело» — одно WARNING (v5.1.24: 17.10 было
                         # только DEBUG каждую минуту — 4 сут тишины в журнале)
@@ -1191,8 +1283,12 @@ class OnlineManager:
                         if _stl is None:
                             _stl = self._stale_last_data = {}
                         _stl[key] = engine.last_data_ts
-                        logger.warning("StatusScheduler[%s]: данные устарели %.0f с — статус и "
+                        # Отставание по прочитанному и возраст данных от «сейчас» (ревью O7)
+                        _ld0 = engine.last_data_ts
+                        _da = (now - _aware(_ld0)).total_seconds() if _ld0 is not None else None
+                        logger.warning("StatusScheduler[%s]: данные устарели %.0f с%s — статус и "
                                        "гейт заморожены (%s)", key, _age,
+                                       (f" (последние данные {_da:.0f} с назад)" if _da is not None else ""),
                                        self._engine_progress_text(key, engine, now))
                     else:
                         logger.debug("StatusScheduler[%s]: данные устарели (%.0fс) — пропуск",
@@ -1201,12 +1297,11 @@ class OnlineManager:
                 _since_stale = self._stale_since.pop(key, None)
                 _last_before = (getattr(self, "_stale_last_data", None) or {}).pop(key, None)
                 if _since_stale is not None:
-                    # Перерыв — от последних данных до обрыва (v5.1.25, П8)
-                    _from = _last_before or _since_stale
-                    if _from.tzinfo is None:
-                        _from = _from.replace(tzinfo=timezone.utc)
+                    # Перерыв — по данным (v5.1.32, defects[6]): от последней строки
+                    # до обрыва до первой после него, а не до тика, заметившего
+                    # свежесть («перерыв 4 мин» при дыре 3 мин 11 с)
                     logger.info("StatusScheduler[%s]: данные снова свежие (перерыв %s)", key,
-                                _fmt_dur((now - _from).total_seconds()))
+                                hole_text(engine, _last_before or _since_stale, now, stale_sec))
 
                 seg = await online_db.get_open_segment(
                     engine.router_sn, engine.equip_type, engine.panel_id
@@ -1596,6 +1691,127 @@ def _catchup_estimate_sec(engine) -> float:
     return (int(days) + 1) * 60.0
 
 
+def _aware(ts: datetime) -> datetime:
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
+def data_freshness(engine, now: datetime, stale_sec: float,
+                   poll_interval_sec: float | None = None) -> tuple[str, float | None]:
+    """Свежесть телеметрии движка по прочитанному (v5.1.32, defects[5]).
+
+    До v5.1.32 — «сейчас − last_data_ts > порога»: last_data_ts двигается только
+    чтением окна, поэтому паузы пакетов 43–54 с (правило N+1 — ещё до 30 с),
+    закрытие суточного реза и холодная загрузка после рестарта давали «данные
+    устарели» при живой связи (26 из 95 входов 24.10–01.11). Теперь отставание —
+    data_read_to − last_data_ts: насколько принятые строки старше границы
+    последнего чтения истории открытого окна.
+
+    → (состояние, секунды): "fresh" — свежо (данных ещё не было вовсе — тоже,
+    как раньше); "unread" — после старта окно ещё не читалось, свежесть
+    неизвестна; "lag" — движок не читает дольше порога «аналитика не
+    обновляется» (analytics_stale_threshold, 180 с), секунды — сколько;
+    "stale" — строки отстают от границы чтения больше stale_sec, секунды — на
+    сколько; "hold" — окно не читалось дольше порога телеметрии и опроса (W7, как
+    у API), статус и гейт ждут молча. Без запросов."""
+    ld = getattr(engine, "last_data_ts", None)
+    rt = getattr(engine, "data_read_to", None)
+    if rt is None:
+        return ("unread", None) if ld is not None else ("fresh", None)
+    rt = _aware(rt)
+    # Лаг — от последнего живого обновления (live_ok_at), как у API analytics_stale
+    # (ревью v5.1.32, O2): от границы чтения тик и API расходились на цикл, а цикл,
+    # где окно упало после чтения истории, лагом не считался; запасной — граница
+    lag = (_aware(now) - (_lag_base(engine) or rt)).total_seconds()
+    if lag > analytics_stale_threshold(stale_sec, poll_interval_sec):
+        return "lag", lag
+    # W7, как у API (health_fields): окно не читалось дольше порога телеметрии и
+    # опроса — data_stale недостоверен, статус и гейт ждут (перепроверка ревью, п. 3)
+    _rd = (_aware(now) - rt).total_seconds()
+    if _rd > float(stale_sec) + float(poll_interval_sec or 30):
+        return "hold", _rd
+    if ld is None:
+        return "fresh", None
+    age = max(0.0, (rt - _aware(ld)).total_seconds())
+    if age > float(stale_sec):
+        return "stale", age
+    return "fresh", age
+
+
+def _lag_base(engine) -> datetime | None:
+    """Последнее живое обновление движка (live_ok_at, если оно настоящее — не момент
+    старта), иначе граница последнего чтения (data_read_to). None — ни того, ни другого."""
+    lok = getattr(engine, "live_ok_at", None)
+    if isinstance(lok, _DT) and getattr(engine, "live_ok_real", False):
+        return _aware(lok)
+    rt = getattr(engine, "data_read_to", None)
+    return _aware(rt) if isinstance(rt, _DT) else None
+
+
+def data_stale_for(mgr, key: str, last_data_ts: datetime | None, now: datetime,
+                   stale_sec: float) -> bool:
+    """data_stale для API (v5.1.32): у работающего движка, уже читавшего окно, —
+    по прочитанному (data_freshness: строки отстают от границы чтения больше
+    порога); иначе — как раньше, «сейчас − last_data_ts наблюдения > порога».
+    Движок не читает — data_stale замирает на последнем чтении; недостоверность
+    несёт analytics_stale (health_fields: движок не читал дольше порога телеметрии
+    и опроса — W7, или лаг больше порога). Только память менеджера."""
+    eng = None
+    try:
+        eng = mgr._engines.get(key) if mgr is not None else None
+    except Exception:
+        eng = None
+    rt = getattr(eng, "data_read_to", None) if eng is not None else None
+    ld = getattr(eng, "last_data_ts", None) if eng is not None else None
+    if rt is not None and ld is not None:
+        return (_aware(rt) - _aware(ld)).total_seconds() > float(stale_sec)
+    return last_data_ts is None or (_aware(now) - _aware(last_data_ts)).total_seconds() > stale_sec
+
+
+# Одиночная строка внутри обрыва: следующая дыра начинается с той же метки
+_HOLE_CHAIN_SEC = 0.5
+
+
+def hole_text(engine, last_before: datetime | None, now: datetime, stale_sec: float = 90.0) -> str:
+    """«Перерыв» на выходе из «данные устарели» (v5.1.32, defects[6]): по дырам в
+    строках (engine.data_holes) с последних данных до обрыва — от них до конца
+    последней дыры: «3 мин 11 с: 18:07:28 → 18:10:39» (поздняя строка внутри
+    обрыва дыру не делит). Дыр нет (конец пришёл закрытым окном) — «не больше
+    N» до последней строки; совсем нечем — как раньше, от последних данных до тика.
+    Ревью v5.1.32: в счёт — только дыры длиннее порога stale_sec (O4: пауза 40 с
+    после возврата связи перерыв не удлиняет); концы в разные сутки — с датой (O6)."""
+    from analytics.labels import _local_tz, fmt_duration, fmt_local
+    lb = _aware(last_before) if last_before is not None else None
+    tz = getattr(engine, "tz", None)
+    try:
+        hs = sorted((_aware(a), _aware(b)) for a, b in list(getattr(engine, "data_holes", None) or [])
+                    if lb is not None and _aware(a) >= lb - timedelta(seconds=1))
+        # «Устарело» шло без перерыва от lb до сейчас — все дыры длиннее порога после
+        # lb внутри этого обрыва (финальная проверка, п. 2: поздняя пачка строк
+        # 06:00–06:05 из очереди db-writer или живой островок 20–30 с, который тик не
+        # застал, обрыв не делят): конец — у последней такой дыры. Короткие паузы
+        # (≤ порога) после возврата не захватываются (O4); короткая дыра сразу за
+        # одиночной строкой (та же метка) — ещё обрыв (перепроверка, п. 4: 18:07:28 →
+        # 18:10:10 → 18:10:39 — 3 мин 11 с)
+        _big = [h for h in hs if (h[1] - h[0]).total_seconds() > float(stale_sec)]
+        end = max((h[1] for h in _big), default=None)
+        if end is not None:
+            for a, b in hs:
+                if abs((a - end).total_seconds()) <= _HOLE_CHAIN_SEC and b > end:
+                    end = b
+        if end is not None:
+            a, b = lb, end
+            _z = _local_tz(tz) or timezone.utc
+            _day = a.astimezone(_z).date() != b.astimezone(_z).date()
+            return (f"{fmt_duration((b - a).total_seconds())}: {fmt_local(a, tz, day=_day)} → "
+                    f"{fmt_local(b, tz, day=_day)}")
+        ld = getattr(engine, "last_data_ts", None)
+        if lb is not None and ld is not None and _aware(ld) > lb:
+            return f"не больше {fmt_duration((_aware(ld) - lb).total_seconds())}"
+    except Exception:
+        logger.warning("Перерыв по данным не определён — от тика", exc_info=True)
+    return _fmt_dur((_aware(now) - lb).total_seconds()) if lb is not None else "?"
+
+
 def analytics_stale_threshold(data_stale_sec: float, poll_interval_sec: float | None = None) -> int:
     """Порог «аналитика не обновляется» (критика v5.1.24, К7).
 
@@ -1660,6 +1876,18 @@ def health_fields(mgr: "OnlineManager | None", key: str, monitoring_status: str 
         stale_by_data = bool(data_stale) and (
             lag is None or lag > float(data_stale_sec or 0)
             or not (h or {}).get("live_ok_real", False))
+        # Ревью v5.1.32 (O1): data_stale по прочитанному замирает на последнем чтении
+        # (обычно «ложь») — W7 не срабатывал, и при зависании analytics_stale ждал
+        # лага 180 с. Движок не читал дольше порога телеметрии и опроса — тоже W7
+        try:
+            _eng = getattr(mgr, "_engines", {}).get(key) if mgr is not None else None
+            _rt = getattr(_eng, "data_read_to", None) if _eng is not None else None
+            if isinstance(_rt, _DT):
+                _pl = float((h or {}).get("poll_interval_sec") or poll_interval_sec or 30)
+                if (now - _aware(_rt)).total_seconds() > float(data_stale_sec or 0) + _pl:
+                    stale_by_data = True
+        except Exception:
+            logger.warning("API: граница чтения движка %s не проверена", key, exc_info=True)
         out.update({
             "analytics_updated_at": lok.isoformat() if isinstance(lok, _DT) else None,
             "analytics_lag_sec":    lag,

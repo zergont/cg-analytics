@@ -706,6 +706,61 @@ def _start_tail(sp: dict[str, Any], tz=None) -> list[str]:
     return out
 
 
+def _runup_below_first(sp: dict[str, Any]) -> bool:
+    """Первый отсчёт пуска ниже порога просадки — и обороты, и частота его кадра
+    (v5.1.32, ревью А5: ДГУ №2 12.10 13:44:39 — 1421 об/мин «на номинале»).
+    Профиль до v5.1.32 (порога в нём нет) — False."""
+    thr, r1 = sp.get("runup_rpm"), sp.get("first_rpm")
+    if not isinstance(thr, (int, float)) or not isinstance(r1, (int, float)) or r1 >= thr:
+        return False
+    f1, hz = sp.get("first_freq"), sp.get("runup_hz")
+    return not (isinstance(f1, (int, float)) and isinstance(hz, (int, float)) and f1 >= hz)
+
+
+def _runup_tail(sp: dict[str, Any], tz=None) -> str | None:
+    """Выход на порог просадки (v5.1.32, defects[7]): «1485 об/мин и выше — с
+    12:02:58»; взят по частоте — «49,5 Гц и выше — с …» (ревью А5). Порог не
+    взят — «1485 об/мин ещё не набрал» (ждём: живой край или суточный рез внутри
+    предела), «… до замыкания автомата не набрал», «… до конца окна пуска не
+    набрал», «… в первые 30 с не набрал». None — порог на отсчёте выхода на
+    рабочие обороты, до них не вышел или профиль до v5.1.32 (поля runup_rpm нет)."""
+    from datetime import datetime, timedelta
+    thr, ru, ra = sp.get("runup_rpm"), sp.get("runup_to"), sp.get("rated_at")
+    if not isinstance(thr, (int, float)) or not ra:
+        return None
+    try:
+        dra = datetime.fromisoformat(str(ra))
+        if ru:
+            if datetime.fromisoformat(str(ru)) <= dra:
+                return None
+            t = fmt_local(ru, tz)
+            if not t:
+                return None
+            if sp.get("runup_unobserved"):
+                # Разрыв связи до предела, первый отсчёт после — уже на пороге (п. 5)
+                return f"выход на {_rpm(thr)} об/мин прошёл без связи (первый отсчёт после разрыва — {t})"
+            hz = sp.get("runup_hz")
+            if sp.get("runup_by") == "freq" and isinstance(hz, (int, float)):
+                return f"{_hz(hz)} Гц и выше — с {t}"
+            return f"{_rpm(thr)} об/мин и выше — с {t}"
+        if sp.get("runup_unseen"):
+            # Связь пропала не позже предела и вернулась уже после «Работы» (финальная
+            # проверка, п. 3): разгон не наблюдали — и просадки по нему нет
+            return f"выход на {_rpm(thr)} об/мин не наблюдали — связь пропала до предела"
+        if sp.get("runup_pending"):
+            return f"{_rpm(thr)} об/мин ещё не набрал"
+        mx = sp.get("runup_max_sec")
+        t_to = datetime.fromisoformat(str(sp["t_to"])) if sp.get("t_to") else None
+        if isinstance(mx, (int, float)) and t_to is not None and t_to < dra + timedelta(seconds=mx):
+            return (f"{_rpm(thr)} об/мин до замыкания автомата не набрал" if sp.get("end_by") == "breaker"
+                    else f"{_rpm(thr)} об/мин до конца окна пуска не набрал")
+        if isinstance(mx, (int, float)):
+            return f"{_rpm(thr)} об/мин в первые {fmt_duration(mx)} не набрал"
+        return f"{_rpm(thr)} об/мин не набрал"
+    except (TypeError, ValueError):
+        return None
+
+
 def start_profile_text(sp: dict[str, Any] | None, tz=None) -> str | None:
     """Строка профиля пуска без заголовка: «выход на номинал за 9 с; обороты
     1439–1584 об/мин, частота 48,1–52,9 Гц; раскачка 1 мин 50 с, 6 смен знака;
@@ -728,12 +783,26 @@ def start_profile_text(sp: dict[str, Any] | None, tz=None) -> str | None:
             else f"первый отсчёт после обрыва {_t0}" if _t0 else "первый отсчёт после обрыва"))
     elif isinstance(rsec, (int, float)) and _first:
         _bnd = sp.get("rated_bound_sec")
-        parts.append("на номинале с первого отсчёта"
-                     + (f" (разгон между отсчётами, не дольше {fmt_duration(_bnd)})"
-                        if isinstance(_bnd, (int, float)) and _bnd > 0 else ""))
+        _bt = (f"разгон между отсчётами, не дольше {fmt_duration(_bnd)}"
+               if isinstance(_bnd, (int, float)) and _bnd > 0 else "")
+        _ru = _runup_tail(sp, tz)
+        if _runup_below_first(sp):
+            # v5.1.32 (defects[7]): первый отсчёт — рабочие обороты, но ниже порога
+            # просадки (1406 об/мин, 46,6 Гц) — «на номинале» было неправдой; порог
+            # не взят (окно идёт, предел вышел) — тоже не «на номинале» (ревью А5)
+            _fv = ", ".join(x for x in (
+                f"{_rpm(sp['first_rpm'])} об/мин" if isinstance(sp.get("first_rpm"), (int, float)) else "",
+                f"{_hz(sp['first_freq'])} Гц" if isinstance(sp.get("first_freq"), (int, float)) else "",
+            ) if x)
+            _fv = "; ".join(x for x in (_fv, _bt) if x)
+            parts.append("на рабочих оборотах с первого отсчёта" + (f" ({_fv})" if _fv else "")
+                         + (f", {_ru}" if _ru else ""))
+        else:
+            parts.append("на номинале с первого отсчёта" + (f" ({_bt})" if _bt else ""))
     else:
-        parts.append(f"выход на номинал за {fmt_duration(rsec)}" if isinstance(rsec, (int, float))
-                     else "до номинала не вышел")
+        parts.append((f"выход на номинал за {fmt_duration(rsec)}" if isinstance(rsec, (int, float))
+                      else "до номинала не вышел")
+                     + (f", {_runup_tail(sp, tz)}" if _runup_tail(sp, tz) else ""))
     rr = []
     _r = _span_txt(sp.get("rpm"), "об/мин", _rpm)
     if _r:
@@ -744,9 +813,11 @@ def start_profile_text(sp: dict[str, Any] | None, tz=None) -> str | None:
     if rr:
         parts.append(", ".join(rr))
     sw = []
-    if (sp.get("swing_sec") or 0) >= 1:
+    # Пока ждём порога, раскачка — от отсчёта разгона: не печатаем (ревью v5.1.32, п. 6)
+    _wait_rp = bool(sp.get("runup_pending")) and not sp.get("runup_to")
+    if (sp.get("swing_sec") or 0) >= 1 and not _wait_rp:
         sw.append(f"раскачка {fmt_duration(sp.get('swing_sec'))}")
-    if sp.get("flips"):
+    if sp.get("flips") and not _wait_rp:
         sw.append(_flips_txt(sp["flips"]))
     if sw:
         parts.append(", ".join(sw))

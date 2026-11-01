@@ -846,7 +846,8 @@ async def _analyse_segment_chain(
                             f"{meta.get('task_id') or '?'} осталась на шлюзе") from None
                 else:
                     content = await _call
-                if not content:
+                # Ответ из одних пробелов — тоже пустой (v5.1.32, ревью O8)
+                if not content or not str(content).strip():
                     raise EmptyLLMResponse("модель вернула пустой ответ")
                 f = _llm_result_fields(meta, entry["model"])
                 # Чужой язык в ответе (иероглифы, английские фразы; v5.1.22, В4):

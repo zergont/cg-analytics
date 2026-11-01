@@ -393,7 +393,9 @@ check(parts["verdict"]["level"] == "НОРМА" and parts["verdict"]["remarks_n"
 check(any(c.get("check") == "source_rpm_glitch" and "04:42:32" in c.get("details", "")
           for c in parts["failed_checks"]), f"1р: строка в замечаниях, МСК: {parts['failed_checks']}")
 md = render_summary_md(parts)
-check("❗ отброшены отсчёты оборотов" in md, f"1р: строка в сводке:\n{md}")
+# v5.1.32 (defects[11]): НОРМА без замечаний — блок «К сведению» и ℹ️ (было «### Замечания» и ❗)
+check("### К сведению" in md and "ℹ️ отброшены отсчёты оборотов" in md and "### Замечания" not in md,
+      f"1р: строка в сводке:\n{md}")
 rem = _remarks_from_summary({"report_summary_json": parts}) or ""
 check("[качество данных, на вердикт не влияет]" in rem, f"1р: вход модели: {rem}")
 check("01:42:32" in _check_details(_c, U) and "04:42:32" in _check_details(_c, MSK),

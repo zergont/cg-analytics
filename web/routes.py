@@ -254,6 +254,8 @@ async def analyze_stream(
             md = to_markdown(
                 segments, router_sn, equip_type, panel_id,
                 ts_from_utc, ts_to_utc, _AV, tz=tz,
+                # Имя машины из реестра (v5.1.32): у ДЭС №3 было «ДГУ»
+                equip_name=eq.get("name"),
             )
             summary = build_run_summary(segments)
             yield _evt({"stage": "build", "status": "done",
@@ -1338,6 +1340,18 @@ async def update_equipment(
         "controller_id": controller_id or None,
         "engine_id": engine_id or None,
     })
+    # Имя машины в заголовке отчёта (v5.1.32, ревью O9) — и у живого движка, без
+    # рестарта: менеджер берёт его из реестра только при сборке движка
+    try:
+        from online.manager import get_manager
+        _eng = get_manager()._engines.get(f"{router_sn}|{equip_type}|{panel_id}")
+        if _eng is not None:
+            _eng.equip_name = name or None
+    except RuntimeError:
+        pass
+    except Exception:
+        logger.warning("Имя машины у живого движка %s/%s/%s не обновлено", router_sn, equip_type,
+                       panel_id, exc_info=True)
     return RedirectResponse(url="/settings", status_code=303)
 
 
@@ -2143,6 +2157,19 @@ async def online_clear(
     )
 
 
+def _data_stale(mgr, key: str, last_data_ts, now, stale_sec: int) -> bool:
+    """data_stale API (v5.1.32, defects[5]): у работающего движка — по прочитанному
+    (online.manager.data_stale_for: строки отстают от границы последнего чтения
+    больше порога), иначе — «сейчас − last_data_ts > порога», как раньше. Сбой —
+    как раньше: ответ API не роняем."""
+    try:
+        from online.manager import data_stale_for
+        return data_stale_for(mgr, key, last_data_ts, now, stale_sec)
+    except Exception:
+        logger.warning("API: data_stale по прочитанному не посчитан для %s", key, exc_info=True)
+        return last_data_ts is None or (now - last_data_ts).total_seconds() > stale_sec
+
+
 def _engine_health_fields(mgr, key: str, obs: dict, now, stale_sec: int,
                           diagnostics: bool = False, data_stale: bool = False) -> dict:
     """«Аналитика не обновляется» отдельно от «нет связи» (v5.1.24).
@@ -2193,10 +2220,7 @@ async def api_online_status():
         # «Онлайн»/отставание считаются по обработке (processed_to догоняет
         # wall-clock даже на пустых окнах) — поэтому отдельно отдаём data_stale.
         _last_data = obs.get("last_data_ts")
-        data_stale = (
-            _last_data is None
-            or (now_utc - _last_data).total_seconds() > _stale_sec
-        )
+        data_stale = _data_stale(mgr, key, _last_data, now_utc, _stale_sec)
         cr = None
         run_state = None
         if open_seg and open_seg.get("coking_risk_json"):
@@ -2345,10 +2369,7 @@ async def api_machines():
         # Свежесть телеметрии: максимальный ts history, виденный движком.
         # Нет отметки (наблюдение ни разу не работало) → считаем устаревшим.
         _last_data = obs.get("last_data_ts")
-        data_stale = (
-            _last_data is None
-            or (_now - _last_data).total_seconds() > _stale_sec
-        )
+        data_stale = _data_stale(_mgr, key, _last_data, _now, _stale_sec)
 
         # Текущее состояние из открытого сегмента
         run_state      = seg.get("run_state")    if seg else None

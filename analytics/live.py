@@ -568,6 +568,40 @@ def _spans(points: list[tuple], t0: datetime, t1: datetime,
     return [s for s in out if s["_e"] > s["_s"] or any(p[0] >= t0 for p in s["_pts"])]
 
 
+def _drop_runup(pts: list[tuple], init: tuple | None,
+                runup: dict[str, Any] | None) -> tuple[list[tuple], tuple | None]:
+    """Отсчёты разгона пуска до порога просадки — не просадка (v5.1.32, defects[7]:
+    ДГУ №2 27.10 12:02:48 — 1406 об/мин первым отсчётом «Работы», эпизод 15041).
+
+    runup — {from, to, open, until} из профиля пуска (segmenter.start_profile):
+    from — начало прокрутки, to — первый отсчёт на пороге (None — не было),
+    until — предел ожидания (выход на рабочие обороты + runup_max_sec, ревью
+    v5.1.32, А1). Отсчёты в [from, to) отбрасываются; порога ещё нет, а ждём
+    (open: живой край или суточный рез внутри предела) — отсчёты в [from, until);
+    не дождались — ничего: настоящая просадка «не вышел на обороты». Это префикс
+    точек окна (прокрутка не позже начала рабочей части)."""
+    if not isinstance(runup, dict) or runup.get("from") is None:
+        return pts, init
+    r0 = _tz(runup["from"])
+    r1 = runup.get("to")
+    r1 = _tz(r1) if r1 is not None else None
+    incl = False
+    if r1 is None:
+        if not runup.get("open"):
+            return pts, init
+        # Ждём: отсчёт на самом пределе — тоже ещё разгон (проба A: 1450 ровно на
+        # пределе давал эпизод на 5 с), после предела отсчётов при ожидании нет
+        r1 = _tz(runup["until"]) if runup.get("until") is not None else None
+        incl = True
+
+    def _in(t: datetime) -> bool:
+        return t >= r0 and (r1 is None or t < r1 or (incl and t == r1))
+    keep = [p for p in pts if not _in(p[0])]
+    if init is not None and _in(init[0]):
+        init = None
+    return keep, init
+
+
 def _rpm_points(seg_by_addr, cfg, prm, t0, t1, held, carry, gaps, packets, horizon):
     """Отсчёты оборотов с признаком провала v* (1б): [(момент, в провале, обороты,
     k·f_min)]; отсчёт правила B на живом краю (None) пропускается до следующего.
@@ -1143,6 +1177,7 @@ def segment_spans(
     phase_out: dict | None = None,
     seg_start: datetime | None = None,
     noload_out: dict | None = None,
+    rpm_runup: dict[str, Any] | None = None,
 ) -> dict[str, list[dict[str, Any]] | None]:
     """Участки и кластеры нарушений рабочей части сегмента [t0, t1): {ключ: [кластер]}.
 
@@ -1169,6 +1204,8 @@ def segment_spans(
     разгоне решают удержанное на t0 значение «без нагрузки»; noload_out — сюда
     кладётся head (отрезок «без нагрузки» начат с t0 по удержанной нагрузке,
     _noload_spans).
+    rpm_runup (v5.1.32) — разгон своего пуска до порога просадки {from, to,
+    open}: его отсчёты ключ RPM_UNDERSPEED не берёт (_drop_runup).
     O(n) по строкам адреса."""
     t0, t1 = _tz(t0), _tz(t1)
     if t1 <= t0:
@@ -1202,6 +1239,7 @@ def segment_spans(
     def _rpm() -> None:
         pts, init = _rpm_points(seg_by_addr, cfg, prm, t0, t1, held, carry, gaps, packets,
                                 _tz(horizon) if horizon else None)
+        pts, init = _drop_runup(pts, init, rpm_runup)
         add("RPM_UNDERSPEED", _spans(pts, t0, t1, brk, init, "RPM"))
     guarded("RPM_UNDERSPEED", _rpm)
 

@@ -137,13 +137,14 @@ async def _process_segment(seg_id: int, task_id: str = "human_auto") -> None:
         return
 
     conclusion_md = analysis.get("conclusion_md") or ""
-    if not conclusion_md:
+    # Одни пробелы / переводы строк — тоже пустое (v5.1.32, ревью O8)
+    if not conclusion_md.strip():
         logger.warning("qwen/worker: conclusion_md пустой у #%d — пропускаю", seg_id)
         return
 
     _meta: dict = {}
     humanized = await humanize(conclusion_md, task_id=task_id, meta=_meta)
-    if not humanized:
+    if not humanized or not str(humanized).strip():
         logger.warning("qwen/worker: хуманизатор вернул пустой результат для #%d", seg_id)
         return
 

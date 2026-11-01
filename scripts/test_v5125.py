@@ -766,7 +766,10 @@ check(no_data_run_estimate(H0, None, 180, M(24, 9, 0)) is None and no_data_run_e
       is None and labels.no_data_hours_text(None) is None, "1.9е: нет H0/H1 — оценки нет")
 _rmd, _smd = build_no_data_report("SN", "pcc", 1, M(24, 9, 0), M(24, 12, 38, 59), tz=MSK,
                                   last_data_ts=M(24, 5, 48, 15), run_estimate=_est)
-check("Последние данные до обрыва: 2026-10-24 05:48:15" in _smd and "получены" not in _smd,
+# v5.1.32 (defects[11]): сводка заглушки — короткие метки «24.10 05:48:15 МСК», полный
+# отчёт — «2026-10-24 05:48:15 МСК» (было «… Europe/Moscow» в обеих)
+check("Последние данные до обрыва: 24.10 05:48:15 МСК." in _smd and "получены" not in _smd
+      and "Последние данные до обрыва: 2026-10-24 05:48:15 МСК." in _rmd and "Europe/" not in _smd + _rmd,
       f"1.9ж: строка «Последние данные до обрыва»: {_smd}")
 check("до ~12:05–12:08" in _smd and "до ~12:05–12:08" in _rmd and "## ⚠ Нет связи" in _smd,
       "1.9ж: оценка — в обеих частях заглушки")
@@ -1402,23 +1405,34 @@ _o_dt, _o_gas, _o_gos = _mgr.datetime, _dba.get_app_setting, _odb.get_open_segme
 _mgr.datetime, _dba.get_app_setting, _odb.get_open_segment = _FakeDT, _stale90, _none_seg
 try:
     _m = _mgr.OnlineManager.__new__(_mgr.OnlineManager)
+    # v5.1.32 (defects[5], [6]): свежесть — по прочитанному (data_read_to), перерыв — по
+    # дырам в строках (data_holes): движок читает окно каждые 30 с
     _eng27 = type("E", (), {"last_data_ts": M(24, 5, 48, 15), "router_sn": "1126246373",
-                            "equip_type": "pcc", "panel_id": 1})()
+                            "equip_type": "pcc", "panel_id": 1, "tz": MSK,
+                            "data_read_to": M(24, 7, 48, 18), "data_holes": []})()
     _m._engines = {"K": _eng27}
     _m._stale_since, _m._stale_last_data = {}, {}
+    _m._unread_logged, _m._lag_since, _m._unread_since = set(), {}, {}
     _m._engine_progress_text = lambda *a, **k: "—"
     asyncio.run(_m._tick_status_lines())
     _eng27.last_data_ts = M(24, 11, 48, 9)      # поздние строки медленной группы (12:38:28)
+    _eng27.data_read_to = M(24, 12, 38, 0)
+    _eng27.data_holes = [(M(24, 5, 48, 15), M(24, 11, 48, 9))]
     _NOW["t"] = M(24, 12, 38, 30)
     asyncio.run(_m._tick_status_lines())
     _eng27.last_data_ts = M(24, 12, 39, 7)
+    _eng27.data_read_to = M(24, 12, 39, 14)
+    _eng27.data_holes.append((M(24, 11, 48, 9), M(24, 12, 38, 59)))
     _NOW["t"] = M(24, 12, 39, 44)
     asyncio.run(_m._tick_status_lines())
 finally:
     _mgr.datetime, _dba.get_app_setting, _odb.get_open_segment = _o_dt, _o_gas, _o_gos
     _lm.removeHandler(_inf)
     _lm.setLevel(_lm_level)
-check(any("данные снова свежие (перерыв 6 ч 51 мин)" in x for x in _inf.msgs) and not _m._stale_last_data,
+# v5.1.32 (defects[6]): перерыв — от последних данных до обрыва до конца последней дыры в
+# строках (поздняя строка 11:48:09 его не делит), а не до тика 12:39:44 (было «6 ч 51 мин»)
+check(any("данные снова свежие (перерыв 6 ч 50 мин: 05:48:15 → 12:38:59)" in x for x in _inf.msgs)
+      and not _m._stale_last_data,
       f"2.7: перерыв — от последних данных 05:48:15, а не от входа 07:48:48: "
       f"{[x for x in _inf.msgs if 'свежие' in x]}")
 
@@ -1483,7 +1497,8 @@ check("last_data_ts=self.last_data_ts" not in _csrc and "last_data_ts=self.last_
 _rmd10, _smd10 = build_no_data_report("SN", "pcc", 1, M(24, 9, 0), M(24, 12, 38, 59), tz=MSK,
                                       last_data_ts=_e28n._no_data_last_before(M(24, 9, 0), _g65),
                                       run_estimate=_est10)
-check("Последние данные до обрыва: 2026-10-24 05:48:15" in _smd10 and "до ~12:05–12:08" in _smd10,
+# v5.1.32: короткая метка в сводке заглушки (см. 1.9ж)
+check("Последние данные до обрыва: 24.10 05:48:15 МСК." in _smd10 and "до ~12:05–12:08" in _smd10,
       f"2.8е: заглушка #36065: {_smd10}")
 
 # ══ 2.9. Сторож v5.1.24: новые шаги не ставят флаги цикла ══════════════════

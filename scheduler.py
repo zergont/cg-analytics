@@ -90,6 +90,8 @@ async def _run_all_equipment() -> None:
                 controller_id=controller_id,
                 engine_id=engine_id,
                 kb_path=kb_path_rel,
+                # Имя машины в заголовке отчёта (v5.1.32) — из той же строки реестра
+                equip_name=eq.get("name"),
             )
             if result.get("error"):
                 logger.error(

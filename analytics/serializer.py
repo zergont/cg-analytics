@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 from .contract import Segment, Subsegment, cap_severity
 from .labels import (
     fault_code_close_text, fmt_duration, fmt_local, fmt_number, gate_supp_label,
-    number_decimals, role_label, run_trip_name, run_trip_text, unit_ru,
+    number_decimals, role_label, run_trip_name, run_trip_text, tz_label, unit_ru,
 )
 
 
@@ -99,15 +99,22 @@ def _fmt_duration(sec: float) -> str:
 
 
 def _fmt_ts(iso: str | None, tz=None) -> str:
-    """Форматировать ISO-метку в читаемую строку с учётом часового пояса."""
+    """Форматировать ISO-метку в читаемую строку с учётом часового пояса.
+
+    v5.1.32 (defects[11]): подпись пояса — «МСК» / «UTC+N» (labels.tz_label), а не
+    имя «Europe/Moscow». Без пояса метка печатается в UTC и подписывается «UTC»:
+    tz_label(None) вернул бы пояс сервиса при времени в UTC."""
     if not iso:
         return "—"
     try:
         dt = datetime.fromisoformat(iso)
         if dt.tzinfo:
-            target = tz if tz is not None else timezone.utc
-            dt = dt.astimezone(target)
-            label = getattr(tz, "key", "UTC") if tz is not None else "UTC"
+            if tz is not None:
+                dt = dt.astimezone(tz)
+                label = tz_label(tz)
+            else:
+                dt = dt.astimezone(timezone.utc)
+                label = "UTC"
             return dt.strftime(f"%Y-%m-%d %H:%M:%S {label}")
         return iso
     except ValueError:
@@ -512,6 +519,27 @@ def _km_continued_since(segments: list, tz=None) -> tuple[str | None, str | None
     return t0.isoformat(), fmt_local(t0, tz if tz is not None else timezone.utc, seconds=False)
 
 
+def _km_tail_blind(segments: list) -> tuple[float, datetime | None, int]:
+    """Хвосты без связи «Работ» периода (v5.1.32): сумма work_sec из проверки
+    subseg_data_coverage (segmenter._tail_gap), конец последнего хвоста и число
+    хвостов (ревью А8: «до HH:MM» — только у одного)."""
+    total, end, n = 0.0, None, 0
+    for s in segments or []:
+        if getattr(s, "run_state", None) != 3:
+            continue
+        for c in getattr(s, "sequence_checks", None) or []:
+            if not isinstance(c, dict) or c.get("check") != "subseg_data_coverage":
+                continue
+            t = c.get("tail")
+            if isinstance(t, dict) and float(t.get("work_sec") or 0) > 0:
+                total += float(t["work_sec"])
+                n += 1
+                e = _dt(t.get("end"))
+                if e is not None and (end is None or e > end):
+                    end = e
+    return total, end, n
+
+
 def _key_metrics_part(segments: list, trip_roles: list[str] | None,
                       is_open: bool = False, tz=None) -> dict[str, Any] | None:
     """Ключевые показатели за весь период работы (v5.1.6; раньше — последний
@@ -576,16 +604,34 @@ def _key_metrics_part(segments: list, trip_roles: list[str] | None,
     # work_sec взвешен качеством данных (вес медианы); в заголовок — время работы
     out = {"rows": rows, "basis": "period", "work_sec": sum(w for _, w in subs),
            "work_raw_sec": work_raw, "subsegments": len(subs)}
+    # Хвост без связи (v5.1.32, defects[9]): режим после разрыва, доходящего до
+    # конца сегмента, неизвестен — это не работа. work_raw_sec не меняется (поле
+    # API), заголовок — «за {работа − хвост} работы (ещё {хвост} без связи до …)»
+    try:
+        _tail, _tail_end, _tail_n = _km_tail_blind(segments)
+        if _tail >= 1 and _tail_end is not None:
+            out["tail_blind_sec"] = round(_tail, 1)
+            out["tail_end"] = _tail_end.isoformat()
+            out["tail_n"] = _tail_n
+            if _tail_n == 1:
+                out["tail_end_text"] = fmt_local(_tail_end, tz if tz is not None else timezone.utc,
+                                                 seconds=False)
+    except Exception:
+        logger.warning("Хвост без связи в ключевых показателях не учтён — заголовок как раньше",
+                       exc_info=True)
     try:
         by_role = {r["role"]: r for r in rows}
         rpm_n = (by_role.get("RPM") or {}).get("n")
-        _by_time = work_raw < _KM_SHORT_WORK_SEC
+        # Известная работа — без хвоста без связи (ревью v5.1.32, А6: «за 1 мин 10 с
+        # работы (ещё 58 мин 50 с …)» рядом с «Мало отсчётов за работу (1 ч 00 мин …)»)
+        _known = max(0.0, work_raw - float(out.get("tail_blind_sec") or 0.0))
+        _by_time = _known < _KM_SHORT_WORK_SEC
         if _by_time or (rpm_n is not None and rpm_n < _KM_SHORT_SAMPLES):
             def _se(role: str) -> list | None:
                 r = by_role.get(role)
                 return [r.get("start"), r.get("end")] if r and r.get("start") is not None else None
             _since, _since_txt = _km_continued_since(segments, tz)
-            out["short"] = {"sec": work_raw, "n": rpm_n, "rpm": _se("RPM"),
+            out["short"] = {"sec": _known, "n": rpm_n, "rpm": _se("RPM"),
                             "freq": _se("FREQUENCY"), "open": bool(is_open),
                             "by": "time" if _by_time else "samples",
                             "since": _since, "since_text": _since_txt}
@@ -1822,8 +1868,13 @@ def render_summary_md(parts: dict[str, Any]) -> str:
           + (f". {fc['text']}" if isinstance(fc, dict) and fc.get("text") else ""))
 
     if parts.get("has_remarks"):
+        # v5.1.32 (defects[11]): НОРМА без замечаний — в блоке только проверки,
+        # не влияющие на вердикт (качество данных, наблюдения, «Висит также»):
+        # «### К сведению» и ℹ️, а не «### Замечания» под «Замечаний к работе
+        # нет» (#36117 — сбой датчика оборотов с ❗)
+        _info_only = v.get("level") == "НОРМА" and not (parts.get("remarks") or [])
         a("")
-        a("### Замечания")
+        a("### К сведению" if _info_only else "### Замечания")
         _eps_ru = lambda n: ("эпизод" if n % 10 == 1 and n % 100 != 11 else
                              "эпизода" if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else
                              "эпизодов")
@@ -1912,7 +1963,8 @@ def render_summary_md(parts: dict[str, Any]) -> str:
             a(line)
         for c in parts.get("failed_checks") or []:
             det = c.get("details") if isinstance(c, dict) else c
-            mark = "ℹ️" if isinstance(c, dict) and c.get("check") in _INFO_CHECKS else "❗"
+            mark = ("ℹ️" if _info_only or (isinstance(c, dict) and c.get("check") in _INFO_CHECKS)
+                    else "❗")
             a(f"- {mark} {det}" if det else f"- {mark} проверка не пройдена")
         # v5.1.25 (П7): бит «Общая авария» висит под громким — сведения, не замечание
         _hold = parts.get("common_alarm_hold")
@@ -1925,8 +1977,17 @@ def render_summary_md(parts: dict[str, Any]) -> str:
         # «Обычно» — медиана по времени, минимум и максимум — крайние за период
         work = km.get("work_raw_sec", km.get("work_sec"))
         a("")
-        a(f"### Ключевые показатели за {_fmt_duration(work)} работы"
-          if km.get("basis") == "period" and work else "### Ключевые показатели")
+        # Хвост без связи (v5.1.32): «за 21 ч 02 мин работы (ещё 2 ч 57 мин без
+        # связи до 09:00)» — работой он не считается, режим после него неизвестен
+        _tail = float(km.get("tail_blind_sec") or 0) if work else 0.0
+        if km.get("basis") == "period" and work and _tail >= 1:
+            _wh = ("на концах сегментов" if int(km.get("tail_n") or 1) > 1
+                   else f"до {km['tail_end_text']}" if km.get("tail_end_text") else "")
+            a(f"### Ключевые показатели за {_fmt_duration(max(0.0, work - _tail))} работы "
+              f"(ещё {_fmt_duration(_tail)} без связи" + (f" {_wh}" if _wh else "") + ")")
+        else:
+            a(f"### Ключевые показатели за {_fmt_duration(work)} работы"
+              if km.get("basis") == "period" and work else "### Ключевые показатели")
         a("")
         a("| Параметр | Обычно | Минимум | Максимум | Ед. |")
         a("|----------|-------:|--------:|---------:|-----|")
@@ -2134,6 +2195,7 @@ def build_no_data_report(
     tz=None,
     last_data_ts: "datetime | None" = None,
     run_estimate: dict[str, Any] | None = None,
+    equip_name: str | None = None,
 ) -> tuple[str, str]:
     """Заглушка отчёта для сегмента без единой строки телеметрии (data_quality == 0).
 
@@ -2144,6 +2206,10 @@ def build_no_data_report(
     v5.1.25 (П10): last_data_ts — последние данные ДО обрыва (у #36065 было
     время уже после восстановления связи), run_estimate — оценка работы за
     обрыв по счётчику наработки (labels.no_data_hours_text).
+
+    v5.1.32 (defects[11]): equip_name — имя машины из реестра (у ДЭС №3 заголовок
+    был «ДГУ»); сводка — короткие метки «25.10 09:00 — 26.10 09:00 МСК», как в
+    остальных сводках, а не «2026-10-25 09:00:00 Europe/Moscow».
     """
     fmt_ts = _make_fmt_ts(tz)
     period = f"{fmt_ts(t_start.isoformat())} — {fmt_ts(t_end.isoformat())}"
@@ -2152,6 +2218,16 @@ def build_no_data_report(
         if last_data_ts is not None
         else "Данных за период нет."
     )
+    _z = tz if tz is not None else timezone.utc
+    _zl = tz_label(tz) if tz is not None else "UTC"
+
+    def _short(dt: datetime, sec: bool) -> str:
+        d = (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).astimezone(_z)
+        return d.strftime("%d.%m %H:%M:%S" if sec or d.second else "%d.%m %H:%M")
+
+    period_s = f"{_short(t_start, False)} — {_short(t_end, False)} {_zl}"
+    last_s = (f"Последние данные до обрыва: {_short(last_data_ts, True)} {_zl}."
+              if last_data_ts is not None else "Данных за период нет.")
     try:
         from .labels import no_data_hours_text
         _est = no_data_hours_text(run_estimate, tz)
@@ -2160,9 +2236,10 @@ def build_no_data_report(
         _est = None
     if _est:
         last_line = f"{last_line} {_est}"
+        last_s = f"{last_s} {_est}"
 
     report_md = "\n".join([
-        f"# Аналитический отчёт — ДГУ `{router_sn}` / панель {panel_id}",
+        report_title(router_sn, panel_id, equip_name),
         "",
         f"**Период анализа:** {period}",
         f"**Тип оборудования:** {equip_type}",
@@ -2175,9 +2252,22 @@ def build_no_data_report(
     ])
     summary_md = (
         f"## ⚠ Нет связи\n\nСвязь с оборудованием отсутствовала весь период "
-        f"({period}). {last_line}\n"
+        f"({period_s}). {last_s}\n"
     )
     return report_md, summary_md
+
+
+def report_title(router_sn: str, panel_id: int, equip_name: str | None = None) -> str:
+    """Заголовок отчёта (v5.1.32, defects[11]): имя машины из реестра
+    (equipment_registry.name) — «ДЭС №3», «ДГУ №1 инв. 2569»; без имени — только
+    серийный номер и панель. Раньше у всех было «ДГУ», у ДЭС №3 тоже."""
+    name = " ".join(str(equip_name).split()) if equip_name else ""
+    if name:
+        # Имя — из реестра (ввод в настройках): разметка Markdown в нём экранируется
+        for ch in ("\\", "`", "*", "_", "[", "]", "#"):
+            name = name.replace(ch, "\\" + ch)
+        return f"# Аналитический отчёт — {name} (`{router_sn}` / панель {panel_id})"
+    return f"# Аналитический отчёт — `{router_sn}` / панель {panel_id}"
 
 
 def _plural(n: int, one: str, few: str, many: str) -> str:
@@ -2512,6 +2602,7 @@ def to_markdown(
     fault_ref=None,
     inherited_run_state_sec: "dict[int, float] | None" = None,
     last_close: "tuple | None" = None,
+    equip_name: str | None = None,
 ) -> str:
     """Сформировать Markdown-отчёт.
 
@@ -2521,6 +2612,7 @@ def to_markdown(
     last_close — (cause_close, t_end) последнего сегмента, как его закрывает
     движок (v5.1.25): подпись идущего нарушения «(до конца работы)» /
     «(продолжается после 09:00)» вместо «(идёт)»; None — по сегменту.
+    equip_name — имя машины из реестра для заголовка (v5.1.32); None — без имени.
     """
     fmt_ts = _make_fmt_ts(tz)
 
@@ -2528,7 +2620,8 @@ def to_markdown(
     a = lines.append
 
     # ── Заголовок ──
-    a(f"# Аналитический отчёт — ДГУ `{router_sn}` / панель {panel_id}")
+    # Имя машины из реестра (v5.1.32): у ДЭС №3 было «ДГУ»
+    a(report_title(router_sn, panel_id, equip_name))
     a(f"")
     a(f"**Период анализа:** {fmt_ts(ts_from.isoformat())} — {fmt_ts(ts_to.isoformat())}")
     a(f"**Тип оборудования:** {equip_type}")
@@ -2559,8 +2652,17 @@ def to_markdown(
     # Время в режиме: за период — по сегментам окна; с начала состояния — только
     # у головы и только её режима (раньше строки показывали сквозное время цепочки
     # без подписи: «280 ч в останове» в суточном отчёте)
+    # Хвост без связи (v5.1.32): часть времени «Работы» после последних данных
+    try:
+        _tail_rs3 = _km_tail_blind(segments)[0]
+    except Exception:
+        logger.warning("Хвост без связи в отчёте не учтён", exc_info=True)
+        _tail_rs3 = 0.0
     for rs in sorted(period_rs, key=lambda r: (r != 3, r != 0, r)):
-        a(f"| {_rs_time_label(rs)} за период | {_fmt_duration(period_rs[rs])} |")
+        # «В конце»: у открытого сегмента это живой край, а не конец сегмента (ревью)
+        _tn = (f" (из них {_fmt_duration(_tail_rs3)} в конце без связи)"
+               if rs == 3 and _tail_rs3 >= 1 else "")
+        a(f"| {_rs_time_label(rs)} за период | {_fmt_duration(period_rs[rs])}{_tn} |")
     head = segments[0] if segments else None
     inh = float((inherited_run_state_sec or {}).get(head.run_state) or 0.0) if head else 0.0
     if inh > 0:
@@ -3004,16 +3106,23 @@ def _append_subsegment(
         a("")
         a(f"| Риск | Уровень | Детали |")
         a(f"|------|---------|--------|")
+        # v5.1.32 (defects[11]): уровень по-русски («повышенный» / «высокий»,
+        # а не YELLOW / RED), нулевые слагаемые не печатаются (было 337 раз
+        # «холостой ход 0 с, ОЖ<60°C 0 с» за неделю)
         if cr_lvl != "GREEN":
-            details = (
-                f"накоплено с прожига: малая нагрузка {_fmt_duration(cr['low_load_zone_sec'])}, "
-                f"холостой ход {_fmt_duration(cr['idle_low_rpm_sec'])}, "
-                f"ОЖ<60°C {_fmt_duration(cr['coolant_below_60_sec'])}"
-            )
-            a(f"| Риск нагара | {_RISK_EMOJI.get(cr_lvl, '')} {cr_lvl} | {details} |")
+            _parts = [f"{name} {_fmt_duration(cr.get(key) or 0)}"
+                      for name, key in (("малая нагрузка", "low_load_zone_sec"),
+                                        ("холостой ход", "idle_low_rpm_sec"),
+                                        ("холодная ОЖ (< 60 °C)", "coolant_below_60_sec"))
+                      if float(cr.get(key) or 0) >= 1]
+            details = "накоплено с прожига: " + ", ".join(_parts) if _parts else "—"
+            a(f"| Риск нагара | {_RISK_EMOJI.get(cr_lvl, '')} "
+              f"{_COKING_LEVEL_RU.get(cr_lvl, cr_lvl)} | {details} |")
         if tr_lvl != "GREEN":
-            details = f"ELEVATED зона: {_fmt_duration(tr['elevated_zone_sec'])}"
-            a(f"| Тепловой | {_RISK_EMOJI.get(tr_lvl, '')} {tr_lvl} | {details} |")
+            _el = float(tr.get("elevated_zone_sec") or 0)
+            details = f"повышенная нагрузка: {_fmt_duration(_el)}" if _el >= 1 else "—"
+            a(f"| Тепловой | {_RISK_EMOJI.get(tr_lvl, '')} "
+              f"{_COKING_LEVEL_RU.get(tr_lvl, tr_lvl)} | {details} |")
         a("")
 
     # Обнаружения — блоком на уровне сегмента (_append_detections), здесь не повторяются

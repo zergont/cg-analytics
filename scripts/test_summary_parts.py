@@ -93,7 +93,9 @@ s7 = seg()
 s7.sequence_checks = [{"check": "subseg_data_coverage", "passed": False, "details": "отсутствие связи/данных: 19:20–00:31"}]
 p = build_summary_parts([s7], [])
 check(p["verdict"]["level"] == "НОРМА", f"7: связь не замечание: {p['verdict']}")
-check("❗ отсутствие связи" in render_summary_md(p), "7б: строка о связи в замечаниях осталась")
+# v5.1.32 (defects[11]): при НОРМА строка о связи — в блоке «К сведению» с ℹ️ (было «Замечания», ❗)
+check("### К сведению\n- ℹ️ отсутствие связи" in render_summary_md(p),
+      "7б: строка о связи осталась — в «К сведению»")
 s7.sequence_checks.append({"check": "order", "passed": False, "details": "порядок нарушен"})
 check(build_summary_parts([s7], [])["verdict"]["remarks_n"] == 1, "7в: прочие проверки — замечания")
 

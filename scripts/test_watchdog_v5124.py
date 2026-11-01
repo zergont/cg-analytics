@@ -1666,9 +1666,11 @@ check("**_engine_health_fields(_mgr, key, obs, _now, _stale_sec, data_stale=data
       and "_engine_health_fields(mgr, key, obs, now_utc, _stale_sec, diagnostics=True,\n"
           "                                        data_stale=data_stale)" in _s_src
       and "**_health" in _s_src, "6: оба маршрута отдают поля надзора (и data_stale в расчёт — W7)")
-check(_m_src.count("(_now - _last_data).total_seconds() > _stale_sec") == 1
-      and _s_src.count("(now_utc - _last_data).total_seconds() > _stale_sec") == 1,
-      "6: data_stale считается как раньше")
+# v5.1.32 (defects[5]): data_stale — общим помощником по прочитанному (было «now − last_data_ts»
+# в каждом маршруте); прежняя формула — запасная внутри помощника
+check(_m_src.count("data_stale = _data_stale(_mgr, key, _last_data, _now, _stale_sec)") == 1
+      and _s_src.count("data_stale = _data_stale(mgr, key, _last_data, now_utc, _stale_sec)") == 1,
+      "6: data_stale считается помощником по прочитанному")
 _html = (ROOT / "web" / "templates" / "online_monitor.html").read_text(encoding="utf-8")
 check("Аналитика не обновляется" in _html and "Движок завис — перезапуск сторожем" in _html,
       "6: страница /online — «Аналитика не обновляется» и «Движок завис»")
@@ -1825,8 +1827,10 @@ async def sec10() -> None:
     odb.get_open_segment, dba.get_app_setting = gos, setting
     try:
         m10 = mgr.OnlineManager()
+        # v5.1.32: движок уже читал окно (data_read_to) — строки отстают на 470 с
         e = NS(router_sn="SN", equip_type="pcc", panel_id=1, _fault_ref=None, tz=timezone.utc,
                last_data_ts=datetime.now(timezone.utc) - timedelta(seconds=500),
+               data_read_to=datetime.now(timezone.utc) - timedelta(seconds=30), data_holes=[],
                live_ok_at=datetime.now(timezone.utc) - timedelta(seconds=95),
                beat_mono=time.monotonic(), poll_interval_sec=30)
         m10._engines = {"SN|pcc|1": e}
@@ -1838,6 +1842,7 @@ async def sec10() -> None:
               and "аналитика обновлялась" in w[0] and calls == [],
               f"10: вход в «устарело» — одно WARNING, запросов нет: {w} {calls}")
         e.last_data_ts = datetime.now(timezone.utc)
+        e.data_read_to = datetime.now(timezone.utc)
         await m10._tick_status_lines()
         await m10._tick_status_lines()
         i = logs(m0, logging.INFO, "данные снова свежие")

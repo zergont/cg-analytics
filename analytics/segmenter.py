@@ -848,8 +848,13 @@ def _build_subsegments_for_running(
     cause_open: str | None = None,
     held: dict[str, Any] | None = None,
     live_edge: bool = False,
+    rpm_runup: dict[str, Any] | None = None,
 ) -> tuple[list[Subsegment], RiskAccumulators]:
     """L2-сегментация внутри RUN_STATE=3: ZoneTracker + fault-события.
+
+    rpm_runup — разгон своего пуска до порога просадки (v5.1.32): {from, to,
+    open} из профиля пуска; отсчёты оборотов в нём участки просадки не берут
+    (live.segment_spans).
 
     live_edge — сегмент кончается на живом краю открытого окна: только там
     правило B ждёт следующего отсчёта оборотов (v5.1.21, ревью analytics-3).
@@ -935,6 +940,7 @@ def _build_subsegments_for_running(
             noload_break_sec=float(getattr(_cr, "noload_break_sec", 0.0) or 0.0) if _carry_sp else 0.0,
             phase_out=_phase_out,
             seg_start=seg_t0, noload_out=_nl_out,
+            rpm_runup=rpm_runup,
         )
     except Exception:
         logger.warning("Участки нарушений сегмента %s не посчитаны — детекторы по подсегменту",
@@ -1362,6 +1368,58 @@ def _rpm_glitch_check(
     }
 
 
+def _tail_gap(subsegments: list[Subsegment], cfg: AnalyticsConfig) -> dict[str, Any] | None:
+    """Разрыв связи, доходящий до конца сегмента (v5.1.32, defects[9]).
+
+    Разрывы подсегментов (data_gaps — запись data_gaps или синтетический разрыв
+    идущего обрыва, уже обрезанные по подсегменту) сливаются; последний, если
+    его конец — конец сегмента и он не короче льготы опроса (heartbeat ×
+    multiplier, 90 с — как у синтетического разрыва), — хвост. После него режим
+    до конца сегмента неизвестен (суточный рез в обрыве или смена режима,
+    увиденная только после возврата связи): это не работа.
+    → {start, end, sec, work_sec} (UTC ISO; work_sec — часть хвоста в
+    нетранзиентных подсегментах, ею время работы и уменьшается) или None."""
+    if not subsegments:
+        return None
+    t_end = _iso_dt(subsegments[-1].t_end)
+    if t_end is None:
+        return None
+    try:
+        hb = float(cfg.seg("data_quality", "heartbeat_nominal_sec", default=30) or 30)
+        mult = float(cfg.seg("data_quality", "heartbeat_max_multiplier", default=3) or 3)
+    except Exception:
+        hb, mult = 30.0, 3.0
+    ivs: list[tuple[datetime, datetime]] = []
+    for s in subsegments:
+        for g in getattr(s, "data_gaps", None) or []:
+            gs, ge = _iso_dt(g.get("start")), _iso_dt(g.get("end"))
+            if gs is not None and ge is not None and ge > gs:
+                ivs.append((gs, ge))
+    if not ivs:
+        return None
+    ivs.sort()
+    merged: list[list[datetime]] = []
+    for a, b in ivs:
+        # Разрыв на стыке подсегментов обрезан по их границе — один разрыв
+        if merged and (a - merged[-1][1]).total_seconds() <= 1.0:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    a, b = merged[-1]
+    if abs((t_end - b).total_seconds()) > 1.0 or (b - a).total_seconds() < hb * mult:
+        return None
+    work = 0.0
+    for s in subsegments:
+        if getattr(s, "transient", False):
+            continue
+        s0, s1 = _iso_dt(s.t_start), _iso_dt(s.t_end)
+        if s0 is None or s1 is None:
+            continue
+        work += max(0.0, (min(s1, b) - max(s0, a)).total_seconds())
+    return {"start": a.isoformat(), "end": b.isoformat(),
+            "sec": round((b - a).total_seconds(), 1), "work_sec": round(work, 1)}
+
+
 def _sequence_checks(
     run_state: int,
     subsegments: list[Subsegment],
@@ -1402,14 +1460,42 @@ def _sequence_checks(
         else:
             runs = []
 
-        checks.append({
+        _ranges = [{"start": subsegments[r[0]].t_start, "end": subsegments[r[-1]].t_end}
+                   for r in runs]
+        # Хвост без связи (v5.1.32, defects[9]): разрыв, доходящий до конца
+        # сегмента, лежит внутри частично покрытого подсегмента и пустым его не
+        # делает — строки «❗ отсутствие связи» не было, а время шло в работу
+        # (ДЭС №3 #36178: 06:02:08–09:00 «за 24 ч 00 мин работы»). Режим после
+        # него до конца сегмента неизвестен. Сбой — без хвоста, как раньше
+        tail = None
+        try:
+            tail = _tail_gap(subsegments, cfg)
+        except Exception:
+            logger.warning("Хвост без связи сегмента не определён", exc_info=True)
+            tail = None
+        if tail is not None:
+            _hit = next((r for r in _ranges if r.get("end") == subsegments[-1].t_end), None)
+            if _hit is not None:
+                # Пустой хвостовой подсегмент уже в окнах — окно от начала разрыва
+                if _iso_dt(tail["start"]) < _iso_dt(_hit["start"]):
+                    _hit["start"] = tail["start"]
+            else:
+                _ranges.append({"start": tail["start"], "end": tail["end"]})
+            from datetime import datetime as _DT
+            details = "отсутствие связи/данных: " + ", ".join(
+                f"{_DT.fromisoformat(r['start']).strftime('%H:%M:%S')}–"
+                f"{_DT.fromisoformat(r['end']).strftime('%H:%M:%S')}" for r in _ranges)
+
+        _cov = {
             "check": "subseg_data_coverage",
-            "passed": not runs,
+            "passed": not _ranges,
             "details": details,        # UTC-текст — для старых читателей
             # Окна структурно: сводка и отчёт печатают их в местном времени
-            "ranges": [{"start": subsegments[r[0]].t_start, "end": subsegments[r[-1]].t_end}
-                       for r in runs],
-        })
+            "ranges": _ranges,
+        }
+        if tail is not None:
+            _cov["tail"] = tail
+        checks.append(_cov)
 
     # Проверка: нет активных аварийных масок на конце сегмента. Наблюдение, на
     # вердикт не влияет — аварию несёт сама панель. Сырые уровни масок в нижнем
@@ -2815,6 +2901,7 @@ def _steady_window(
 
     steady_from = t0 if _ok() else None
     last_ok_end: datetime | None = None   # момент, когда рабочие обороты ушли
+    rpm_low_from: datetime | None = None  # первый отсчёт оборотов ниже рабочих подряд
     for ts, name, v in events:
         was = _ok()
         state[name] = v
@@ -2825,8 +2912,30 @@ def _steady_window(
             last_ok_end = ts
         elif now:
             last_ok_end = None
+        if name == "rpm":
+            if v >= prm["rated_rpm"]:
+                rpm_low_from = None
+            elif rpm_low_from is None:
+                rpm_low_from = ts
     if steady_from is None:
         return None, None
+    # Кадр смены режима (v5.1.32, defects[8]; ДГУ №2 27.10: 1251 об/мин в
+    # 12:03:58, «Охлаждение» и 41,6 Гц в 12:03:59): частота пишется по изменению,
+    # удержанные 50 Гц держали «рабочие обороты», а её отсчёт того же кадра лёг
+    # на конец сегмента и в окно не попадал — выбег оставался в работе. Обороты
+    # уже ниже рабочих, частота кадра смены (± joint_tol) тоже — сброс с первого
+    # отсчёта оборотов ниже рабочих. Сбой — как раньше. Известное ограничение
+    # (ревью v5.1.32, А7): на живом краю отсчёт частоты кадра может прийти на 1–2 с
+    # позже метки смены (process_to — внутри кадра); сегмент тогда закрывается без
+    # среза, а следующий цикл его не перестраивает — закрытие сегментов не меняем
+    if next_value in (4, 5, 6) and last_ok_end is None and rpm_low_from is not None:
+        try:
+            _tol = timedelta(seconds=_joint_tol(cfg))
+            _fr = next(((ts, v) for ts, v in freq if t1 <= ts <= t1 + _tol), None)
+            if _fr is not None and _fr[1] < prm["rated_freq"]:
+                last_ok_end = rpm_low_from
+        except Exception:
+            logger.warning("Кадр смены режима для сброса оборотов не проверен", exc_info=True)
     steady_to = t1
     if (next_value in (4, 5, 6) and last_ok_end is not None
             and (t1 - last_ok_end).total_seconds() <= prm["rundown_max_sec"]):
@@ -2896,7 +3005,26 @@ def start_profile_params(cfg) -> dict[str, Any]:
         "rundown_max_sec": cp["rundown_max_sec"],
         "nominal_rpm": d("RPM_UNDERSPEED", "rated_rpm", 1500.0),
         "nominal_hz": d("LOAD_STEP", "freq_nominal_hz", 50.0),
+        # Разгон до порога просадки (v5.1.32, defects[7]): до первого отсчёта
+        # оборотов ≥ порога RPM_UNDERSPEED (или частоты ≥ порог / k) в окне пуска
+        # — разгон, не просадка и не раскачка. Выключено в KB — как до v5.1.32
+        "runup_rpm": d("RPM_UNDERSPEED", "threshold_rpm", 1485.0),
+        "runup_exclude": _runup_exclude(cfg),
+        # Предел разгона (ревью v5.1.32, А1): порог не взят за runup_max_sec от выхода
+        # на рабочие обороты — разгона нет, просадка и раскачка как в v5.1.31
+        # (медленный 1410→1486 за 190 с прятал бы и признак «неустойчивый»)
+        "runup_max_sec": d("RPM_UNDERSPEED", "runup_max_sec", 30.0),
     }
+
+
+def _runup_exclude(cfg) -> bool:
+    """RPM_UNDERSPEED.start_runup_exclude (v5.1.32): разгон пуска до порога
+    просадки не считается просадкой. Нет ключа — включено; сбой — выключено."""
+    try:
+        v = cfg.det("RPM_UNDERSPEED", "start_runup_exclude", default=True)
+        return True if v is None else bool(v)
+    except Exception:
+        return False
 
 
 def _start_origin(
@@ -3099,6 +3227,62 @@ def _iso_dt(v: Any) -> datetime | None:
         return None
 
 
+def _runup_after_limit(
+    all_by_addr: dict[int, list[dict]], cfg, rpm_a: int | None, frq_a: int | None,
+    thr: float, k: float, a: datetime, until: datetime, seg_end: datetime, gaps: list[dict] | None,
+) -> tuple[datetime | None, str | None, str | None]:
+    """Порог разгона не взят до предела until (ревью v5.1.32, п. 5: связь потеряна
+    сразу после первого отсчёта 1406 — через 30 с по часам заводилась просадка, как
+    15041). Решает первый отсчёт оборотов или частоты после предела:
+    - его ещё нет — (None, None, "wait"): ждём; "wait_brk" — и при этом разрыв связи
+      начался не позже предела (на закрытии сменой режима: разгон «не наблюдали»);
+    - до него разрыв связи, начавшийся не позже предела, и он на пороге —
+      (момент, rpm|freq, "unobserved"): разгон прошёл без связи, отсчёты до
+      разрыва — не просадка;
+    - иначе — (None, None, None): порог не набран, просадка от первого отсчёта.
+    Разрыв связи — запись data_gaps или пауза пакетов (пинг 40290, как у участков
+    live._spans) дольше льготы опроса, а не тишина регистров оборотов и частоты:
+    они пишутся по изменению (финальная проверка, п. 4). Без запросов, по строкам
+    окна; сбой — наружу (вызывающий — как раньше)."""
+    from .rpm_freq import packet_times, rpm_freq_params
+    after = until + timedelta(microseconds=1)
+    nxt = [x for x in (next(_iter_values(all_by_addr, rpm_a, after, seg_end), None),
+                       next(_iter_values(all_by_addr, frq_a, after, seg_end), None)) if x is not None]
+    s_next = min((t for t, _ in nxt), default=None)
+    s_last = max((t for addr in (rpm_a, frq_a) for t, _ in _iter_values(all_by_addr, addr, a, after)),
+                 default=a)
+    try:
+        hb = float(cfg.seg("data_quality", "heartbeat_nominal_sec", default=30) or 30)
+        mult = float(cfg.seg("data_quality", "heartbeat_max_multiplier", default=3) or 3)
+    except Exception:
+        hb, mult = 30.0, 3.0
+    pmax = hb * mult
+    end = s_next if s_next is not None else _tz(seg_end)
+    # Пауза пакетов между последним отсчётом до предела и концом ожидания, начатая
+    # не позже предела
+    pk = packet_times(all_by_addr, rpm_freq_params(cfg))
+    _pts = [s_last] + [p for p in pk if s_last < p < end] + [end]
+    brk = any((y - x).total_seconds() > pmax and x <= until for x, y in zip(_pts, _pts[1:]))
+    if not brk:
+        for g in gaps or []:
+            gs, ge = _iso_dt(g.get("gap_start")), _iso_dt(g.get("gap_end"))
+            if gs is not None and gs < end and gs <= until and (ge is None or ge > s_last):
+                brk = True
+                break
+    if s_next is None:
+        return None, None, ("wait_brk" if brk else "wait")
+    if not brk:
+        return None, None, None
+    tol = timedelta(seconds=_joint_tol(cfg))
+    hr = next(((t, v) for t, v in _iter_values(all_by_addr, rpm_a, after, s_next + tol)), None)
+    hf = next(((t, v) for t, v in _iter_values(all_by_addr, frq_a, after, s_next + tol)), None)
+    if hr is not None and hr[1] >= thr:
+        return hr[0], "rpm", "unobserved"
+    if hf is not None and hf[1] * k >= thr:
+        return hf[0], "freq", "unobserved"
+    return None, None, None
+
+
 def start_profile_carry(
     prev: dict[str, Any] | None,
     all_by_addr: dict[int, list[dict]],
@@ -3109,6 +3293,7 @@ def start_profile_carry(
     seg_end: datetime,
     open_end: bool = False,
     steady_to: datetime | None = None,
+    gaps: list[dict] | None = None,
 ) -> dict[str, Any] | None:
     """Профиль пуска «Работы»-предка у «Работы», продолжающейся через суточный
     рез (ревью v5.1.23, R1). None — профиля нет или он не этой «Работы».
@@ -3150,6 +3335,38 @@ def start_profile_carry(
                    open=bool(open_end and end_by == "state_end"))
         if cb_closed is not None and cb_closed <= t_to and not prev.get("breaker_closed_at"):
             out["breaker_closed_at"] = cb_closed.isoformat()
+        if prev.get("rated_at") is None and rated is not None and prev.get("runup_rpm") is not None:
+            out["runup_until"] = (rated + timedelta(seconds=float(prm["runup_max_sec"]))).isoformat()
+    # Разгон, не решённый к резу (ревью v5.1.32, А2: пуск в 08:59:50 — 1406, в
+    # 09:00:00 — 1440, в 09:00:10 — 1498; п. 5: ждали первого отсчёта после разрыва
+    # связи): выход на порог — по строкам этого окна в пределах runup_until предка,
+    # иначе по первому отсчёту после разрыва (_runup_after_limit). Сбой — без разгона
+    if prev.get("runup_rpm") is not None and not prev.get("runup_to") and prev.get("runup_pending"):
+        try:
+            _until = _iso_dt(out.get("runup_until"))
+            if _until is not None:
+                _thr = float(prev["runup_rpm"])
+                _hz = float(prev.get("runup_hz") or _thr / 30.0)
+                _k = _thr / _hz if _hz else 30.0
+                _rpm_a, _frq_a = cfg.role_to_addr("RPM"), cfg.role_to_addr("FREQUENCY")
+                _hit = None
+                if _until >= tf:
+                    _cap = min(seg_end, _until + timedelta(microseconds=1))
+                    _hr = next((t for t, v in _iter_values(all_by_addr, _rpm_a, tf, _cap) if v >= _thr), None)
+                    _hf = next((t for t, v in _iter_values(all_by_addr, _frq_a, tf, _cap) if v >= _hz), None)
+                    if _hr is not None and (_hf is None or _hr <= _hf):
+                        _hit = (_hr, "rpm", None)
+                    elif _hf is not None:
+                        _hit = (_hf, "freq", None)
+                if _hit is None:
+                    _hit = _runup_after_limit(all_by_addr, cfg, _rpm_a, _frq_a, _thr, _k, tf, _until, seg_end,
+                                              gaps)
+                _t, _by, _st = _hit
+                out.update(runup_to=_t.isoformat() if _t else None, runup_by=_by,
+                           runup_wait=_st in ("wait", "wait_brk"), runup_wait_brk=_st == "wait_brk",
+                           runup_unobserved=_st == "unobserved")
+        except Exception:
+            logger.warning("Разгон пуска через суточный рез не определён", exc_info=True)
     return out
 
 
@@ -3297,12 +3514,71 @@ def start_profile(
         "swing_sec": 0.0, "swing_from": None, "swing_to": None, "flips": 0,
     }
 
-    # Раскачка и смены знака — только после выхода на номинал (разгон — не раскачка)
+    # Разгон до порога просадки (v5.1.32, defects[7]; ДГУ №2 27.10 12:02:48 —
+    # 1406 об/мин и 46,6 Гц «на номинале» по рабочему порогу 1400 / 46,5, а
+    # просадка — ниже 1485): первый отсчёт оборотов ≥ порога или частоты ≥
+    # порог / k в окне пуска. До него — разгон: участки просадки его не берут
+    # (live.segment_spans, runup), раскачка и смены знака считаются от него.
+    # Не вышел за окно — None: просадка и раскачка как раньше. Сбой — как раньше
+    #
+    # Предел (ревью v5.1.32, А1): порог ищется не дальше runup_max_sec (KB, 30 с; на
+    # реальных пусках выход на порог — через 0–11 с после рабочих оборотов) от
+    # выхода на рабочие обороты (нет его — от «схватил»): дольше — runup_to None,
+    # поведение v5.1.31. Окно пуска, закрытое автоматом раньше порога (ревью А3), —
+    # тоже None: машина уже под нагрузкой ниже порога, это настоящая просадка.
+    # «Ещё ждём» (порог не взят, окно идёт: живой край или суточный рез внутри
+    # предела) решает сегментатор — runup_pending (А1, А2)
+    runup_to: datetime | None = None
+    # Порог ещё ждём (окно кончилось до предела или после него нет отсчётов) — раскачку
+    # не продлевать удержанным отсчётом разгона (финальная проверка, п. 3)
+    _rp_wait = False
+    if prm["runup_exclude"]:
+        try:
+            _thr = prm["runup_rpm"]
+            _k = prm["nominal_rpm"] / prm["nominal_hz"] if prm["nominal_hz"] else 30.0
+            _base = rated or fire
+            _until = _base + timedelta(seconds=float(prm["runup_max_sec"]))
+            _cap = min(t_to, _until + timedelta(microseconds=1))
+            _hr = next((t for t, v in _iter_values(all_by_addr, rpm_a, fire, _cap) if v >= _thr), None)
+            _hf = next((t for t, v in _iter_values(all_by_addr, frq_a, fire, _cap) if v * _k >= _thr), None)
+            _by, _st = None, None
+            if _hr is not None and (_hf is None or _hr <= _hf):
+                runup_to, _by = _hr, "rpm"
+            elif _hf is not None:
+                runup_to, _by = _hf, "freq"
+            elif t_to > _until:
+                # Предел вышел без порога — если в нём начался разрыв связи, решает
+                # первый отсчёт после разрыва (ревью v5.1.32, п. 5)
+                runup_to, _by, _st = _runup_after_limit(all_by_addr, cfg, rpm_a, frq_a, _thr, _k, fire,
+                                                        _until, seg_end, gaps)
+            _r1 = next(_iter_values(all_by_addr, rpm_a, crank, t_to), None)
+            # Частота первого отсчёта — только из его кадра (ревью А4: 50 Гц, пришедшие
+            # после порога, — не «первый отсчёт 1406 об/мин, 50 Гц»)
+            _f1 = next(_iter_values(all_by_addr, frq_a, crank,
+                                    _base + timedelta(seconds=prm["frame_tol_sec"], microseconds=1)), None)
+            _rp_wait = runup_to is None and (_st in ("wait", "wait_brk")
+                                             or (t_to <= _until and end_by == "state_end"))
+            out.update(runup_rpm=_r3(_thr), runup_hz=_r3(_thr / _k), runup_max_sec=float(prm["runup_max_sec"]),
+                       runup_until=_until.isoformat(),
+                       runup_to=runup_to.isoformat() if runup_to else None, runup_by=_by,
+                       runup_wait=_st in ("wait", "wait_brk"), runup_wait_brk=_st == "wait_brk",
+                       runup_unobserved=_st == "unobserved",
+                       first_rpm=_r3(_r1[1]) if _r1 else None,
+                       first_freq=_r3(_f1[1]) if _f1 else None)
+        except Exception:
+            logger.warning("Разгон пуска до порога просадки не определён — профиль как раньше",
+                           exc_info=True)
+            runup_to = None
+
+    # Раскачка и смены знака — только после выхода на номинал (разгон — не раскачка),
+    # с v5.1.32 — после выхода на порог просадки, если он был в окне
     if rated is not None:
         f0, r0 = prm["nominal_hz"], prm["nominal_rpm"]
         outs: list[datetime] = []
         side = flips = 0
         for t, v in freq_w:
+            if runup_to is not None and t < runup_to:
+                continue
             dev = v - f0
             if abs(dev) > prm["swing_out_hz"]:
                 r = rpm.near(t, prm["swing_pair_sec"])
@@ -3315,7 +3591,14 @@ def start_profile(
                 side = sd
         out["flips"] = flips
         if outs:
-            back = next((t for t, v in freq_w if t > outs[-1] and abs(v - f0) <= prm["swing_in_hz"]), t_to)
+            # Порог ждём, а возврата в номинал нет — конец раскачки на последнем
+            # наблюдённом отсчёте, а не на конце окна (финальная проверка, п. 3: при
+            # обрыве связи после 1406 / 46,6 Гц удержанный отсчёт давал «раскачка 1 мин
+            # 40 с» и запрет снятия гейтом без данных). Иначе — как раньше, до конца окна
+            _end = t_to
+            if _rp_wait:
+                _end = min(t_to, max([t for t, _ in rpm_w] + [t for t, _ in freq_w] + [outs[-1]]))
+            back = next((t for t, v in freq_w if t > outs[-1] and abs(v - f0) <= prm["swing_in_hz"]), _end)
             out.update(swing_sec=round((back - outs[0]).total_seconds(), 1),
                        swing_from=outs[0].isoformat(), swing_to=back.isoformat())
 
@@ -3731,7 +4014,8 @@ def segment(
                         # запрета снятия (ревью R1); окно пуска не дописывается
                         start_prev = start_profile_carry(
                             start_carry, all_by_addr, enum_periods, cfg, p_start, tf, seg_end,
-                            open_end=live_edge and p_end_raw is None, steady_to=_st_to)
+                            open_end=live_edge and p_end_raw is None, steady_to=_st_to,
+                            gaps=_held_gaps)
                 except Exception:
                     logger.warning("Профиль пуска сегмента %s не посчитан", seg_start, exc_info=True)
             # Удержанные значения на начало сегмента (v5.1.21): последняя строка
@@ -3742,6 +4026,39 @@ def segment(
             except Exception:
                 logger.warning("Удержанные значения на начало сегмента не определены", exc_info=True)
                 _seg_held = {}
+            # Разгон своего пуска до порога просадки (v5.1.32, defects[7]): окно
+            # пуска и выход на порог из профиля; профиль предка через рез — нет
+            # Ревью v5.1.32 (А1, А2): «ещё ждём» порога — окно пуска кончается концом
+            # окна (state_end), режим идёт дальше (живой край или суточный рез) и
+            # предел runup_max_sec не вышел; у продолжения через рез — профиль предка
+            _runup = None
+            _sp_r = (start_prof if isinstance(start_prof, dict) and "runup_rpm" in start_prof else
+                     start_prev if isinstance(start_prev, dict) and "runup_rpm" in start_prev else None)
+            if _sp_r is not None:
+                try:
+                    _rt = _iso_dt(_sp_r.get("runup_to"))
+                    _until = _iso_dt(_sp_r.get("runup_until"))
+                    _past = p_end_raw is None or _tz(p_end_raw) > _tz(tt)
+                    # Предел включительно: отсчёт на самом пределе ещё не прочитан, если
+                    # живой край — ровно предел (проба B2: эпизод 30 с и отзыв на 31-й)
+                    _pend = bool(_rt is None and _past and (
+                        (_sp_r.get("end_by") == "state_end" and _until is not None
+                         and _tz(seg_end) <= _until)
+                        or _sp_r.get("runup_wait")))
+                    _sp_r["runup_pending"] = _pend
+                    _runup = {"from": _iso_dt(_sp_r.get("crank_at")), "to": _rt, "open": _pend,
+                              "until": _until}
+                    # Закрыт сменой режима, после предела отсчётов нет, а связь пропала не
+                    # позже предела (финальная проверка, п. 3: связь вернулась вместе со
+                    # Стопом) — разгон «не наблюдали»: его отсчёты в просадку не идут
+                    if _rt is None and not _pend and not _past and _sp_r.get("runup_wait_brk"):
+                        _sp_r["runup_unseen"] = True
+                        _runup = {"from": _iso_dt(_sp_r.get("crank_at")),
+                                  "to": _tz(seg_end) + timedelta(microseconds=1), "open": False,
+                                  "until": _until}
+                except Exception:
+                    logger.warning("Разгон пуска для участков просадки не передан", exc_info=True)
+                    _runup = None
             subsegments, accumulators = _build_subsegments_for_running(
                 seg_id=seg_id,
                 seg_by_addr=seg_by_addr,
@@ -3760,6 +4077,7 @@ def segment(
                 held=_seg_held,
                 # Живой край — только у сегмента, идущего до края открытого окна
                 live_edge=live_edge and not _cut_inside,
+                rpm_runup=_runup,
             )
         else:
             subseg, accumulators = _build_single_subsegment(

@@ -819,10 +819,13 @@ _pA = prof_of(start_case(T_A, [
     (149, 1499.0, 49.9, 50.033, None), (160, None, 50.0, None, None), (169, 1500.0, 49.9, 50.166, 1.0)],
     [(-500, 0), (0, 3)], cb_at=169, pre=[(-11, RPM, 0.0), (-291, FREQ, 0.0), (-240, FREF, 0.0), (-240, OIL1, 66.0)],
     tail=(180, 1499.0, 50.0)))
-check(isinstance(_pA, dict) and _pA["rated_sec"] == 0.0 and _pA["swing_sec"] == 9.0 and _pA["flips"] == 0
+# v5.1.32 (defects[7]): 1426 / 47,7 Гц первым отсчётом — разгон до порога просадки 1485, не
+# раскачка (было swing_sec 9 с — от отсчёта разгона); выход на порог — 1499 в 17:24:19
+check(isinstance(_pA, dict) and _pA["rated_sec"] == 0.0 and _pA["swing_sec"] == 0.0 and _pA["flips"] == 0
+      and _pA["runup_to"] == iso(S(T_A, 9)) and _pA["first_rpm"] == 1426.0 and _pA["first_freq"] == 47.7
       and _pA["end_by"] == "breaker" and not _pA["unstable"] and _pA["fref"]["range"] == [49.966, 50.033]
       and _pA["kw_max"] == 0.0 and _pA["oil_temp"] == 66.0,
-      f"4б: 27.09 17:24 — раскачка 9 с без смен знака, автомат 17:26:59 — устойчив: {_pA}")
+      f"4б: 27.09 17:24 — разгон 1426 до 1499 не раскачка, автомат 17:26:59 — устойчив: {_pA}")
 # ДГУ №2 15.10 13:00:20 — частота 49,0–51,1 Гц, одна смена знака, задание 49,5–50,6
 T_B = M(15, 13, 0, 20)
 _pB = prof_of(start_case(T_B, [
@@ -1180,12 +1183,20 @@ check(_va({}, FREF, T_Q, 30, (S(T_Q, -1), 52.2)) == (S(T_Q, -1), 52.2)
       "4з: _value_at — строка окна, иначе посев не позже момента и не старше срока")
 
 # ── 4и. Ревью R14: номинал в кадре смены режима — «на номинале с первого отсчёта» ──
-for _nm, _pp14, _bnd in (("15.10 05:42", _pE, 31.0), ("27.09 17:24", _pA, 11.0), ("25.09 13:48", _pD, 23.0)):
+# 27.09 17:24 (_pA) с v5.1.32 — «на рабочих оборотах с первого отсчёта …» (ниже порога просадки, 4и′)
+for _nm, _pp14, _bnd in (("15.10 05:42", _pE, 31.0), ("25.09 13:48", _pD, 23.0)):
     _t14 = start_profile_text(_pp14, MSK) or ""
     check(_pp14["rated_sec"] == 0.0 and _pp14["rated_first"] is True and _pp14["rated_bound_sec"] == _bnd
           and _t14.startswith(f"на номинале с первого отсчёта (разгон между отсчётами, не дольше "
                               f"{_lbl.fmt_duration(_bnd)});") and "за 0 с" not in _t14,
           f"4и: {_nm} — номинал в кадре смены режима, оценка сверху {_bnd} с: {_t14}")
+# 4и′ (v5.1.32, defects[7]): первый отсчёт 1426 / 47,7 Гц — рабочие обороты, но ниже порога просадки:
+# «на номинале» было неправдой — значения первого отсчёта и выход на порог
+_tA = start_profile_text(_pA, MSK) or ""
+check(_pA["rated_first"] is True and _pA["rated_bound_sec"] == 11.0
+      and _tA.startswith("на рабочих оборотах с первого отсчёта (1426 об/мин, 47,7 Гц; разгон между "
+                         "отсчётами, не дольше 11 с), 1485 об/мин и выше — с 17:24:19;"),
+      f"4и′: 27.09 17:24 — первый отсчёт ниже порога просадки: {_tA}")
 check(_pB["rated_first"] is False and (start_profile_text(_pB, MSK) or "").startswith("выход на номинал за 9 с;")
       and _pF["rated_first"] is False and _p3["rated_first"] is False,
       "4и: разгон за 9–10 с (номинал в следующем кадре) — «выход на номинал за N с», как было")
@@ -1344,15 +1355,25 @@ check(_openML.start_profile and _openML.start_profile["unstable"] and len(_clUn)
 check(suppression_bans(_rowML, _dML) == [] and "start_unstable" not in
       [r["code"] for r in uncancellable_reasons(build_structural_status(_rowML, None, MSK))],
       "5в: провал под нагрузкой после окна неустойчивого пуска — снимать можно")
-# Устойчивый пуск с провалом на пуске (27.09 17:24: 1426 / 47,7 Гц) — снимать можно
+# Устойчивый пуск 27.09 17:24: 1426 / 47,7 Гц первым отсчётом — с v5.1.32 разгон, не просадка
+# (defects[7]; было: провал на пуске, снимать можно)
 _segsAo = start_case(T_A, [(-1, None, None, 50.0, None), (0, 1426.0, 47.7, None, None), (9, 1499.0, 50.0, None, None)],
                      [(-500, 0), (0, 3)], pre=[(-11, RPM, 0.0), (-291, FREQ, 0.0), (-240, OIL1, 66.0)],
                      tail=(20, 1500.0, 50.0), b=60, live_edge=True)
 _cvA, _dA = _extract_open_segment_data(_segsAo[-1])
 check(_segsAo[-1].start_profile and not _segsAo[-1].start_profile["unstable"]
-      and any(d["scenario"] == "RPM_UNDERSPEED" for d in _dA)
-      and suppression_bans(open_row(_segsAo[-1], _cvA, _dA), _dA) == [],
-      "5в: провал на устойчивом пуске (27.09 17:24) — снимать можно")
+      and not any(d["scenario"] == "RPM_UNDERSPEED" for d in _dA),
+      "5в: разгон 1426 на устойчивом пуске (27.09 17:24) — не просадка (v5.1.32)")
+# Провал после выхода на порог на устойчивом пуске (1499, затем 1426 / 47,7 Гц) — снимать можно
+_segsAo2 = start_case(T_A, [(-1, None, None, 50.0, None), (0, 1499.0, 50.0, None, None), (9, 1426.0, 47.7, None, None),
+                            (20, 1500.0, 50.0, None, None)],
+                      [(-500, 0), (0, 3)], pre=[(-11, RPM, 0.0), (-291, FREQ, 0.0), (-240, OIL1, 66.0)],
+                      tail=(30, 1500.0, 50.0), b=60, live_edge=True)
+_cvA2, _dA2 = _extract_open_segment_data(_segsAo2[-1])
+check(_segsAo2[-1].start_profile and not _segsAo2[-1].start_profile["unstable"]
+      and any(d["scenario"] == "RPM_UNDERSPEED" for d in _dA2)
+      and suppression_bans(open_row(_segsAo2[-1], _cvA2, _dA2), _dA2) == [],
+      "5в: провал после выхода на порог на устойчивом пуске — снимать можно")
 
 # ── 5г. Старая строка без профиля; сбой помощника изолирован ──
 _ch_old = _open.to_dict()
