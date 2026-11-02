@@ -119,15 +119,16 @@ def _act_row(r: Any) -> dict[str, Any]:
 
 async def hourly_aggregates(router_sn: str, equip_type: str, panel_id: int, addr: int,
                             t_from: datetime, t_to: datetime, limit: int = 2000) -> list[dict[str, Any]]:
-    """Запасной путь долгого тренда: часовые агрегаты писателя (ПО ОТСЧЁТАМ)."""
+    """Запасной путь долгого тренда: часовые агрегаты писателя (ПО ОТСЧЁТАМ).
+    Колонка времени в агрегате — `ts` (в руководстве db-writer она звалась bucket)."""
     from analytics import source as _src
     from db import remote
     async with remote.connection(_src._get_pool()) as conn:
         rows = await conn.fetch("""
-            SELECT bucket, avg_value, min_value, max_value, sample_count
+            SELECT ts AS bucket, avg_value, min_value, max_value, sample_count
             FROM history_1hour
             WHERE router_sn = $1 AND equip_type = $2 AND panel_id = $3 AND addr = $4
-              AND bucket >= $5 AND bucket < $6
-            ORDER BY bucket LIMIT $7
+              AND ts >= $5 AND ts < $6
+            ORDER BY ts LIMIT $7
         """, router_sn, equip_type, panel_id, int(addr), t_from, t_to, int(limit))
     return [dict(r) for r in rows]

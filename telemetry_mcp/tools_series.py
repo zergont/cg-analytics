@@ -382,6 +382,9 @@ def register(server: Any) -> None:
                         env.notes.append(f"{p.label}: регистр вне KB, а часовых агрегатов в источнике нет "
                                          "(history_1hour) — возьмите series по дням")
                         continue
+                    if not agg_rows:
+                        env.notes.append(f"{p.label}: регистр вне KB, записей за окно нет")
+                        continue
                     ok_samples.append(p)
                     for a in agg_rows:
                         key = a["bucket"].astimezone(tz).strftime("%d.%m.%Y")
