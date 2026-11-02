@@ -83,6 +83,15 @@ class Envelope:
     notes: list[str] = field(default_factory=list)
     rows: int | None = None
 
+    @property
+    def multi_day(self) -> bool:
+        """Окно захватывает больше одних местных суток — метки времени печатаются с датой."""
+        if self.window_from is None or self.window_to is None:
+            return False
+        from datetime import timedelta
+        end = self.window_to - timedelta(seconds=1) if self.window_to > self.window_from else self.window_to
+        return (fmt_local(self.window_from, day=True) or "")[:5] != (fmt_local(end, day=True) or "")[:5]
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "label": self.label, "tool": self.tool, "unit": self.unit,
@@ -111,9 +120,10 @@ class Envelope:
                 f"{_DROP_RU.get(k, k)} {v}" for k, v in dropped.items()) + ")")
         if self.gaps:
             parts = []
+            multi = self.multi_day
             for a, b in self.gaps[:6]:
                 dur = fmt_duration((b - a).total_seconds()) if b else "продолжается"
-                parts.append(f"{fmt_local(a)}–{fmt_local(b) if b else '…'} ({dur})")
+                parts.append(f"{fmt_local(a, day=multi)}–{fmt_local(b, day=multi) if b else '…'} ({dur})")
             more = f" и ещё {len(self.gaps) - 6}" if len(self.gaps) > 6 else ""
             clean.append(f"разрывы связи в окне: {'; '.join(parts)}{more}")
         if clean:

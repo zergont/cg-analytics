@@ -161,8 +161,18 @@ def param_from_addr(cfg: Any, catalog: dict[int, dict[str, Any]], addr: int) -> 
             step = cfg.sensor_step(role)[0]
         except Exception:  # noqa: BLE001
             step = None
-    return ParamRef(addr=addr, role=role, label=param_label(meta, cat, addr), unit=unit_ru(unit),
+    return ParamRef(addr=addr, role=role, label=param_label(meta, cat, addr), unit=_unit_ru(unit),
                     kind=str(kind), step=step, source="KB" if meta else "каталог")
+
+
+# Единицы каталога телеметрии, которых нет в labels.UNIT_RU
+_EXTRA_UNITS = {"Amps": "А", "Volts": "В", "Hz": "Гц", "RPM": "об/мин", "kPa": "кПа", "°C": "°C",
+                "psi": "psi", "gal/h": "gal/h", "%": "%", "hours": "ч", "Hours": "ч"}
+
+
+def _unit_ru(unit: str) -> str:
+    u = unit_ru(unit)
+    return _EXTRA_UNITS.get(u, u)
 
 
 def resolve_params(cfg: Any, catalog: dict[int, dict[str, Any]], names: list[str],
@@ -211,17 +221,22 @@ def _resolve_one(s: str, rm: dict[int, dict[str, Any]], catalog: dict[int, dict[
             if m.get("role") == role:
                 return a
         # роль есть в словарях, но у этой машины такого регистра нет — ищем по имени
+    # Поиск по основам слов (v5.2.3, приёмка Э1): «ток нейтрали» находит «Ток в
+    # нейтральном проводнике генератора» каталога; сперва KB, потом каталог
+    query = NAME_ALIASES.get(n, s)
+    nq = _norm(query)          # псевдоним подменяет и подстроку, и основы
+    stems = _stems(query)
     cands: list[tuple[int, str]] = []
     for a, m in rm.items():
-        d = _norm(m.get("description") or "")
-        lab = _norm(ROLE_LABELS.get(m.get("role") or "", ""))
-        if n and (n in d or (lab and n in lab)):
-            cands.append((a, m.get("description") or lab))
+        d = m.get("description") or ""
+        lab = role_label_ru(m.get("role")) or ""
+        if _match(stems, nq, d) or _match(stems, nq, lab):
+            cands.append((a, d or lab))
     if not cands:
         for a, c in catalog.items():
-            nm = _norm(c.get("name_ru") or ""), _norm(c.get("name") or "")
-            if n and (n in nm[0] or n in nm[1]):
-                cands.append((a, c.get("name_ru") or c.get("name") or str(a)))
+            nm_ru, nm_en = c.get("name_ru") or "", c.get("name") or ""
+            if _match(stems, nq, nm_ru) or _match(stems, nq, nm_en):
+                cands.append((a, nm_ru or nm_en or str(a)))
     if len(cands) == 1:
         return cands[0][0]
     if len(cands) > 1:
@@ -231,7 +246,36 @@ def _resolve_one(s: str, rm: dict[int, dict[str, Any]], catalog: dict[int, dict[
         listing = "; ".join(f"{a} {nm}" for a, nm in cands[:12])
         raise ToolError(f"«{s}» подходит нескольким регистрам, уточните адресом: {listing}")
     raise ToolError(f"Параметр «{s}» не найден. Примеры: мощность, частота, обороты, ток L1, "
-                    "давление масла, температура ОЖ, напряжение, АКБ, или адрес регистра.")
+                    "давление масла, температура ОЖ, напряжение, АКБ, ток нейтрали, или адрес регистра.")
+
+
+# Имена без роли KB → запрос по основам слов к описаниям/каталогу
+NAME_ALIASES: dict[str, str] = {
+    "ток нейтрали": "ток нейтральном проводнике", "нейтраль": "ток нейтральном проводнике",
+    "ток в нейтрали": "ток нейтральном проводнике", "ток нейтрального проводника": "ток нейтральном проводнике",
+    "ток нейтральный": "ток нейтральном проводнике", "i n": "ток нейтральном проводнике",
+    "i_n": "ток нейтральном проводнике", "in": "ток нейтральном проводнике",
+}
+
+
+def _stems(s: str) -> list[str]:
+    """Основы слов запроса: первые 5 букв каждого слова длиннее 5, иначе слово целиком."""
+    out: list[str] = []
+    for w in _norm(s).replace("/", " ").replace("—", " ").split():
+        w = w.strip(".,;:()«»\"'")
+        if len(w) >= 2:
+            out.append(w[:5] if len(w) > 5 else w)
+    return out
+
+
+def _match(stems: list[str], n: str, text: str) -> bool:
+    """Подстрока целиком или все основы слов запроса в тексте."""
+    if not text:
+        return False
+    t = _norm(text)
+    if n and n in t:
+        return True
+    return bool(stems) and all(st in t for st in stems)
 
 
 def key_roles(cfg: Any) -> list[str]:

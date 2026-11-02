@@ -148,6 +148,68 @@ def resample(series: dict[str, list[Point]], t0: datetime, t1: datetime, n_point
     return Resampled("bucket", step, times, cells, summary, n_raw)
 
 
+def bucket_times(t0: datetime, t1: datetime, step_sec: int) -> list[datetime]:
+    """Начала корзин шага step_sec, выровненные по эпохе UTC (как time_bucket)."""
+    from datetime import timezone
+    epoch0 = int(t0.timestamp()) // step_sec * step_sec
+    t = datetime.fromtimestamp(epoch0, tz=timezone.utc)
+    out: list[datetime] = []
+    while t < t1:
+        out.append(t)
+        t = t + timedelta(seconds=step_sec)
+    return out
+
+
+def _bucket_in_gap(a: datetime, b: datetime, gaps: list[tuple[datetime, datetime | None]]) -> bool:
+    return any(ga <= a and (gb is None or gb >= b) for ga, gb in gaps)
+
+
+def from_buckets(series: dict[str, list[dict[str, Any]]], t0: datetime, t1: datetime, step_sec: int,
+                 gaps: list[tuple[datetime, datetime | None]] | None = None) -> Resampled:
+    """Ряды из корзин БД (history.bucketed_history): корзина без записей держит
+    последнее значение предыдущей (ступенчато), корзина целиком в разрыве связи —
+    пусто и обрывает удержание. Сводка: первое/последнее — по записям, минимум и
+    максимум — точные моменты записей (t_min/t_max из SQL; без них — первая запись корзины)."""
+    gaps = gaps or []
+    times = bucket_times(t0, t1, step_sec)
+    cells: dict[str, list[Any]] = {}
+    summary: dict[str, dict[str, Any]] = {}
+    n_raw: dict[str, int] = {}
+    for key, buckets in series.items():
+        by_b = {b["b"]: b for b in buckets}
+        col: list[Any] = [None] * len(times)
+        prev_last: float | None = None
+        n = 0
+        first = last = mn = mx = None
+        for i, t in enumerate(times):
+            t_end = t + timedelta(seconds=step_sec)
+            if _bucket_in_gap(t, t_end, gaps):
+                prev_last = None
+                continue
+            b = by_b.get(t)
+            if b is None:
+                if prev_last is not None:
+                    col[i] = (prev_last, prev_last, prev_last)
+                continue
+            vmin, vmax = float(b["vmin"]), float(b["vmax"])
+            if prev_last is not None:
+                vmin, vmax = min(vmin, prev_last), max(vmax, prev_last)
+            col[i] = (vmin, float(b["avg"]), vmax)
+            prev_last = float(b["vlast"]) if b.get("vlast") is not None else prev_last
+            n += int(b.get("n") or 0)
+            if first is None:
+                first = (b["t_first"], float(b["vfirst"]))
+            last = (b["t_last"], float(b["vlast"]))
+            if mn is None or float(b["vmin"]) < mn[1]:
+                mn = (b.get("t_min") or b["t_first"], float(b["vmin"]))
+            if mx is None or float(b["vmax"]) > mx[1]:
+                mx = (b.get("t_max") or b["t_first"], float(b["vmax"]))
+        cells[key] = col
+        n_raw[key] = n
+        summary[key] = {"first": first, "last": last, "min": mn, "max": mx, "n": n} if first else {}
+    return Resampled("bucket", step_sec, times, cells, summary, n_raw)
+
+
 def _summary(pts: list[Point], t0: datetime, t1: datetime) -> dict[str, Any]:
     win = [(t, v) for t, v in pts if t0 <= t < t1]
     if not win:

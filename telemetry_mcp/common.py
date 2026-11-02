@@ -303,8 +303,7 @@ async def run_tool(
     task_id, source = ctx_task_and_source(ctx)
     if not st.allowed(source, tool):
         return f"ОШИБКА: инструмент {tool} не разрешён источнику «{source or 'default'}»."
-    label = next_label(task_id)
-    env = Envelope(label=label, tool=tool, unit=unit.title if unit else "—",
+    env = Envelope(label="", tool=tool, unit=unit.title if unit else "—",
                    unit_id=unit.id if unit else None)
     t0 = time.monotonic()
     status, error, text = "ok", None, ""
@@ -319,6 +318,8 @@ async def run_tool(
         out, cut = _cap_result(out, int(st.limit("result_max_tokens") or 8000))
         if cut:
             env.truncation.append(cut)
+        # Метка [Tn] — только у состоявшегося ответа: ошибка номер не съедает (приёмка Э1)
+        env.label = next_label(task_id)
         text = env.text() + ("\n\n" + out if out else "")
     except ToolError as e:
         status, error = "error", str(e)

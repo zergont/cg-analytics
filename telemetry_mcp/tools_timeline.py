@@ -93,8 +93,12 @@ def debounce(events: list[dict[str, Any]], window_sec: float, min_count: int) ->
     return out
 
 
-def _fmt_event(e: dict[str, Any], day: bool, prefix: str = "") -> str:
+def _fmt_event(e: dict[str, Any], day: bool, prefix: str = "", t0: datetime | None = None) -> str:
     kind = e["kind"]
+    # Событие, начавшееся до окна (эпизод, период), печатается с датой — иначе оно
+    # встаёт «впереди 09:00» без объяснения (приёмка Э1)
+    if t0 is not None and e.get("ts") is not None and e["ts"] < t0:
+        day = True
     t = fmt_t(e["ts"], day=day)
     dur = ""
     if e.get("end") and e.get("ts"):
@@ -187,7 +191,12 @@ def register(server: Any) -> None:
             lines_ev: list[tuple[datetime, str]] = []
             day = (fmt_local(t0, day=True) or "")[:5] != (fmt_local(t1 - timedelta(seconds=1), day=True) or "")[:5]
             for e in events:
-                lines_ev.append((e["ts"], _fmt_event(e, day)))
+                lines_ev.append((e["ts"], _fmt_event(e, day, t0=t0)))
+            from .history import retention_cutoff
+            cut = await retention_cutoff()
+            if cut is not None and t0 < cut:
+                env.notes.append(f"аналоговой истории раньше {cut:%d.%m.%Y} в телеметрии уже нет (срок хранения): "
+                                 "ряды и снимки за это время недоступны, лента состояний хранится дольше")
             if with_analytics:
                 from .queries import segments_in_window
                 from online.db import get_episodes_overlapping
@@ -200,18 +209,18 @@ def register(server: Any) -> None:
                     if s.get("cause_close"):
                         name += f", закрыт: {s['cause_close']}"
                     lines_ev.append((s["t_start"], _fmt_event({"ts": s["t_start"], "end": None, "kind": "analytics",
-                                                                "name": name}, day)))
+                                                                "name": name}, day, t0=t0)))
                 for ep in await get_episodes_overlapping(*u.triple, t0, t1):
                     name = f"эпизод #{ep['id']} {ep.get('scenario')} [{ep.get('severity') or '—'}]"
                     if ep.get("gate_suppressed"):
                         name += " · снят гейтом"
                     lines_ev.append((ep["t_open"], _fmt_event({"ts": ep["t_open"], "end": ep.get("t_close"),
-                                                                "kind": "analytics", "name": name}, day)))
+                                                                "kind": "analytics", "name": name}, day, t0=t0)))
             if with_neighbors:
                 for nb in await neighbors_of(u):
                     nev = await _unit_events(nb, t0, t1, {"mode", "fault", "personnel"}, None, st)
                     for e in nev:
-                        lines_ev.append((e["ts"], _fmt_event(e, day, prefix=f"[{nb.name}] ")))
+                        lines_ev.append((e["ts"], _fmt_event(e, day, prefix=f"[{nb.name}] ", t0=t0)))
             lines_ev.sort(key=lambda x: x[0])
             cap = int(st.limit("timeline_max_rows"))
             env.rows = len(lines_ev)
@@ -219,10 +228,6 @@ def register(server: Any) -> None:
                 env.truncation.append(f"показано {cap} из {len(lines_ev)} событий — сузьте окно или виды")
                 lines_ev = lines_ev[:cap]
             if not lines_ev:
-                from .history import retention_note
-                rn = await retention_note(t0, t1, "history")
-                if rn:
-                    env.notes.append(rn.replace("сырых записей", "периоды панели и записи"))
                 return "Событий в окне нет."
             return "\n".join(s for _, s in lines_ev)
         return await run_tool("timeline", ctx, {"unit": unit, "t_from": t_from, "t_to": t_to, "at": at,

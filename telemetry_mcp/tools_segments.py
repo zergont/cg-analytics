@@ -147,16 +147,13 @@ def register(server: Any) -> None:
                         pass
                 env.rows = len(text.splitlines())
                 return text
-            chosen: list[str] = []
-            for w in want:
-                hit = [b for b in blocks if _section_key(b[0]) == _section_key(w) or w in b[0].lower()]
-                if not hit and w in ("шапка", "head"):
-                    hit = blocks[:1]
-                for b in hit:
-                    if b[1] not in chosen:
-                        chosen.append(b[1])
+            chosen, missing = _pick_sections(blocks, want)
             if not chosen:
                 raise ToolError("Таких разделов нет. Есть: " + "; ".join(names))
+            if missing:
+                # Запрошенного раздела нет (старые отчёты зовут разделы иначе) — сказать,
+                # а не промолчать (приёмка Э1)
+                env.notes.append("разделов нет: " + ", ".join(missing) + " — есть: " + "; ".join(names[:12]))
             text = "\n\n".join(chosen)
             env.rows = len(text.splitlines())
             return text
@@ -302,8 +299,8 @@ def _act_text(row: dict[str, Any], events_limit: int, *, full: bool) -> str:
         last = conclusions[-1]
         md = str(last.get("md") or "")
         cap = 2500 if full else 500
-        lines.append(f"заключение совета ИИ ({fmt_t(_dt(last.get('t')), day=True)}): "
-                     + (md[:cap] + (" …" if len(md) > cap else "")))
+        lines.append(f"заключение совета ИИ ({fmt_t(_dt(last.get('t')), day=True)}; текст модели — время внутри "
+                     "может быть в UTC, а не МСК): " + (md[:cap] + (" …" if len(md) > cap else "")))
     elif full:
         lines.append("заключения совета ИИ по акту нет")
     return "\n".join(lines)
@@ -405,6 +402,22 @@ def _section_key(name: str) -> str:
         if n.startswith(k) or k in n:
             return v
     return n
+
+
+def _pick_sections(blocks: list[tuple[str, str]], want: list[str]) -> tuple[list[str], list[str]]:
+    """(тексты найденных разделов по порядку запроса, запрошенные, которых нет)."""
+    chosen: list[str] = []
+    missing: list[str] = []
+    for w in want:
+        hit = [b for b in blocks if _section_key(b[0]) == _section_key(w) or w in b[0].lower()]
+        if not hit and w in ("шапка", "head"):
+            hit = blocks[:1]
+        if not hit:
+            missing.append(w)
+        for b in hit:
+            if b[1] not in chosen:
+                chosen.append(b[1])
+    return chosen, missing
 
 
 def _split_sections(md: str) -> list[tuple[str, str]]:

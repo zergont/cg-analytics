@@ -53,6 +53,10 @@ class McpSettings:
     source_header: str = "X-Source"
     journal: bool = True
     log_level: str = "INFO"
+    # Своя БД телеметрии для сервера (DSN); пусто — databases.source как у движка.
+    # Реплика в БД аналитики хранит историю без обрезки (у источника — 30 дней) и не
+    # нагружает боевую базу: сюда можно указать databases.analytics (v5.2.3).
+    source_db: str | None = None
 
     def limit(self, key: str) -> Any:
         return self.limits.get(key, DEFAULT_LIMITS.get(key))
@@ -91,4 +95,5 @@ def load(path: Path | None = None) -> McpSettings:
         source_header=str(sec.get("source_header", "X-Source")),
         journal=bool(sec.get("journal", True)),
         log_level=str(sec.get("log_level", "INFO")).upper(),
+        source_db=(str(sec["source_db"]).strip() or None) if sec.get("source_db") else None,
     )

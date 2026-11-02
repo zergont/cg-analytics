@@ -364,6 +364,63 @@ check("[обрезано]" in r and "результат обрезан" in r, "9
 r = asyncio.run(run_tool("series", Ctx({"x-source": "closed"}), {}, ok_body))
 check(r.startswith("ОШИБКА") and "не разрешён" in r, "9: источник без прав")
 
+# ── 10. Полировка v5.2.3 по замечаниям приёмки Э1 ────────────────────────────
+# 10а — имена по основам слов: «ток нейтрали» → 40030 каталога, «нейтраль» через псевдоним,
+#       «напряжение» остаётся ролью, неоднозначность по основам — ошибка со списком
+CAT2 = {**CAT, 40030: {"name_ru": "Ток в нейтральном проводнике генератора", "name": "Neutral Current", "unit": "Amps", "kind": "analog", "states": None},
+        40020: {"name_ru": "Напряжение генератора фаза L3 — нейтраль (В перем.)", "name": "L3-N Voltage", "unit": "V", "kind": "analog", "states": None}}
+r = resolve_params(cfg, CAT2, ["ток нейтрали", "нейтраль", "Ток в нейтральном проводнике"])
+check([x.addr for x in r] == [40030] and r[0].source == "каталог" and r[0].unit == "А", f"10а: ток нейтрали → 40030, Amps → А: {[(x.addr, x.source, x.unit) for x in r]}")
+check(resolve_params(cfg, CAT2, ["напряжение"])[0].addr == 40020, "10а: роль без регистра у машины — поиск по основе в каталоге")
+try:
+    resolve_params(cfg, CAT2, ["масла"])
+    check(False, "10а: одна основа на несколько регистров KB — ошибка")
+except ToolError as e:
+    check("нескольким" in str(e) and "40045" in str(e) and "40046" in str(e), f"10а: список кандидатов: {e}")
+check(resolve_params(cfg, CAT2, ["температура воды на выходе"])[0].addr == 40100, "10а: подстрока целиком по-прежнему работает")
+
+# 10б — ряды из корзин БД: удержание пустой корзины, разрыв обрывает удержание, сводка
+from telemetry_mcp.series import bucket_times, from_buckets
+
+bt = bucket_times(U(12, 0, 30), U(12, 5), 60)
+check(bt[0] == U(12, 0) and len(bt) == 5, f"10б: корзины выровнены по эпохе: {bt[0]} {len(bt)}")
+B = [{"b": U(12, 0), "vmin": 1.0, "vmax": 3.0, "avg": 2.0, "n": 2, "vfirst": 1.0, "vlast": 3.0, "t_first": U(12, 0, 5), "t_last": U(12, 0, 40)},
+     {"b": U(12, 2), "vmin": 5.0, "vmax": 5.0, "avg": 5.0, "n": 1, "vfirst": 5.0, "vlast": 5.0, "t_first": U(12, 2, 10), "t_last": U(12, 2, 10)}]
+fb = from_buckets({"P": B}, U(12), U(12, 5), 60)
+check(fb.mode == "bucket" and fb.step_sec == 60 and len(fb.times) == 5, "10б: сетка")
+check(fb.cells["P"][0] == (1.0, 2.0, 3.0) and fb.cells["P"][1] == (3.0, 3.0, 3.0), f"10б: корзина и удержание: {fb.cells['P'][:2]}")
+check(fb.cells["P"][2] == (3.0, 5.0, 5.0) and fb.cells["P"][3] == (5.0, 5.0, 5.0), f"10б: мин с учётом удержанного на входе: {fb.cells['P'][2:4]}")
+fbg = from_buckets({"P": B}, U(12), U(12, 5), 60, gaps=[(U(12, 3), U(12, 4))])
+check(fbg.cells["P"][3] is None and fbg.cells["P"][4] is None, f"10б: корзина в разрыве — пусто, удержание оборвано: {fbg.cells['P'][3:]}")
+s = fb.summary["P"]
+check(s["first"] == (U(12, 0, 5), 1.0) and s["last"] == (U(12, 2, 10), 5.0) and s["min"][1] == 1.0 and s["max"][1] == 5.0 and s["n"] == 3,
+      f"10б: сводка: {s}")
+check(from_buckets({"P": []}, U(12), U(12, 5), 60).summary["P"] == {}, "10б: пустой ряд — пустая сводка")
+
+# 10в — даты у разрывов в многодневном окне, момент старше окна
+e4 = Envelope(label="T1", tool="x", unit="y", window_from=U(9), window_to=U(10, day=14), gaps=[(U(9, 41, 10), U(9, 43, 55))])
+check("13.10 12:41:10–13.10 12:43:55" in e4.text(), f"10в: разрывы с датой в многодневном окне: {e4.text()}")
+check(e4.multi_day and not Envelope(label="T", tool="x", unit="y", window_from=U(9), window_to=U(10)).multi_day, "10в: признак многодневного окна")
+
+# 10г — метка не съедается ошибкой
+reset_labels()
+r = asyncio.run(run_tool("series", Ctx({"X-Task-Id": "job-9"}), {}, err_body))
+r2 = asyncio.run(run_tool("series", Ctx({"X-Task-Id": "job-9"}), {}, ok_body))
+check(r.startswith("ОШИБКА") and r2.startswith("[T1]"), f"10г: после ошибки первая метка T1: {r2[:8]}")
+
+# 10д — событие до начала окна печатается с датой
+from telemetry_mcp.tools_timeline import _fmt_event
+
+ev = {"ts": U(14, 24, 42, day=11), "end": None, "kind": "analytics", "name": "эпизод #1"}
+check(_fmt_event(ev, False, t0=U(9)).startswith("11.10 17:24:42"), f"10д: дата у события до окна: {_fmt_event(ev, False, t0=U(9))}")
+check(_fmt_event({**ev, "ts": U(9, 30)}, False, t0=U(9)).startswith("12:30:00"), "10д: событие в окне — без даты")
+
+# 10е — отчёт: запрошенные, но отсутствующие разделы
+from telemetry_mcp.tools_segments import _pick_sections
+
+chosen, missing = _pick_sections(secs, ["сводка", "заключение", "шапка"])
+check(len(chosen) == 2 and missing == ["заключение"], f"10е: найдено 2, нет «заключение»: {missing}")
+
 if _errors:
     print(f"FAIL — {len(_errors)} расхождений:")
     for x in _errors:

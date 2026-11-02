@@ -121,3 +121,8 @@ telemetry_mcp:
     debounce_min_count: 3           # … и не меньше стольких подряд
   journal: true                     # журнал вызовов в mcp_calls (БД аналитики)
   log_level: INFO
+  # Своя БД телеметрии для сервера (DSN). Пусто — databases.source, как у движка.
+  # Реплика в БД аналитики хранит историю без обрезки (источник — 30 дней) и не
+  # нагружает боевую базу; у неё нет TimescaleDB и часовых агрегатов history_1hour
+  # (запасной путь trend для регистров вне KB там недоступен).
+  # source_db: postgresql://analytics:pass@localhost:5432/analytics

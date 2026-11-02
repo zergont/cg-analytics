@@ -72,6 +72,10 @@ async def startup(st: McpSettings) -> None:
     from analytics.source import init_source_pool
     from db.analytics import get_app_setting
     from config import settings as _settings, set_tz
+    if st.source_db:
+        # Своя БД телеметрии сервера (реплика без обрезки истории) — до открытия пула
+        _settings.source_db_url = st.source_db
+        logger.info("Источник телеметрии сервера — telemetry_mcp.source_db (своя БД, не databases.source)")
     await init_source_pool()
     try:
         tz = await get_app_setting("timezone", _settings.timezone_name)
