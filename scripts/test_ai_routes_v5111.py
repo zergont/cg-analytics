@@ -104,7 +104,10 @@ router.load_depth(new)
 check(router.get_route("incident")["provider"] == "llm"
       and router.get_route("incident")["reasoning"] == "xhigh", "2: строка аварии загружена")
 router.load_depth(router.serialize_depth())
-check(json.loads(router.serialize_depth()) == json.loads(new), "2б: круговая загрузка без потерь")
+# v5.2.7: у строки появились поля подключения, инструментов и бюджетов — сверяем прежние
+_OLD_FIELDS = ("model", "reasoning", "priority", "provider", "claude_model")
+_old_part = lambda raw: {k: {f: v.get(f) for f in _OLD_FIELDS} for k, v in json.loads(raw).items()}
+check(_old_part(router.serialize_depth()) == _old_part(new), "2б: круговая загрузка без потерь")
 router.load_depth(SNAP_DEPTH)          # старый JSON без провайдера (откат и обратно)
 check(router.get_route("gate_caution")["provider"] == "llm", "2в: без поля provider — шлюз")
 router.load_depth(json.dumps({"humanize": {"model": "fast", "reasoning": "low", "priority": "batch",

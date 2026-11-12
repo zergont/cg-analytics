@@ -289,6 +289,9 @@
                     Паспорта подключений для приоритетных цепочек анализа сегментов.
                     «Лимит контекста» — по нему роутер решает, влезает ли отчёт сегмента в модель.
                     «Параллельно» — сколько запросов допускается одновременно (локальным серверам — 1).
+                    «Цена» — USD за 1 млн токенов (вход / выход): по ней считается стоимость в карточке
+                    «Расход ИИ»; пусто — стоимость не считается. «Инструменты» и «зрение» — что умеет модель:
+                    вызывать инструменты сервера телеметрии и читать картинки (графики).
                 </div>
                 {% if llm_registry %}
                 <table class="table table-sm align-middle mb-3">
@@ -300,6 +303,7 @@
                             <th class="text-end">Лимит контекста</th>
                             <th class="text-end">Параллельно</th>
                             <th>Рассуждение</th>
+                            <th class="text-end">Цена, $ / млн</th>
                             <th>Ключ API</th>
                             <th style="width:220px"></th>
                         </tr>
@@ -309,11 +313,22 @@
                     <tr>
                         <td><span class="fw-semibold small">{{ e.name }}</span><br>
                             <span class="text-muted" style="font-size:0.72rem">{{ e.id }}</span></td>
-                        <td><small>{{ e.provider }}{% if e.type == 'api' %} <span class="badge bg-primary-subtle text-primary-emphasis" style="font-size:0.65rem">агент</span>{% endif %}</small></td>
+                        <td><small>{{ e.provider }}{% if e.type == 'api' %} <span class="badge bg-primary-subtle text-primary-emphasis" style="font-size:0.65rem">агент</span>{% endif %}
+                            {%- if e.tools %} <span class="badge bg-secondary-subtle text-secondary-emphasis" style="font-size:0.65rem" title="умеет вызывать инструменты">инструменты</span>{% endif %}
+                            {%- if e.vision %} <span class="badge bg-secondary-subtle text-secondary-emphasis" style="font-size:0.65rem" title="читает картинки (графики)">зрение</span>{% endif %}
+                            {%- if e.proxy %} <span class="badge bg-warning-subtle text-warning-emphasis" style="font-size:0.65rem" title="идёт через прокси записи">прокси</span>{% endif %}</small></td>
                         <td><small>{{ e.model }}{% if e.base_url %}<br><span class="text-muted" style="font-size:0.72rem">{{ e.base_url }}</span>{% endif %}</small></td>
                         <td class="text-end"><small>{{ "{:,}".format(e.max_ctx_tokens).replace(",", " ") }}</small></td>
                         <td class="text-end"><small>{{ e.max_concurrent }}</small></td>
                         <td><small>{{ "—" if e.reasoning == "default" else e.reasoning }}</small></td>
+                        <td class="text-end"><small>
+                            {%- if e.price_in is not none or e.price_out is not none -%}
+                            {{ "—" if e.price_in is none else "%g"|format(e.price_in) }} / {{ "—" if e.price_out is none else "%g"|format(e.price_out) }}
+                            {%- if e.price_cache_read is not none or e.price_cache_write is not none -%}
+                            <br><span class="text-muted" style="font-size:0.72rem">кэш {{ "—" if e.price_cache_read is none else "%g"|format(e.price_cache_read) }} / {{ "—" if e.price_cache_write is none else "%g"|format(e.price_cache_write) }}</span>
+                            {%- endif -%}
+                            {%- else -%}—{%- endif -%}
+                        </small></td>
                         <td><small>{{ "••••••" if e.has_api_key else "—" }}</small></td>
                         <td class="text-end">
                             <button type="button" class="btn btn-sm btn-outline-secondary"
@@ -353,6 +368,7 @@
                                     <option value="lmstudio">LM Studio</option>
                                     <option value="llamacpp">llama-server (llama.cpp)</option>
                                     <option value="deepseek">DeepSeek</option>
+                                    <option value="openai">OpenAI</option>
                                     <option value="anthropic">Claude (Anthropic)</option>
                                     <option value="gorynych">Горыныч (шлюз)</option>
                                 </select>
@@ -382,7 +398,7 @@
                                 <input type="password" name="api_key" id="reg_api_key" class="form-control form-control-sm"
                                        autocomplete="new-password"
                                        placeholder="пусто — не менять">
-                                <div class="form-text" style="font-size:0.72rem">Нужен для DeepSeek; локальным не требуется.</div>
+                                <div class="form-text" style="font-size:0.72rem">Нужен для DeepSeek и OpenAI; локальным не требуется. У Claude пусто — ключ из config.yml.</div>
                             </div>
                             <div class="col-2">
                                 <label class="form-label small fw-semibold mb-1">Лимит контекста</label>
@@ -423,6 +439,41 @@
                                 </div>
                             </div>
                         </div>
+                        <input type="hidden" name="caps_present" value="1">
+                        <div class="row g-2 mb-2">
+                            <div class="col-6">
+                                <label class="form-label small fw-semibold mb-1">Цена, USD за 1 млн токенов</label>
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text">вход</span>
+                                    <input type="number" name="price_in" id="reg_price_in" class="form-control" min="0" step="any">
+                                    <span class="input-group-text">выход</span>
+                                    <input type="number" name="price_out" id="reg_price_out" class="form-control" min="0" step="any">
+                                    <span class="input-group-text">кэш: чтение</span>
+                                    <input type="number" name="price_cache_read" id="reg_price_cache_read" class="form-control" min="0" step="any">
+                                    <span class="input-group-text">запись</span>
+                                    <input type="number" name="price_cache_write" id="reg_price_cache_write" class="form-control" min="0" step="any">
+                                </div>
+                                <div class="form-text" style="font-size:0.72rem">Из прайса провайдера. Пусто — стоимость не считается; без цены кэша — по цене входа.</div>
+                            </div>
+                            <div class="col-2 pt-4">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" name="tools" id="reg_tools" value="on">
+                                    <label class="form-check-label small" for="reg_tools"
+                                           title="Модель умеет вызывать инструменты (сервер телеметрии)">Инструменты</label>
+                                </div>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" name="vision" id="reg_vision" value="on">
+                                    <label class="form-check-label small" for="reg_vision"
+                                           title="Модель читает картинки: ей предлагается инструмент chart (график)">Зрение</label>
+                                </div>
+                            </div>
+                            <div class="col-4">
+                                <label class="form-label small fw-semibold mb-1">Прокси</label>
+                                <input type="text" name="proxy" id="reg_proxy" class="form-control form-control-sm"
+                                       autocomplete="off" placeholder="http://host:port — пусто: напрямую">
+                                <div class="form-text" style="font-size:0.72rem">Для OpenAI из РФ. У Claude — прокси карточки «Claude API (облако)».</div>
+                            </div>
+                        </div>
                         <input type="hidden" name="type" id="reg_type" value="llm">
                         <button type="submit" class="btn btn-sm btn-primary">Сохранить подключение</button>
                         <button type="button" class="btn btn-sm btn-outline-secondary" onclick="llmRegReset()">Очистить форму</button>
@@ -431,7 +482,9 @@
                 </details>
 
                 <script>
-                const LLM_REG_CTX_DEFAULTS = {ollama: 16384, lmstudio: 40960, llamacpp: 32768, deepseek: 131072, anthropic: 200000, gorynych: 262144};
+                const LLM_REG_CTX_DEFAULTS = {ollama: 16384, lmstudio: 40960, llamacpp: 32768, deepseek: 131072, openai: 200000, anthropic: 200000, gorynych: 262144};
+                // Умолчания признаков для новой записи: облако и шлюз умеют инструменты, зрение — Claude
+                const LLM_REG_TOOLS_DEFAULT = ["anthropic", "openai", "deepseek", "gorynych"];
                 function llmRegProviderHint() {
                     const p = document.getElementById("reg_provider").value;
                     document.getElementById("reg_url_hint").textContent = {
@@ -439,6 +492,7 @@
                         lmstudio:  "LM Studio: обычно http://host:1234",
                         llamacpp:  "llama-server: обычно http://host:8080; имя модели — как в «Модели сервера» (алиас или файл GGUF)",
                         deepseek:  "DeepSeek: https://api.deepseek.com",
+                        openai:    "OpenAI: https://api.openai.com (без /v1); из РФ — через прокси записи. Поле Temp. не действует",
                         anthropic: "Не используется — подключение через SDK",
                         gorynych:  "Шлюз: http://192.168.0.79:4000/src/analytics (без /v1). Модели: fast, flashnext, gemma; "
                                    + "smart + xhigh — совет на 15–30 мин, не для цепочек. Кто, модель, рассуждение и приоритет "
@@ -446,10 +500,20 @@
                                    + "температуру выбирает шлюз — поле Temp. не действует",
                     }[p] || "";
                     const ctx = document.getElementById("reg_max_ctx");
-                    if (!ctx.value) ctx.value = LLM_REG_CTX_DEFAULTS[p];
+                    // новая запись: лимит следует за провайдером, пока в поле стоит чьё-то умолчание
+                    if (!ctx.value || (!document.getElementById("reg_entry_id").value
+                                       && Object.values(LLM_REG_CTX_DEFAULTS).includes(Number(ctx.value))))
+                        ctx.value = LLM_REG_CTX_DEFAULTS[p];
                     document.getElementById("reg_type").value = (p === "anthropic") ? "api" : "llm";
                     if (p === "deepseek" && !document.getElementById("reg_base_url").value)
                         document.getElementById("reg_base_url").value = "https://api.deepseek.com";
+                    if (p === "openai" && !document.getElementById("reg_base_url").value)
+                        document.getElementById("reg_base_url").value = "https://api.openai.com";
+                    if (!document.getElementById("reg_entry_id").value) {
+                        // новая запись: признаки по провайдеру (у существующей — как сохранено)
+                        document.getElementById("reg_tools").checked  = LLM_REG_TOOLS_DEFAULT.includes(p);
+                        document.getElementById("reg_vision").checked = (p === "anthropic");
+                    }
                     if (p === "gorynych" && !document.getElementById("reg_entry_id").value) {
                         // только для новой записи: при редактировании не затираем введённое
                         if (!document.getElementById("reg_base_url").value)
@@ -476,6 +540,11 @@
                     document.getElementById("reg_stream").checked    = e.stream;
                     document.getElementById("reg_reasoning").value   = e.reasoning || "default";
                     document.getElementById("reg_type").value        = e.type;
+                    for (const k of ["price_in", "price_out", "price_cache_read", "price_cache_write"])
+                        document.getElementById("reg_" + k).value = (e[k] === null || e[k] === undefined) ? "" : e[k];
+                    document.getElementById("reg_tools").checked     = !!e.tools;
+                    document.getElementById("reg_vision").checked    = !!e.vision;
+                    document.getElementById("reg_proxy").value       = e.proxy || "";
                     llmRegProviderHint();
                     document.getElementById("llm-reg-form").scrollIntoView({behavior: "smooth", block: "center"});
                 }
@@ -489,7 +558,7 @@
                     const out = document.getElementById("reg_models_out");
                     out.className = "mt-1 text-muted"; out.textContent = "запрашиваю…";
                     const fd = new FormData();
-                    for (const id of ["reg_entry_id", "reg_provider", "reg_base_url", "reg_api_key"]) {
+                    for (const id of ["reg_entry_id", "reg_provider", "reg_base_url", "reg_api_key", "reg_proxy"]) {
                         const el = document.getElementById(id);
                         fd.append(el.name, el.value);
                     }
@@ -924,6 +993,7 @@
 </div>
 
 {% include "settings_units.html" %}
+{% include "settings_usage.html" %}
 
 <!-- Модальное окно редактирования оборудования -->
 <div class="modal fade" id="editModal" tabindex="-1">

@@ -34,6 +34,13 @@ def start_scheduler() -> None:
         id="daily_analytics",
         replace_existing=True,
     )
+    # Журнал обращений к моделям (v5.2.7): строки старше 90 суток — в суточные итоги
+    _scheduler.add_job(
+        _rollup_llm_calls,
+        trigger=CronTrigger(hour=1, minute=40, timezone="UTC"),
+        id="llm_calls_rollup",
+        replace_existing=True,
+    )
     _scheduler.start()
     logger.info(
         "Планировщик запущен. Ежедневный запуск в %02d:%02d UTC.",
@@ -44,6 +51,12 @@ def start_scheduler() -> None:
 def stop_scheduler() -> None:
     _scheduler.shutdown(wait=False)
     logger.info("Планировщик остановлен.")
+
+
+async def _rollup_llm_calls() -> None:
+    """Свёртка журнала llm_calls (db/llm_usage.py): сама не бросает."""
+    from db.llm_usage import rollup_old
+    await rollup_old()
 
 
 async def _run_all_equipment() -> None:

@@ -42,7 +42,12 @@ logger = logging.getLogger(__name__)
 
 REGISTRY_SETTING_KEY = "llm_model_registry"
 
-ENTRY_PROVIDERS = ("ollama", "lmstudio", "llamacpp", "deepseek", "anthropic", "gorynych")
+ENTRY_PROVIDERS = ("ollama", "lmstudio", "llamacpp", "deepseek", "openai", "anthropic", "gorynych")
+# Облачные подключения: их может выбрать строка таблицы «Кто и как разбирает» (Р19)
+CLOUD_PROVIDERS = ("anthropic", "openai", "deepseek")
+OPENAI_DEFAULT_URL = "https://api.openai.com"
+# Цены записи (v5.2.7, Р22): USD за 1 млн токенов; пусто — стоимость не считается
+PRICE_KEYS = ("price_in", "price_out", "price_cache_read", "price_cache_write")
 ENTRY_TYPES     = ("llm", "api")
 REASONING_LEVELS = ("default", "off", "low", "medium", "high", "xhigh")
 # Локальные серверы: по умолчанию строго последовательно (один запрос за раз)
@@ -54,6 +59,7 @@ DEFAULT_MAX_CTX = {
     "lmstudio":  40960,
     "llamacpp":  32768,
     "deepseek":  131072,
+    "openai":    200000,
     "anthropic": 200000,
     # Шлюз сам выбирает голову, в окно которой влезает промпт (Gemma — 262 144);
     # не влезло никуда — 400 context_length_exceeded, цепочка идёт дальше
@@ -74,6 +80,26 @@ _semaphores: dict[str, asyncio.Semaphore] = {}
 def _slugify(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
     return slug or "model"
+
+
+def _price(v) -> float | None:
+    """Цена из формы или JSON: неотрицательное число, иначе None (не задана)."""
+    if v is None or isinstance(v, bool) or str(v).strip() == "":
+        return None
+    try:
+        f = float(str(v).replace(",", ".").strip())
+    except (TypeError, ValueError):
+        return None
+    return f if f >= 0 else None
+
+
+def _flag(raw: dict, key: str, default: bool) -> bool:
+    v = raw.get(key)
+    if v is None:
+        return default
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "on", "yes", "да")
+    return bool(v)
 
 
 def normalize_entry(raw: dict) -> dict:
@@ -114,6 +140,10 @@ def normalize_entry(raw: dict) -> dict:
         base_url = base_url or GORYNYCH_DEFAULT_URL
         if base_url.endswith("/v1"):     # клиент добавляет /v1 сам
             base_url = base_url[:-3].rstrip("/")
+    if provider == "openai":
+        base_url = base_url or OPENAI_DEFAULT_URL
+        if base_url.endswith("/v1"):
+            base_url = base_url[:-3].rstrip("/")
     return {
         "id":             entry_id,
         "name":           name,
@@ -131,6 +161,12 @@ def normalize_entry(raw: dict) -> dict:
                            if str(raw.get("reasoning", "default")).strip() in REASONING_LEVELS
                            else "default"),
         "max_concurrent": max_conc,
+        # v5.2.7 (MCP Э2б): цены (Р22), умеет ли вызов инструментов и картинки (Р21),
+        # прокси подключения (OpenAI из РФ; у Claude — прежняя настройка claude_proxy)
+        **{k: _price(raw.get(k)) for k in PRICE_KEYS},
+        "tools":          _flag(raw, "tools", provider in CLOUD_PROVIDERS or provider == "gorynych"),
+        "vision":         _flag(raw, "vision", provider == "anthropic"),
+        "proxy":          str(raw.get("proxy") or "").strip(),
     }
 
 

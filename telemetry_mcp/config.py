@@ -56,6 +56,10 @@ class McpSettings:
     source_header: str = "X-Source"
     journal: bool = True
     log_level: str = "INFO"
+    # Хост цикла в cg-analytics (v5.2.7, Э2б): куда он подключается за инструментами
+    # и умолчания бюджетов прогона (Р12): {cloud|gateway: {calls, tokens, minutes}}
+    client_url: str = "http://127.0.0.1:8095/mcp"
+    host_budgets: dict[str, Any] = field(default_factory=dict)
     # Своя БД телеметрии для сервера (DSN); пусто — databases.source как у движка.
     # Реплика в БД аналитики хранит историю без обрезки (у источника — 30 дней) и не
     # нагружает боевую базу: сюда можно указать databases.analytics (v5.2.3).
@@ -99,4 +103,7 @@ def load(path: Path | None = None) -> McpSettings:
         journal=bool(sec.get("journal", True)),
         log_level=str(sec.get("log_level", "INFO")).upper(),
         source_db=(str(sec["source_db"]).strip() or None) if sec.get("source_db") else None,
+        client_url=str(sec.get("client_url") or f"http://127.0.0.1:{int(sec.get('port', 8095))}"
+                       f"{str(sec.get('path', '/mcp'))}"),
+        host_budgets=dict(sec.get("host_budgets") or {}),
     )

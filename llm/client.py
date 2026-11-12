@@ -140,9 +140,12 @@ def _retry_delay(exc: Exception, attempt: int, gateway_restart: bool = False) ->
     return _RETRY_BASE_DELAY_SEC * attempt
 
 
-def _http_client() -> httpx.AsyncClient:
+def _http_client(proxy: str | None = None) -> httpx.AsyncClient:
+    """proxy — прокси записи реестра (v5.2.7): OpenAI из РФ напрямую недоступен."""
     if _TRANSPORT is not None:
         return httpx.AsyncClient(timeout=_TIMEOUT, transport=_TRANSPORT)
+    if proxy:
+        return httpx.AsyncClient(timeout=_TIMEOUT, proxy=proxy)
     return httpx.AsyncClient(timeout=_TIMEOUT)
 
 
@@ -194,7 +197,7 @@ def _clean_base_url(base_url: str, provider: str) -> str:
 
 # Провайдеры с OpenAI-совместимым API (/v1/chat/completions):
 # LM Studio, llama-server (llama.cpp), DeepSeek, шлюз «Горыныч»
-_OPENAI_COMPAT = ("lmstudio", "llamacpp", "deepseek", "gorynych")
+_OPENAI_COMPAT = ("lmstudio", "llamacpp", "deepseek", "openai", "gorynych")
 
 
 # Режим рассуждения (llm.registry.REASONING_LEVELS): "default" — ничего не передаём.
@@ -226,6 +229,12 @@ def _apply_reasoning(payload: dict, provider: str, level: str, system: str) -> s
         # chat_template_kwargs к головам не пропускает, /no_think в system не
         # учитывает — только reasoning_effort
         payload["reasoning_effort"] = "none" if off else level
+        return system
+    if provider == "openai":
+        # У OpenAI рассуждение задаёт только reasoning_effort; «выкл» у рассуждающих
+        # моделей нет — параметр не шлём; xhigh — как high
+        if not off:
+            payload["reasoning_effort"] = "high" if level == "xhigh" else level
         return system
     if provider == "deepseek":
         payload["thinking"] = {"type": "disabled" if off else "enabled"}
@@ -281,6 +290,9 @@ def _build_request(
         payload["priority"] = priority if priority in GORYNYCH_PRIORITIES else "normal"
         # Температуру выбирает шлюз — на любом уровне рассуждений (у Qwen при
         # 0.1–0.3 рассуждение ходит по кругу). Поле настроек для шлюза не действует
+        payload.pop("temperature", None)
+    if provider == "openai":
+        # Рассуждающие модели OpenAI принимают только температуру по умолчанию
         payload.pop("temperature", None)
     if stream and provider in ("deepseek", "openai"):
         # Расход в потоке эти API отдают только по просьбе (учёт llm_calls, v5.2.6)
@@ -477,7 +489,7 @@ async def chat_stream(
                                      "reasoning": payload.get("reasoning_effort")}
             try:
                 if use_stream:
-                    async with _http_client() as client:
+                    async with _http_client(cfg.get("proxy") or None) as client:
                         async with client.stream("POST", url, json=payload, headers=headers) as response:
                             await _raise_for_status(response, stream_mode=True, gateway=gateway)
                             if gateway:
@@ -494,7 +506,7 @@ async def chat_stream(
                     await _record_call(cfg, entry, payload, meta, depth, system, user, _t0, _out_chars)
                     return
                 else:
-                    async with _http_client() as client:
+                    async with _http_client(cfg.get("proxy") or None) as client:
                         resp = await client.post(url, json=payload, headers=headers)
                         await _raise_for_status(resp, stream_mode=False, gateway=gateway)
                         data = resp.json()
@@ -615,7 +627,8 @@ async def chat(
     return strip_think("".join(parts)).strip()
 
 
-async def list_server_models(provider: str, base_url: str, api_key: str = "") -> list[str]:
+async def list_server_models(provider: str, base_url: str, api_key: str = "",
+                             proxy: str | None = None) -> list[str]:
     """Имена моделей, которые отдаёт сервер: Ollama — /api/tags, остальные — /v1/models.
 
     Бросает исключение при недоступности; для anthropic список не запрашивается.
@@ -625,7 +638,9 @@ async def list_server_models(provider: str, base_url: str, api_key: str = "") ->
     base_url = _clean_base_url(base_url, provider)
     url = f"{base_url}/api/tags" if provider == "ollama" else f"{base_url}/v1/models"
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    async with httpx.AsyncClient(timeout=10.0, transport=_TRANSPORT) as client:
+    kwargs = ({"transport": _TRANSPORT} if _TRANSPORT is not None
+              else ({"proxy": proxy} if proxy else {}))
+    async with httpx.AsyncClient(timeout=10.0, **kwargs) as client:
         resp = await client.get(url, headers=headers)
         resp.raise_for_status()
         data = resp.json()
@@ -651,7 +666,8 @@ async def ping_entry(entry: dict) -> dict:
                 "detail": "ключ API найден (config.yml)" if has_key
                           else "ключ не задан ни в config.yml, ни в ANTHROPIC_API_KEY"}
     try:
-        models = await list_server_models(provider, entry["base_url"], entry.get("api_key", ""))
+        models = await list_server_models(provider, entry["base_url"], entry.get("api_key", ""),
+                                          proxy=entry.get("proxy") or None)
     except Exception as exc:
         return {"ok": False, "detail": repr(exc)}
     if entry.get("model") and entry["model"] not in models:

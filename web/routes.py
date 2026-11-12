@@ -1003,12 +1003,22 @@ async def llm_registry_save(request: Request):
     form = await request.form()
     entry_id = str(form.get("entry_id", "")).strip()
     api_key  = str(form.get("api_key", "")).strip()
+    existing = llm_registry.get_entry(entry_id) if entry_id else None
     # пустое поле ключа при редактировании = оставить прежний ключ
-    if not api_key and entry_id:
-        existing = llm_registry.get_entry(entry_id)
-        if existing:
-            api_key = existing["api_key"]
+    if not api_key and existing:
+        api_key = existing["api_key"]
+    # Цены, признаки и прокси (v5.2.7). Вкладка, открытая до обновления, этих полей не
+    # шлёт вовсе (нет отметки caps_present) — у существующей записи они остаются прежними
+    if form.get("caps_present") is None and existing:
+        caps = {k: existing.get(k) for k in (*llm_registry.PRICE_KEYS, "tools", "vision", "proxy")}
+    else:
+        caps = {k: form.get(k, "") for k in llm_registry.PRICE_KEYS}
+        caps["proxy"] = form.get("proxy", "")
+        if form.get("caps_present") is not None:
+            caps["tools"] = form.get("tools") == "on"
+            caps["vision"] = form.get("vision") == "on"
     entry = llm_registry.upsert_entry({
+        **caps,
         "id":             entry_id,
         "name":           form.get("name", ""),
         "type":           form.get("type", "llm"),
@@ -1074,17 +1084,20 @@ async def llm_registry_models(request: Request):
     base_url = str(form.get("base_url", "")).strip()
     api_key  = str(form.get("api_key", "")).strip()
     entry_id = str(form.get("entry_id", "")).strip()
+    proxy    = str(form.get("proxy", "")).strip()
     if not api_key and entry_id:
         existing = llm_registry.get_entry(entry_id)
         if existing:
             api_key = existing["api_key"]
+    if provider == "openai" and not base_url:
+        base_url = llm_registry.OPENAI_DEFAULT_URL
     if provider == "anthropic":
         return JSONResponse({"ok": True, "models": [],
                              "detail": "Claude: список моделей задаётся вручную"})
     if not base_url:
         return JSONResponse({"ok": False, "detail": "укажите URL сервера"})
     try:
-        models = await list_server_models(provider, base_url, api_key)
+        models = await list_server_models(provider, base_url, api_key, proxy=proxy or None)
         return JSONResponse({"ok": True, "models": models})
     except Exception as exc:
         return JSONResponse({"ok": False, "detail": repr(exc)})

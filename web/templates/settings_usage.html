@@ -1,0 +1,188 @@
+{# Карточка «Расход ИИ» (v5.2.7, MCP Э2б; design_mcp_e2.md, разд. 6.2).
+   Данные — GET /api/llm-usage: журнал llm_calls (+ суточные итоги) и mcp_calls. #}
+<div class="row g-3 mt-0" id="ai-usage">
+    <div class="col-12">
+        <div class="card mb-3">
+            <div class="card-header fw-semibold d-flex align-items-center justify-content-between">
+                <span>💰 Расход ИИ</span>
+                <span class="d-flex align-items-center gap-2">
+                    <select id="ai-usage-days" class="form-select form-select-sm" style="width:auto"
+                            onchange="aiUsageLoad()">
+                        <option value="1">сегодня</option>
+                        <option value="7" selected>7 суток</option>
+                        <option value="30">30 суток</option>
+                        <option value="90">90 суток</option>
+                        <option value="365">год</option>
+                    </select>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="aiUsageLoad()">Обновить</button>
+                </span>
+            </div>
+            <div class="card-body">
+                <div class="text-muted small mb-3">
+                    Каждое обращение к модели из сервиса — строка журнала: гейт, заключения, пересказ, разбор
+                    аварии, очистка языка, площадка. Токены — как их отдал провайдер: «вход» — без кэша,
+                    «кэш» — прочитано из кэша; чего провайдер не сообщил — прочерк, а не ноль.
+                    Стоимость считается по ценам записи реестра на момент вызова; у вызовов без цен её нет —
+                    рядом показано, сколько вызовов оценено. Журнал хранится построчно
+                    <span id="ai-usage-keep">90</span> суток, старше — суточными итогами.
+                </div>
+                <div id="ai-usage-state" class="text-muted small">загрузка…</div>
+                <div id="ai-usage-body" style="display:none">
+                    <div class="small mb-3" id="ai-usage-totals"></div>
+
+                    <div class="fw-semibold small mb-1">По дням и провайдерам</div>
+                    <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-3" id="ai-usage-days-table">
+                        <thead class="table-light"><tr>
+                            <th>Сутки</th><th>Провайдер</th>
+                            <th class="text-end">Вызовов</th><th class="text-end">Сбоев</th>
+                            <th class="text-end">Вход</th><th class="text-end">Выход</th>
+                            <th class="text-end">Кэш: чтение</th><th class="text-end">Кэш: запись</th>
+                            <th class="text-end">Рассуждения</th><th class="text-end">Доля кэша</th>
+                            <th class="text-end">Стоимость</th>
+                        </tr></thead>
+                        <tbody></tbody>
+                    </table>
+                    </div>
+
+                    <div class="fw-semibold small mb-1">По видам задач</div>
+                    <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-3" id="ai-usage-tasks-table">
+                        <thead class="table-light"><tr>
+                            <th>Задача</th><th>Провайдер</th><th>Модель</th>
+                            <th class="text-end">Вызовов</th><th class="text-end">Сбоев</th>
+                            <th class="text-end">Вход</th><th class="text-end">Выход</th>
+                            <th class="text-end">Кэш: чтение</th>
+                            <th class="text-end">Вызовов инструментов</th>
+                            <th class="text-end">Среднее время</th>
+                            <th class="text-end">Стоимость</th>
+                        </tr></thead>
+                        <tbody></tbody>
+                    </table>
+                    </div>
+
+                    <div class="fw-semibold small mb-1">Инструменты сервера телеметрии</div>
+                    <div class="text-muted mb-1" style="font-size:0.75rem">
+                        Размер ответа инструмента — главный измеритель того, сколько контекста он съедает.
+                        У <code>chart</code> в размер входит картинка: её цена в токенах зависит от размера изображения, а не от байтов.
+                        <span id="ai-usage-sources"></span>
+                    </div>
+                    <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0" id="ai-usage-tools-table">
+                        <thead class="table-light"><tr>
+                            <th>Инструмент</th>
+                            <th class="text-end">Вызовов</th><th class="text-end">Ошибок</th>
+                            <th class="text-end">Усечено</th>
+                            <th class="text-end">Средний ответ</th><th class="text-end">Наибольший</th>
+                            <th class="text-end">Всего</th><th class="text-end">Среднее время</th>
+                        </tr></thead>
+                        <tbody></tbody>
+                    </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+(function () {
+    const TASKS = {gate: "Гейт", seg: "Заключение", humanize: "Пересказ", incident: "Разбор аварии",
+                   question: "Вопрос", lang_check: "Очистка языка", manual: "Ручной анализ",
+                   playground: "Площадка", other: "Прочее"};
+    const dash = "—";
+    const num = v => (v === null || v === undefined) ? dash : Number(v).toLocaleString("ru-RU");
+    const money = (v, priced, calls) => {
+        if (v === null || v === undefined) return dash;
+        const s = "$" + Number(v).toLocaleString("ru-RU", {minimumFractionDigits: 2, maximumFractionDigits: 4});
+        return (priced !== undefined && calls && priced < calls) ? s + " (" + priced + " из " + calls + ")" : s;
+    };
+    const share = v => (v === null || v === undefined) ? dash
+        : (v > 0 && v < 0.005) ? "меньше 1 %" : Math.round(v * 100) + " %";
+    const kb = v => {
+        if (v === null || v === undefined) return dash;
+        v = Number(v);
+        if (v >= 1048576) return (v / 1048576).toLocaleString("ru-RU", {maximumFractionDigits: 1}) + " МБ";
+        return (v / 1024).toLocaleString("ru-RU", {maximumFractionDigits: 1}) + " КБ";
+    };
+    const dur = ms => {
+        if (ms === null || ms === undefined) return dash;
+        ms = Number(ms);
+        return ms >= 1000 ? (ms / 1000).toLocaleString("ru-RU", {maximumFractionDigits: 1}) + " с"
+                          : Math.round(ms) + " мс";
+    };
+    const day = iso => { const p = String(iso).split("-"); return p.length === 3 ? p[2] + "." + p[1] + "." + p[0] : iso; };
+
+    function fill(tableId, rows, cells, empty) {
+        const tb = document.querySelector("#" + tableId + " tbody");
+        tb.replaceChildren();
+        if (!rows.length) {
+            const tr = tb.insertRow(), td = tr.insertCell();
+            td.colSpan = document.querySelectorAll("#" + tableId + " thead th").length;
+            td.className = "text-muted small"; td.textContent = empty;
+            return;
+        }
+        for (const r of rows) {
+            const tr = tb.insertRow();
+            for (const [text, right] of cells(r)) {
+                const td = tr.insertCell();
+                td.className = "small" + (right ? " text-end" : "");
+                td.textContent = text;
+            }
+        }
+    }
+
+    window.aiUsageLoad = async function () {
+        const state = document.getElementById("ai-usage-state");
+        const body = document.getElementById("ai-usage-body");
+        const days = document.getElementById("ai-usage-days").value;
+        state.className = "text-muted small"; state.textContent = "загрузка…";
+        let j;
+        try {
+            const r = await fetch("/api/llm-usage?days=" + encodeURIComponent(days));
+            j = await r.json();
+        } catch (err) {
+            state.className = "text-danger small"; state.textContent = "✗ " + err; body.style.display = "none";
+            return;
+        }
+        if (!j.ok) {
+            state.className = "text-danger small"; state.textContent = "✗ " + (j.detail || "нет данных");
+            body.style.display = "none";
+            return;
+        }
+        document.getElementById("ai-usage-keep").textContent = j.keep_days;
+        state.textContent = j.journal ? "" : "Журнала обращений ещё нет — он появится после перезапуска сервиса.";
+        body.style.display = "";
+        const t = j.totals;
+        document.getElementById("ai-usage-totals").textContent =
+            "С " + day(j.from) + " (" + j.tz + "): вызовов " + num(t.calls) + ", сбоев " + num(t.errors)
+            + " · вход " + num(t.tokens_in) + ", выход " + num(t.tokens_out)
+            + ", кэш " + num(t.tokens_cache_read) + " (доля " + share(t.cache_share) + ")"
+            + " · стоимость " + money(t.cost_usd, t.priced, t.calls);
+
+        fill("ai-usage-days-table", j.by_day, r => [
+            [day(r.day)], [r.provider || dash],
+            [num(r.calls), 1], [num(r.errors), 1], [num(r.tokens_in), 1], [num(r.tokens_out), 1],
+            [num(r.tokens_cache_read), 1], [num(r.tokens_cache_write), 1], [num(r.tokens_reasoning), 1],
+            [share(r.cache_share), 1], [money(r.cost_usd, r.priced, r.calls), 1],
+        ], "За период обращений к моделям нет.");
+
+        fill("ai-usage-tasks-table", j.by_task, r => [
+            [TASKS[r.task_kind] || r.task_kind || dash], [r.provider || dash], [r.model || dash],
+            [num(r.calls), 1], [num(r.errors), 1], [num(r.tokens_in), 1], [num(r.tokens_out), 1],
+            [num(r.tokens_cache_read), 1], [num(r.tool_calls), 1],
+            [dur(r.duration_ms === null || !r.calls ? null : r.duration_ms / r.calls), 1],
+            [money(r.cost_usd, r.priced, r.calls), 1],
+        ], "За период обращений к моделям нет.");
+
+        fill("ai-usage-tools-table", j.by_tool, r => [
+            [r.tool], [num(r.calls), 1], [num(r.errors), 1], [num(r.truncated), 1],
+            [kb(r.avg_bytes), 1], [kb(r.max_bytes), 1], [kb(r.sum_bytes), 1], [dur(r.avg_ms), 1],
+        ], "За период инструменты не вызывались.");
+
+        document.getElementById("ai-usage-sources").textContent = j.by_source.length
+            ? "Кто вызывал: " + j.by_source.map(s => (s.source || "без метки") + " — " + num(s.calls)).join(", ") + "."
+            : "";
+    };
+    document.addEventListener("DOMContentLoaded", window.aiUsageLoad);
+})();
+</script>

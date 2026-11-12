@@ -410,3 +410,26 @@ CREATE TABLE IF NOT EXISTS llm_calls (
 );
 CREATE INDEX IF NOT EXISTS idx_llm_calls_ts ON llm_calls (ts DESC);
 CREATE INDEX IF NOT EXISTS idx_llm_calls_run ON llm_calls (run_id) WHERE run_id IS NOT NULL;
+
+-- Суточные итоги журнала (v5.2.7): llm_calls хранится построчно 90 суток, старше —
+-- сворачивается сюда и удаляется (db/llm_usage.py:rollup_old, задание планировщика).
+-- Сутки — в поясе сервиса. Сумма по колонке, где провайдер ничего не отдал, — NULL.
+-- priced — сколько вызовов суток имели стоимость.
+CREATE TABLE IF NOT EXISTS llm_calls_daily (
+    day                DATE    NOT NULL,
+    task_kind          TEXT    NOT NULL DEFAULT '',
+    provider           TEXT    NOT NULL DEFAULT '',
+    model              TEXT    NOT NULL DEFAULT '',
+    calls              INT     NOT NULL DEFAULT 0,
+    errors             INT     NOT NULL DEFAULT 0,
+    priced             INT     NOT NULL DEFAULT 0,
+    tokens_in          BIGINT,
+    tokens_out         BIGINT,
+    tokens_cache_read  BIGINT,
+    tokens_cache_write BIGINT,
+    tokens_reasoning   BIGINT,
+    tool_calls         BIGINT,
+    duration_ms        BIGINT,
+    cost_usd           NUMERIC(14, 6),
+    PRIMARY KEY (day, task_kind, provider, model)
+);

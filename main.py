@@ -361,6 +361,9 @@ app.include_router(router)
 from web.units_routes import router as _units_router  # noqa: E402
 app.include_router(_units_router)
 
+from web.usage_routes import router as _usage_router  # noqa: E402
+app.include_router(_usage_router)
+
 
 if __name__ == "__main__":
     uvicorn.run(

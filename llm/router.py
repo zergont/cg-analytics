@@ -275,10 +275,40 @@ SYSTEM_PROVIDER = "system"
 SYSTEM_ROUTE_KINDS: frozenset[str] = frozenset({"seg_shutdown"})
 
 
+# v5.2.7 (MCP Э2б, решения Р10, Р19, Р23). Строка может выбрать облачное подключение
+# из реестра (api_entry: anthropic / openai / deepseek; пусто — Claude, как раньше) и
+# получить инструменты сервера телеметрии с бюджетами прогона. Пока только разбор
+# аварии: гейт, заключение и пересказ зовут Anthropic SDK напрямую — чужое
+# подключение увело бы их не туда, а инструменты им не положены (Р10).
+API_ENTRY_KINDS: frozenset[str] = frozenset({"incident"})
+TOOL_KINDS: frozenset[str] = frozenset({"incident"})
+TOOLS_TELEMETRY = "telemetry"
+BUDGET_KEYS: tuple[str, ...] = ("budget_calls", "budget_tokens", "budget_minutes")
+_BUDGET_LIMITS = {"budget_calls": (1, 60), "budget_tokens": (10_000, 2_000_000), "budget_minutes": (1, 240)}
+# Умолчания бюджетов (Р12): облако / прямой режим шлюза; перекрываются config.yml
+# (telemetry_mcp.host_budgets) и полями строки
+BUDGET_DEFAULTS = {"cloud": {"calls": 12, "tokens": 200_000, "minutes": 10},
+                   "gateway": {"calls": 8, "tokens": 150_000, "minutes": 40}}
+
+
+def _budget(key: str, v) -> int | None:
+    """Поле бюджета из формы или JSON: целое в допустимых пределах; пусто — None (умолчание)."""
+    if v is None or isinstance(v, bool) or str(v).strip() == "":
+        return None
+    try:
+        n = int(float(str(v).strip()))
+    except (TypeError, ValueError):
+        return None
+    lo, hi = _BUDGET_LIMITS[key]
+    return max(lo, min(hi, n))
+
+
 def _default_depth(kind: str) -> dict[str, str]:
     return {"model": "fast", "reasoning": "default",
             "priority": _DEPTH_DEFAULT_PRIORITY.get(kind, "normal"),
-            "provider": "llm", "claude_model": ""}
+            "provider": "llm", "claude_model": "",
+            "api_entry": "", "tools": "",
+            "budget_calls": None, "budget_tokens": None, "budget_minutes": None}
 
 
 _depth: dict[str, dict[str, str]] = {k: _default_depth(k) for k in DEPTH_KINDS}
@@ -290,8 +320,11 @@ def get_depth(kind: str) -> dict[str, str]:
 
 
 def apply_depth(kind: str, model: str, reasoning: str, priority: str, *,
-                provider: str | None = None, claude_model: str | None = None) -> None:
-    """Строка таблицы. provider/claude_model не переданы — остаются прежними."""
+                provider: str | None = None, claude_model: str | None = None,
+                api_entry: str | None = None, tools: str | None = None,
+                budgets: dict | None = None) -> None:
+    """Строка таблицы. provider/claude_model/api_entry/tools не переданы — остаются
+    прежними; budgets — только переданные ключи (пустое значение — умолчание)."""
     if kind not in DEPTH_KINDS:
         raise ValueError(f"Неизвестный вид разбора: {kind}")
     cur = _depth.get(kind) or _default_depth(kind)
@@ -305,6 +338,14 @@ def apply_depth(kind: str, model: str, reasoning: str, priority: str, *,
         "provider":  prov if prov in ROUTE_PROVIDERS else "llm",
         "claude_model": (cur.get("claude_model", "") if claude_model is None
                          else str(claude_model).strip()),
+        "api_entry": ((cur.get("api_entry", "") if api_entry is None else str(api_entry).strip())
+                      if kind in API_ENTRY_KINDS else ""),
+        "tools": ((cur.get("tools", "") if tools is None
+                   else (TOOLS_TELEMETRY if str(tools).strip() == TOOLS_TELEMETRY else ""))
+                  if kind in TOOL_KINDS else ""),
+        **{k: ((cur.get(k) if budgets is None or k not in budgets else _budget(k, budgets[k]))
+               if kind in TOOL_KINDS else None)
+           for k in BUDGET_KEYS},
     }
 
 
@@ -326,7 +367,9 @@ def load_depth(json_str: str) -> None:
             _depth[kind] = _default_depth(kind)
             apply_depth(kind, prof.get("model", ""), prof.get("reasoning", "default"),
                         prof.get("priority", ""), provider=prof.get("provider", "llm"),
-                        claude_model=prof.get("claude_model", ""))
+                        claude_model=prof.get("claude_model", ""),
+                        api_entry=prof.get("api_entry", ""), tools=prof.get("tools", ""),
+                        budgets={k: prof.get(k) for k in BUDGET_KEYS})
         else:
             _depth[kind] = _default_depth(kind)
 
@@ -353,6 +396,65 @@ def claude_model_for(kind: str) -> str:
         return ""
 
 
+def api_entry_for(kind: str) -> dict | None:
+    """Запись реестра, которую строка выбрала облачным подключением (Р19). None —
+    не выбрана, удалена из реестра или вид её не поддерживает: Claude, как раньше."""
+    if kind not in API_ENTRY_KINDS:
+        return None
+    eid = (get_depth(kind).get("api_entry") or "").strip()
+    if not eid:
+        return None
+    try:
+        from llm.registry import CLOUD_PROVIDERS, get_entry
+        e = get_entry(eid)
+    except Exception:
+        return None
+    return e if e and e.get("provider") in CLOUD_PROVIDERS else None
+
+
+def api_model_for(kind: str) -> str:
+    """Модель облачного вызова строки: поле модели строки (переопределение) → модель
+    записи реестра → карточка Claude."""
+    m = (get_depth(kind).get("claude_model") or "").strip()
+    if m:
+        return m
+    e = api_entry_for(kind)
+    if e and (e.get("model") or "").strip():
+        return e["model"].strip()
+    return claude_model_for(kind)
+
+
+def tools_enabled(kind: str) -> bool:
+    """Положены ли строке инструменты сервера телеметрии."""
+    return kind in TOOL_KINDS and get_depth(kind).get("tools") == TOOLS_TELEMETRY
+
+
+def budget_defaults(gateway: bool = False) -> dict[str, int]:
+    """Умолчания бюджетов прогона: код ← config.yml (telemetry_mcp.host_budgets)."""
+    base = dict(BUDGET_DEFAULTS["gateway" if gateway else "cloud"])
+    try:
+        from telemetry_mcp.config import load as _load
+        cfg = (_load().host_budgets or {}).get("gateway" if gateway else "cloud") or {}
+        for k in base:
+            if cfg.get(k):
+                base[k] = int(cfg[k])
+    except Exception:
+        pass
+    return base
+
+
+def budgets_for(kind: str, *, gateway: bool = False) -> dict[str, int]:
+    """Бюджеты прогона с инструментами (Р12, Р23): поля строки, пустые — умолчания.
+    {calls, tokens (объём контекста прогона), minutes}."""
+    out = budget_defaults(gateway)
+    r = get_depth(kind)
+    for key in BUDGET_KEYS:
+        v = _budget(key, r.get(key))
+        if v:
+            out[key[len("budget_"):]] = v
+    return out
+
+
 def route_label(kind: str) -> str:
     """«Горыныч: smart (xhigh)» / «Claude: claude-sonnet-5» — для журнала и подписи.
 
@@ -361,7 +463,10 @@ def route_label(kind: str) -> str:
     """
     r = get_depth(kind)
     if r.get("provider") == "api":
-        return f"Claude: {claude_model_for(kind)}"
+        e = api_entry_for(kind)
+        if e and e.get("provider") != "anthropic":
+            return f"{e.get('name') or e.get('provider')}: {api_model_for(kind)}"
+        return f"Claude: {api_model_for(kind) if e else claude_model_for(kind)}"
     if r.get("provider") == SYSTEM_PROVIDER:
         from analytics.labels import SYSTEM_MODEL
         return SYSTEM_MODEL
@@ -392,6 +497,14 @@ def apply_route_form(form) -> None:
         cur = get_depth(kind)
         provider = form.get(f"route_{kind}_provider")
         claude_model = form.get(f"route_{kind}_claude_model")
+        api_entry = form.get(f"route_{kind}_api_entry")
+        # Флажок без отметки в форме не приходит вовсе — рядом с ним скрытое поле
+        # «флажок был в форме»: старая вкладка без него инструменты не выключает
+        tools = None
+        if form.get(f"route_{kind}_tools_present") is not None:
+            tools = TOOLS_TELEMETRY if form.get(f"route_{kind}_tools") else ""
+        budgets = {k: form.get(f"route_{kind}_{k}") for k in BUDGET_KEYS
+                   if form.get(f"route_{kind}_{k}") is not None} or None
         apply_depth(
             kind,
             _txt(f"depth_{kind}_model", cur.get("model", "")),
@@ -400,6 +513,8 @@ def apply_route_form(form) -> None:
             provider="llm" if kind == "manual" else (
                 None if provider is None else str(provider).strip()),
             claude_model=None if claude_model is None else str(claude_model).strip(),
+            api_entry=None if api_entry is None else str(api_entry).strip(),
+            tools=tools, budgets=budgets,
         )
 
 
