@@ -60,7 +60,20 @@ def _text(result) -> str:
     return "\n".join(parts) if parts else str(result)
 
 
-async def run(url: str, source: str, calls: list[tuple[str, dict]], limit: int, task_id: str) -> int:
+def _images(result) -> list[tuple[str, bytes]]:
+    """Картинки ответа (ImageContent): [(mime, байты)]."""
+    import base64
+    out = []
+    for c in getattr(result, "content", []) or []:
+        data = getattr(c, "data", None)
+        if data and getattr(c, "type", "") == "image":
+            mime = getattr(c, "mime_type", None) or getattr(c, "mimeType", None) or "image/png"
+            out.append((mime, base64.b64decode(data)))
+    return out
+
+
+async def run(url: str, source: str, calls: list[tuple[str, dict]], limit: int, task_id: str,
+              save_images: str | None = None) -> int:
     http = create_mcp_http_client(headers={"X-Source": source, "X-Task-Id": task_id})
     failures = 0
     async with streamable_http_client(url, http_client=http) as streams:
@@ -83,6 +96,17 @@ async def run(url: str, source: str, calls: list[tuple[str, dict]], limit: int, 
                 head = f"\n=== {name} {json.dumps(args, ensure_ascii=False)} · {dt:.1f} с · {len(text)} симв."
                 print(head + (" · ОШИБКА" if err else ""))
                 print(text[:limit] + (" …" if len(text) > limit else ""))
+                if not err:
+                    for k, (mime, data) in enumerate(_images(res), 1):
+                        line = f"[картинка {k}: {mime}, {len(data)} байт"
+                        if save_images:
+                            import os
+                            os.makedirs(save_images, exist_ok=True)
+                            path = os.path.join(save_images, f"{name}_{int(time.time() * 1000) % 10**9}_{k}.png")
+                            with open(path, "wb") as f:
+                                f.write(data)
+                            line += f" -> {path}"
+                        print(line + "]")
     return failures
 
 
@@ -95,6 +119,7 @@ def main() -> int:
     ap.add_argument("--call")
     ap.add_argument("--args", default="{}")
     ap.add_argument("--limit", type=int, default=3000, help="сколько символов ответа печатать")
+    ap.add_argument("--save-images", help="папка, куда сохранять картинки ответов (chart)")
     a = ap.parse_args()
     calls: list[tuple[str, dict]] = []
     if a.call:
@@ -110,7 +135,7 @@ def main() -> int:
     else:
         calls.append(("equipment_tree", {}))
     task = f"probe-{int(time.time())}"
-    failures = asyncio.run(run(a.url, a.source, calls, a.limit, task))
+    failures = asyncio.run(run(a.url, a.source, calls, a.limit, task, a.save_images))
     print(f"\nитого: вызовов {len(calls)}, с ошибкой {failures}")
     return 1 if failures else 0
 

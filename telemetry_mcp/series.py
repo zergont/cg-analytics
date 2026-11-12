@@ -127,6 +127,10 @@ def resample(series: dict[str, list[Point]], t0: datetime, t1: datetime, n_point
         stamps.update(t for t, _ in pts if t0 <= t < t1)
     summary = {k: _summary(pts, t0, t1) for k, pts in series.items()}
     n_raw = {k: sum(1 for t, _ in pts if t0 <= t < t1) for k, pts in series.items()}
+    # Значение, удержанное с момента до окна (посев): сетка начинается с начала окна,
+    # иначе ряд выглядел бы пустым до первой записи, хотя значение держалось (v5.2.5)
+    if any(st.value_at(t0) is not None for st in steppers.values()):
+        stamps.add(t0)
     if len(stamps) <= max(1, n_points):
         times = sorted(stamps)
         cells = {k: [st.value_at(t) for t in times] for k, st in steppers.items()}
@@ -164,8 +168,18 @@ def _bucket_in_gap(a: datetime, b: datetime, gaps: list[tuple[datetime, datetime
     return any(ga <= a and (gb is None or gb >= b) for ga, gb in gaps)
 
 
+def seed_allowed(seed_ts: datetime, t0: datetime, gaps: list[tuple[datetime, datetime | None]]) -> bool:
+    """Можно ли держать на входе окна последнюю запись до окна: между ней и началом окна
+    не было разрыва связи (значение через разрыв не переносится — после него регистр
+    приходит заново)."""
+    if seed_ts >= t0:
+        return False
+    return not any(a < t0 and (b is None or b > seed_ts) for a, b in gaps)
+
+
 def from_buckets(series: dict[str, list[dict[str, Any]]], t0: datetime, t1: datetime, step_sec: int,
-                 gaps: list[tuple[datetime, datetime | None]] | None = None) -> Resampled:
+                 gaps: list[tuple[datetime, datetime | None]] | None = None,
+                 seed: dict[str, float] | None = None) -> Resampled:
     """Ряды из корзин БД (history.bucketed_history): корзина без записей держит
     последнее значение предыдущей (ступенчато), корзина целиком в разрыве связи —
     пусто и обрывает удержание. Сводка: первое/последнее — по записям, минимум и
@@ -178,7 +192,8 @@ def from_buckets(series: dict[str, list[dict[str, Any]]], t0: datetime, t1: date
     for key, buckets in series.items():
         by_b = {b["b"]: b for b in buckets}
         col: list[Any] = [None] * len(times)
-        prev_last: float | None = None
+        # посев: значение, удержанное с момента до окна, — до первой корзины с записями
+        prev_last: float | None = (seed or {}).get(key)
         n = 0
         first = last = mn = mx = None
         for i, t in enumerate(times):

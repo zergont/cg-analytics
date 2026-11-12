@@ -28,7 +28,7 @@ _ARG_UNIT = Annotated[str, Field(description="Установка: имя («ДЭ
 
 def register(server: Any) -> None:
 
-    @server.tool(name="equipment_tree",
+    @server.tool(structured_output=False, name="equipment_tree",
                  description="Оборудование и соседи: дерево объект → установки → панель и датчики. "
                              "С чего начинать: даёт имена и id установок для остальных инструментов, "
                              "соседей по объекту, привязку KB и когда были последние данные.")
@@ -75,7 +75,7 @@ def register(server: Any) -> None:
             return "\n".join(lines)
         return await run_tool("equipment_tree", ctx, {"unit": unit}, body)
 
-    @server.tool(name="register_catalog",
+    @server.tool(structured_output=False, name="register_catalog",
                  description="Каталог регистров установки: адрес, русское имя, единица, вид "
                              "(аналог/состояние/биты), роль в KB, расшифровка состояний. "
                              "Поиск по слову сужает список.")
@@ -128,7 +128,7 @@ def register(server: Any) -> None:
         return await run_tool("register_catalog", ctx, {"unit": unit, "query": query, "all_registers": all_registers},
                               body)
 
-    @server.tool(name="kb_passport",
+    @server.tool(structured_output=False, name="kb_passport",
                  description="Паспорт и пороги из базы знаний установки: паспортные значения РЭ, уставки "
                              "контроллера, настраиваемые пороги, зоны нагрузки, шаг датчиков, ссылки на "
                              "источники. Параметр сужает до своего раздела.")
@@ -194,7 +194,7 @@ def register(server: Any) -> None:
             return "\n".join(lines)
         return await run_tool("kb_passport", ctx, {"unit": unit, "param": param}, body)
 
-    @server.tool(name="fault_code",
+    @server.tool(structured_output=False, name="fault_code",
                  description="Справочник кодов панели: что говорит панель про код неисправности или бит "
                              "маски (имя, серьёзность, описание, причины и шаги из KB). «Как в мануале» — "
                              "это не здесь, а у Библиотекаря.")

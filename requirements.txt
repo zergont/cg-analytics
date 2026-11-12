@@ -18,3 +18,6 @@ pyyaml>=6.0.2
 
 # Сервер телеметрии для моделей (MCP, v5.2.0): SDK 2.x (MCPServer, streamable HTTP)
 mcp>=2.0,<3
+
+# Картинка ряда для инструмента chart сервера телеметрии (v5.2.5); рендер без GUI (Agg)
+matplotlib>=3.8

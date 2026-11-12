@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
@@ -28,7 +29,7 @@ from .common import (ToolError, UnitRef, fmt_num, fmt_t, neighbors_of, now_utc, 
 from .envelope import Envelope
 from .history import bucketed_history, gap_pairs, load_history, retention_cutoff, retention_note
 from .kb import ParamRef, kb_for, key_roles, nominal_for, param_from_addr, resolve_params
-from .series import bucket_times, from_buckets, held_points, nice_step, resample
+from .series import Resampled, bucket_times, from_buckets, held_points, nice_step, resample, seed_allowed
 
 _ARG_UNIT = Annotated[str, Field(description="Установка: имя («ДЭС №3») или id из equipment_tree")]
 _ARG_FROM = Annotated[str | None, Field(description="Начало окна, пояс сервиса (МСК): «13.10.2026 12:00», «2026-10-13 12:00:00»")]
@@ -47,18 +48,185 @@ def _multi_day(t0: datetime, t1: datetime) -> bool:
     return (fmt_local(t0, day=True) or "")[:5] != (fmt_local(t1 - timedelta(seconds=1), day=True) or "")[:5]
 
 
+async def _seeds(unit: UnitRef, prefs: list[ParamRef], t0: datetime, t1: datetime,
+                 ) -> tuple[dict[str, tuple[datetime, float]], list[tuple[datetime, datetime | None]]]:
+    """({метка: (время, значение)} — посев: последние записи до окна, которые можно
+    держать на его входе; разрывы связи окна). Запись не старше
+    series_seed_max_age_hours и не отделена от окна разрывом связи (seed_allowed)."""
+    age = timedelta(hours=float(settings().limit("series_seed_max_age_hours") or 0))
+    gaps_all = gap_pairs(await _src.get_data_gaps(*unit.triple, t0 - age, t1))
+    window = [(a, b) for a, b in gaps_all if a < t1 and (b is None or b > t0)]
+    out: dict[str, tuple[datetime, float]] = {}
+    if age.total_seconds() > 0 and prefs:
+        try:
+            last = await _src.get_last_values_before(*unit.triple, [p.addr for p in prefs], t0,
+                                                     age.total_seconds())
+        except Exception:  # noqa: BLE001 — без посева ряд просто начнётся с первой записи
+            last = {}
+        for p in prefs:
+            sd = last.get(p.addr)
+            if sd and sd.get("value") is not None and seed_allowed(sd["ts"], t0, gaps_all):
+                out[p.label] = (sd["ts"], float(sd["value"]))
+    return out, window
+
+
 async def _series_for(unit: UnitRef, cfg: Any, prefs: list[ParamRef], t0: datetime, t1: datetime,
-                      ) -> tuple[dict[str, list], dict[str, int], list[tuple[datetime, datetime | None]]]:
+                      ) -> tuple[dict[str, list], dict[str, int], list[tuple[datetime, datetime | None]], int]:
+    """(ряды по меткам, очистка, разрывы окна, сколько рядов с посевом на входе)."""
     addrs = frozenset(p.addr for p in prefs)
-    gaps = gap_pairs(await _src.get_data_gaps(*unit.triple, t0, t1))
+    seeds, gaps = await _seeds(unit, prefs, t0, t1)
     rows, st = await load_history(*unit.triple, t0, t1, addrs)
     series = {p.label: held_points(rows, p.addr) for p in prefs}
-    return series, st, gaps
+    for label, (_ts, value) in seeds.items():
+        # точка за микросекунду до окна: в сводку и счёт записей не попадает, на входе держится
+        series[label].insert(0, (t0 - timedelta(microseconds=1), value))
+    return series, st, gaps, len(seeds)
+
+
+@dataclass
+class Gathered:
+    """Собранные ряды установки и соседей на общей сетке — вход таблицы `series`
+    и картинки `chart` (один сбор, два представления)."""
+    rs: Resampled
+    keys: list[str]                       # метки колонок по порядку
+    steps: dict[str, float | None]        # шаг датчика по колонке
+    cols: list[dict[str, Any]]            # {key, unit_name, neighbor, param, unit, role}
+    prefs: list[ParamRef]                 # параметры своей установки
+    t0: datetime
+    t1: datetime
+    long_window: bool
+
+
+async def gather_series(env: Envelope, u: UnitRef, cfg: Any, prefs: list[ParamRef],
+                        t0: datetime, t1: datetime, n_pts: int, with_neighbors: bool,
+                        st: Any) -> Gathered:
+    """Прочитать ряды параметров установки (и соседей) и свести на одну сетку.
+    Окно до series_raw_window_hours — сырые строки через защиту меток и удержание;
+    длиннее — укрупнение на стороне БД. Заполняет конверт: единицы, очистка,
+    разрывы, слой, усечение, пометки (срок хранения, номиналы)."""
+    env.window_from, env.window_to = t0, t1
+    env.layer = "очищенный слой: защита меток, удержание до следующей записи"
+    raw_hours = float(st.limit("series_raw_window_hours"))
+    long_window = (t1 - t0) > timedelta(hours=raw_hours)
+    step_sec = nice_step((t1 - t0).total_seconds() / max(1, n_pts)) if long_window else 0
+
+    # Колонки: своя установка и соседи (те же роли у соседа; тот же адрес при том же типе панели)
+    columns: list[tuple[UnitRef, Any, list[ParamRef], list[ParamRef]]] = [(u, cfg, prefs, prefs)]
+    if with_neighbors:
+        for nb in await neighbors_of(u):
+            ncfg, _r, _n = await kb_for(nb)
+            ncat = await get_catalog(nb.equip_type)
+            nprefs: list[ParamRef] = []
+            origin: list[ParamRef] = []
+            for p in prefs:
+                a = ncfg.role_to_addr(p.role) if (ncfg is not None and p.role) else None
+                if a is None and nb.equip_type == u.equip_type:
+                    a = p.addr
+                if a is None:
+                    continue
+                try:
+                    np_ = param_from_addr(ncfg, ncat, a)
+                except ToolError:
+                    continue
+                np_.label = f"{nb.name}: {p.label}"
+                nprefs.append(np_)
+                origin.append(p)
+            if nprefs:
+                columns.append((nb, ncfg, nprefs, origin))
+
+    steps: dict[str, float | None] = {}
+    series_all: dict[str, Any] = {}
+    cols: list[dict[str, Any]] = []
+    gaps: list = []
+    seeded = 0
+    for cu, _ccfg, cprefs, corigin in columns:
+        for p, po in zip(cprefs, corigin):
+            env.units[p.label] = p.unit
+            steps[p.label] = p.step
+            cols.append({"key": p.label, "unit_name": cu.name, "neighbor": cu is not u,
+                         "param": po.label, "unit": p.unit, "role": po.role})
+        if long_window:
+            # Укрупнение на стороне БД (v5.2.3): сырые строки за недели не вычитать за срок вызова;
+            # series_all[метка] → укрупнённый набор этой установки (Resampled)
+            cseeds, cgaps = await _seeds(cu, cprefs, t0, t1)
+            seeded += len(cseeds)
+            agg = await bucketed_history(*cu.triple, t0, t1, frozenset(p.addr for p in cprefs), step_sec)
+            part = from_buckets({p.label: agg.get(p.addr, []) for p in cprefs}, t0, t1, step_sec, cgaps,
+                                seed={k: v for k, (_t, v) in cseeds.items()})
+            for p in cprefs:
+                series_all[p.label] = part
+            if cu is u:
+                gaps = cgaps
+            elif cgaps:
+                env.notes.append(f"у {cu.name} разрывы связи: " + "; ".join(
+                    f"{fmt_t(a, day=True)}–{fmt_t(b, day=True) if b else '…'}" for a, b in cgaps[:4]))
+        else:
+            ser, drops, cgaps, n_seed = await _series_for(cu, _ccfg, cprefs, t0, t1)
+            seeded += n_seed
+            for k, v in drops.items():
+                env.dropped[k] = env.dropped.get(k, 0) + v
+            if cu is u:
+                gaps = cgaps
+            elif cgaps:
+                env.notes.append(f"у {cu.name} разрывы связи: " + "; ".join(
+                    f"{fmt_t(a)}–{fmt_t(b) if b else '…'}" for a, b in cgaps[:4]))
+            series_all.update(ser)
+    env.gaps = gaps
+
+    if long_window:
+        # Склейка укрупнённых рядов всех колонок на одной сетке корзин
+        times = bucket_times(t0, t1, step_sec)
+        cells = {k: series_all[k].cells.get(k, [None] * len(times)) for k in series_all}
+        summary = {k: series_all[k].summary.get(k, {}) for k in series_all}
+        n_raw = {k: series_all[k].n_raw.get(k, 0) for k in series_all}
+        rs = Resampled("bucket", step_sec, times, cells, summary, n_raw)
+        env.layer = "укрупнение в БД по корзинам (среднее по времени удержания); защита меток — только от меток в будущем"
+        env.notes.append(f"окно длиннее {raw_hours:g} ч — укрупнено в БД до шага {fmt_duration(step_sec)}; "
+                         "кадры застывших часов здесь не отсеиваются")
+    else:
+        rs = resample(series_all, t0, t1, n_pts, gaps)
+    env.rows = len(rs.times)
+    if rs.mode == "bucket":
+        env.truncation.append(f"укрупнено до шага {fmt_duration(rs.step_sec)} ({len(rs.times)} точек; "
+                              "в ячейке мин/ср.по времени/макс)")
+    if not any(rs.summary.get(k) for k in rs.summary):
+        rn = await retention_note(t0, t1)
+        if rn:
+            env.notes.append(rn)
+    env.notes.append("запись по изменению — значение держится до следующей записи; в разрыве связи — пусто")
+    if seeded:
+        _age = float(st.limit("series_seed_max_age_hours"))
+        env.notes.append(f"на входе окна — последнее значение до окна (не старше {_age:g} ч, без разрыва "
+                         "связи между ними); в сводку и счёт записей оно не входит")
+    for p in prefs:
+        nom = nominal_for(cfg, p.role)
+        if nom:
+            env.notes.append(f"{p.label}: номинал {fmt_num(nom[0])} {p.unit} ({nom[1]})")
+    return Gathered(rs=rs, keys=list(series_all.keys()), steps=steps, cols=cols, prefs=prefs,
+                    t0=t0, t1=t1, long_window=long_window)
+
+
+def summary_lines(g: Gathered) -> list[str]:
+    """Числовая сводка по колонкам: первое, последнее, минимум и максимум с временем."""
+    day = _multi_day(g.t0, g.t1)
+    lines = ["сводка:"]
+    for k in g.keys:
+        s = g.rs.summary.get(k) or {}
+        st_ = g.steps.get(k)
+        if not s:
+            lines.append(f"  {k}: записей нет")
+            continue
+        lines.append(f"  {k}: первое {fmt_num(s['first'][1], st_)} ({fmt_t(s['first'][0], day=day)}), "
+                     f"последнее {fmt_num(s['last'][1], st_)} ({fmt_t(s['last'][0], day=day)}), "
+                     f"мин {fmt_num(s['min'][1], st_)} ({fmt_t(s['min'][0], day=day)}), "
+                     f"макс {fmt_num(s['max'][1], st_)} ({fmt_t(s['max'][0], day=day)}), "
+                     f"записей {s['n']}")
+    return lines
 
 
 def register(server: Any) -> None:
 
-    @server.tool(name="series",
+    @server.tool(structured_output=False, name="series",
                  description="Ряд параметров установки за окно: значения удержаны до следующей записи "
                              "(запись по изменению), при укрупнении шага — мин / среднее по времени / макс. "
                              "Сводка по колонкам. with_neighbors=true добавляет те же параметры соседних "
@@ -87,107 +255,12 @@ def register(server: Any) -> None:
             prefs = resolve_params(cfg, cat, _split(params), max_params=int(st.limit("series_max_params")))
             t0, t1 = parse_window(t_from, t_to, at, minutes, default_hours=2,
                                   max_days=float(st.limit("series_max_window_days")))
-            env.window_from, env.window_to = t0, t1
-            env.layer = "очищенный слой: защита меток, удержание до следующей записи"
             n_pts = min(int(points or st.limit("series_max_points")), int(st.limit("series_max_points")))
-            raw_hours = float(st.limit("series_raw_window_hours"))
-            long_window = (t1 - t0) > timedelta(hours=raw_hours)
-            step_sec = nice_step((t1 - t0).total_seconds() / max(1, n_pts)) if long_window else 0
-
-            # Колонки: своя установка и соседи (те же роли у соседа; тот же адрес при том же типе панели)
-            columns: list[tuple[UnitRef, Any, list[ParamRef]]] = [(u, cfg, prefs)]
-            if with_neighbors:
-                for nb in await neighbors_of(u):
-                    ncfg, _r, _n = await kb_for(nb)
-                    ncat = await get_catalog(nb.equip_type)
-                    nprefs: list[ParamRef] = []
-                    for p in prefs:
-                        a = ncfg.role_to_addr(p.role) if (ncfg is not None and p.role) else None
-                        if a is None and nb.equip_type == u.equip_type:
-                            a = p.addr
-                        if a is None:
-                            continue
-                        try:
-                            np_ = param_from_addr(ncfg, ncat, a)
-                        except ToolError:
-                            continue
-                        np_.label = f"{nb.name}: {p.label}"
-                        nprefs.append(np_)
-                    if nprefs:
-                        columns.append((nb, ncfg, nprefs))
-
-            steps: dict[str, float | None] = {}
-            series_all: dict[str, Any] = {}
-            gaps: list = []
-            for cu, _ccfg, cprefs in columns:
-                for p in cprefs:
-                    env.units[p.label] = p.unit
-                    steps[p.label] = p.step
-                if long_window:
-                    # Укрупнение на стороне БД (v5.2.3): сырые строки за недели не вычитать за срок вызова;
-                    # series_all[метка] → укрупнённый набор этой установки (Resampled)
-                    cgaps = gap_pairs(await _src.get_data_gaps(*cu.triple, t0, t1))
-                    agg = await bucketed_history(*cu.triple, t0, t1, frozenset(p.addr for p in cprefs), step_sec)
-                    part = from_buckets({p.label: agg.get(p.addr, []) for p in cprefs}, t0, t1, step_sec, cgaps)
-                    for p in cprefs:
-                        series_all[p.label] = part
-                    if cu is u:
-                        gaps = cgaps
-                    elif cgaps:
-                        env.notes.append(f"у {cu.name} разрывы связи: " + "; ".join(
-                            f"{fmt_t(a, day=True)}–{fmt_t(b, day=True) if b else '…'}" for a, b in cgaps[:4]))
-                else:
-                    ser, drops, cgaps = await _series_for(cu, _ccfg, cprefs, t0, t1)
-                    for k, v in drops.items():
-                        env.dropped[k] = env.dropped.get(k, 0) + v
-                    if cu is u:
-                        gaps = cgaps
-                    elif cgaps:
-                        env.notes.append(f"у {cu.name} разрывы связи: " + "; ".join(
-                            f"{fmt_t(a)}–{fmt_t(b) if b else '…'}" for a, b in cgaps[:4]))
-                    series_all.update(ser)
-            env.gaps = gaps
-
-            if long_window:
-                # Склейка укрупнённых рядов всех колонок на одной сетке корзин
-                times = bucket_times(t0, t1, step_sec)
-                cells = {k: series_all[k].cells.get(k, [None] * len(times)) for k in series_all}
-                summary = {k: series_all[k].summary.get(k, {}) for k in series_all}
-                n_raw = {k: series_all[k].n_raw.get(k, 0) for k in series_all}
-                from .series import Resampled
-                rs = Resampled("bucket", step_sec, times, cells, summary, n_raw)
-                env.layer = "укрупнение в БД по корзинам (среднее по времени удержания); защита меток — только от меток в будущем"
-                env.notes.append(f"окно длиннее {raw_hours:g} ч — укрупнено в БД до шага {fmt_duration(step_sec)}; "
-                                 "кадры застывших часов здесь не отсеиваются")
-            else:
-                rs = resample(series_all, t0, t1, n_pts, gaps)
-            env.rows = len(rs.times)
-            if rs.mode == "bucket":
-                env.truncation.append(f"укрупнено до шага {fmt_duration(rs.step_sec)} ({len(rs.times)} точек; "
-                                      "в ячейке мин/ср.по времени/макс)")
-            if not any(rs.summary.get(k) for k in rs.summary):
-                rn = await retention_note(t0, t1)
-                if rn:
-                    env.notes.append(rn)
-            env.notes.append("запись по изменению — значение держится до следующей записи; в разрыве связи — пусто")
-            for p in prefs:
-                nom = nominal_for(cfg, p.role)
-                if nom:
-                    env.notes.append(f"{p.label}: номинал {fmt_num(nom[0])} {p.unit} ({nom[1]})")
-            keys = list(series_all.keys())
+            g = await gather_series(env, u, cfg, prefs, t0, t1, n_pts, with_neighbors, st)
+            rs, keys, steps = g.rs, g.keys, g.steps
             day = _multi_day(t0, t1)
             # Сводка — ПЕРЕД таблицей: при усечении по размеру теряются строки, а не итоги (приёмка Э1)
-            lines = ["сводка:"]
-            for k in keys:
-                s = rs.summary.get(k) or {}
-                if not s:
-                    lines.append(f"  {k}: записей нет")
-                    continue
-                lines.append(f"  {k}: первое {fmt_num(s['first'][1], steps.get(k))} ({fmt_t(s['first'][0], day=day)}), "
-                             f"последнее {fmt_num(s['last'][1], steps.get(k))} ({fmt_t(s['last'][0], day=day)}), "
-                             f"мин {fmt_num(s['min'][1], steps.get(k))} ({fmt_t(s['min'][0], day=day)}), "
-                             f"макс {fmt_num(s['max'][1], steps.get(k))} ({fmt_t(s['max'][0], day=day)}), "
-                             f"записей {s['n']}")
+            lines = summary_lines(g)
             lines.append("")
             lines.append("время | " + " | ".join(keys))
             for i, t in enumerate(rs.times):
@@ -210,7 +283,7 @@ def register(server: Any) -> None:
                                               "at": at, "minutes": minutes, "points": points,
                                               "with_neighbors": with_neighbors}, body)
 
-    @server.tool(name="state_at",
+    @server.tool(structured_output=False, name="state_at",
                  description="Снимок состояния установки на момент: значение, единица и ВОЗРАСТ значения "
                              "(когда менялось в последний раз), режим и состояния панели с расшифровкой, "
                              "активные неисправности с серьёзностью. По умолчанию ключевые параметры.")
@@ -313,7 +386,7 @@ def register(server: Any) -> None:
             return "\n".join(out)
         return await run_tool("state_at", ctx, {"unit": unit, "at": at, "params": params}, body)
 
-    @server.tool(name="trend",
+    @server.tool(structured_output=False, name="trend",
                  description="Долгие тренды (дни…месяцы) из характеристик сегментов аналитики: по суткам "
                              "или по сегментам работы — медиана по времени, минимум, максимум параметра, "
                              "часы работы. Запасной путь без аналитики — часовые агрегаты «по отсчётам».")

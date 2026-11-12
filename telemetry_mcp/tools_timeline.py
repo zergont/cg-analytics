@@ -162,7 +162,7 @@ async def _unit_events(u: UnitRef, t0: datetime, t1: datetime, kinds: set[str], 
 
 def register(server: Any) -> None:
 
-    @server.tool(name="timeline",
+    @server.tool(structured_output=False, name="timeline",
                  description="Лента событий установки за окно одним списком: смены режима, состояния, "
                              "действия персонала (переключатель, команды, сброс, автомат), фронты "
                              "неисправностей с серьёзностью, связь (разрывы). Дребезг схлопнут с числом "

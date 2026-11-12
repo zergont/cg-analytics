@@ -28,9 +28,20 @@ from starlette.responses import JSONResponse
 from . import __version__
 from .config import McpSettings, load
 from . import common
-from . import tools_equipment, tools_segments, tools_series, tools_timeline
+from . import tools_chart, tools_equipment, tools_segments, tools_series, tools_timeline
 
 logger = logging.getLogger(__name__)
+
+
+def service_version() -> str:
+    """Версия сервиса — файл VERSION репозитория (то, что выкачено); нет файла — версия пакета."""
+    from pathlib import Path
+    try:
+        v = (Path(__file__).resolve().parent.parent / "VERSION").read_text(encoding="utf-8").strip()
+        return v or __version__
+    except OSError:
+        return __version__
+
 
 INSTRUCTIONS = """Сервер телеметрии «Честной Генерации»: данные генераторных установок для разбора.
 Правила для модели:
@@ -39,6 +50,8 @@ INSTRUCTIONS = """Сервер телеметрии «Честной Генер�
 • Время во входе и в ответах — пояс сервиса (МСК), формат «ДД.ММ.ГГГГ ЧЧ:ММ[:СС]».
 • Сначала timeline (что происходило), потом series (как менялись параметры); соседей смотреть,
   если машины на одном объекте (series/timeline with_neighbors=true).
+• chart — картинка ряда: форму (раскачка, провал, выброс) смотри на картинке, числа бери
+  только из сводки в том же ответе.
 • Каждый ответ начинается конвертом [Tn]: окно, слой, что отброшено, усечение. Если данные
   усечены или окно внутри разрыва связи — скажи об этом, не додумывай.
 • В конце ответа перечисли использованные вызовы блоком «## Данные» по меткам [Tn].
@@ -53,16 +66,17 @@ def build_server(st: McpSettings | None = None) -> MCPServer:
         name="cg-telemetry",
         title="Телеметрия «Честной Генерации»",
         instructions=INSTRUCTIONS,
-        version=__version__,
+        version=service_version(),
         log_level=st.log_level if st.log_level in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL") else "INFO",
     )
-    for mod in (tools_equipment, tools_series, tools_timeline, tools_segments):
+    for mod in (tools_equipment, tools_series, tools_chart, tools_timeline, tools_segments):
         mod.register(server)
 
     @server.custom_route("/health", methods=["GET"])
     async def health(_request: Request) -> JSONResponse:
         tools = await server.list_tools()
-        return JSONResponse({"status": "ok", "service": "cg-telemetry-mcp", "version": __version__,
+        return JSONResponse({"status": "ok", "service": "cg-telemetry-mcp", "version": service_version(),
+                             "package": __version__,
                              "tools": [t.name for t in tools], "path": st.path})
 
     return server
@@ -87,7 +101,14 @@ async def startup(st: McpSettings) -> None:
         await get_tree(panel_types=st.panel_types, ensure=True)
     except Exception:  # noqa: BLE001
         logger.warning("Карта установок при старте не материализована", exc_info=True)
-    logger.info("cg-telemetry-mcp %s: %s:%d%s", __version__, st.host, st.port, st.path)
+    # Прогрев рендера графиков (кэш шрифтов matplotlib) — в фоне, старт не держит
+    try:
+        import asyncio
+        from .chart import warm_up
+        asyncio.get_running_loop().run_in_executor(None, warm_up)
+    except Exception:  # noqa: BLE001
+        logger.warning("Прогрев графиков не запущен", exc_info=True)
+    logger.info("cg-telemetry-mcp %s: %s:%d%s", service_version(), st.host, st.port, st.path)
 
 
 async def shutdown() -> None:

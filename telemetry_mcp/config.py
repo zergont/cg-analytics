@@ -26,6 +26,9 @@ DEFAULT_LIMITS: dict[str, Any] = {
     "series_max_points": 150,          # точек на колонку
     "series_max_params": 8,            # колонок (параметров) на вызов
     "series_max_window_days": 31,      # дальше — «берите trend»
+    "series_seed_max_age_hours": 6,    # значение на входе окна: последняя запись до окна не старше
+    "chart_max_params": 4,             # панелей на графике
+    "chart_max_points": 600,           # точек по времени на графике (в токены не идут)
     "snapshot_max_registers": 400,     # снимок «все»
     "timeline_max_rows": 300,          # строк ленты
     "trend_max_points": 400,           # точек долгого тренда

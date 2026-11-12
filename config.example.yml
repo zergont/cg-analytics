@@ -110,6 +110,9 @@ telemetry_mcp:
     series_max_points: 150          # точек на колонку
     series_max_params: 8            # параметров на вызов
     series_max_window_days: 31
+    series_seed_max_age_hours: 6    # ряд и график: значение на входе окна — запись до окна не старше
+    chart_max_params: 4             # панелей на графике (chart)
+    chart_max_points: 600           # точек по времени на графике
     snapshot_max_registers: 400     # снимок «все»
     timeline_max_rows: 300          # строк ленты
     trend_max_points: 400

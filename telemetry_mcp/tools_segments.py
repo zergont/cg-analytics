@@ -51,7 +51,7 @@ def _first_line(md: str | None) -> str | None:
 
 def register(server: Any) -> None:
 
-    @server.tool(name="segments",
+    @server.tool(structured_output=False, name="segments",
                  description="Сегменты аналитики установки за окно: номер, режим, границы, длительность, "
                              "причина закрытия, качество данных, подсегменты, замечания, есть ли акт и "
                              "разборы ИИ. Номер сегмента нужен для segment_report.")
@@ -107,7 +107,7 @@ def register(server: Any) -> None:
             return "\n".join(lines)
         return await run_tool("segments", ctx, {"unit": unit, "t_from": t_from, "t_to": t_to}, body)
 
-    @server.tool(name="segment_report",
+    @server.tool(structured_output=False, name="segment_report",
                  description="Отчёт сегмента аналитики по разделам: шапка, сводка, подсегменты, замечания, "
                              "заключение ИИ; «всё» — целиком (большие сутки сжимаются). Нужен номер из segments.")
     async def segment_report(
@@ -159,7 +159,7 @@ def register(server: Any) -> None:
             return text
         return await run_tool("segment_report", ctx, {"segment_id": segment_id, "sections": sections}, body)
 
-    @server.tool(name="episodes",
+    @server.tool(structured_output=False, name="episodes",
                  description="Эпизоды тревог аналитики за окно: сценарий, серьёзность, начало и конец, "
                              "воздействие (active_sec) и слепая доля без связи (blind_sec), источник "
                              "(панель/аналитика), снятие гейтом, значения на открытии.")
@@ -215,7 +215,7 @@ def register(server: Any) -> None:
         return await run_tool("episodes", ctx, {"unit": unit, "t_from": t_from, "t_to": t_to, "scenario": scenario},
                               body)
 
-    @server.tool(name="incident_acts",
+    @server.tool(structured_output=False, name="incident_acts",
                  description="Акты аварийных остановов установки за окно или акт по номеру сегмента: момент "
                              "и вид стопа, характер (мгновенный/управляемый), отказ пуска или работы, окно "
                              "акта, стоящие неисправности, сводка «Следователя», лента событий, заключение "

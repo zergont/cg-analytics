@@ -335,7 +335,7 @@ async def run_tool(
             await log_call(
                 tool=tool, task_id=task_id, source=source, unit_id=env.unit_id,
                 args=_safe_args(args), window_from=env.window_from, window_to=env.window_to,
-                rows=env.rows, nbytes=len(text.encode("utf-8")),
+                rows=env.rows, nbytes=len(text.encode("utf-8")) + int(env.attachment_bytes or 0),
                 truncated="; ".join(env.truncation) or None,
                 dropped={**{k: v for k, v in env.dropped.items() if v},
                          **({"gaps": len(env.gaps)} if env.gaps else {})} or None,

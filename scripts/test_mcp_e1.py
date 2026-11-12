@@ -313,7 +313,8 @@ srv = build_server(st)
 tools = asyncio.run(srv.list_tools())
 names = sorted(t.name for t in tools)
 check(names == sorted(["equipment_tree", "register_catalog", "series", "state_at", "timeline", "segments", "segment_report",
-                       "episodes", "incident_acts", "trend", "kb_passport", "fault_code"]), f"8: 12 инструментов: {names}")
+                       "episodes", "incident_acts", "trend", "kb_passport", "fault_code", "chart"]),
+      f"8: 13 инструментов (12 из Э1 + chart, v5.2.5): {names}")
 by = {t.name: t for t in tools}
 props = {n: set((by[n].input_schema or {}).get("properties", {}).keys()) for n in by}
 check(props["series"] == {"unit", "params", "t_from", "t_to", "at", "minutes", "points", "with_neighbors"}, f"8: аргументы series: {props['series']}")

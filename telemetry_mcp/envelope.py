@@ -82,6 +82,7 @@ class Envelope:
     truncation: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     rows: int | None = None
+    attachment_bytes: int = 0                  # вложение ответа (PNG графика) — в журнал
 
     @property
     def multi_day(self) -> bool:
