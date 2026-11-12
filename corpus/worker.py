@@ -203,7 +203,11 @@ async def _process_segment(
     # шлюз дважды не зовём (она остаётся в цепочке ради отката на v5.1.10)
     entries = _route_entries(task_id, depth)
     provider = entries[0]["name"] + (f" +{len(entries) - 1} запасн." if len(entries) > 1 else "")
-    result = await _analyse_segment_chain(seg_row, kb_path, prompt, entries, depth=depth)
+    # Журнал llm_calls (v5.2.6): сегмент, вид разбора и версия промпта — контекстом
+    from llm import usage as _usage
+    with _usage.call_context(task="seg", ref=seg_id, depth=depth,
+                             prompt_version=(prompt_meta or {}).get("version")):
+        result = await _analyse_segment_chain(seg_row, kb_path, prompt, entries, depth=depth)
     # Версия промпта и признак картины объекта (v5.2.1, В12) — при любом исходе:
     # «до/после» по debug_json
     result["debug_json"] = {**(result.get("debug_json") or {}), "prompt": prompt_meta,

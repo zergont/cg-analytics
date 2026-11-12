@@ -2215,7 +2215,7 @@ _VERDICT_TOOL = {
 
 
 async def _run_warning_gate_api(
-    user_prompt: str, model: str, claude_cfg: dict,
+    user_prompt: str, model: str, claude_cfg: dict, depth: str | None = None,
 ) -> tuple[str, str, str, int, int]:
     """Гейт через Claude API: анализ + машинно-читаемый вердикт (tool_use verdict).
 
@@ -2236,7 +2236,9 @@ async def _run_warning_gate_api(
             # SDK сам ретраит 429/5xx/сетевые ошибки с экспоненциальным backoff
             max_retries=3,
         )
-        response = await client.messages.create(
+        from llm import usage as _usage
+        response = await _usage.anthropic_create(
+            client, depth=depth,
             model=model,
             # Лимит из настроек Claude (веб-морда): 1024 обрезало анализ на полуслове
             max_tokens=claude_cfg["max_tokens"],
@@ -2485,15 +2487,21 @@ async def _analyze_warning_claude(
         reasons     = uncancellable_reasons(struct)
         can_cancel  = not reasons
 
-        if provider == "llm":
-            # Модель, рассуждение и приоритет — строка таблицы (resolve_depth по виду)
-            analysis, decision, reason, tokens_in, tokens_out = await _run_warning_gate_llm(
-                user_prompt, None, depth=kind, meta=_gw_meta,
-            )
-        else:
-            analysis, decision, reason, tokens_in, tokens_out = await _run_warning_gate_api(
-                user_prompt, claude_model_for(kind), claude_cfg,
-            )
+        # Журнал llm_calls (v5.2.6): вид, машина и версия промпта — контекстом; вердикт
+        # модели дописывается в строку вызова после разбора ответа
+        from llm import usage as _usage
+        with _usage.call_context(task="gate", depth=kind, prompt_version=_pver,
+                                 ref=f"{router_sn}/{equip_type}/{panel_id}") as _ucx:
+            if provider == "llm":
+                # Модель, рассуждение и приоритет — строка таблицы (resolve_depth по виду)
+                analysis, decision, reason, tokens_in, tokens_out = await _run_warning_gate_llm(
+                    user_prompt, None, depth=kind, meta=_gw_meta,
+                )
+            else:
+                analysis, decision, reason, tokens_in, tokens_out = await _run_warning_gate_api(
+                    user_prompt, claude_model_for(kind), claude_cfg, depth=kind,
+                )
+        await _usage.annotate(_ucx, verdict=decision)
         # Подпись и журнал — по реально ответившей модели (у шлюза это голова,
         # а не имя из маршрута уровня)
         from llm.client import gateway_label

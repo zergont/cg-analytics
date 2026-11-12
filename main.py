@@ -64,6 +64,9 @@ async def lifespan(app: FastAPI):
                        "поправлен до %d с: сервер должен снимать запрос раньше клиента",
                        settings.source_query_timeout, settings.source_statement_timeout)
     await init_db()
+    # Журнал обращений к моделям llm_calls (v5.2.6): пишет только работающий сервис
+    from llm import usage as _llm_usage
+    _llm_usage.enable()
     await init_source_pool()
     # Загружаем сохранённый часовой пояс из БД (если пользователь менял через UI)
     saved_tz = await get_app_setting("timezone", settings.timezone_name)

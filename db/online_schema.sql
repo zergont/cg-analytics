@@ -364,3 +364,49 @@ CREATE TABLE IF NOT EXISTS mcp_calls (
     error        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_mcp_calls_ts ON mcp_calls (ts DESC);
+
+-- ── Журнал обращений к моделям (v5.2.6, MCP Э2б; design_mcp_e2.md, Р5/Р25/Р26) ──
+-- Одна строка — один вызов модели, из ВСЕХ точек (гейт, заключения, пересказ, разбор
+-- аварии, очистка языка, ручные запросы, цикл с инструментами). Одна таблица на план
+-- MCP Э2 и на план цепочки (plan_chain_reports_v5.md, «Таблица llm_calls»).
+-- tokens_in — вход БЕЗ кэша; чего провайдер не отдал — NULL. cost_usd — по ценам записи
+-- реестра на момент вызова (смена цен историю не пересчитывает). input_text пока не
+-- пишется: хранить ли полный вход, решает план цепочки. Без CHECK (файл играется при
+-- каждом старте).
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id                 BIGSERIAL   PRIMARY KEY,
+    ts                 TIMESTAMPTZ NOT NULL DEFAULT now(),
+    task_kind          TEXT,        -- gate | seg | humanize | incident | question | lang_check | manual | playground | other
+    depth              TEXT,        -- строка таблицы «Кто и как разбирает»
+    task_ref           TEXT,        -- сегмент / акт / вопрос / машина
+    run_id             TEXT,        -- один прогон цикла с инструментами
+    iteration          INT,
+    entry_id           TEXT,        -- запись реестра моделей
+    provider           TEXT,
+    model              TEXT,
+    backend            TEXT,        -- голова шлюза, реально ответившая
+    reasoning          TEXT,
+    priority           TEXT,
+    prompt_version     TEXT,
+    system_chars       INT,
+    input_chars        INT,
+    input_parts        JSONB,       -- состав входа (план цепочки)
+    input_text         TEXT,
+    output_chars       INT,
+    tokens_in          INT,
+    tokens_out         INT,
+    tokens_cache_read  INT,
+    tokens_cache_write INT,
+    tokens_reasoning   INT,
+    tool_calls         INT,
+    tool_result_chars  INT,
+    duration_ms        INT,
+    status             TEXT,        -- ok | empty | error | budget
+    error              TEXT,
+    gateway_task_id    TEXT,
+    gateway_job_id     TEXT,
+    verdict            TEXT,
+    cost_usd           NUMERIC(12, 6)
+);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_ts ON llm_calls (ts DESC);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_run ON llm_calls (run_id) WHERE run_id IS NOT NULL;

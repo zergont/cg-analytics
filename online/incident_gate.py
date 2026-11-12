@@ -679,7 +679,9 @@ async def _ask_claude(user_prompt: str, model: str, system: str | None = None) -
             http_client=http_client,
             max_retries=3,
         )
-        response = await client.messages.create(
+        from llm import usage as _usage
+        response = await _usage.anthropic_create(
+            client, depth="incident",
             model=model or cfg["model"],
             max_tokens=cfg["max_tokens"],
             system=system if system is not None else system_for("incident")[0],
@@ -1227,7 +1229,10 @@ async def _run_incident(
         reason = ""
         err: BaseException | None = None
         try:
-            analysis = await asyncio.wait_for(_ask(prompt, meta, system=_system), INCIDENT_DEADLINE_SEC)
+            from llm import usage as _usage
+            with _usage.call_context(task="incident", depth="incident", prompt_version=pv,
+                                     ref=segment_id if segment_id is not None else fh):
+                analysis = await asyncio.wait_for(_ask(prompt, meta, system=_system), INCIDENT_DEADLINE_SEC)
             outcome = "ok"
         except asyncio.TimeoutError:
             outcome, reason = INC_FAILED, f"нет ответа за {INCIDENT_DEADLINE_SEC // 3600} ч"

@@ -233,10 +233,13 @@ async def _ask_cleanup(text: str, priority: str | None, meta: dict) -> str:
     """Один короткий запрос очистки через общее подключение (llm.client.chat)."""
     from llm.client import chat, get_llm_settings
     gateway = (get_llm_settings() or {}).get("provider") == "gorynych"
-    return await chat(CLEANUP_PROMPT, text,
-                      model=_cfg["model"] if gateway else None,
-                      reasoning=_cfg.get("reasoning") or None,
-                      priority=priority, meta=meta)
+    from llm import usage as _usage
+    # В журнале llm_calls проход очистки — своя задача; сегмент или акт наследуется
+    with _usage.call_context(task="lang_check", depth=None):
+        return await chat(CLEANUP_PROMPT, text,
+                          model=_cfg["model"] if gateway else None,
+                          reasoning=_cfg.get("reasoning") or None,
+                          priority=priority, meta=meta)
 
 
 async def clean_text(text: str, source: str = "", *, priority: str | None = None,

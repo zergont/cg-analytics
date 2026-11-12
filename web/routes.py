@@ -1289,7 +1289,9 @@ async def ai_playground_run(request: Request):
                         f"\n\n[raw]\n{_json.dumps({'usage': dict(raw_msg.usage.__dict__)}, ensure_ascii=False, indent=2, default=str)}"
                     )
                 else:
-                    response = await client.messages.create(
+                    from llm import usage as _usage
+                    response = await _usage.anthropic_create(
+                        client, task="playground", entry=entry,
                         model=model,
                         max_tokens=claude_cfg["max_tokens"],
                         system=system_prompt,

@@ -18,6 +18,7 @@ import httpx
 
 from config import settings
 from corpus.settings import get_claude_settings
+from llm import usage as _usage
 from corpus.tools import TOOLS
 from corpus.executor import execute_tool
 from corpus.prompt import build_user_message
@@ -90,7 +91,8 @@ async def analyse_segment(
             loops_count += 1
             iter_info: dict[str, Any] = {"loop": loops_count}
 
-            response = await client.messages.create(
+            response = await _usage.anthropic_create(
+                client,
                 model=_model,
                 max_tokens=_max_tokens,
                 system=_system_prompt,
@@ -158,7 +160,8 @@ async def analyse_segment(
                     "Составь итоговое заключение на основе уже собранных данных."
                 ),
             })
-            final_resp = await client.messages.create(
+            final_resp = await _usage.anthropic_create(
+                client,
                 model=_model,
                 max_tokens=_max_tokens,
                 system=_system_prompt,

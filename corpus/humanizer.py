@@ -96,7 +96,9 @@ async def _humanize_api(system_prompt: str, user_msg: str, model: str | None = N
             # SDK сам ретраит 429/5xx/сетевые ошибки с экспоненциальным backoff
             max_retries=3,
         )
-        response = await client.messages.create(
+        from llm import usage as _usage
+        response = await _usage.anthropic_create(
+            client, depth="humanize",
             model=model or claude_cfg["model"],
             max_tokens=claude_cfg["max_tokens"],
             system=system_prompt,

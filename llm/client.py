@@ -22,6 +22,7 @@
 """
 import asyncio
 import json
+import time
 import logging
 import re
 from collections.abc import AsyncIterator
@@ -281,6 +282,9 @@ def _build_request(
         # Температуру выбирает шлюз — на любом уровне рассуждений (у Qwen при
         # 0.1–0.3 рассуждение ходит по кругу). Поле настроек для шлюза не действует
         payload.pop("temperature", None)
+    if stream and provider in ("deepseek", "openai"):
+        # Расход в потоке эти API отдают только по просьбе (учёт llm_calls, v5.2.6)
+        payload["stream_options"] = {"include_usage": True}
     payload["messages"] = [
         {"role": "system", "content": system},
         {"role": "user",   "content": user},
@@ -288,8 +292,9 @@ def _build_request(
     return url, payload, headers
 
 
-async def _iter_ollama_stream(response) -> AsyncIterator[str]:
-    """NDJSON-стрим Ollama: по JSON-объекту на строку, конец — done=true."""
+async def _iter_ollama_stream(response, meta: dict | None = None) -> AsyncIterator[str]:
+    """NDJSON-стрим Ollama: по JSON-объекту на строку, конец — done=true.
+    Расход (prompt_eval_count / eval_count) — в meta["usage"], как у OpenAI-формата."""
     async for line in response.aiter_lines():
         if not line:
             continue
@@ -302,6 +307,9 @@ async def _iter_ollama_stream(response) -> AsyncIterator[str]:
             yield token
         if data.get("done"):
             logger.info("LLM завершил генерацию: eval_count=%s", data.get("eval_count", "?"))
+            if meta is not None and data.get("eval_count") is not None:
+                meta["usage"] = {"prompt_tokens": data.get("prompt_eval_count"),
+                                 "completion_tokens": data.get("eval_count")}
             return
 
 
@@ -431,6 +439,12 @@ async def chat_stream(
     cfg = entry if entry is not None else _cfg
     gateway = cfg.get("provider") == "gorynych"
     model, reasoning, priority = resolve_depth(cfg, depth, model, reasoning, priority)
+    # Учёт llm_calls (v5.2.6): метаданные ответа нужны всегда, а не только когда их
+    # просил вызывающий; его словарь заполняется как раньше
+    _t0 = time.monotonic()
+    _out_chars = 0
+    if meta is None:
+        meta = {}
     # Шлюз — всегда потоком: без потока долгий разбор упирается в 600 с без
     # единого байта; псевдопоток шлюза с пингами этого не допускает
     use_stream = True if gateway else (cfg.get("stream", True) if stream is None else stream)
@@ -455,12 +469,12 @@ async def chat_stream(
         for attempt in range(1, _RETRY_ATTEMPTS + 1):
             yielded = False
             accepted = False
-            if meta is not None:
-                meta.clear()
-                if gateway:
-                    # Что заказано — для подписи, если шлюз голову не назовёт
-                    meta["requested"] = {"model": payload.get("model"),
-                                         "reasoning": payload.get("reasoning_effort")}
+            meta.clear()
+            _out_chars = 0
+            if gateway:
+                # Что заказано — для подписи, если шлюз голову не назовёт
+                meta["requested"] = {"model": payload.get("model"),
+                                     "reasoning": payload.get("reasoning_effort")}
             try:
                 if use_stream:
                     async with _http_client() as client:
@@ -471,11 +485,13 @@ async def chat_stream(
                                 accepted = bool(response.headers.get("x-gorynych-task-id"))
                             it = (_iter_openai_stream(response, meta, gateway=gateway)
                                   if cfg.get("provider") in _OPENAI_COMPAT
-                                  else _iter_ollama_stream(response))
+                                  else _iter_ollama_stream(response, meta))
                             async for token in it:
                                 yielded = True
+                                _out_chars += len(token)
                                 yield token
                     _log_gateway(meta)
+                    await _record_call(cfg, entry, payload, meta, depth, system, user, _t0, _out_chars)
                     return
                 else:
                     async with _http_client() as client:
@@ -486,14 +502,20 @@ async def chat_stream(
                         content = _extract_content(data, cfg)
                         logger.info("LLM завершил генерацию (no-stream): %d символов", len(content))
                         if content:
+                            _out_chars += len(content)
                             yield content
                     _log_gateway(meta)
+                    await _record_call(cfg, entry, payload, meta, depth, system, user, _t0, _out_chars)
                     return
             except Exception as exc:
                 if yielded or attempt == _RETRY_ATTEMPTS or not retriable_llm_error(exc):
+                    await _record_call(cfg, entry, payload, meta, depth, system, user, _t0, _out_chars,
+                                       error=exc)
                     raise
                 # Остановка шлюза снимает и задачу — её можно слать заново
                 if accepted and not resend_accepted and not _is_gateway_stop(exc):
+                    await _record_call(cfg, entry, payload, meta, depth, system, user, _t0, _out_chars,
+                                       error=exc)
                     raise
                 gateway_restart = gateway_restart or _is_gateway_stop(exc)
                 delay = _retry_delay(exc, attempt, gateway_restart)
@@ -503,6 +525,33 @@ async def chat_stream(
     finally:
         if sem is not None:
             sem.release()
+
+
+async def _record_call(cfg: dict, entry: dict | None, payload: dict, meta: dict, depth: str | None,
+                       system: str, user: str, t0: float, out_chars: int,
+                       error: BaseException | None = None) -> None:
+    """Строка журнала llm_calls по завершённому вызову (успех, пустой ответ или
+    окончательная ошибка). Журнал вызов не ломает (llm.usage.record не бросает)."""
+    try:
+        from llm import usage as _usage
+        g = meta.get("gorynych") or {}
+        code = getattr(error, "code", None) if error is not None else None
+        await _usage.record(
+            provider=cfg.get("provider"), model=payload.get("model"), entry=entry, depth=depth,
+            backend=g.get("backend"),
+            reasoning=g.get("reasoning_level") or payload.get("reasoning_effort"),
+            priority=payload.get("priority"),
+            system_chars=len(system or ""), input_chars=len(system or "") + len(user or ""),
+            output_chars=out_chars, usage=meta.get("usage"),
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            status=("error" if error is not None else "ok" if out_chars else "empty"),
+            error=(f"{code}: {error!r}"[:300] if code else repr(error)[:300]) if error is not None else None,
+            gateway_task_id=meta.get("task_id") or g.get("task_id"),
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001
+        logger.debug("llm_calls: запись вызова не выполнена", exc_info=True)
 
 
 def _note_gateway_task(response, meta: dict | None) -> None:
