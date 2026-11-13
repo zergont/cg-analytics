@@ -830,6 +830,12 @@
                     <code>batch</code> — очередь, <code>background</code> — никогда не переключает видеокарту.
                     <br><strong>Claude API</strong> — облако; пустая модель — из карточки Claude API
                     (сейчас <code>{{ claude.model }}</code>).
+                    <br><strong>Разбор аварии на облаке</strong> может идти через подключение из реестра
+                    (Claude, OpenAI, DeepSeek, Gemini) и с <strong>инструментами сервера телеметрии</strong>: модель сама
+                    запрашивает ленту событий, ряды параметров, соседние установки и графики, а в конце разбора
+                    система ставит блок «Данные» с метками запросов. Бюджет прогона — вызовы инструментов, объём
+                    контекста в токенах и минуты; пусто — умолчание. По исчерпании модель отвечает по собранному.
+                    Гейт, заключения и пересказ инструментов не получают.
                     <br>При отказе: заключения — запасные (карточка «Запасные»); гейт пропускает тревогу как есть;
                     разбор аварии ждёт ответа сутки, при сбое — один повтор через 15 мин.
                 </div>
@@ -853,7 +859,7 @@
                         <tr><th>Вид работы</th><th style="width:150px">Кто</th>
                             <th style="width:140px">Модель шлюза</th>
                             <th style="width:130px">Рассуждение</th><th style="width:130px">Приоритет</th>
-                            <th style="width:190px">Модель Claude</th></tr>
+                            <th style="width:300px">Облако: подключение и модель</th></tr>
                     </thead>
                     <tbody>
                     {% for d in ai_depth %}
@@ -893,9 +899,43 @@
                         </select></td>
                         <td class="route-claude">
                             {% if d.kind != 'manual' %}
+                            {% if d.kind in ai_tool_kinds %}
+                            {% set known = ai_cloud_entries | selectattr('id', 'equalto', d.api_entry) | list %}
+                            <select name="route_{{ d.kind }}_api_entry" class="form-select form-select-sm mb-1"
+                                    title="Подключение из реестра моделей: ключ, прокси, цены и признаки — его">
+                                <option value="">Claude (карточка Claude API)</option>
+                                {% for e in ai_cloud_entries %}
+                                <option value="{{ e.id }}" {% if d.api_entry == e.id %}selected{% endif %}>{{ e.name }} — {{ e.provider }}: {{ e.model }}</option>
+                                {% endfor %}
+                                {% if d.api_entry and not known %}
+                                <option value="{{ d.api_entry }}" selected>запись «{{ d.api_entry }}» удалена — идёт Claude</option>
+                                {% endif %}
+                            </select>
+                            {% endif %}
                             <input type="text" name="route_{{ d.kind }}_claude_model" list="claude-route-models"
                                    class="form-control form-control-sm" value="{{ d.claude_model }}"
-                                   placeholder="из карточки: {{ claude.model }}">
+                                   placeholder="{{ 'модель подключения; у Claude — ' ~ claude.model if d.kind in ai_tool_kinds else 'из карточки: ' ~ claude.model }}">
+                            {% if d.kind in ai_tool_kinds %}
+                            <input type="hidden" name="route_{{ d.kind }}_tools_present" value="1">
+                            <div class="form-check mt-1">
+                                <input class="form-check-input" type="checkbox" name="route_{{ d.kind }}_tools" value="on"
+                                       id="route_{{ d.kind }}_tools" {% if d.tools == 'telemetry' %}checked{% endif %}>
+                                <label class="form-check-label small" for="route_{{ d.kind }}_tools">Инструменты телеметрии</label>
+                                <span class="text-muted ai-mcp-status" style="font-size:0.7rem"></span>
+                            </div>
+                            <div class="d-flex gap-1 mt-1" title="Бюджет прогона с инструментами; пусто — умолчание">
+                                <input type="number" name="route_{{ d.kind }}_budget_calls" class="form-control form-control-sm" min="1" max="60"
+                                       style="width:70px" title="вызовов инструментов"
+                                       value="{{ d.budget_calls if d.budget_calls is not none else '' }}" placeholder="{{ ai_budget_defaults.calls }}">
+                                <input type="number" name="route_{{ d.kind }}_budget_tokens" class="form-control form-control-sm" min="10000" max="2000000" step="1000"
+                                       style="width:110px" title="токенов контекста"
+                                       value="{{ d.budget_tokens if d.budget_tokens is not none else '' }}" placeholder="{{ ai_budget_defaults.tokens }}">
+                                <input type="number" name="route_{{ d.kind }}_budget_minutes" class="form-control form-control-sm" min="1" max="240"
+                                       style="width:70px" title="минут"
+                                       value="{{ d.budget_minutes if d.budget_minutes is not none else '' }}" placeholder="{{ ai_budget_defaults.minutes }}">
+                            </div>
+                            <div class="text-muted" style="font-size:0.7rem">бюджет: вызовов · токенов контекста · минут</div>
+                            {% endif %}
                             {% endif %}
                         </td>
                     </tr>
@@ -906,6 +946,21 @@
                 <button type="submit" class="btn btn-sm btn-primary">Сохранить</button>
                 <span class="text-muted small ms-2">Вступает в силу немедленно, без перезапуска.</span>
                 </form>
+                <script>
+                // Состояние сервера телеметрии для хоста цикла — рядом с флажком инструментов
+                document.addEventListener("DOMContentLoaded", async () => {
+                    const marks = document.querySelectorAll(".ai-mcp-status");
+                    if (!marks.length) return;
+                    let text = "", cls = "text-muted";
+                    try {
+                        const j = await (await fetch("/api/telemetry-mcp/status")).json();
+                        text = j.ok ? "— сервер доступен, инструментов " + j.tools
+                                    : "— сервер недоступен: разбор пойдёт без инструментов";
+                        cls = j.ok ? "text-success" : "text-danger";
+                    } catch (err) { text = "— состояние сервера не получено"; }
+                    marks.forEach(m => { m.textContent = text; m.className = cls + " ai-mcp-status"; });
+                });
+                </script>
             </div>
         </div>
     </div>

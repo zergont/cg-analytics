@@ -113,7 +113,7 @@ def set_answers(*answers) -> None:
     ASK.update({"queue": list(answers), "calls": 0})
 
 
-async def _ask(prompt, meta, system=None):   # v5.2.1: system приходит из _run_incident
+async def _ask(prompt, meta, system=None, private=()):   # v5.2.1: system приходит из _run_incident; private — MCP Э2б
     ASK["calls"] += 1
     a = ASK["queue"].pop(0) if ASK["queue"] else "Разбор"
     if isinstance(a, tuple) and a[0] == "sleep":

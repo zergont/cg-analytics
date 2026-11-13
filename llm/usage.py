@@ -78,7 +78,8 @@ def set_sink(fn: Callable[[dict], Awaitable[int | None]] | None) -> None:
 def call_context(**fields: Any) -> Iterator[dict]:
     """Сообщить журналу, что за вызовы идут внутри блока. Поля: task (gate | seg |
     humanize | incident | question | lang_check | manual | playground), ref (сегмент,
-    акт, вопрос), depth, prompt_version, run_id, iteration, input_parts. Вложенный блок
+    акт, вопрос), depth, prompt_version, run_id, iteration, input_parts,
+    tool_result_chars (шаг цикла с инструментами). Вложенный блок
     дополняет и перекрывает внешний. Возвращает словарь контекста: после вызова в нём
     `last_call_id` — для annotate()."""
     cur = dict(_ctx.get() or {})
@@ -132,6 +133,17 @@ def normalize_usage(provider: str | None, usage: Any) -> dict[str, int | None]:
     out: dict[str, int | None] = {"tokens_in": None, "tokens_out": None, "tokens_cache_read": None,
                                   "tokens_cache_write": None, "tokens_reasoning": None}
     if usage is None:
+        return out
+    if provider != "anthropic" and _g(usage, "input_tokens") is not None and (
+            provider == "openai" or _g(usage, "input_tokens_details") is not None
+            or _g(usage, "output_tokens_details") is not None):
+        # OpenAI Responses API: input_tokens включает кэш, output_tokens — рассуждения
+        total = _int(_g(usage, "input_tokens"))
+        cached = _int(_g(_g(usage, "input_tokens_details"), "cached_tokens"))
+        out["tokens_in"] = max(0, total - cached) if total is not None and cached is not None else total
+        out["tokens_cache_read"] = cached
+        out["tokens_out"] = _int(_g(usage, "output_tokens"))
+        out["tokens_reasoning"] = _int(_g(_g(usage, "output_tokens_details"), "reasoning_tokens"))
         return out
     if provider == "anthropic" or _g(usage, "input_tokens") is not None:
         out["tokens_in"] = _int(_g(usage, "input_tokens"))
@@ -231,7 +243,9 @@ async def record(
             "system_chars": system_chars, "input_chars": input_chars,
             "input_parts": ctx.get("input_parts"), "output_chars": output_chars,
             **u,
-            "tool_calls": tool_calls, "tool_result_chars": tool_result_chars,
+            "tool_calls": tool_calls,
+            "tool_result_chars": (tool_result_chars if tool_result_chars is not None
+                                  else ctx.get("tool_result_chars")),
             "duration_ms": duration_ms, "status": status,
             "error": (str(error)[:1000] if error else None),
             "gateway_task_id": gateway_task_id, "gateway_job_id": gateway_job_id,

@@ -876,7 +876,9 @@ async def settings_page(request: Request):
         DEPTH_KINDS as _DEPTH_KINDS, DEPTH_HINTS as _DEPTH_HINTS,
         DEPTH_PRIORITIES as _DEPTH_PRIOS, DEPTH_REASONING as _DEPTH_REAS,
         get_all_depth as _get_depth,
+        TOOL_KINDS as _TOOL_KINDS, budget_defaults as _budget_defaults,
     )
+    from llm.registry import CLOUD_PROVIDERS as _CLOUD_PROVIDERS
     from llm.registry import get_entries as _get_llm_entries
     _llm_entries = _get_llm_entries()
     for _e in _llm_entries:   # ключи API в шаблон не отдаём — только признак наличия
@@ -946,6 +948,10 @@ async def settings_page(request: Request):
         ],
         "ai_depth_priorities": list(_DEPTH_PRIOS),
         "ai_depth_reasoning":  list(_DEPTH_REAS),
+        # MCP Э2б: облачные подключения реестра и умолчания бюджетов для строк с инструментами
+        "ai_cloud_entries": [e for e in _llm_entries if e.get("provider") in _CLOUD_PROVIDERS],
+        "ai_tool_kinds": sorted(_TOOL_KINDS),
+        "ai_budget_defaults": _budget_defaults(),
         # Строки «Горыныч» идут через общее подключение — шлюз ли оно, решает только оно
         "gorynych_in_use": get_llm_settings().get("provider") == "gorynych",
     })

@@ -1174,7 +1174,7 @@ async def _i4_append(sn, eq, panel, event, segment_id=None, ts=None):
     return True
 
 
-async def _i4_ask(prompt, meta, system=None):
+async def _i4_ask(prompt, meta, system=None, private=()):
     I4["systems"].append(system)
     if len(I4["systems"]) == 1:
         router.apply_task("incident", "llm", "Новый промпт совета после первой попытки")   # правка между попытками

@@ -45,6 +45,10 @@ logger = logging.getLogger(__name__)
 # Версия блока «Правила системы» (текст и состав правил). Правка текста или
 # состава правил — поднять
 PROMPT_RULES_VERSION = "5.2.1"
+# Версия правил для инструментов (MCP Э2б): они входят в блок, только когда прогон
+# идёт с инструментами сервера телеметрии; своя версия — чтобы правка этих правил не
+# меняла строку версии у задач без инструментов
+TOOLS_RULES_VERSION = "1"
 # Версия формы «Системные промпты»: вкладка с другой (или без неё) не сохраняет
 PROMPTS_FORM_VERSION = "5.2.1"
 # Маркер разовой миграции сохранённых промптов (по образцу ai_routes_version)
@@ -63,6 +67,8 @@ RULES_HEADER = "ПРАВИЛА СИСТЕМЫ (действуют всегда, 
 
 SEG_TASKS: frozenset[str] = frozenset({"seg_auto", "seg_manual"})
 GATE_TASKS: frozenset[str] = frozenset({"warning_claude"})
+# Задачи, которым могут быть даны инструменты сервера телеметрии (Р10: гейт — никогда)
+TOOL_TASKS: frozenset[str] = frozenset({"incident"})
 
 
 @dataclass(frozen=True)
@@ -74,6 +80,8 @@ class Rule:
     source: str
     # Фразы текста владельца, противоречащие правилу (сравнение — _fold)
     contradicts: tuple[str, ...] = ()
+    # Правило только для прогона с инструментами сервера телеметрии
+    tools_only: bool = False
 
 
 # Проект текстов — §4.2; R-NAME/R-EQUIP — по картине объекта во входе (В11 в
@@ -111,6 +119,43 @@ RULES: tuple[Rule, ...] = (
     Rule("R-TZ",
          "Время пиши по местному времени ({tz}), как во входе, а не по UTC.",
          SEG_TASKS | GATE_TASKS, "Д19, v5122.P1-6"),
+)
+
+# Правила прогона с инструментами сервера телеметрии (MCP Э2б; design_mcp_e2.md,
+# разд. 10): входят в блок только когда прогон идёт с инструментами. Отдельный
+# набор со своей версией (TOOLS_RULES_VERSION) — состав и версия RULES не меняются
+TOOL_RULES: tuple[Rule, ...] = (
+    Rule("R-T-DATA",
+         "У тебя есть инструменты телеметрии — ими уточняй то, чего не хватает во входе. "
+         "Утверждай только то, что есть во входе или в ответах инструментов; цифры по памяти "
+         "не пиши, чего не запрашивал — не утверждай.",
+         TOOL_TASKS, "mcp-e2 §10; Р1", tools_only=True),
+    Rule("R-T-UNIT",
+         "Установку называй инструментам так, как в строке «Эта установка» входа; время — "
+         "местное ({tz}), в виде «ДД.ММ.ГГГГ ЧЧ:ММ».",
+         TOOL_TASKS, "mcp-e2 §7", tools_only=True),
+    Rule("R-T-ORDER",
+         "Сначала timeline (что происходило вокруг останова), потом series (как менялись "
+         "параметры). Соседние установки того же объекта смотри, когда причина может быть "
+         "общей: сеть, топливо, нагрузка.",
+         TOOL_TASKS, "mcp-e2 §10", tools_only=True),
+    Rule("R-T-ENVELOPE",
+         "Каждый ответ инструмента начинается строкой с меткой [Tn]: установка, окно, слой, "
+         "что отброшено, усечение. Если данные усечены или окно попало в разрыв связи — "
+         "скажи об этом, не додумывай.",
+         TOOL_TASKS, "mcp-e1 конверт; mcp-e2 §10", tools_only=True),
+    Rule("R-T-HOLD",
+         "Запись в телеметрию идёт по изменению: значение держится до следующей записи. "
+         "Отсутствие записей — не отсутствие сигнала; средние «по отсчётам» смещены.",
+         TOOL_TASKS, "mcp-e1 инструкции сервера", tools_only=True),
+    Rule("R-T-REF",
+         "В тексте ссылайся на метки [Tn] ответов инструментов. Блок «## Данные» в конце "
+         "не пиши — его добавит система.",
+         TOOL_TASKS, "mcp-e2 §2", tools_only=True),
+    Rule("R-T-ONCE",
+         "Число вызовов ограничено: не повторяй вызов с теми же аргументами и не запрашивай "
+         "окно шире суток без нужды.",
+         TOOL_TASKS, "mcp-e2 §4.1; Р12", tools_only=True),
 )
 
 # Противоречия текста владельца не правилам блока, а входу кода (шапка
@@ -208,8 +253,10 @@ def rule_text(rule: Rule) -> str:
     return rule.text.replace("{tz}", _tz_label())
 
 
-def rules_for(task: str) -> list[Rule]:
-    return [r for r in RULES if task in r.tasks]
+def rules_for(task: str, tools: bool = False) -> list[Rule]:
+    """Правила задачи; tools — прогон идёт с инструментами сервера телеметрии."""
+    return [r for r in RULES if task in r.tasks] + (
+        [r for r in TOOL_RULES if task in r.tasks] if tools else [])
 
 
 # ── Сборка system ────────────────────────────────────────────────────────────
@@ -244,7 +291,7 @@ def base_text(task: str) -> tuple[str, str]:
 
 
 def rules_block(task: str, base: str | None = None, *,
-                force: bool = False) -> tuple[str, list[str], list[str]]:
+                force: bool = False, tools: bool = False) -> tuple[str, list[str], list[str]]:
     """(текст блока, применённые id, пропущенные id). Правило, текст которого уже
     есть в тексте владельца, не дописывается. Выключатель — пустой блок; force —
     блок как был бы при включённом (показ в форме серым)."""
@@ -256,7 +303,7 @@ def rules_block(task: str, base: str | None = None, *,
     lines: list[str] = []
     applied: list[str] = []
     skipped: list[str] = []
-    for r in rules_for(task):
+    for r in rules_for(task, tools):
         txt = rule_text(r)
         if _fold(txt) in folded:
             skipped.append(r.id)
@@ -299,23 +346,27 @@ def version_string(meta: dict[str, Any]) -> str:
             f"·in{meta.get('input') or '-'}")
 
 
-def system_for(task: str, *, suffix: str = "") -> tuple[str, dict[str, Any]]:
-    """Системный промпт точки вызова и его след.
+def system_for(task: str, *, suffix: str = "", tools: bool = False) -> tuple[str, dict[str, Any]]:
+    """Системный промпт точки вызова и его след. tools — прогон с инструментами
+    сервера телеметрии: в блок входят и правила для них (версия — «…+tN»).
 
     text = текст владельца (или умолчание кода) + «\\n\\n» + блок «Правила
     системы» + suffix (у гейта на шлюзе — маркер вердикта, последним).
     meta = {task, src, saved_at, sha, rules, rule_ids, skipped, conflicts, input,
     version} — в debug_json / gate_log / warning_analyses.extra (В12, В13)."""
     base, src = base_text(task)
-    block, applied, skipped = rules_block(task, base)
+    block, applied, skipped = rules_block(task, base, tools=tools)
     text = base + (f"\n\n{block}" if block else "") + (suffix or "")
+    _tool_rules = tools and any(r.tools_only for r in rules_for(task, True))
     ts = _saved_at.get(task) if src == "owner" else None
     meta: dict[str, Any] = {
         "task": task,
         "src": src,
         "saved_at": ts.isoformat() if isinstance(ts, datetime) else None,
         "sha": fingerprint(text),
-        "rules": PROMPT_RULES_VERSION if _rules_enabled else "off",
+        "rules": ((PROMPT_RULES_VERSION + (f"+t{TOOLS_RULES_VERSION}" if _tool_rules else ""))
+                  if _rules_enabled else "off"),
+        "tools": bool(tools),
         "rule_ids": applied,
         "skipped": skipped,
         "conflicts": conflicts_in(task, base),
@@ -325,10 +376,10 @@ def system_for(task: str, *, suffix: str = "") -> tuple[str, dict[str, Any]]:
     return text, meta
 
 
-def prompt_version(task: str, *, suffix: str = "") -> str | None:
+def prompt_version(task: str, *, suffix: str = "", tools: bool = False) -> str | None:
     """Строка версии system задачи (gate_log, отметки совета); сбой — None."""
     try:
-        return system_for(task, suffix=suffix)[1]["version"]
+        return system_for(task, suffix=suffix, tools=tools)[1]["version"]
     except Exception:
         logger.warning("Промпт %s: версия не определена", task, exc_info=True)
         return None
@@ -415,7 +466,12 @@ def describe(task: str, *, backup: Any = None,
     backup — текст резервной копии (None — копии нет; True — есть, текст не дан)."""
     text, meta = system_for(task)
     base, _ = base_text(task)
-    block, ids, _ = rules_block(task, base, force=True)
+    # Строка таблицы включила инструменты — форма показывает блок вместе с их правилами
+    try:
+        tools_on = task in TOOL_TASKS and bool(_router().tools_enabled(task))
+    except Exception:
+        tools_on = False
+    block, ids, _ = rules_block(task, base, force=True, tools=tools_on)
     has_backup = backup is not None and backup is not False
     if isinstance(backup, str):
         has_backup = form_value(task, backup) != owner_text(task)
@@ -430,6 +486,8 @@ def describe(task: str, *, backup: Any = None,
     }
     for label, sfx in (suffixes or {}).items():
         out["variants"].append({"label": label, "sha": system_for(task, suffix=sfx)[1]["sha"]})
+    if tools_on:
+        out["variants"].append({"label": "с инструментами", "sha": system_for(task, tools=True)[1]["sha"]})
     return out
 
 

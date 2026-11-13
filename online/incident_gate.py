@@ -893,14 +893,107 @@ def _outcome_for_error(exc: BaseException) -> str:
     return INC_FAILED
 
 
+PRIVATE_MARK = "(скрыто)"
+
+
+def scrub_private(prompt: str, private: tuple[Any, ...] | list[Any] = ()) -> str:
+    """Убрать из входа то, что не уходит в облако (решение Р11): серийные номера
+    роутеров, а с ними и тройки «роутер/тип/панель». Такой номер стоит в заголовке
+    отчёта сегмента, который входит в бриф. Локальному шлюзу вход идёт как есть."""
+    out = prompt or ""
+    for item in private or ():
+        s = str(item or "").strip()
+        if len(s) >= 5:
+            out = out.replace(s, PRIVATE_MARK)
+    return out
+
+
+_UNIT_LINE_RE = None
+
+
+def _unit_name(prompt: str) -> str | None:
+    """Имя установки из строки «Эта установка: … — …» блока «Картина объекта»."""
+    global _UNIT_LINE_RE
+    if _UNIT_LINE_RE is None:
+        import re
+        _UNIT_LINE_RE = re.compile(r"^Эта установка:\s*(.+?)\s+—\s", re.M)
+    m = _UNIT_LINE_RE.search(prompt or "")
+    name = m.group(1).strip() if m else ""
+    return name if name and name != "имя не задано" else None
+
+
+async def _ask_loop(prompt: str, meta: dict, entry: dict | None,
+                    system: str | None) -> tuple[str, str, str]:
+    """Разбор через цикл (llm/agent_loop.py, MCP Э2б): облачное подключение из
+    реестра и/или инструменты сервера телеметрии. Возвращает (текст разбора,
+    подпись модели с расходом, блок «## Данные»). Сводка прогона — meta["loop"], версия
+    промпта с правилами инструментов — meta["prompt"].
+
+    Fail-open: сервер телеметрии недоступен или подключение не умеет инструменты —
+    тот же разбор одним запросом, с пометкой в подписи. Бриф (акт и материал) не
+    меняется: инструменты — для углубления."""
+    import contextlib
+
+    from llm import agent_loop
+    from llm import usage as _usage
+    from llm.adapters import make_adapter
+    from llm.mcp_client import McpUnavailable, TelemetrySession
+    from llm.prompts import system_for
+    from llm.router import api_model_for, budgets_for, get_depth, tools_enabled
+
+    run_id = agent_loop.new_run_id()
+    adapter = make_adapter(entry, model=api_model_for("incident"), depth="incident",
+                           priority=get_depth("incident").get("priority"))
+    note: str | None = None
+    session = tools = None
+    async with contextlib.AsyncExitStack() as stack:
+        stack.push_async_callback(adapter.aclose)
+        if tools_enabled("incident"):
+            if entry is not None and not entry.get("tools", True):
+                note = "подключение не умеет инструменты"
+            else:
+                try:
+                    session = await stack.enter_async_context(TelemetrySession(run_id))
+                    tools = await agent_loop.offered_tools(session, vision=bool(adapter.vision))
+                except McpUnavailable as exc:
+                    logger.warning("IncidentGate: сервер телеметрии недоступен (%s) — разбор "
+                                   "без инструментов", exc)
+                    session, tools, note = None, None, "инструменты недоступны"
+        user, pm = prompt, None
+        if session is not None and tools:
+            _sys, pm = system_for("incident", tools=True)
+            _name = _unit_name(prompt)
+            if _name:
+                user = (f"{prompt}\n\nДля инструментов телеметрии: установка этого акта — "
+                        f"«{_name}».")
+        else:
+            session = None
+            _sys = system if system is not None else system_for("incident")[0]
+        with _usage.call_context(prompt_version=pm["version"] if pm else None):
+            res = await agent_loop.run(
+                adapter=adapter, system=_sys, user=user, session=session, tools=tools,
+                budget=budgets_for("incident", gateway=(entry or {}).get("provider") == "gorynych"),
+                run_id=run_id, tools_note=note)
+    meta["loop"] = res.summary()
+    if pm:
+        meta["prompt"] = pm["version"]
+    tail = res.signature_tail()
+    label = res.model or "Claude API"
+    # Блок «## Данные» отдаётся отдельно: он собран хостом и под очистку языка не идёт
+    block = f"\n\n## Данные\n{res.data_block}" if res.data_block else ""
+    return res.answer, (f"{label} · {tail}" if tail else label), block
+
+
 def _route() -> tuple[str, str]:
     """(провайдер, подпись маршрута) строки «Разбор аварии» таблицы."""
     from llm.router import get_route, route_label
     return get_route("incident").get("provider", "llm"), route_label("incident")
 
 
-async def _ask(prompt: str, meta: dict, system: str | None = None) -> str:
+async def _ask(prompt: str, meta: dict, system: str | None = None,
+               private: tuple[Any, ...] = ()) -> str:
     """Спросить модель строки «Разбор аварии». Текст с подписью; пустой — ошибка.
+    private — то, что вычищается из входа на облачном пути (Р11: серийник роутера).
     v5.2.1: system — llm.prompts.system_for (у совета блок правил пуст, §4.2);
     _run_incident передаёт system вместе с его версией на каждой попытке (ревью,
     п. 4: повтор после правки промпта не уходит с прежней версией в записи).
@@ -909,6 +1002,7 @@ async def _ask(prompt: str, meta: dict, system: str | None = None) -> str:
     from llm.router import claude_model_for, format_ai_signature
     provider, label = _route()
     _system = system if system is not None else system_for("incident")[0]
+    _data = ""     # блок «## Данные» прогона с инструментами: добавляется после очистки языка
     if provider == "llm":
         from llm.client import chat, gateway_label
         # Модель, рассуждение и приоритет — строка таблицы (depth="incident")
@@ -918,10 +1012,20 @@ async def _ask(prompt: str, meta: dict, system: str | None = None) -> str:
                            meta=meta, resend_accepted=False)).strip()
         label = gateway_label(meta, label)
     else:
-        model = claude_model_for("incident")
-        text = (await (_ask_claude(prompt, model, _system) if system is not None
-                       else _ask_claude(prompt, model))).strip()
-        label = model or "Claude API"
+        from llm.router import api_entry_for, tools_enabled
+        prompt = scrub_private(prompt, private)     # облако: без серийника роутера (Р11)
+        _entry = api_entry_for("incident")
+        if _entry is not None or tools_enabled("incident"):
+            # MCP Э2б: подключение из реестра (Claude / OpenAI / DeepSeek) и/или
+            # инструменты сервера телеметрии — через цикл. Без того и другого —
+            # прежний одиночный запрос к Claude, ниже
+            text, label, _data = await _ask_loop(prompt, meta, _entry, system)
+            text = text.strip()
+        else:
+            model = claude_model_for("incident")
+            text = (await (_ask_claude(prompt, model, _system) if system is not None
+                           else _ask_claude(prompt, model))).strip()
+            label = model or "Claude API"
     if not text:
         raise EmptyIncidentAnswer("модель вернула пустой ответ")
     # Чужой язык в ответе совета (v5.1.22, решение В4): один проход «очистка /
@@ -947,12 +1051,13 @@ async def _ask(prompt: str, meta: dict, system: str | None = None) -> str:
             _sig = format_ai_signature(label)
         except Exception:
             _sig = ""
-        meta["uncleaned"] = text + _sig
+        meta["uncleaned"] = text + _data + _sig
         meta["lang_check"] = {"found": _found, "cleaned": False, "accepted": False,
                               "error": "остановка сервиса во время очистки — сохранён исходник"}
         raise
     except Exception:
         logger.warning("IncidentGate: проверка языка не выполнена", exc_info=True)
+    text += _data
     try:
         text += format_ai_signature(label)
     except Exception:
@@ -1232,7 +1337,8 @@ async def _run_incident(
             from llm import usage as _usage
             with _usage.call_context(task="incident", depth="incident", prompt_version=pv,
                                      ref=segment_id if segment_id is not None else fh):
-                analysis = await asyncio.wait_for(_ask(prompt, meta, system=_system), INCIDENT_DEADLINE_SEC)
+                analysis = await asyncio.wait_for(
+                    _ask(prompt, meta, system=_system, private=(router_sn,)), INCIDENT_DEADLINE_SEC)
             outcome = "ok"
         except asyncio.TimeoutError:
             outcome, reason = INC_FAILED, f"нет ответа за {INCIDENT_DEADLINE_SEC // 3600} ч"
@@ -1246,7 +1352,8 @@ async def _run_incident(
                 _ok = False
                 try:
                     _lc = meta.get("lang_check")
-                    _ex = {k: v for k, v in (("lang_check", _lc), ("prompt", pv)) if v}
+                    _ex = {k: v for k, v in (("lang_check", _lc), ("prompt", meta.get("prompt") or pv),
+                                             ("loop", meta.get("loop"))) if v}
                     _ex["picture"] = has_picture
                     _ok = await _save(router_sn, equip_type, panel_id, stop_ts, segment_id, _raw,
                                       extra=_ex or None, tries=1)
@@ -1275,8 +1382,11 @@ async def _run_incident(
         if outcome == "ok":
             try:
                 _lc = meta.get("lang_check")
-                # v5.2.1 (В12): версия промпта и признак картины — в запись разбора
-                _ex = {k: v for k, v in (("lang_check", _lc), ("prompt", pv)) if v}
+                # v5.2.1 (В12): версия промпта и признак картины — в запись разбора;
+                # прогон с инструментами (MCP Э2б) — и его сводка: номер прогона, вызовы,
+                # токены, стоимость, причина остановки
+                _ex = {k: v for k, v in (("lang_check", _lc), ("prompt", meta.get("prompt") or pv),
+                                         ("loop", meta.get("loop"))) if v}
                 _ex["picture"] = has_picture
                 saved = await _save(router_sn, equip_type, panel_id, stop_ts, segment_id, analysis,
                                     extra=_ex or None)
