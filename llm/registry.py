@@ -50,8 +50,10 @@ OPENAI_DEFAULT_URL = "https://api.openai.com"
 # Gemini (v5.2.8): точка OpenAI-формата Google. Адрес записи — вместе с путём версии:
 # клиент дописывает к нему /chat/completions и /models, а не /v1/…
 GEMINI_DEFAULT_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
-# Провайдеры, чьи модели читают картинки (умолчание признака «зрение» новой записи)
-VISION_BY_DEFAULT = ("anthropic", "gemini")
+# Провайдеры, чьи модели читают картинки (умолчание признака «зрение» записи, пока
+# владелец не выставил его сам). Шлюз «Горыныч» — с v5.2.10 (решение владельца
+# 13.11.2026): головы flashnext и q27-5090 читают график в прямом режиме — проверено
+VISION_BY_DEFAULT = ("anthropic", "gemini", "gorynych")
 # Цены записи (v5.2.7, Р22): USD за 1 млн токенов; пусто — стоимость не считается
 PRICE_KEYS = ("price_in", "price_out", "price_cache_read", "price_cache_write")
 ENTRY_TYPES     = ("llm", "api")

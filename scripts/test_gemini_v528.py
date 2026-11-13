@@ -77,8 +77,13 @@ check(registry.normalize_entry({"name": "g", "provider": "gemini", "model": "m",
       "зрение у Gemini можно снять")
 old = {p: registry.normalize_entry({"name": p, "provider": p, "model": "m"}) for p in registry.ENTRY_PROVIDERS}
 check(old["openai"]["base_url"] == "https://api.openai.com" and old["openai"]["vision"] is False
-      and old["anthropic"]["vision"] is True and old["gorynych"]["vision"] is False,
+      and old["anthropic"]["vision"] is True and old["deepseek"]["vision"] is False
+      and old["lmstudio"]["vision"] is False,
       "прежние провайдеры: адреса и признаки не изменились")
+# v5.2.10: у записей шлюза зрение включено по умолчанию; явный отказ сохраняется
+check(old["gorynych"]["vision"] is True, "шлюз: зрение по умолчанию включено")
+check(registry.normalize_entry({"name": "gw", "provider": "gorynych", "model": "fast", "vision": False})["vision"] is False,
+      "шлюз: снятый флажок сохраняется")
 
 # ── 2. Запрос ────────────────────────────────────────────────────────────────
 print("2. Запрос к Gemini")
@@ -164,7 +169,7 @@ print("5. Форма настроек")
 with open(os.path.join(ROOT, "web", "templates", "settings.html"), encoding="utf-8") as f:
     tpl = f.read()
 check('<option value="gemini">Gemini (Google)</option>' in tpl, "провайдер в списке формы")
-check("gemini: 1000000" in tpl and 'LLM_REG_VISION_DEFAULT = ["anthropic", "gemini"]' in tpl
+check("gemini: 1000000" in tpl and 'LLM_REG_VISION_DEFAULT = ["anthropic", "gemini", "gorynych"]' in tpl
       and '"gemini", "gorynych"]' in tpl, "умолчания формы: лимит, зрение, инструменты")
 check("generativelanguage.googleapis.com/v1beta/openai" in tpl, "адрес по умолчанию в форме")
 with open(os.path.join(ROOT, "web", "routes.py"), encoding="utf-8") as f:

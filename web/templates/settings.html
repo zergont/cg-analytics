@@ -484,9 +484,9 @@
 
                 <script>
                 const LLM_REG_CTX_DEFAULTS = {ollama: 16384, lmstudio: 40960, llamacpp: 32768, deepseek: 131072, openai: 200000, gemini: 1000000, anthropic: 200000, gorynych: 262144};
-                // Умолчания признаков для новой записи: облако и шлюз умеют инструменты, зрение — Claude и Gemini
+                // Умолчания признаков для новой записи: облако и шлюз умеют инструменты, зрение — Claude, Gemini и шлюз
                 const LLM_REG_TOOLS_DEFAULT = ["anthropic", "openai", "deepseek", "gemini", "gorynych"];
-                const LLM_REG_VISION_DEFAULT = ["anthropic", "gemini"];
+                const LLM_REG_VISION_DEFAULT = ["anthropic", "gemini", "gorynych"];
                 function llmRegProviderHint() {
                     const p = document.getElementById("reg_provider").value;
                     document.getElementById("reg_url_hint").textContent = {
