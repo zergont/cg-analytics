@@ -42,10 +42,16 @@ logger = logging.getLogger(__name__)
 
 REGISTRY_SETTING_KEY = "llm_model_registry"
 
-ENTRY_PROVIDERS = ("ollama", "lmstudio", "llamacpp", "deepseek", "openai", "anthropic", "gorynych")
-# Облачные подключения: их может выбрать строка таблицы «Кто и как разбирает» (Р19)
-CLOUD_PROVIDERS = ("anthropic", "openai", "deepseek")
+ENTRY_PROVIDERS = ("ollama", "lmstudio", "llamacpp", "deepseek", "openai", "gemini", "anthropic", "gorynych")
+# Облачные подключения: их может выбрать строка таблицы «Кто и как разбирает» (Р19;
+# Gemini — четвёртый, решение владельца 13.11.2026)
+CLOUD_PROVIDERS = ("anthropic", "openai", "deepseek", "gemini")
 OPENAI_DEFAULT_URL = "https://api.openai.com"
+# Gemini (v5.2.8): точка OpenAI-формата Google. Адрес записи — вместе с путём версии:
+# клиент дописывает к нему /chat/completions и /models, а не /v1/…
+GEMINI_DEFAULT_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+# Провайдеры, чьи модели читают картинки (умолчание признака «зрение» новой записи)
+VISION_BY_DEFAULT = ("anthropic", "gemini")
 # Цены записи (v5.2.7, Р22): USD за 1 млн токенов; пусто — стоимость не считается
 PRICE_KEYS = ("price_in", "price_out", "price_cache_read", "price_cache_write")
 ENTRY_TYPES     = ("llm", "api")
@@ -60,6 +66,7 @@ DEFAULT_MAX_CTX = {
     "llamacpp":  32768,
     "deepseek":  131072,
     "openai":    200000,
+    "gemini":    1000000,
     "anthropic": 200000,
     # Шлюз сам выбирает голову, в окно которой влезает промпт (Gemma — 262 144);
     # не влезло никуда — 400 context_length_exceeded, цепочка идёт дальше
@@ -144,6 +151,10 @@ def normalize_entry(raw: dict) -> dict:
         base_url = base_url or OPENAI_DEFAULT_URL
         if base_url.endswith("/v1"):
             base_url = base_url[:-3].rstrip("/")
+    if provider == "gemini":
+        base_url = base_url or GEMINI_DEFAULT_URL
+        if "/openai" not in base_url:    # введён только хост (или прокси-адрес) — дописать путь точки
+            base_url = base_url + "/v1beta/openai"
     return {
         "id":             entry_id,
         "name":           name,
@@ -165,7 +176,7 @@ def normalize_entry(raw: dict) -> dict:
         # прокси подключения (OpenAI из РФ; у Claude — прежняя настройка claude_proxy)
         **{k: _price(raw.get(k)) for k in PRICE_KEYS},
         "tools":          _flag(raw, "tools", provider in CLOUD_PROVIDERS or provider == "gorynych"),
-        "vision":         _flag(raw, "vision", provider == "anthropic"),
+        "vision":         _flag(raw, "vision", provider in VISION_BY_DEFAULT),
         "proxy":          str(raw.get("proxy") or "").strip(),
     }
 

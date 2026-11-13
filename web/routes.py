@@ -1091,6 +1091,9 @@ async def llm_registry_models(request: Request):
             api_key = existing["api_key"]
     if provider == "openai" and not base_url:
         base_url = llm_registry.OPENAI_DEFAULT_URL
+    if provider == "gemini":
+        base_url = llm_registry.normalize_entry(
+            {"name": "x", "provider": "gemini", "model": "x", "base_url": base_url})["base_url"]
     if provider == "anthropic":
         return JSONResponse({"ok": True, "models": [],
                              "detail": "Claude: список моделей задаётся вручную"})

@@ -86,14 +86,15 @@ check(registry.normalize_entry({"name": "x", "provider": "deepseek", "model": "m
 
 defaults = {p: registry.normalize_entry({"name": p, "provider": p, "model": "m"})
             for p in registry.ENTRY_PROVIDERS}
-check(all(defaults[p]["tools"] for p in ("anthropic", "openai", "deepseek", "gorynych")),
+check(all(defaults[p]["tools"] for p in (*registry.CLOUD_PROVIDERS, "gorynych")),
       "инструменты по умолчанию: облако и шлюз")
 check(not any(defaults[p]["tools"] for p in ("ollama", "lmstudio", "llamacpp")),
       "инструменты по умолчанию: локальные — нет")
+# v5.2.8: к Claude добавился Gemini (четвёртый облачный провайдер, тоже со зрением)
 check(defaults["anthropic"]["vision"] and not any(
-    defaults[p]["vision"] for p in registry.ENTRY_PROVIDERS if p != "anthropic"),
-      "зрение по умолчанию — только Claude")
-check(set(registry.CLOUD_PROVIDERS) == {"anthropic", "openai", "deepseek"}, "облачные провайдеры")
+    defaults[p]["vision"] for p in registry.ENTRY_PROVIDERS if p not in registry.VISION_BY_DEFAULT),
+      "зрение по умолчанию — только у провайдеров из VISION_BY_DEFAULT")
+check({"anthropic", "openai", "deepseek"} <= set(registry.CLOUD_PROVIDERS), "облачные провайдеры")
 
 off = registry.normalize_entry({"name": "c", "provider": "anthropic", "model": "m",
                                 "tools": False, "vision": False})

@@ -197,7 +197,15 @@ def _clean_base_url(base_url: str, provider: str) -> str:
 
 # Провайдеры с OpenAI-совместимым API (/v1/chat/completions):
 # LM Studio, llama-server (llama.cpp), DeepSeek, шлюз «Горыныч»
-_OPENAI_COMPAT = ("lmstudio", "llamacpp", "deepseek", "openai", "gorynych")
+_OPENAI_COMPAT = ("lmstudio", "llamacpp", "deepseek", "openai", "gemini", "gorynych")
+# Уровень рассуждения → reasoning_effort Gemini: «выкл» у новых моделей нет — низший уровень
+_GEMINI_EFFORT = {"off": "low", "low": "low", "medium": "medium", "high": "high", "xhigh": "high"}
+
+
+def _api_root(base_url: str, provider: str) -> str:
+    """Корень OpenAI-совместимого API: у Gemini путь версии уже в адресе записи
+    (…/v1beta/openai), у остальных — /v1."""
+    return base_url if provider == "gemini" else f"{base_url}/v1"
 
 
 # Режим рассуждения (llm.registry.REASONING_LEVELS): "default" — ничего не передаём.
@@ -236,6 +244,9 @@ def _apply_reasoning(payload: dict, provider: str, level: str, system: str) -> s
         if not off:
             payload["reasoning_effort"] = "high" if level == "xhigh" else level
         return system
+    if provider == "gemini":
+        payload["reasoning_effort"] = _GEMINI_EFFORT.get(level, "low")
+        return system
     if provider == "deepseek":
         payload["thinking"] = {"type": "disabled" if off else "enabled"}
     elif provider in _OPENAI_COMPAT:
@@ -266,7 +277,7 @@ def _build_request(
         headers["Authorization"] = f"Bearer {cfg['api_key']}"
     if provider in _OPENAI_COMPAT:
         # OpenAI-совместимый API: LM Studio (контекст задаётся при загрузке модели) и DeepSeek
-        url, payload = f"{cfg['base_url']}/v1/chat/completions", {
+        url, payload = f"{_api_root(cfg['base_url'], provider)}/chat/completions", {
             "model":       mdl,
             "stream":      stream,
             "temperature": cfg["temperature"],
@@ -291,10 +302,11 @@ def _build_request(
         # Температуру выбирает шлюз — на любом уровне рассуждений (у Qwen при
         # 0.1–0.3 рассуждение ходит по кругу). Поле настроек для шлюза не действует
         payload.pop("temperature", None)
-    if provider == "openai":
-        # Рассуждающие модели OpenAI принимают только температуру по умолчанию
+    if provider in ("openai", "gemini"):
+        # Рассуждающие модели OpenAI принимают только температуру по умолчанию;
+        # Gemini на низкой температуре зацикливается — оставляем умолчание провайдера
         payload.pop("temperature", None)
-    if stream and provider in ("deepseek", "openai"):
+    if stream and provider in ("deepseek", "openai", "gemini"):
         # Расход в потоке эти API отдают только по просьбе (учёт llm_calls, v5.2.6)
         payload["stream_options"] = {"include_usage": True}
     payload["messages"] = [
@@ -636,7 +648,7 @@ async def list_server_models(provider: str, base_url: str, api_key: str = "",
     if provider == "anthropic":
         return []
     base_url = _clean_base_url(base_url, provider)
-    url = f"{base_url}/api/tags" if provider == "ollama" else f"{base_url}/v1/models"
+    url = f"{base_url}/api/tags" if provider == "ollama" else f"{_api_root(base_url, provider)}/models"
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     kwargs = ({"transport": _TRANSPORT} if _TRANSPORT is not None
               else ({"proxy": proxy} if proxy else {}))
@@ -646,7 +658,10 @@ async def list_server_models(provider: str, base_url: str, api_key: str = "",
         data = resp.json()
     if provider == "ollama":
         return [m.get("name", "") for m in data.get("models", []) if m.get("name")]
-    return [m.get("id", "") for m in data.get("data", []) if m.get("id")]
+    ids = [m.get("id", "") for m in data.get("data", []) if m.get("id")]
+    if provider == "gemini":             # Google отдаёт имена с приставкой «models/»
+        ids = [i[len("models/"):] if i.startswith("models/") else i for i in ids]
+    return ids
 
 
 async def ping_entry(entry: dict) -> dict:

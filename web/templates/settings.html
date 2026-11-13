@@ -369,6 +369,7 @@
                                     <option value="llamacpp">llama-server (llama.cpp)</option>
                                     <option value="deepseek">DeepSeek</option>
                                     <option value="openai">OpenAI</option>
+                                    <option value="gemini">Gemini (Google)</option>
                                     <option value="anthropic">Claude (Anthropic)</option>
                                     <option value="gorynych">Горыныч (шлюз)</option>
                                 </select>
@@ -398,7 +399,7 @@
                                 <input type="password" name="api_key" id="reg_api_key" class="form-control form-control-sm"
                                        autocomplete="new-password"
                                        placeholder="пусто — не менять">
-                                <div class="form-text" style="font-size:0.72rem">Нужен для DeepSeek и OpenAI; локальным не требуется. У Claude пусто — ключ из config.yml.</div>
+                                <div class="form-text" style="font-size:0.72rem">Нужен для DeepSeek, OpenAI и Gemini; локальным не требуется. У Claude пусто — ключ из config.yml.</div>
                             </div>
                             <div class="col-2">
                                 <label class="form-label small fw-semibold mb-1">Лимит контекста</label>
@@ -471,7 +472,7 @@
                                 <label class="form-label small fw-semibold mb-1">Прокси</label>
                                 <input type="text" name="proxy" id="reg_proxy" class="form-control form-control-sm"
                                        autocomplete="off" placeholder="http://host:port — пусто: напрямую">
-                                <div class="form-text" style="font-size:0.72rem">Для OpenAI из РФ. У Claude — прокси карточки «Claude API (облако)».</div>
+                                <div class="form-text" style="font-size:0.72rem">Для OpenAI и Gemini из РФ. У Claude — прокси карточки «Claude API (облако)».</div>
                             </div>
                         </div>
                         <input type="hidden" name="type" id="reg_type" value="llm">
@@ -482,9 +483,10 @@
                 </details>
 
                 <script>
-                const LLM_REG_CTX_DEFAULTS = {ollama: 16384, lmstudio: 40960, llamacpp: 32768, deepseek: 131072, openai: 200000, anthropic: 200000, gorynych: 262144};
-                // Умолчания признаков для новой записи: облако и шлюз умеют инструменты, зрение — Claude
-                const LLM_REG_TOOLS_DEFAULT = ["anthropic", "openai", "deepseek", "gorynych"];
+                const LLM_REG_CTX_DEFAULTS = {ollama: 16384, lmstudio: 40960, llamacpp: 32768, deepseek: 131072, openai: 200000, gemini: 1000000, anthropic: 200000, gorynych: 262144};
+                // Умолчания признаков для новой записи: облако и шлюз умеют инструменты, зрение — Claude и Gemini
+                const LLM_REG_TOOLS_DEFAULT = ["anthropic", "openai", "deepseek", "gemini", "gorynych"];
+                const LLM_REG_VISION_DEFAULT = ["anthropic", "gemini"];
                 function llmRegProviderHint() {
                     const p = document.getElementById("reg_provider").value;
                     document.getElementById("reg_url_hint").textContent = {
@@ -493,6 +495,8 @@
                         llamacpp:  "llama-server: обычно http://host:8080; имя модели — как в «Модели сервера» (алиас или файл GGUF)",
                         deepseek:  "DeepSeek: https://api.deepseek.com",
                         openai:    "OpenAI: https://api.openai.com (без /v1); из РФ — через прокси записи. Поле Temp. не действует",
+                        gemini:    "Gemini: https://generativelanguage.googleapis.com/v1beta/openai (точка OpenAI-формата Google, адрес вместе с путём); "
+                                   + "из РФ — через прокси записи. Поле Temp. не действует; рассуждение «выкл» — низший уровень",
                         anthropic: "Не используется — подключение через SDK",
                         gorynych:  "Шлюз: http://192.168.0.79:4000/src/analytics (без /v1). Модели: fast, flashnext, gemma; "
                                    + "smart + xhigh — совет на 15–30 мин, не для цепочек. Кто, модель, рассуждение и приоритет "
@@ -509,10 +513,12 @@
                         document.getElementById("reg_base_url").value = "https://api.deepseek.com";
                     if (p === "openai" && !document.getElementById("reg_base_url").value)
                         document.getElementById("reg_base_url").value = "https://api.openai.com";
+                    if (p === "gemini" && !document.getElementById("reg_base_url").value)
+                        document.getElementById("reg_base_url").value = "https://generativelanguage.googleapis.com/v1beta/openai";
                     if (!document.getElementById("reg_entry_id").value) {
                         // новая запись: признаки по провайдеру (у существующей — как сохранено)
                         document.getElementById("reg_tools").checked  = LLM_REG_TOOLS_DEFAULT.includes(p);
-                        document.getElementById("reg_vision").checked = (p === "anthropic");
+                        document.getElementById("reg_vision").checked = LLM_REG_VISION_DEFAULT.includes(p);
                     }
                     if (p === "gorynych" && !document.getElementById("reg_entry_id").value) {
                         // только для новой записи: при редактировании не затираем введённое
