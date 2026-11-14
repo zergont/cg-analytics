@@ -11,19 +11,159 @@
 KB, справочник кодов (design_mcp_telemetry.md, разд. 5.2)."""
 from __future__ import annotations
 
-from typing import Annotated, Any
+import asyncio
+from types import SimpleNamespace
+from typing import Annotated, Any, NamedTuple
 
 from mcp.server.mcpserver import Context
 from pydantic import Field
 
 from analytics.labels import ROLE_LABELS, fmt_local, unit_ru
 
+from config import get_tz
+
+from .availability import Polled, is_exact, last_text, polled_registers
 from .catalog import get_catalog, enum_text, bit_info
 from .common import ToolError, UNITS, resolve_unit, run_tool, settings
 from .envelope import Envelope
 from .kb import kb_for, resolve_params
 
 _ARG_UNIT = Annotated[str, Field(description="Установка: имя («ДЭС №3», «ДГУ №1») или id из equipment_tree")]
+
+
+CATALOG_CAP = 150
+# Сколько ждать перечни опроса в дереве оборудования: не успели — строка без счёта,
+# запросы доходят в фоне и наполняют кэш
+TREE_POLLED_WAIT_SEC = 6.0
+
+
+class CatalogView(NamedTuple):
+    text: str
+    total: int
+    truncation: list[str]
+    notes: list[str]
+
+
+def _norm_q(s: Any) -> str:
+    return str(s or "").strip().lower().replace("ё", "е")
+
+
+def _catalog_row(a: int, rm: dict[int, Any], cat: dict[int, Any]) -> tuple[str, str, str]:
+    """(строка каталога без пометки об опросе, текст для поиска, имя)."""
+    m, c = rm.get(a, {}), cat.get(a, {})
+    role = m.get("role") or ""
+    name = ROLE_LABELS.get(role) or m.get("description") or c.get("name_ru") or c.get("name") or ""
+    kind = m.get("kind") or c.get("kind") or ""
+    unit_s = unit_ru(m.get("unit") or c.get("unit") or "")
+    hay = _norm_q(" ".join([str(a), name, role, str(c.get("name") or ""), str(m.get("description") or "")]))
+    states = ""
+    st = c.get("states")
+    if kind == "enum" and isinstance(st, dict):
+        lab = st.get("labels_ru") or st.get("labels") or {}
+        kbl = m.get("labels_ru") if isinstance(m.get("labels_ru"), dict) else {}
+        merged = {**{str(k): v for k, v in lab.items()}, **{str(k): v for k, v in kbl.items()}}
+        states = " · " + ", ".join(f"{k}={v}" for k, v in list(merged.items())[:8])
+    elif kind == "fault_bitmap" and isinstance(st, dict):
+        states = f" · битов {len(st)}"
+    kind_ru = {"analog": "аналог", "enum": "состояние", "fault_bitmap": "биты неисправностей"}.get(kind, kind)
+    line = f"{a} | {name} | {unit_s} | {kind_ru}" + (f" | роль {role}" if role else "") + states
+    return line, hay, name
+
+
+def build_catalog(rm: dict[int, Any], cat: dict[int, Any], polled: dict[int, Polled] | None,
+                  query: str | None, all_registers: bool, *, tz: Any = None,
+                  cap: int = CATALOG_CAP) -> CatalogView:
+    """Текст каталога регистров. polled — перечень опрашиваемых (availability); None —
+    доступность не определена, каталог как до v5.2.11: регистры KB, по просьбе — вся
+    карта панели, без пометок."""
+    q = _norm_q(query)
+    known = sorted(set(rm) | set(cat))
+    notes: list[str] = []
+    trunc: list[str] = []
+    head = ""
+    # exact — перечень из таблицы последних значений (полный); иначе выведен из записей:
+    # регистр без записей либо не опрашивается, либо ни разу не менялся
+    exact = is_exact(polled)
+    off = "не опрашивается" if exact else "записей нет"
+    if polled is None:
+        addrs = sorted(set(rm) | (set(cat) if all_registers or not rm else set()))
+        notes.append("доступность регистров определить не удалось — каталог без пометок об опросе")
+    else:
+        n_polled = sum(1 for a in known if a in polled)
+        n_map = len(cat) or len(known)       # карта панели — каталог телеметрии (как в дереве оборудования)
+        if exact:
+            head = f"Опрашивается регистров: {n_polled} из {n_map} в карте панели. " + (
+                "Показана вся карта панели: у регистров без данных пометка «не опрашивается»."
+                if all_registers else "Показаны опрашиваемые: только по ним есть данные.")
+        else:
+            head = (f"Регистров с записями: {n_polled} из {n_map} в карте панели (перечень выведен из "
+                    "записей: регистр, который опрашивается, но ни разу не менялся, в него не попадает). ") + (
+                "Показана вся карта панели: у регистров без записей пометка «записей нет»."
+                if all_registers else "Показаны регистры с записями.")
+        addrs = known if all_registers else [a for a in known if a in polled]
+        no_data = [a for a in sorted(rm) if a not in polled and (rm.get(a) or {}).get("role")]
+        if no_data and exact:
+            notes.append("регистры с ролью KB, которых нет в опросе: " + ", ".join(
+                f"{a} ({rm[a]['role']})" for a in no_data[:12]) + (" …" if len(no_data) > 12 else ""))
+    rows: list[str] = []
+    for a in addrs:
+        line, hay, _name = _catalog_row(a, rm, cat)
+        if q and q not in hay:
+            continue
+        if polled is not None:
+            line += " | " + (last_text(polled[a], tz, exact) if a in polled else off)
+        rows.append(line)
+    total = len(rows)
+    if not rows:
+        if polled is not None and not all_registers and q:
+            others = []
+            for a in known:
+                if a in polled:
+                    continue
+                _line, hay, name = _catalog_row(a, rm, cat)
+                if q in hay:
+                    others.append(f"{a} {name}".strip())
+            if others:
+                text = ((f"Среди опрашиваемых регистров по запросу «{query}» ничего нет. В карте панели такие "
+                         f"регистры есть ({len(others)}), но роутер их не опрашивает — данных по ним нет: ")
+                        if exact else
+                        (f"Среди регистров с записями по запросу «{query}» ничего нет. В карте панели такие "
+                         f"регистры есть ({len(others)}), но записей по ним нет: ")) \
+                    + "; ".join(others[:8]) + (" …" if len(others) > 8 else "")
+            else:
+                text = f"По запросу «{query}» ничего нет ни среди опрашиваемых регистров, ни в карте панели."
+        elif polled is None and not all_registers:
+            text = "Ничего не найдено. Попробуйте all_registers=true."
+        else:
+            text = "Ничего не найдено."
+        return CatalogView((head + "\n" if head else "") + text, 0, trunc, notes)
+    if total > cap:
+        trunc.append(f"показано {cap} из {total} регистров — сузьте поиском")
+        rows = rows[:cap]
+    header = "адрес | имя | ед. | вид | роль · состояния" + (" | опрос" if polled is not None else "")
+    return CatalogView("\n".join(([head] if head else []) + [header] + rows), total, trunc, notes)
+
+
+async def _tree_polled(objects: list[dict[str, Any]]) -> dict[tuple, tuple[int, int]]:
+    """{(роутер, тип, панель): (опрашивается, в карте панели)} для дерева оборудования.
+    Ждём недолго: что не успело — без счёта в этот раз, запросы наполняют кэш в фоне."""
+    refs: dict[tuple, Any] = {}
+    for o in objects:
+        for u in o.get("units", []):
+            p = u["panel"]
+            key = (o["router_sn"], p["equip_type"], int(p["panel_id"]))
+            refs[key] = SimpleNamespace(triple=key, equip_type=p["equip_type"])
+    if not refs:
+        return {}
+    tasks = {key: asyncio.ensure_future(polled_registers(ref)) for key, ref in refs.items()}
+    await asyncio.wait(tasks.values(), timeout=TREE_POLLED_WAIT_SEC)
+    out: dict[tuple, tuple[int, int]] = {}
+    for key, t in tasks.items():
+        if not t.done() or t.cancelled() or t.exception() is not None or t.result() is None:
+            continue
+        cat = await get_catalog(key[1])
+        out[key] = (len(t.result()), len(cat))
+    return out
 
 
 def register(server: Any) -> None:
@@ -46,6 +186,7 @@ def register(server: Any) -> None:
             env.layer = "карта установок (аналитика) + реестр оборудования"
             lines: list[str] = []
             n_units = 0
+            polled_n = await _tree_polled(objects)
             for o in objects:
                 lines.append(f"Объект «{o['name']}»:")
                 for u in o.get("units", []):
@@ -58,8 +199,10 @@ def register(server: Any) -> None:
                     last_s = f"последние данные {fmt_local(last, day=True)}" if last else "данных движка ещё нет"
                     act = "" if u.get("active") else " · выключена"
                     ident = f" [id {u['id']}]" if u.get("id") is not None else " [обращаться по имени]"
+                    pn = polled_n.get((o["router_sn"], p["equip_type"], int(p["panel_id"])))
+                    polled_s = f" · опрашивается регистров: {pn[0]} из {pn[1]}" if pn else ""
                     lines.append(f"  • {u['name']}{ident}{act} · панель {p['equip_type']}/{p['panel_id']} · "
-                                 f"{eng}{sn} · {kb} · {last_s}")
+                                 f"{eng}{sn} · {kb} · {last_s}{polled_s}")
                     sens = u.get("sensors") or []
                     if sens:
                         lines.append("     датчики: " + "; ".join(
@@ -76,55 +219,30 @@ def register(server: Any) -> None:
         return await run_tool("equipment_tree", ctx, {"unit": unit}, body)
 
     @server.tool(structured_output=False, name="register_catalog",
-                 description="Каталог регистров установки: адрес, русское имя, единица, вид "
-                             "(аналог/состояние/биты), роль в KB, расшифровка состояний. "
-                             "Поиск по слову сужает список.")
+                 description="Каталог регистров установки. По умолчанию — только регистры, которые опрашивает "
+                             "роутер (по ним есть данные): адрес, русское имя, единица, вид, роль в KB, дата "
+                             "последней записи. Поиск по слову сужает список. all_registers=true — вся карта "
+                             "панели: у регистров без данных пометка «не опрашивается», запрашивать их бесполезно.")
     async def register_catalog(
         ctx: Context,
         unit: _ARG_UNIT,
-        query: Annotated[str | None, Field(description="Слово для поиска по имени/роли (пусто — все регистры KB)")] = None,
-        all_registers: Annotated[bool, Field(description="true — весь каталог панели, не только регистры KB")] = False,
+        query: Annotated[str | None, Field(description="Слово для поиска по имени, роли или адресу (пусто — все опрашиваемые)")] = None,
+        all_registers: Annotated[bool, Field(description="true — вся карта панели, включая регистры, которые роутер не опрашивает")] = False,
     ) -> str:
         async def body(env: Envelope) -> str:
             u = await resolve_unit(unit)
             env.unit, env.unit_id = u.title, u.id
             cfg, _ref, note = await kb_for(u)
             cat = await get_catalog(u.equip_type)
-            env.layer = "каталог регистров телеметрии + mapping KB"
+            env.layer = "каталог регистров телеметрии + mapping KB + записи установки"
             if note:
                 env.notes.append(note)
             rm = cfg.register_map if cfg is not None else {}
-            addrs = sorted(set(rm) | (set(cat) if all_registers or not rm else set()))
-            q = (query or "").strip().lower().replace("ё", "е")
-            rows: list[str] = []
-            for a in addrs:
-                m, c = rm.get(a, {}), cat.get(a, {})
-                role = m.get("role") or ""
-                name = ROLE_LABELS.get(role) or m.get("description") or c.get("name_ru") or c.get("name") or ""
-                kind = m.get("kind") or c.get("kind") or ""
-                unit_s = unit_ru(m.get("unit") or c.get("unit") or "")
-                hay = " ".join([str(a), name, role, str(c.get("name") or ""), str(m.get("description") or "")]).lower()
-                if q and q not in hay.replace("ё", "е"):
-                    continue
-                states = ""
-                st = c.get("states")
-                if kind == "enum" and isinstance(st, dict):
-                    lab = st.get("labels_ru") or st.get("labels") or {}
-                    kbl = m.get("labels_ru") if isinstance(m.get("labels_ru"), dict) else {}
-                    merged = {**{str(k): v for k, v in lab.items()}, **{str(k): v for k, v in kbl.items()}}
-                    states = " · " + ", ".join(f"{k}={v}" for k, v in list(merged.items())[:8])
-                elif kind == "fault_bitmap" and isinstance(st, dict):
-                    states = f" · битов {len(st)}"
-                kind_ru = {"analog": "аналог", "enum": "состояние", "fault_bitmap": "биты неисправностей"}.get(kind, kind)
-                rows.append(f"{a} | {name} | {unit_s} | {kind_ru}" + (f" | роль {role}" if role else "") + states)
-            cap = 150
-            env.rows = len(rows)
-            if len(rows) > cap:
-                env.truncation.append(f"показано {cap} из {len(rows)} регистров — сузьте поиском")
-                rows = rows[:cap]
-            if not rows:
-                return "Ничего не найдено." + (" Попробуйте all_registers=true." if not all_registers else "")
-            return "адрес | имя | ед. | вид | роль · состояния\n" + "\n".join(rows)
+            view = build_catalog(rm, cat, await polled_registers(u, cat), query, all_registers, tz=get_tz())
+            env.rows = view.total
+            env.truncation.extend(view.truncation)
+            env.notes.extend(view.notes)
+            return view.text
         return await run_tool("register_catalog", ctx, {"unit": unit, "query": query, "all_registers": all_registers},
                               body)
 

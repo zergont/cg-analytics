@@ -862,13 +862,13 @@ check(t1.startswith(t0) and len(t1) > len(t0) and prompts.RULES_HEADER in t1 and
       "правила инструментов — только в прогоне с инструментами")
 check(m0["rules"] == prompts.PROMPT_RULES_VERSION and m1["rules"] == f"{prompts.PROMPT_RULES_VERSION}+t{prompts.TOOLS_RULES_VERSION}"
       and m0["version"] != m1["version"] and m1["tools"] is True, f"версии: {m0['version']} / {m1['version']}")
-check(all(i.startswith("R-T-") for i in m1["rule_ids"]) and len(m1["rule_ids"]) == 7, f"состав правил: {m1['rule_ids']}")
+check(all(i.startswith("R-T-") for i in m1["rule_ids"]) and len(m1["rule_ids"]) == len(prompts.TOOL_RULES), f"состав правил: {m1['rule_ids']}")
 for task in ("seg_auto", "seg_manual", "warning_claude"):
     _a, _b = prompts.system_for(task), prompts.system_for(task, tools=True)
     check(_a[0] == _b[0] and _a[1]["version"] == _b[1]["version"], f"{task}: правила инструментов не подмешиваются")
 check("«## Данные» в конце не пиши" in t1 and "timeline" in t1 and "[Tn]" in t1, "ключевые правила в тексте")
 check(not any(r.tools_only for r in prompts.rules_for("incident")) and
-      sum(r.tools_only for r in prompts.rules_for("incident", True)) == 7, "rules_for с инструментами и без")
+      sum(r.tools_only for r in prompts.rules_for("incident", True)) == len(prompts.TOOL_RULES), "rules_for с инструментами и без")
 
 from online import incident_gate as ig
 

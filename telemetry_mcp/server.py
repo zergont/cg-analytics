@@ -48,6 +48,9 @@ INSTRUCTIONS = """Сервер телеметрии «Честной Генер�
 • Данные — только из инструментов; что не запрошено, не утверждать; цифры по памяти не писать.
 • Начни с equipment_tree: имена и id установок, соседи по объекту, когда были последние данные.
 • Время во входе и в ответах — пояс сервиса (МСК), формат «ДД.ММ.ГГГГ ЧЧ:ММ[:СС]».
+• Данные есть только по регистрам, которые опрашивает роутер установки (опроса по требованию
+  нет): их перечень — register_catalog. Регистр вне перечня не запрашивай — назови его как
+  недостающий сигнал.
 • Сначала timeline (что происходило), потом series (как менялись параметры); соседей смотреть,
   если машины на одном объекте (series/timeline with_neighbors=true).
 • chart — картинка ряда: форму (раскачка, провал, выброс) смотри на картинке, числа бери
@@ -82,10 +85,18 @@ def build_server(st: McpSettings | None = None) -> MCPServer:
     return server
 
 
+# Фоновые задачи прогрева: ссылка держит задачу до завершения
+_WARM_TASKS: list[Any] = []
+
+
 async def startup(st: McpSettings) -> None:
     from analytics.source import init_source_pool
     from db.analytics import get_app_setting
     from config import settings as _settings, set_tz
+    # Исходная БД телеметрии — для перечня опрашиваемых регистров (latest_state, v5.2.11):
+    # запоминается до подмены источника репликой
+    from .availability import set_source_dsn
+    set_source_dsn(_settings.source_db_url)
     if st.source_db:
         # Своя БД телеметрии сервера (реплика без обрезки истории) — до открытия пула
         _settings.source_db_url = st.source_db
@@ -108,6 +119,20 @@ async def startup(st: McpSettings) -> None:
         asyncio.get_running_loop().run_in_executor(None, warm_up)
     except Exception:  # noqa: BLE001
         logger.warning("Прогрев графиков не запущен", exc_info=True)
+    # Перечни опрашиваемых регистров активных установок (v5.2.11) — тоже в фоне
+    try:
+        import asyncio
+        from .availability import warm_all
+
+        async def _warm() -> None:
+            try:
+                logger.info("Перечни опрашиваемых регистров прогреты: установок %d", await warm_all())
+            except Exception:  # noqa: BLE001
+                logger.warning("Перечни опрашиваемых регистров при старте не прогреты", exc_info=True)
+
+        _WARM_TASKS.append(asyncio.ensure_future(_warm()))
+    except Exception:  # noqa: BLE001
+        logger.warning("Прогрев перечней опроса не запущен", exc_info=True)
     logger.info("cg-telemetry-mcp %s: %s:%d%s", service_version(), st.host, st.port, st.path)
 
 

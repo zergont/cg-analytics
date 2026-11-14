@@ -23,6 +23,8 @@ from pydantic import Field
 
 from config import get_tz
 
+from .availability import (held_text, is_exact, nothing_text, polled_registers, split_polled,
+                           unpolled_text)
 from .catalog import get_catalog
 from .chart import has_data, panels_from, png_size, render_png
 from .common import parse_window, resolve_unit, run_tool, settings
@@ -60,6 +62,14 @@ def register(server: Any) -> None:
                 env.notes.append(note)
             cat = await get_catalog(u.equip_type)
             prefs = resolve_params(cfg, cat, _split(params), max_params=int(st.limit("chart_max_params")))
+            polled = await polled_registers(u, cat)
+            prefs, missing = split_polled(prefs, polled)
+            if missing:
+                env.notes.append(unpolled_text(missing, exact=is_exact(polled)))
+            if not prefs:
+                return nothing_text(is_exact(polled))
+            if held_text(prefs, polled):
+                env.notes.append(held_text(prefs, polled))
             t0, t1 = parse_window(t_from, t_to, at, minutes, default_hours=2,
                                   max_days=float(st.limit("series_max_window_days")))
             g = await gather_series(env, u, cfg, prefs, t0, t1, int(st.limit("chart_max_points")),

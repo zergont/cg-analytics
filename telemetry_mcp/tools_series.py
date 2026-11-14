@@ -23,6 +23,8 @@ from analytics import source as _src
 from analytics.labels import ROLE_LABELS, fmt_duration, fmt_local, unit_ru
 from analytics.serializer import RUN_STATE_RU
 
+from .availability import (held_text, is_exact, nothing_text, polled_registers, split_polled,
+                           unpolled_text)
 from .catalog import get_catalog, enum_text
 from .common import (ToolError, UnitRef, fmt_num, fmt_t, neighbors_of, now_utc, parse_ts,
                      parse_window, resolve_unit, run_tool, settings)
@@ -131,6 +133,14 @@ async def gather_series(env: Envelope, u: UnitRef, cfg: Any, prefs: list[ParamRe
                 np_.label = f"{nb.name}: {p.label}"
                 nprefs.append(np_)
                 origin.append(p)
+            if nprefs:
+                npolled = await polled_registers(nb, ncat)
+                if npolled is not None:
+                    gone = [a for a in nprefs if a.addr not in npolled]
+                    if gone:
+                        env.notes.append(unpolled_text(gone, who=nb.name, exact=is_exact(npolled)))
+                        pairs = [(a, b) for a, b in zip(nprefs, origin) if a.addr in npolled]
+                        nprefs, origin = [x[0] for x in pairs], [x[1] for x in pairs]
             if nprefs:
                 columns.append((nb, ncfg, nprefs, origin))
 
@@ -253,6 +263,15 @@ def register(server: Any) -> None:
                 env.notes.append(note)
             cat = await get_catalog(u.equip_type)
             prefs = resolve_params(cfg, cat, _split(params), max_params=int(st.limit("series_max_params")))
+            # Регистры вне опроса роутера (v5.2.11): данных по ним нет и не будет — сказать прямо
+            polled = await polled_registers(u, cat)
+            prefs, missing = split_polled(prefs, polled)
+            if missing:
+                env.notes.append(unpolled_text(missing, exact=is_exact(polled)))
+            if not prefs:
+                return nothing_text(is_exact(polled))
+            if held_text(prefs, polled):
+                env.notes.append(held_text(prefs, polled))
             t0, t1 = parse_window(t_from, t_to, at, minutes, default_hours=2,
                                   max_days=float(st.limit("series_max_window_days")))
             n_pts = min(int(points or st.limit("series_max_points")), int(st.limit("series_max_points")))
@@ -313,6 +332,7 @@ def register(server: Any) -> None:
                                  "аналоговых значений нет, только состояния и неисправности")
             sel = (params or "ключевые").strip().lower()
             rm = cfg.register_map if cfg is not None else {}
+            polled = await polled_registers(u, cat)
             if sel in ("ключевые", "key", ""):
                 roles = key_roles(cfg) if cfg is not None else []
                 analog = [cfg.role_to_addr(r) for r in roles]
@@ -330,8 +350,24 @@ def register(server: Any) -> None:
                     analog = analog[:cap]
             else:
                 prefs = resolve_params(cfg, cat, _split(params))
+                prefs, missing = split_polled(prefs, polled)
+                if missing:
+                    env.notes.append(unpolled_text(missing, exact=is_exact(polled)))
+                if not prefs:
+                    return nothing_text(is_exact(polled))
+                if held_text(prefs, polled):
+                    env.notes.append(held_text(prefs, polled))
                 analog = [p.addr for p in prefs if p.kind == "analog"]
                 enum_addrs = [p.addr for p in prefs if p.kind == "enum"]
+            if polled is not None:
+                # «ключевые» и «все» — только то, что роутер опрашивает
+                n_all = len(analog) + len(enum_addrs)
+                analog = [a for a in analog if a in polled]
+                enum_addrs = [a for a in enum_addrs if a in polled]
+                if n_all != len(analog) + len(enum_addrs):
+                    env.notes.append(("показаны только опрашиваемые регистры: " if is_exact(polled)
+                                      else "показаны только регистры с записями: ")
+                                     + f"{len(analog) + len(enum_addrs)} из {n_all} выбранных")
             out: list[str] = []
             gaps = gap_pairs(await _src.get_data_gaps(*u.triple, t - timedelta(hours=6), t + timedelta(seconds=1)))
             for a, b in gaps:
@@ -408,6 +444,12 @@ def register(server: Any) -> None:
                 env.notes.append(note)
             cat = await get_catalog(u.equip_type)
             prefs = resolve_params(cfg, cat, _split(params), max_params=4)
+            polled = await polled_registers(u, cat)
+            prefs, missing = split_polled(prefs, polled)
+            if missing:
+                env.notes.append(unpolled_text(missing, exact=is_exact(polled)))
+            if not prefs:
+                return nothing_text(is_exact(polled))
             t0, t1 = parse_window(t_from, t_to, None, None, default_hours=24 * 30,
                                   max_days=float(st.limit("trend_max_window_days")))
             env.window_from, env.window_to = t0, t1

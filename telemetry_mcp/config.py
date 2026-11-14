@@ -39,6 +39,7 @@ DEFAULT_LIMITS: dict[str, Any] = {
     "debounce_sec": 60,                # лента: дребезг — переключения одного регистра чаще
     "debounce_min_count": 3,           # … и не меньше стольких подряд
     "chars_per_token": 1.7,            # оценка v5.1.9
+    "availability_ttl_min": 30,        # перечень опрашиваемых регистров установки: срок кэша
 }
 
 
