@@ -12,6 +12,7 @@ KB, справочник кодов (design_mcp_telemetry.md, разд. 5.2)."""
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from types import SimpleNamespace
 from typing import Annotated, Any, NamedTuple
 
@@ -22,7 +23,7 @@ from analytics.labels import ROLE_LABELS, fmt_local, unit_ru
 
 from config import get_tz
 
-from .availability import Polled, is_exact, last_text, polled_registers
+from .availability import Polled, fmt_value, is_exact, last_text, polled_registers
 from .catalog import get_catalog, enum_text, bit_info
 from .common import ToolError, UNITS, resolve_unit, run_tool, settings
 from .envelope import Envelope
@@ -32,6 +33,8 @@ _ARG_UNIT = Annotated[str, Field(description="Установка: имя («ДЭ
 
 
 CATALOG_CAP = 150
+# Краткий перечень: с какого числа строк общая дата последней записи выносится в шапку
+COMMON_MARK_MIN = 8
 # Сколько ждать перечни опроса в дереве оборудования: не успели — строка без счёта,
 # запросы доходят в фоне и наполняют кэш
 TREE_POLLED_WAIT_SEC = 6.0
@@ -48,8 +51,9 @@ def _norm_q(s: Any) -> str:
     return str(s or "").strip().lower().replace("ё", "е")
 
 
-def _catalog_row(a: int, rm: dict[int, Any], cat: dict[int, Any]) -> tuple[str, str, str]:
-    """(строка каталога без пометки об опросе, текст для поиска, имя)."""
+def _catalog_row(a: int, rm: dict[int, Any], cat: dict[int, Any], brief: bool = False) -> tuple[str, str, str]:
+    """(строка каталога без пометки об опросе, текст для поиска, имя). brief — строка
+    краткого перечня (v5.2.12): состояния не расшифровываются."""
     m, c = rm.get(a, {}), cat.get(a, {})
     role = m.get("role") or ""
     name = ROLE_LABELS.get(role) or m.get("description") or c.get("name_ru") or c.get("name") or ""
@@ -62,12 +66,57 @@ def _catalog_row(a: int, rm: dict[int, Any], cat: dict[int, Any]) -> tuple[str, 
         lab = st.get("labels_ru") or st.get("labels") or {}
         kbl = m.get("labels_ru") if isinstance(m.get("labels_ru"), dict) else {}
         merged = {**{str(k): v for k, v in lab.items()}, **{str(k): v for k, v in kbl.items()}}
-        states = " · " + ", ".join(f"{k}={v}" for k, v in list(merged.items())[:8])
+        states = "" if brief else " · " + ", ".join(f"{k}={v}" for k, v in list(merged.items())[:8])
     elif kind == "fault_bitmap" and isinstance(st, dict):
         states = f" · битов {len(st)}"
     kind_ru = {"analog": "аналог", "enum": "состояние", "fault_bitmap": "биты неисправностей"}.get(kind, kind)
     line = f"{a} | {name} | {unit_s} | {kind_ru}" + (f" | роль {role}" if role else "") + states
     return line, hay, name
+
+
+def _kind(a: int, rm: dict[int, Any], cat: dict[int, Any]) -> str:
+    return str((rm.get(a) or {}).get("kind") or (cat.get(a) or {}).get("kind") or "")
+
+
+def _ranges(addrs: list[int]) -> str:
+    """Адреса списком с диапазонами: «40400–40415, 40420, 40422–40428»."""
+    xs = sorted(set(addrs))
+    out: list[str] = []
+    i = 0
+    while i < len(xs):
+        j = i
+        while j + 1 < len(xs) and xs[j + 1] == xs[j] + 1:
+            j += 1
+        if j - i >= 2:
+            out.append(f"{xs[i]}–{xs[j]}")
+        else:
+            out.extend(str(x) for x in xs[i:j + 1])
+        i = j + 1
+    return ", ".join(out)
+
+
+def _mask_summary(masks: list[int], polled: dict[int, Polled] | None, exact: bool) -> str:
+    """Маски неисправностей одной строкой — для краткого перечня (v5.2.12)."""
+    parts: list[str] = []
+    if polled is None:
+        parts.append(_ranges(masks))
+    else:
+        on = [a for a in masks if a in polled]
+        gone = [a for a in masks if a not in polled]
+        if on:
+            parts.append(("опрашиваются " if exact else "с записями ") + _ranges(on))
+        held: dict[str, list[int]] = {}
+        for a in on:
+            p = polled[a]
+            if p.held and exact:
+                held.setdefault(fmt_value(p.value) if p.value is not None else "", []).append(a)
+        for val, aa in held.items():
+            parts.append("из них значение не менялось" + (f" ({val})" if val else "") + " — " + _ranges(aa))
+        if gone:
+            parts.append(("не опрашиваются " if exact else "записей нет ") + _ranges(gone))
+    return (f"Маски неисправностей — регистров {len(masks)}, одной строкой: " + "; ".join(parts)
+            + ". Что стоит за битом — fault_code (addr и bit); строка маски с числом битов и датой — "
+              "запросом по её адресу или по слову «маска».")
 
 
 def build_catalog(rm: dict[int, Any], cat: dict[int, Any], polled: dict[int, Polled] | None,
@@ -105,16 +154,38 @@ def build_catalog(rm: dict[int, Any], cat: dict[int, Any], polled: dict[int, Pol
         if no_data and exact:
             notes.append("регистры с ролью KB, которых нет в опросе: " + ", ".join(
                 f"{a} ({rm[a]['role']})" for a in no_data[:12]) + (" …" if len(no_data) > 12 else ""))
+    # Краткий перечень (v5.2.12): без слова поиска список длинный (113–137 регистров) и не
+    # помещался в предел результата — хвост обрезался. Маски неисправностей идут одной
+    # строкой, состояния не расшифровываются; полная строка регистра — по слову или адресу
+    compact = not q
+    masks: list[int] = []
+    marks: list[str] = []          # пометка об опросе каждой строки — парой к rows
     rows: list[str] = []
     for a in addrs:
-        line, hay, _name = _catalog_row(a, rm, cat)
+        line, hay, _name = _catalog_row(a, rm, cat, brief=compact)
         if q and q not in hay:
             continue
+        if compact and _kind(a, rm, cat) == "fault_bitmap":
+            masks.append(a)
+            continue
         if polled is not None:
-            line += " | " + (last_text(polled[a], tz, exact) if a in polled else off)
+            marks.append(last_text(polled[a], tz, exact) if a in polled else off)
+            line += " | " + marks[-1]
         rows.append(line)
-    total = len(rows)
-    if not rows:
+    total = len(rows) + len(masks)
+    if compact and total:
+        head += (" " if head else "") + ("Перечень краткий: состояния не расшифрованы — полная строка регистра "
+                                         "по слову или адресу (query).")
+    if compact and marks:
+        # Одна и та же «посл. запись ДД.ММ.ГГГГ» у большинства строк — в шапку, один раз
+        common, n_common = (Counter(m for m in marks if m.startswith("посл. запись")).most_common(1) or [("", 0)])[0]
+        if n_common >= max(COMMON_MARK_MIN, len(rows) // 2):
+            tail = " | " + common
+            rows = [r[:-len(tail)] if m == common else r for r, m in zip(rows, marks)]
+            head += (f" Колонка «опрос» заполнена только там, где отличается: у остальных регистров — {common}.")
+    if masks:
+        head += "\n" + _mask_summary(masks, polled, exact)
+    if not total:
         if polled is not None and not all_registers and q:
             others = []
             for a in known:
@@ -137,10 +208,11 @@ def build_catalog(rm: dict[int, Any], cat: dict[int, Any], polled: dict[int, Pol
         else:
             text = "Ничего не найдено."
         return CatalogView((head + "\n" if head else "") + text, 0, trunc, notes)
-    if total > cap:
-        trunc.append(f"показано {cap} из {total} регистров — сузьте поиском")
+    if len(rows) > cap:
+        trunc.append(f"показано {cap + len(masks)} из {total} регистров — сузьте поиском")
         rows = rows[:cap]
-    header = "адрес | имя | ед. | вид | роль · состояния" + (" | опрос" if polled is not None else "")
+    header = ("адрес | имя | ед. | вид | роль" if compact else "адрес | имя | ед. | вид | роль · состояния") \
+        + (" | опрос" if polled is not None else "")
     return CatalogView("\n".join(([head] if head else []) + [header] + rows), total, trunc, notes)
 
 
@@ -221,7 +293,9 @@ def register(server: Any) -> None:
     @server.tool(structured_output=False, name="register_catalog",
                  description="Каталог регистров установки. По умолчанию — только регистры, которые опрашивает "
                              "роутер (по ним есть данные): адрес, русское имя, единица, вид, роль в KB, дата "
-                             "последней записи. Поиск по слову сужает список. all_registers=true — вся карта "
+                             "последней записи. Без слова поиска перечень краткий: состояния не расшифрованы, "
+                             "маски неисправностей одной строкой. Поиск по слову или адресу сужает список и "
+                             "даёт полную строку регистра. all_registers=true — вся карта "
                              "панели: у регистров без данных пометка «не опрашивается», запрашивать их бесполезно.")
     async def register_catalog(
         ctx: Context,

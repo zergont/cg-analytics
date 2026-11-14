@@ -256,7 +256,7 @@ v = te.build_catalog(rm, catalog, polled, None, False, tz=UTC)
 lines = v.text.split("\n")
 check(lines[0].startswith("Опрашивается регистров: 3 из 6 в карте панели.") and "Показаны опрашиваемые" in lines[0],
       f"шапка со счётом: {lines[0]}")
-check(lines[1] == "адрес | имя | ед. | вид | роль · состояния | опрос", "заголовок с колонкой опроса")
+check(lines[1] == "адрес | имя | ед. | вид | роль | опрос", "заголовок с колонкой опроса (краткий перечень, v5.2.12)")
 check(v.total == 3 and [ln.split(" | ")[0] for ln in lines[2:]] == ["40068", "40564", "40595"], "по умолчанию — только опрашиваемые")
 check(lines[2].endswith("| посл. запись 14.11.2026") and lines[3].endswith("| значение не менялось"), "дата последней записи в строке")
 check(any("40999 (FUEL_RATE)" in n for n in v.notes), f"роль KB без данных — в пометках: {v.notes}")
