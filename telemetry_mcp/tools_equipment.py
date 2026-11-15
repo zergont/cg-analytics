@@ -28,6 +28,7 @@ from .catalog import get_catalog, enum_text, bit_info
 from .common import ToolError, UNITS, resolve_unit, run_tool, settings
 from .envelope import Envelope
 from .kb import kb_for, resolve_params
+from .kb_notes import passport_notes, rows_with_notes
 
 _ARG_UNIT = Annotated[str, Field(description="Установка: имя («ДЭС №3», «ДГУ №1») или id из equipment_tree")]
 
@@ -161,6 +162,7 @@ def build_catalog(rm: dict[int, Any], cat: dict[int, Any], polled: dict[int, Pol
     masks: list[int] = []
     marks: list[str] = []          # пометка об опросе каждой строки — парой к rows
     rows: list[str] = []
+    row_addrs: list[int] = []      # адрес каждой строки — для пометок базы знаний
     for a in addrs:
         line, hay, _name = _catalog_row(a, rm, cat, brief=compact)
         if q and q not in hay:
@@ -172,6 +174,7 @@ def build_catalog(rm: dict[int, Any], cat: dict[int, Any], polled: dict[int, Pol
             marks.append(last_text(polled[a], tz, exact) if a in polled else off)
             line += " | " + marks[-1]
         rows.append(line)
+        row_addrs.append(a)
     total = len(rows) + len(masks)
     if compact and total:
         head += (" " if head else "") + ("Перечень краткий: состояния не расшифрованы — полная строка регистра "
@@ -211,6 +214,9 @@ def build_catalog(rm: dict[int, Any], cat: dict[int, Any], polled: dict[int, Pol
     if len(rows) > cap:
         trunc.append(f"показано {cap + len(masks)} из {total} регистров — сузьте поиском")
         rows = rows[:cap]
+    # Пометки базы знаний к регистрам (v5.2.13, kb_notes): в коротком списке — под строкой
+    # регистра, с источником; в длинном — подсказка в примечаниях, у каких адресов они есть
+    rows = rows_with_notes(rows, row_addrs, rm, notes)
     header = ("адрес | имя | ед. | вид | роль" if compact else "адрес | имя | ед. | вид | роль · состояния") \
         + (" | опрос" if polled is not None else "")
     return CatalogView("\n".join(([head] if head else []) + [header] + rows), total, trunc, notes)
@@ -296,7 +302,9 @@ def register(server: Any) -> None:
                              "последней записи. Без слова поиска перечень краткий: состояния не расшифрованы, "
                              "маски неисправностей одной строкой. Поиск по слову или адресу сужает список и "
                              "даёт полную строку регистра. all_registers=true — вся карта "
-                             "панели: у регистров без данных пометка «не опрашивается», запрашивать их бесполезно.")
+                             "панели: у регистров без данных пометка «не опрашивается», запрашивать их бесполезно. "
+                             "В коротком списке (поиск по слову или адресу) под строкой регистра — пометка базы "
+                             "знаний с источником, если она есть: из чего складывается значение и чем ограничено.")
     async def register_catalog(
         ctx: Context,
         unit: _ARG_UNIT,
@@ -323,7 +331,8 @@ def register(server: Any) -> None:
     @server.tool(structured_output=False, name="kb_passport",
                  description="Паспорт и пороги из базы знаний установки: паспортные значения РЭ, уставки "
                              "контроллера, настраиваемые пороги, зоны нагрузки, шаг датчиков, ссылки на "
-                             "источники. Параметр сужает до своего раздела.")
+                             "источники, пометки к регистрам (состав и ограничения значения, с источником). "
+                             "Параметр сужает до своего раздела.")
     async def kb_passport(
         ctx: Context,
         unit: _ARG_UNIT,
@@ -333,7 +342,7 @@ def register(server: Any) -> None:
             u = await resolve_unit(unit)
             env.unit, env.unit_id = u.title, u.id
             cfg, _ref, note = await kb_for(u)
-            env.layer = "knowledge_base (thresholds, zones, detectors)"
+            env.layer = "knowledge_base (thresholds, zones, detectors, пометки к регистрам)"
             if cfg is None:
                 raise ToolError(note or "KB для установки не собрана")
             lines: list[str] = []
@@ -344,16 +353,21 @@ def register(server: Any) -> None:
             dets = cfg.detectors or {}
             sections = list(thr.keys())
             det_sections: list[str] = []
+            # Пометки базы знаний к регистрам (v5.2.13, kb_notes): с параметром — пометка его
+            # регистра, без параметра — все; у параметра без разделов порогов пометка — не отказ
+            cat = None
+            note_addrs: list[int] | None = None
             if param:
                 q = param.strip().lower().replace("ё", "е")
                 try:
                     cat = await get_catalog(u.equip_type)
-                    role = resolve_params(cfg, cat, [param])[0].role
+                    pref = resolve_params(cfg, cat, [param])[0]
+                    role, note_addrs = pref.role, [pref.addr]
                 except ToolError:
-                    role = None
+                    role, note_addrs = None, []
                 keys = {k for k in sections if _section_matches(k, q, role)}
                 det_sections = [k for k in dets if isinstance(dets.get(k), dict) and _section_matches(k, q, role)]
-                if not keys and not det_sections:
+                if not keys and not det_sections and not passport_notes(cfg.register_map, cat, note_addrs):
                     raise ToolError(f"Раздел порогов для «{param}» не найден. Разделы thresholds: "
                                     + ", ".join(sections) + "; детекторы: " + ", ".join(sorted(dets)))
                 sections = [k for k in sections if k in keys]
@@ -368,6 +382,7 @@ def register(server: Any) -> None:
             for k in det_sections:
                 lines.append(f"\n[детектор {k}]")
                 lines.extend(_dump(dets[k], "  "))
+            lines.extend(passport_notes(cfg.register_map, cat, note_addrs))
             if not param:
                 try:
                     zb = cfg.zone_boundaries()

@@ -312,9 +312,12 @@ for _attr in ("thresholds", "zones", "segmentation", "detectors", "fault_matrix"
     check(getattr(MONO, _attr) == getattr(CFG, _attr), f"1в: {_attr}: монолит ≠ слои")
 check(MONO.whitelist_analog == CFG.whitelist_analog and MONO.whitelist_enum == CFG.whitelist_enum
       and MONO.whitelist_fault == CFG.whitelist_fault, "1в: whitelist монолита ≠ слоёв")
-_reg_l = {a: {k: v for k, v in m.items() if k != "domain"} for a, m in CFG.register_map.items()}
+# Поля, которые есть только в слое контроллера: domain (шов H3) и пометка для моделей
+# note_ru / note_source (v5.2.13). Движок аналитики их не читает, в монолит не вносятся
+_LAYER_ONLY = ("domain", "note_ru", "note_source")
+_reg_l = {a: {k: v for k, v in m.items() if k not in _LAYER_ONLY} for a, m in CFG.register_map.items()}
 check(MONO.register_map == _reg_l,
-      f"1в: регистры монолита ≠ слоёв (без domain): "
+      f"1в: регистры монолита ≠ слоёв (без domain и пометок): "
       f"{sorted(set(MONO.register_map) ^ set(_reg_l)) or [a for a in _reg_l if MONO.register_map.get(a) != _reg_l[a]]}")
 check(MONO.controller_label == CFG.controller_label == "Cummins PowerCommand PCC3300", "1в: имя контроллера")
 check(MONO.seg("fault_cleared", "stable_clean_sec") == 300
