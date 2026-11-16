@@ -273,8 +273,9 @@ check([lab(s) for s in _live] == ["Стоп", "Работа — ждём под�
 _EN24 = [rs(0, STOP0, A0), rs(3, A0, A1), rs(0, A1)]
 _s24 = segment(_EN24, _H24, [READY_BIT], [], CFG3, "SN", "pcc", 1, "E", STOP0, M(24, 12, 50))
 _got = [(hm(s.t_start), hm(s.t_end), lab(s)) for s in _s24]
-check(_got == [("12:38:59", "12:41:05", "Стоп"), ("12:41:05", "12:50:00", "Неудачный пуск · Стоп")],
-      f"1.2а: «Стоп» 12:38:59–12:41:05 и плашка «Неудачный пуск · Стоп» с 12:41:05: {_got}")
+# v5.2.15 (решение 16.11 «а»): без кода и аварии — «Прерванный пуск · Стоп»
+check(_got == [("12:38:59", "12:41:05", "Стоп"), ("12:41:05", "12:50:00", "Прерванный пуск · Стоп")],
+      f"1.2а: «Стоп» 12:38:59–12:41:05 и плашка «Прерванный пуск · Стоп» с 12:41:05: {_got}")
 _a24 = _s24[-1].attempt if _s24 and _s24[-1].attempt else {}
 check(_a24.get("rpm_in") == 0 and "cranked" in _a24 and _a24["cranked"] is None
       and _a24["facts"]["ready"] is False,
@@ -294,10 +295,10 @@ _H34 = [h(RPM, M(24, 13, 33, 34), 0.0), h(RPM, M(24, 13, 34, 37), 0.0), h(FREQ, 
 _s34 = segment(_EN34, _H34, [], [], CFG3, "SN", "pcc", 1, "E", M(24, 13, 30), M(24, 13, 36))
 _p34 = [s for s in _s34 if s.attempt]
 _f34 = labels.attempt_facts_ru(_p34[0].attempt, MSK) if _p34 else ""
-check(_p34 and lab(_p34[0]) == "Неудачный пуск · Стоп"
+check(_p34 and lab(_p34[0]) == "Прерванный пуск · Стоп"
       and _f34.startswith("попытка 7 с, прокрутка по данным не видна (отсчётов внутри попытки нет)")
       and "без прокрутки" not in _f34,
-      f"1.2д: 13:34:03 — «Неудачный пуск · Стоп» (было «Отменённый», ноль из 13:33:34): "
+      f"1.2д: 13:34:03 — «Прерванный пуск · Стоп», не «Отменённый» (ноль из 13:33:34): "
       f"{_p34 and lab(_p34[0])} / {_f34}")
 
 # ══ 1.3. П3: профиль пуска без перехода порогов не строится ═══════════════
@@ -317,8 +318,9 @@ check(_pf is not None and _pf["fire_at"] == S(_c, 2).isoformat() and _pf["rated_
 
 # ══ 1.4. Подписи попытки (решение А) ═══════════════════════════════════════
 _an = {"cranked": None, "facts": {"rpm_max": 0}, "outcome": "SIMPLE", "codes": []}
-check(labels.attempt_cranked(_an) is None and labels.attempt_label(_an) == "Неудачный пуск · Стоп",
-      "1.4а: cranked None с rpm_max 0 — None, «Неудачный пуск · Стоп» (не проваливается в rpm_max)")
+check(labels.attempt_cranked(_an) is None and labels.attempt_label(_an) == "Прерванный пуск · Стоп",
+      "1.4а: cranked None с rpm_max 0 — None, не «Отменённый» (не проваливается в rpm_max); "
+      "без кода и аварии — «Прерванный пуск · Стоп» (v5.2.15)")
 _ai = {"cranked": None, "rpm_in": 0, "facts": {"rpm_max": 0.0}, "outcome": "SIMPLE", "codes": [],
        "duration_sec": 7.0}
 check(labels.attempt_facts_ru(_ai) == "попытка 7 с, прокрутка по данным не видна (отсчётов внутри попытки нет)",
@@ -337,7 +339,8 @@ check(labels.attempt_label(_old) == "Отменённый пуск · Стоп"
       and labels.attempt_cranked(dict(_old, facts={"rpm_max": 189.0})) is True,
       "1.4д: старая запись без cranked (#36072 в БД) — по rpm_max, как раньше")
 _v23 = {"cranked": True, "facts": {"rpm_max": 189.0}, "outcome": "SIMPLE", "codes": []}
-check(labels.attempt_label(_v23) == "Неудачный пуск · Стоп", "1.4е: запись v5.1.23 с cranked — как была")
+check(labels.attempt_label(_v23) == "Прерванный пуск · Стоп",
+      "1.4е: запись v5.1.23 с прокруткой без кода и аварии — «Прерванный пуск» (v5.2.15)")
 
 # ══ 1.5. Признаки характера по-русски ══════════════════════════════════════
 _NEW = {clf.VOTE_NO_COOLDOWN: "без охлаждения перед остановом (режим 40011 не проходил 4/5)",

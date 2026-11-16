@@ -276,7 +276,12 @@ check(_group_worst("RPM_UNDERSPEED", [v2]) == "мин. 1470 об/мин — на
       and _group_worst("RPM_UNDERSPEED", [{"rpm_min": 1473, "threshold_rpm": 1485}])
       == "мин. 1473 об/мин — на 12 ниже порога 1485",
       "6б: без расхождения и старая запись — как раньше")
-check(CONCLUSION_INPUT_VERSION == "5.2.14", f"6б: версия входа заключения поднята: {CONCLUSION_INPUT_VERSION}")
+def _ver(v):
+    return tuple(int(x) for x in str(v).split("."))
+
+
+# не ниже 5.2.14: следующие версии поднимают её дальше (5.2.15 — подпись попытки)
+check(_ver(CONCLUSION_INPUT_VERSION) >= (5, 2, 14), f"6б: версия входа заключения поднята: {CONCLUSION_INPUT_VERSION}")
 # 6в. Сервер телеметрии, episodes: новая запись — глубина и сверка; старая — без drop_* (= размах)
 from telemetry_mcp.tools_segments import _episode_values  # noqa: E402
 ev_new = _episode_values("RPM_UNDERSPEED", v1)
@@ -310,7 +315,8 @@ check(sa.compute_analytics_hash(AN) == sa.compute_analytics_hash(AN_V) == "75b09
       and sa.compute_fault_hash({"panel_alarms": PN, "analytics_alarms": AN_V}) == "f1e845d1d4d0",
       "6г: хеши составов гейта прежние, новые поля и текст в них не входят")
 import online.incident_gate as ig  # noqa: E402
-check(sa.GATE_RULES_VERSION == "5.1.15" and sa.GATE_INPUT_VERSION == "5.2.14" and ig.INCIDENT_INPUT_VERSION == "5.2.14",
+check(sa.GATE_RULES_VERSION == "5.1.15" and _ver(sa.GATE_INPUT_VERSION) >= (5, 2, 14)
+      and _ver(ig.INCIDENT_INPUT_VERSION) >= (5, 2, 14),
       f"6г: GATE_RULES_VERSION прежний; формат входа гейта и совета — 5.2.14 (строки срабатывания): "
       f"{sa.GATE_RULES_VERSION}, {sa.GATE_INPUT_VERSION}, {ig.INCIDENT_INPUT_VERSION}")
 d1_rc = (d1[0].ref_codes, d1[0].fault_codes) if d1 else None

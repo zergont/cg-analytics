@@ -3063,7 +3063,9 @@ def _append_segment(
     _att = getattr(seg, "attempt", None)
     if isinstance(_att, dict):
         from .labels import attempt_facts_ru
-        a(f"- **Неудачная попытка выхода из стопа:** {attempt_facts_ru(_att, tz, codes=True)}; "
+        # v5.2.15: «Попытка», не «Неудачная попытка» — подпись (Неудачный /
+        # Прерванный / Отменённый пуск) уже в заголовке сегмента
+        a(f"- **Попытка выхода из стопа:** {attempt_facts_ru(_att, tz, codes=True)}; "
           f"останов {fmt_ts(_att.get('t_fall'))}")
     elif getattr(seg, "attempt_pending", False):
         a("- **Выход из стопа ещё не подтверждён:** оборотов выше 250, частоты и "

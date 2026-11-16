@@ -18,7 +18,7 @@ from typing import Annotated, Any
 from mcp.server.mcpserver import Context
 from pydantic import Field
 
-from analytics.labels import fmt_duration, fmt_local
+from analytics.labels import attempt_label, fmt_duration, fmt_local
 from analytics.serializer import RUN_STATE_RU
 
 from .common import ToolError, est_tokens, fmt_num, fmt_t, parse_window, resolve_unit, run_tool, settings
@@ -121,7 +121,10 @@ def register(server: Any) -> None:
                 if cj.get("stop_kind") == "EMERGENCY":
                     mode += " (аварийный)"
                 if isinstance(cj.get("attempt"), dict):
-                    mode += " · неудачная попытка пуска"
+                    # v5.2.15: та же подпись, что в календаре (Неудачный /
+                    # Прерванный / Отменённый пуск), вид стопа уже в mode
+                    _lab = attempt_label(cj["attempt"]) or "Неудачный пуск"
+                    mode += " · " + _lab.split(" · ")[0].lower()
                 t_end = s.get("t_end")
                 span = f"{fmt_t(s['t_start'], day=day)}–{fmt_t(t_end, day=day) if t_end else 'открыт'}"
                 dur = fmt_duration(((t_end or datetime.now(s['t_start'].tzinfo)) - s["t_start"]).total_seconds())

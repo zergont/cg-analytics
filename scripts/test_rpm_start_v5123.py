@@ -1861,8 +1861,10 @@ def plates(segs):
 
 _pl7 = plates(seg7())
 _a35, _a37 = (_pl7[0].attempt, _pl7[1].attempt) if len(_pl7) == 2 else ({}, {})
-check([label_from_chars(s.to_dict()) for s in _pl7] == ["Неудачный пуск · Стоп"] * 2,
-      f"7б: #35935 и #35937 — «Неудачный пуск · Стоп» (было «Неудачная работа · Стоп»): "
+# v5.2.15 (решение 16.11 «а»): прокрутка без кода и аварии — «Прерванный пуск»
+check([label_from_chars(s.to_dict()) for s in _pl7] == ["Прерванный пуск · Стоп"] * 2,
+      f"7б: #35935 и #35937 — «Прерванный пуск · Стоп» (было «Неудачная работа · Стоп», "
+      f"до v5.2.15 «Неудачный пуск · Стоп»): "
       f"{[label_from_chars(s.to_dict()) for s in _pl7]}")
 _f35, _f37 = attempt_facts_ru(_a35, MSK), attempt_facts_ru(_a37, MSK)
 check(_f35 == "прокрутка 20 с до 189 об/мин без вспышки, АКБ до 21,5 В, переключатель «Выкл» 09:27:43, "
@@ -1924,23 +1926,26 @@ for _fs in (1, 2, 3):
                                 "facts": {"rpm_max": _rpm, "freq_max": 0.0, "ready": False}, **_sig}
                         if _new:
                             _att["cranked"] = (_rpm > 50) if _rpm is not None else None
-                        _want = ("Отменённый пуск" if _ck == "нет" and not _codes and _oc == "SIMPLE"
-                                 else "Неудачный пуск") + (" · Авария" if _oc == "EMERGENCY" else " · Стоп")
+                        # v5.2.15 (решение 16.11 «а»): код или авария — «Неудачный»,
+                        # без них: нет прокрутки — «Отменённый», иначе «Прерванный»
+                        _want = ("Неудачный пуск" if _codes or _oc == "EMERGENCY"
+                                 else "Отменённый пуск" if _ck == "нет"
+                                 else "Прерванный пуск") + (" · Авария" if _oc == "EMERGENCY" else " · Стоп")
                         _n7 += 1
                         if attempt_label(_att) != _want:
                             _bad7.append((_fs, _rpm, bool(_sig), _oc, _codes, _new, attempt_label(_att), _want))
 check(_n7 == 360 and not _bad7, f"7в: матрица подписей ({_n7} сочетаний) — расхождения: {_bad7[:5]}")
-check(attempt_label(None) is None and attempt_label({"outcome": "SIMPLE"}) == "Неудачный пуск · Стоп",
-      "7в: не попытка — None; без оборотов — «Неудачный пуск» (отмены не видно)")
+check(attempt_label(None) is None and attempt_label({"outcome": "SIMPLE"}) == "Прерванный пуск · Стоп",
+      "7в: не попытка — None; без оборотов, кода и аварии — «Прерванный пуск» (отмены не видно, v5.2.15)")
 # Старая запись (#35935 в БД, v5.1.22): подпись по rpm_max, факты прежние
 _OLD35 = {"path": [3], "codes": [], "facts": {"ready": False, "rpm_max": 189.0, "freq_max": 0.0},
           "t_fall": "2026-10-16T06:27:43+00:00", "outcome": "SIMPLE", "t_start": "2026-10-16T06:27:23+00:00",
           "from_state": 3, "duration_sec": 20.0}
-check(attempt_cranked(_OLD35) is True and attempt_label(_OLD35) == "Неудачный пуск · Стоп"
+check(attempt_cranked(_OLD35) is True and attempt_label(_OLD35) == "Прерванный пуск · Стоп"
       and attempt_facts_ru(_OLD35) == "попытка 20 с: обороты до 189 об/мин, частоты нет, «Готов к нагрузке» не выставлен",
       f"7в: старая запись — подпись по rpm_max, факты как раньше: {attempt_label(_OLD35)} / {attempt_facts_ru(_OLD35)}")
 check(attempt_label(dict(_OLD35, facts={"rpm_max": 0.0})) == "Отменённый пуск · Стоп"
-      and attempt_label(dict(_OLD35, facts={})) == "Неудачный пуск · Стоп"
+      and attempt_label(dict(_OLD35, facts={})) == "Прерванный пуск · Стоп"
       and attempt_label(dict(_OLD35, facts={"rpm_max": 0.0}, codes=[1438], outcome="EMERGENCY"))
       == "Неудачный пуск · Авария", "7в: старая запись без прокрутки / без оборотов / с кодом и аварией")
 
@@ -1952,15 +1957,15 @@ _fn = next(n for n in ast.parse(_rsrc).body if isinstance(n, ast.FunctionDef) an
 _ns7: dict = {"_STOP_KIND_LABELS": {}, "_RUN_STATE_LABELS": RUN_STATE_RU}
 exec(compile(ast.Module(body=[_fn], type_ignores=[]), "routes._seg_label", "exec"), _ns7)
 _CH35 = {"attempt": _OLD35, "stop_kind": "SIMPLE"}
-check(_ns7["_seg_label"](0, "SIMPLE", _CH35) == "Неудачный пуск · Стоп",
+check(_ns7["_seg_label"](0, "SIMPLE", _CH35) == "Прерванный пуск · Стоп",
       f"7г: календарь — подпись закрытой #35935 пересчитана при чтении: {_ns7['_seg_label'](0, 'SIMPLE', _CH35)}")
 _st7 = build_structural_status({"id": 1, "run_state": 0, "t_start": M(16, 9, 27, 23), "characteristics_json": _CH35,
                                 "current_values_json": {"values": {}}, "active_detections_json": []}, None)
-check(_st7.get("mode_label") == "Неудачный пуск · Стоп", f"7г: строка статуса: {_st7.get('mode_label')}")
+check(_st7.get("mode_label") == "Прерванный пуск · Стоп", f"7г: строка статуса: {_st7.get('mode_label')}")
 
 # ── 7д. Граница порога и ключ KB ──
 _H7b = [r for r in _H7 if not (r["addr"] == RPM and M(16, 9, 27, 23) <= r["ts"] <= M(16, 9, 27, 32))]
-for _v, _lab in ((50.0, "Отменённый пуск · Стоп"), (51.0, "Неудачный пуск · Стоп")):
+for _v, _lab in ((50.0, "Отменённый пуск · Стоп"), (51.0, "Прерванный пуск · Стоп")):
     _pp7 = plates(seg7(hist=sorted(_H7b + [h(RPM, M(16, 9, 27, 32), _v)], key=lambda r: r["ts"]),
                        b=M(16, 9, 27, 50)))
     check(len(_pp7) == 1 and label_from_chars(_pp7[0].to_dict()) == _lab
@@ -1970,8 +1975,9 @@ for _v, _lab in ((50.0, "Отменённый пуск · Стоп"), (51.0, "Н
 _pk7 = plates(seg7(cfg=cfg_seg(CFG, "transition_confirm", crank_rpm_min=200)))
 # v5.1.25 (решение А): у второй попытки (09:27:55–09:28:02) внутри отсчётов
 # нет — 187 об/мин удержаны с 09:27:52, ниже порога 200: прокрутка не видна,
-# «Неудачный пуск»; у первой отсчёты внутри есть — «Отменённый»
-check([label_from_chars(s.to_dict()) for s in _pk7] == ["Отменённый пуск · Стоп", "Неудачный пуск · Стоп"]
+# «Неудачный пуск» (с v5.2.15 без кода и аварии — «Прерванный»); у первой
+# отсчёты внутри есть — «Отменённый»
+check([label_from_chars(s.to_dict()) for s in _pk7] == ["Отменённый пуск · Стоп", "Прерванный пуск · Стоп"]
       and "попытка 20 с без прокрутки (обороты до 189 об/мин)" in attempt_facts_ru(_pk7[0].attempt, MSK),
       f"7д: порог из KB (200) — 189 об/мин не прокрутка: {[label_from_chars(s.to_dict()) for s in _pk7]}")
 
@@ -2005,7 +2011,7 @@ check((_sum7.get("attempt") or {}) == {"label": "Неудачный пуск · 
                                        "facts": "попытка 10 с без прокрутки (обороты 0), код 1438 «Отказ прокрутки стартером»"},
       f"7е: сводка — подпись и факты с кодом: {_sum7.get('attempt')}")
 _md7 = to_markdown(_pe7, "SN", "pcc", 1, S(_T7E, -60), S(_T7E, 120), tz=MSK)
-check("- **Неудачная попытка выхода из стопа:** попытка 10 с без прокрутки (обороты 0), код 1438 "
+check("- **Попытка выхода из стопа:** попытка 10 с без прокрутки (обороты 0), код 1438 "
       "«Отказ прокрутки стартером»; останов" in _md7, "7е: отчёт — строка попытки с кодом")
 # Без кода и без аварии — «Отменённый пуск · Стоп»
 _EN7o = per7(40011, [(S(_T7E, -500), 0), (_T7E, 3), (S(_T7E, 9), 0)])
@@ -2022,7 +2028,7 @@ LOG.records.clear()
 try:
     _px7 = plates(seg7())
     check(len(_px7) == 2 and "cranked" not in _px7[0].attempt
-          and label_from_chars(_px7[0].to_dict()) == "Неудачный пуск · Стоп"
+          and label_from_chars(_px7[0].to_dict()) == "Прерванный пуск · Стоп"
           and attempt_facts_ru(_px7[0].attempt, MSK).startswith("попытка 20 с: обороты до 189 об/мин")
           and logged("Наблюдаемое на попытке"),
           f"7ж: сбой наблюдаемого — запись прежняя, подпись по rpm_max, лог: {_px7 and _px7[0].attempt}")
