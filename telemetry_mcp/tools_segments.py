@@ -27,6 +27,49 @@ from .queries import act_by_id, acts_in_window, segment_with_report, segments_in
 
 _ARG_UNIT = Annotated[str, Field(description="Установка: имя или id")]
 
+# Значения на открытии эпизода — первые шесть. v5.2.14 (решение владельца
+# 16.11.2026, вариант «а»): у просадки и заброса оборотов — свой перечень:
+# подтверждённые частотой обороты (v_min / v_max) и частота в том же отсчёте
+# (не минимум/максимум по всем отсчётам — иначе v_min 1482 при 49,2 Гц), запас
+# до порога, датчик оборотов, признак расхождения и сам расходящийся отсчёт,
+# размах от максимума (просадка) или запас до уставки разноса по датчику
+# (заброс). Сценарий → (признак новой
+# записи, её ключи, ключи записи до v5.2.14 или None — первые шесть, как у
+# всех). У просадки до v5.2.14 drop_pct и drop_rpm — размах от максимума, а не
+# глубина (Сининда 14.11: 11,1 % при провале на 3 об/мин ниже порога), — их
+# не показываем
+_EPISODE_KEYS: dict[str, tuple[str, tuple[str, ...], tuple[str, ...] | None]] = {
+    "RPM_UNDERSPEED": ("v_min",
+                       ("v_min", "v_min_hz", "below_threshold_rpm", "rpm_min", "rpm_freq_mismatch",
+                        "rpm_freq_mismatch_rpm", "rpm_freq_mismatch_hz", "spread_rpm"),
+                       ("rpm_min", "freq_rpm_min", "threshold_rpm", "spread_rpm")),
+    "RPM_OVERSPEED": ("v_max",
+                      ("v_max", "v_max_hz", "above_threshold_rpm", "rpm_max", "rpm_freq_mismatch",
+                       "rpm_freq_mismatch_rpm", "rpm_freq_mismatch_hz", "margin_rpm"),
+                      None),
+}
+
+
+def _episode_values(scenario: Any, ov: dict) -> list[str]:
+    """«ключ=значение» значений на открытии эпизода (не словари и не списки)."""
+    rule = _EPISODE_KEYS.get(str(scenario or ""))
+    keys = None
+    if rule:
+        keys = rule[1] if rule[0] in ov else rule[2]
+    if keys:
+        items = [(k, ov[k]) for k in keys if k in ov and ov[k] is not None]
+    else:
+        items = list(ov.items())[:6]
+    out = []
+    for k, v in items:
+        if isinstance(v, (dict, list)):
+            continue
+        if isinstance(v, bool):
+            out.append(f"{k}={'да' if v else 'нет'}")
+        else:
+            out.append(f"{k}={fmt_num(v) if isinstance(v, (int, float)) else v}")
+    return out
+
 
 def _det_names(cj: dict[str, Any] | None) -> list[str]:
     names: list[str] = []
@@ -202,8 +245,7 @@ def register(server: Any) -> None:
                     except ValueError:
                         ov = None
                 if isinstance(ov, dict):
-                    kv = [f"{k}={fmt_num(v) if isinstance(v, (int, float)) else v}" for k, v in list(ov.items())[:6]
-                          if not isinstance(v, (dict, list))]
+                    kv = _episode_values(e.get("scenario"), ov)
                     if kv:
                         parts.append("значения: " + ", ".join(kv))
                 lines.append(" · ".join(parts))

@@ -84,7 +84,7 @@ H1 = [h(RPM, T(11, 8, 2), 0.0), h(RPM, T(11, 9, 2), 333.0), h(RPM, T(11, 9, 13),
       h(FREQ, T(11, 9, 13), 50.0), h(FREQ, T(11, 9, 22), 50.1),
       h(OIL, T(11, 9, 10), 600.0), h(OIL, T(11, 14), 590.0), h(OILT, T(11, 0), 60.0)]
 s1 = run(E1, H1, T(11, 0), T(11, 20))
-check(not any("RPM мин. 0" in t for t in dets(s1, "RPM_UNDERSPEED")),
+check(not any(t.startswith("До 0 об/мин") for t in dets(s1, "RPM_UNDERSPEED")),
       f"1: «обороты 0» нулевого кадра не срабатывают: {dets(s1, 'RPM_UNDERSPEED')}")
 check(chars_min(s1, "RPM") and chars_min(s1, "RPM") > 1000, f"1б: минимум оборотов без нуля: {chars_min(s1, 'RPM')}")
 gc = [c for s in s1 for c in s.sequence_checks if c.get("check") == "source_zero_glitch"]

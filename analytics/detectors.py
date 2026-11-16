@@ -26,7 +26,7 @@ from .live import (
     LIVE_RECENT_SEC, cooling_proximity, limit_bad, limit_checks, live_values, sub_hits,
     sub_samples,
 )
-from .rpm_freq import overspeed_params
+from .rpm_freq import dip_view, over_view, overspeed_params, rpm_freq_params
 
 logger = logging.getLogger(__name__)
 
@@ -1385,22 +1385,40 @@ def _detect_rpm_underspeed(
 
     live — кластеры RPM_UNDERSPEED сегмента (v5.1.21, В1): провал — по v*,
     обороты и частота опроса ниже порога (analytics/rpm_freq.py). Детекция —
-    только при участке провала в подсегменте; rpm_min — по отсчётам провала,
-    freq_rpm_min — обороты по частоте генератора (k·f_min), front_count —
-    число участков в подсегменте. None — по минимуму подсегмента, как раньше.
+    только при участке провала в подсегменте; front_count — число участков в
+    подсегменте. None — по минимуму подсегмента, как раньше.
+
+    Значения (v5.2.14, решение владельца 16.11.2026, вариант «а» — честная
+    подача расхождения оборотов и частоты, без вердикта «сбой датчика»):
+    - rpm_min — обороты по датчику, минимум по отсчётам провала (как было);
+    - freq_rpm_min / freq_hz_min — обороты по частоте генератора (k·f_min) и
+      сама частота, Гц (только по участкам; None — частоты в провале нет);
+    - v_min — подтверждённая глубина провала: минимум max(обороты, k·f_min)
+      по отсчётам (без частоты — по оборотам), v_min_hz — частота в отсчёте
+      v_min (freq_hz_min — минимум по всем отсчётам); от v_min below_threshold_rpm
+      («на N ниже порога»), drop_rpm и drop_pct — ниже номинала, об/мин и %
+      (до v5.2.14 drop_* были размахом от максимума: Сининда 14.11 — 167 и
+      11,1 % при провале на 3 об/мин ниже порога);
+    - spread_rpm — размах от максимума подсегмента (rpm_max − rpm_min), не
+      глубина провала;
+    - rpm_freq_mismatch — датчик ниже k·f_min больше допуска сверки
+      (rpm_freq.rpm_freq_mismatch), rpm_freq_mismatch_count — сколько таких
+      отсчётов, rpm_freq_mismatch_rpm / _hz — самый низкий из них и его
+      частота (а не rpm_min: крайнее показание датчика может быть отсчётом без
+      частоты); None — сверять не с чем.
+    Порог, критерий v* и фильтр 1а не меняются — меняются подача и поля.
     """
     rpm_char = chars.get("RPM") or {}
     threshold = float(cfg.det("RPM_UNDERSPEED", "threshold_rpm", default=1485.0))
-    freq_rpm_min, live_v, t_det = None, None, _iso(seg_start)
+    view, live_v, t_det = None, None, _iso(seg_start)
     if live is not None:
         hits = sub_hits(live, seg_start, seg_end) if seg_end is not None else []
         spans = [s for _, sp in hits for s in sp]
         pts = sub_samples(spans, seg_start, seg_end) if spans else []
-        if not pts:
+        view = dip_view(pts, rpm_freq_params(cfg)) if pts else None
+        if view is None:
             return []
-        rpm_min = min(p[1] for p in pts)
-        kfs = [p[2] for p in pts if p[2] is not None]
-        freq_rpm_min = round(min(kfs), 1) if kfs else None
+        rpm_min = view["rpm_min"]
         front_live: int | None = len(spans)
         t_det, live_v = hits[0][0]["start"], live_values(hits, seg_start)
     else:
@@ -1420,10 +1438,13 @@ def _detect_rpm_underspeed(
 
     rpm_max = rpm_char.get("max")
     # «Просадка 37» читалась как «на 37 ниже порога», а это размах от максимума:
-    # ниже порога 1485 − 1473 = 12 (v5.1.6)
-    below = threshold - rpm_min
+    # ниже порога 1485 − 1473 = 12 (v5.1.6). v5.2.14: глубина — по v_min
+    # (обороты, подтверждённые частотой), размах — только spread_rpm
+    v_min = view["v_min"] if view is not None else float(rpm_min)
+    below = threshold - v_min
     spread = (rpm_max - rpm_min) if rpm_max is not None else None
-    drop_rpm, drop_pct = spread, (spread / rated * 100) if spread is not None else None  # устар., = размах
+    drop_rpm = rated - v_min
+    drop_pct = drop_rpm / rated * 100 if rated else None
     if front_live is not None:
         front_count = front_live
     else:
@@ -1436,31 +1457,84 @@ def _detect_rpm_underspeed(
         "threshold_rpm": threshold,
         "panel_setpoint_rpm": panel_setpoint,
         "rated_rpm": rated,
+        "v_min": round(v_min, 1),
         "below_threshold_rpm": round(below, 1),
         "spread_rpm": spread,
-        "drop_rpm": drop_rpm,
+        "drop_rpm": round(drop_rpm, 1),
         "drop_pct": round(drop_pct, 1) if drop_pct is not None else None,
         "front_count": front_count,
     }
-    if live_v is not None:
-        values.update(freq_rpm_min=freq_rpm_min, live=live_v)
+    if view is not None:
+        values.update(freq_rpm_min=view["freq_rpm_min"], freq_hz_min=view["freq_hz_min"],
+                      v_min_hz=view["v_hz"], rpm_freq_mismatch=view["mismatch"])
+        values.update(_mismatch_values(view))
+        values["live"] = live_v
     return [Detection(
         scenario="RPM_UNDERSPEED",
         severity=cfg.det("RPM_UNDERSPEED", "severity_default", default="CAUTION"),
         t_detected=t_det,
         source="METRIC_RULE",
-        trigger=(
-            f"RPM мин. {rpm_min:.0f} об/мин"
-            + (f" (по частоте ≈ {freq_rpm_min:.0f})" if freq_rpm_min is not None else "")
-            + f" — на {below:.0f} ниже порога {threshold:.0f}"
-            + (f" (размах {spread:.0f} об/мин от макс. {rpm_max:.0f})" if spread is not None else "")
-            + f", фронтов: {front_count}"
-        ),
+        trigger=_underspeed_trigger(v_min, below, threshold, front_count, view),
         related_roles=["RPM", "ACTIVE_POWER_TOTAL"],
         fault_codes=[fault_code],
         description_key="RPM_UNDERSPEED.below_threshold",
         values=values,
     )]
+
+
+def _mismatch_values(view: dict[str, Any]) -> dict[str, Any]:
+    """Поля расхождения датчика с частотой (v5.2.14): число отсчётов и сам отсчёт —
+    крайнее из расходящихся показаний датчика и его частота. Нет расхождения — {}."""
+    if not view.get("mismatch"):
+        return {}
+    return {"rpm_freq_mismatch_count": view["mismatch_count"],
+            "rpm_freq_mismatch_rpm": view["mm_rpm"], "rpm_freq_mismatch_hz": view["mm_hz"]}
+
+
+def _rpm_freq_trigger(v: float, rel: str, front_count: int, view: dict[str, Any] | None,
+                      where: str) -> str:
+    """Строка срабатывания провала и заброса оборотов (v5.2.14, вариант «а»).
+
+    Название сценария в строке не повторяется — его ставят отчёт («**Просадка
+    оборотов**») и вход гейта («Просадка оборотов: До 1482 об/мин …»). Единицы —
+    у каждого числа: «1482 об/мин по частоте генератора 49,4 Гц» (было «RPM мин.
+    1344 об/мин (по частоте ≈ 1482)» — 1482 читали как Гц). v — подтверждённые
+    частотой обороты (v_min провала, v_max заброса), rel — «на N ниже/выше
+    порога …»; размаха от максимума в строке нет. «По частоте генератора» —
+    только если значение дала частота, а датчик в этом отсчёте с ней не
+    сходится; в пределах допуска — «при частоте генератора». При расхождении —
+    показание датчика рядом и оговорка в скобках (строка во входе гейта
+    продолжается «— за 30 дней: …»): обороты и частота могли быть прочитаны в
+    разные моменты опроса; вердикта «сбой датчика» нет. where — «в провале» /
+    «в заборе»."""
+    hz = view.get("v_hz") if view is not None else None
+    if hz is None:
+        src = " по датчику оборотов"
+    elif view.get("v_by_freq"):
+        src = f" по частоте генератора {fmt_number(hz, 1)} Гц"
+    else:
+        src = f" при частоте генератора {fmt_number(hz, 1)} Гц"
+    text = f"До {v:.0f} об/мин{src} ({rel}), фронтов: {front_count}"
+    if view is None or not view.get("mismatch"):
+        return text
+    if view.get("mm_same") and view.get("v_by_freq"):
+        who = f"датчик оборотов в том же опросе — {view['mm_rpm']:.0f} об/мин, с частотой не сходится"
+    elif view.get("mm_same"):
+        who = "датчик оборотов с частотой не сходится"
+    else:
+        who = (f"датчик оборотов {where} — до {view['mm_rpm']:.0f} об/мин при частоте генератора "
+               f"{fmt_number(view['mm_hz'], 1)} Гц, с частотой не сходится")
+    n = int(view.get("mismatch_count") or 0)
+    return (text + f"; {who} (" + (f"отсчётов: {n}; " if n > 1 else "")
+            + "обороты и частота могли быть прочитаны в разные моменты опроса)")
+
+
+def _underspeed_trigger(v_min: float, below: float, threshold: float, front_count: int,
+                        view: dict[str, Any] | None) -> str:
+    """Строка срабатывания просадки оборотов: «До 1482 об/мин по частоте
+    генератора 49,4 Гц (на 3 ниже порога 1485), фронтов: 1; …» (v5.2.14)."""
+    return _rpm_freq_trigger(v_min, f"на {below:.0f} ниже порога {threshold:.0f}", front_count, view,
+                             "в провале")
 
 
 # ── RPM_OVERSPEED ─────────────────────────────────────────────────────────────
@@ -1487,7 +1561,19 @@ def _detect_rpm_overspeed(
     участков) — детекции нет: по максимуму подсегмента заброс ловился бы по
     строке преамбулы. Код 234 справочный — в fault_codes остаётся, только если
     панель его выставила (confirm_panel_codes). Gate: RUN_STATE=3 (в
-    run_all_detectors). Вне пуска (сброс нагрузки) гейт снимать вправе (В3)."""
+    run_all_detectors). Вне пуска (сброс нагрузки) гейт снимать вправе (В3).
+
+    Значения и строка (v5.2.14, та же подача, что у провала, решение владельца
+    16.11.2026, вариант «а»): rpm_max — датчик оборотов (как было);
+    freq_rpm_max / freq_hz_max — по частоте генератора (k·f_max) и сама частота;
+    v_max — подтверждённая высота: максимум min(обороты, k·f_max) по отсчётам
+    (заброс требует обоих выше порога — подтверждено меньшее), v_max_hz —
+    частота в его отсчёте; от v_max — above_threshold_rpm («на N выше порога»).
+    margin_rpm — запас до уставки разноса по датчику (rpm_max), как до
+    v5.2.14: останов 234 панель решает по своему датчику, запас консервативный;
+    при расхождении в строке — «(по датчику оборотов)». rpm_freq_mismatch —
+    датчик выше k·f_max больше допуска сверки, rpm_freq_mismatch_rpm / _hz —
+    самый высокий из таких отсчётов. Критерий is_over не меняется."""
     if live is None or seg_end is None:
         return []
     prm = overspeed_params(cfg)
@@ -1496,37 +1582,39 @@ def _detect_rpm_overspeed(
     hits = sub_hits(live, seg_start, seg_end)
     spans = [s for _, sp in hits for s in sp]
     pts = sub_samples(spans, seg_start, seg_end) if spans else []
-    if not pts:
+    view = over_view(pts, prm) if pts else None
+    if view is None:
         return []
-    rpm_max = max(p[1] for p in pts)
-    kfs = [p[2] for p in pts if p[2] is not None]
-    freq_rpm_max = round(max(kfs), 1) if kfs else None
-    hz_max = round(freq_rpm_max / prm["k"], 2) if freq_rpm_max is not None and prm["k"] else None
     thr, ovs, pct = prm["threshold_rpm"], prm["overspeed_rpm"], prm["proximity_pct"]
-    margin = ovs - rpm_max
+    v_max = view["v_max"]
+    above = v_max - thr
+    margin = ovs - view["rpm_max"]
     values = {
-        "rpm_max": rpm_max,
-        "freq_rpm_max": freq_rpm_max,
-        "freq_hz_max": hz_max,
+        "rpm_max": view["rpm_max"],
+        "freq_rpm_max": view["freq_rpm_max"],
+        "freq_hz_max": view["freq_hz_max"],
+        "v_max": v_max,
+        "v_max_hz": view["v_hz"],
+        "above_threshold_rpm": round(above, 1),
         "threshold_rpm": round(thr, 1),
         "overspeed_rpm": ovs,
         "proximity_pct": pct,
         "margin_rpm": round(margin, 1),
         "front_count": len(spans),
-        "live": live_values(hits, seg_start),
+        "rpm_freq_mismatch": view["mismatch"],
     }
+    values.update(_mismatch_values(view))
+    values["live"] = live_values(hits, seg_start)
+    rel = (f"на {above:.0f} выше порога {fmt_number(thr, 1)} — {fmt_number(100 - pct, 1)} % уставки "
+           f"разноса {ovs:.0f}; "
+           + (f"до уставки осталось {margin:.0f}" if margin > 0 else f"выше уставки на {-margin:.0f}")
+           + (" по датчику оборотов" if view["mismatch"] else ""))
     return [Detection(
         scenario="RPM_OVERSPEED",
         severity=cfg.det("RPM_OVERSPEED", "severity_default", default="CAUTION"),
         t_detected=hits[0][0]["start"],
         source="METRIC_RULE",
-        trigger=(
-            f"Обороты макс. {rpm_max:.0f} об/мин"
-            + (f" ({fmt_number(hz_max, 1)} Гц, по частоте ≈ {freq_rpm_max:.0f})" if hz_max is not None else "")
-            + f" — выше порога {fmt_number(thr, 1)} ({fmt_number(100 - pct, 1)} % уставки разноса {ovs:.0f}), "
-            + (f"до уставки осталось {margin:.0f}" if margin > 0 else f"выше уставки на {-margin:.0f}")
-            + f", фронтов: {len(spans)}"
-        ),
+        trigger=_rpm_freq_trigger(v_max, rel, len(spans), view, "в заборе"),
         related_roles=["RPM", "FREQUENCY"],
         fault_codes=[prm["fault_code"]],
         description_key="RPM_OVERSPEED.above_threshold",

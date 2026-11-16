@@ -42,7 +42,8 @@ until + N, два сегмента окна, перенос на резе (и е
 открытый эпизод до конца нарушения, строка «Нарушение: …», блок 1 по ролям.
 Раздел 9 — синтетические аналоги регресса (#35890, #35891, #35872) через
 segment() → посев → сводку; реальные окна — scripts/check_v5121_data.py.
-Раздел 10 — счётчики переходного месяца (П11, В5).
+Раздел 10 — счётчики переходного месяца (П11, В5); v5.2.14 — ключ в KB снят,
+фильтр по явному конфигу остаётся, напоминания нет.
 Раздел 11 — ревью v5.1.21, сценарии ревьюеров без БД: пауза пакетов без
 data_gaps внутри нарушения (until — горизонт идущего кластера, конец — по
 карте окна; разрез кластера после паузы), рестарт с простоем > N (until из
@@ -332,7 +333,8 @@ s3 = run(seg_rows(G3))
 c3 = rg_check(s3)
 check(c3 and c3[0]["count"] == 3 and c3[0]["passed"] is False, f"1о: 3 сбоя за сегмент — passed=False (В4): {c3}")
 check(c3 and "04:42:32 (1479 при 50 Гц)" in c3[0]["details"] and "UTC" not in c3[0]["details"]
-      and "сбой датчика" in c3[0]["details"], f"1о: время МСК, обороты и частота: {c3 and c3[0]['details']}")
+      and "не сходящиеся с частотой генератора" in c3[0]["details"] and "(сбой датчика)" not in c3[0]["details"],
+      f"1о: время МСК, обороты и частота, без вердикта «сбой датчика» (v5.2.14): {c3 and c3[0]['details']}")
 check(c3 and c3[0]["samples"][0]["t"] == t1.isoformat(), "1о: моменты сбоев — в samples")
 check(rpm_min(s3) == 1499.0, f"1о: минимум оборотов без сбоев: {rpm_min(s3)}")
 check(not [d for s in s3 for sub in s.subsegments for d in sub.detections if d.scenario == "RPM_UNDERSPEED"],
@@ -394,7 +396,7 @@ check(any(c.get("check") == "source_rpm_glitch" and "04:42:32" in c.get("details
           for c in parts["failed_checks"]), f"1р: строка в замечаниях, МСК: {parts['failed_checks']}")
 md = render_summary_md(parts)
 # v5.1.32 (defects[11]): НОРМА без замечаний — блок «К сведению» и ℹ️ (было «### Замечания» и ❗)
-check("### К сведению" in md and "ℹ️ отброшены отсчёты оборотов" in md and "### Замечания" not in md,
+check("### К сведению" in md and "ℹ️ отброшены из расчёта отсчёты оборотов" in md and "### Замечания" not in md,
       f"1р: строка в сводке:\n{md}")
 rem = _remarks_from_summary({"report_summary_json": parts}) or ""
 check("[качество данных, на вердикт не влияет]" in rem, f"1р: вход модели: {rem}")
@@ -777,8 +779,9 @@ check(set(by_sc) >= {"LIMIT_PROXIMITY", "RPM_UNDERSPEED", "COOLING_FAILURE"}
       and all(d.t_detected == iso(S(L0, 300)) and "live" not in d.values for d in d_old),
       f"4б: None — по характеристикам, начало подсегмента, без live: {[(d.scenario, d.t_detected) for d in d_old]}")
 check(set(by_sc["LIMIT_PROXIMITY"].values) == {"value", "shutdown_limit", "proximity_pct", "role"}
-      and by_sc["RPM_UNDERSPEED"].trigger == "RPM мин. 1473 об/мин — на 12 ниже порога 1485 "
-      "(размах 37 об/мин от макс. 1510), фронтов: 1" and "freq_rpm_min" not in by_sc["RPM_UNDERSPEED"].values,
+      and by_sc["RPM_UNDERSPEED"].trigger == "До 1473 об/мин по датчику оборотов "
+      "(на 12 ниже порога 1485), фронтов: 1" and "freq_rpm_min" not in by_sc["RPM_UNDERSPEED"].values
+      and by_sc["RPM_UNDERSPEED"].values.get("spread_rpm") == 37,
       f"4б: прежние поля и текст: {by_sc['RPM_UNDERSPEED'].trigger}")
 dm_pp = DerivedMetrics(oil_press_passport_kpa=242, oil_press_step_kpa=8, oil_press_step_source="history",
                        oil_press_below_passport_run_sec=90, oil_press_below_passport_min_kpa=240,
@@ -831,8 +834,10 @@ s_dip = seg3(dip_rows, RS_REP)
 d_dip = dets(s_dip, "RPM_UNDERSPEED")
 v_dip = d_dip[0][1].values if d_dip else {}
 check(len(d_dip) == 1 and d_dip[0][1].t_detected == iso(S(L0, 300)) and v_dip.get("rpm_min") == 1418.0
-      and v_dip.get("freq_rpm_min") == 1419.0 and v_dip.get("front_count") == 1
-      and "RPM мин. 1418 об/мин (по частоте ≈ 1419) — на 67 ниже порога 1485" in d_dip[0][1].trigger,
+      and v_dip.get("freq_rpm_min") == 1419.0 and v_dip.get("front_count") == 1 and v_dip.get("v_min") == 1419.0
+      and v_dip.get("rpm_freq_mismatch") is False
+      and "До 1419 об/мин при частоте генератора 47,3 Гц (на 66 ниже порога 1485)"
+      in d_dip[0][1].trigger,
       f"4д: провал 1418 при 47,3 Гц: {d_dip and d_dip[0][1].trigger}")
 check(v_dip.get("live", {}).get("clusters", [{}])[0].get("end") == iso(S(L0, 310)),
       f"4д: участок провала — до первого отсчёта в норме: {v_dip.get('live')}")
@@ -1631,7 +1636,7 @@ finally:
 # ── 7ж. Счётчики — с analytics_counts_since (В5) ──
 CFG3_SINCE = copy.copy(CFG3)
 CFG3_SINCE.detectors = dict(CFG3.detectors, ALARM_EPISODES={"analytics_counts_since": "2026-10-16"})
-# Пустой ключ — отдельной копией: в KB с выкладки стоит дата (В5)
+# Пустой ключ — отдельной копией (с v5.2.14 ключа в KB нет — снят по В5)
 CFG3_EMPTY = copy.copy(CFG3)
 CFG3_EMPTY.detectors = dict(CFG3.detectors, ALARM_EPISODES={"analytics_counts_since": None})
 db7 = SeedDB()
@@ -1888,7 +1893,7 @@ rows9b += [h(RPM, S(L0, 600), 1483.0), h(FREQ, S(L0, 600), 49.4), h(RPM, S(L0, 6
 s9b = seg3(sorted(rows9b, key=lambda r: r["ts"]), RS_REP)
 d9b = dets(s9b, RPM_SC)
 check(len(d9b) == 1 and d9b[0][1].t_detected == iso(S(L0, 600))
-      and "по частоте ≈ 1482" in d9b[0][1].trigger,
+      and "До 1483 об/мин при частоте генератора 49,4 Гц (на 2 ниже порога 1485)" in d9b[0][1].trigger,
       f"9б: провал — по отсчётам, начало 09:10:00: {[(d.t_detected, d.trigger) for _, d in d9b]}")
 db9 = SeedDB()
 collect(s9b[0], db9)
@@ -1992,11 +1997,11 @@ from datetime import date as _date  # noqa: E402
 
 check(CFG3_EMPTY.det("ALARM_EPISODES", "analytics_counts_since", default="нет") is None
       and eng.analytics_counts_since(CFG3_EMPTY) is None, "10а: ключ пуст — фильтра нет")
-# В KB — дата выкладки (В5, снять после 15.11): одна и та же в стеке и legacy-монолите
+# v5.2.14: ключ снят (В5, «после 15.11 снять») — и в стеке, и в legacy-монолите
 _legacy = AnalyticsConfig(KB / "equipment" / "cummins_kta50_pcc3300")
 _kb_since = eng.analytics_counts_since(CFG3)
-check(_kb_since is not None and eng.analytics_counts_since(_legacy) == _kb_since,
-      f"10а: ключ в KB и legacy-монолите совпадает: {_kb_since} / {eng.analytics_counts_since(_legacy)}")
+check(_kb_since is None and eng.analytics_counts_since(_legacy) is None,
+      f"10а: ключа в KB и legacy-монолите нет (v5.2.14): {_kb_since} / {eng.analytics_counts_since(_legacy)}")
 _m16 = datetime(2026, 10, 15, 21, 0, tzinfo=U)
 check(eng.analytics_counts_since(cfg_since("2026-10-16")) == _m16
       and eng.analytics_counts_since(cfg_since(_date(2026, 10, 16))) == _m16
@@ -2043,15 +2048,10 @@ check("analytics_since" in inspect.signature(_mgr._analyze_warning_claude).param
       and '"analytics_since": _since' in inspect.getsource(_mgr.OnlineManager._run_gate),
       "10в: _run_gate → _analyze_warning_claude → count_episodes_batch")
 
-# ── 10г. Напоминание снять ключ: старше 35 дней — предупреждение при старте ──
-LOG.records.clear()
-check(not eng.warn_stale_counts_since(cfg_since("2026-10-16"), now=_m16 + timedelta(days=35))
-      and not logged("ключу больше 35 дней"), "10г: 35 дней — без предупреждения")
-check(eng.warn_stale_counts_since(cfg_since("2026-10-16"), now=_m16 + timedelta(days=35, seconds=1))
-      and logged("ключу больше 35 дней"), "10г: больше 35 дней — предупреждение")
-check(not eng.warn_stale_counts_since(CFG3), "10г: ключ пуст — молчит")
-check("warn_stale_counts_since" in inspect.getsource(_mgr.OnlineManager.start_all_running),
-      "10г: проверка — при старте сервиса")
+# ── 10г. v5.2.14: ключ снят (В5) — напоминание снять его удалено вместе с ним ──
+check(not hasattr(eng, "warn_stale_counts_since") and not hasattr(eng, "_COUNTS_SINCE_WARN_DAYS")
+      and "analytics_counts_since" not in inspect.getsource(_mgr.OnlineManager.start_all_running),
+      "10г: напоминания о ключе нет ни в движке, ни при старте сервиса")
 
 # ══ 11. Ревью v5.1.21: подтверждённые дефекты (сценарии ревьюеров, без БД) ══════
 from analytics.serializer import to_markdown  # noqa: E402
@@ -2301,11 +2301,12 @@ check("live_edge=True" in inspect.getsource(eng.OnlinePollEngine._update_open_wi
 # менялся без объяснения
 md2 = to_markdown(s2_, "SN", "pcc", 1, W0, W1, tz=MSK)
 check("ℹ️ `source_rpm_glitch`" in md2 and "⚠️ `source_rpm_glitch`" not in md2
-      and "**Наблюдения по последовательности**" in md2 and "сбой датчика" in md2 and "04:42:32" in md2,
+      and "**Наблюдения по последовательности**" in md2 and "не сходящиеся с частотой генератора" in md2
+      and "04:42:32" in md2,
       f"11д: 2 сбоя — строка ℹ️ в отчёте (МСК): {[x for x in md2.splitlines() if 'glitch' in x]}")
 p2 = build_summary_parts(s2_, [], tz=MSK, trip_roles=[])
 check(not [c for c in p2["failed_checks"] if c.get("check") == "source_rpm_glitch"]
-      and "отброшены отсчёты" not in render_summary_md(p2) and p2["verdict"]["level"] == "НОРМА",
+      and "отброшены из расчёта отсчёты" not in render_summary_md(p2) and p2["verdict"]["level"] == "НОРМА",
       "11д: в сводке — только от 3 сбоев (В4)")
 md3 = to_markdown(s3, "SN", "pcc", 1, W0, W1, tz=MSK)
 check("⚠️ `source_rpm_glitch`" in md3 and "ℹ️ `source_rpm_glitch`" not in md3,

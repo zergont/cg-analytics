@@ -88,7 +88,7 @@ from .metrics import (
 )
 from .rpm_freq import (
     _PACKET_TOL_SEC, build_poll, dip_marks, freq_ok, over_marks, overspeed_params, packet_times,
-    rpm_freq_params,
+    rpm_freq_params, v_over, v_star,
 )
 
 logger = logging.getLogger(__name__)
@@ -1076,7 +1076,9 @@ def _clusters(spans: list[dict], gl: list[tuple[datetime, datetime]], key: str,
     ролям (с v5.1.31 кластер одной роли, roles — из одной записи, как читают
     отчёт и вход заключения); у
     паспорта — run_sec, hard, hard_min, hard_until, hard_ongoing, instep_min,
-    last_value. Служебные (с «_») — участки и отсчёты, только в памяти."""
+    last_value; у RPM_UNDERSPEED и RPM_OVERSPEED vmin/vmax — датчик оборотов, а
+    подтверждённые частотой v_min / v_max кладёт segment_spans (v5.2.14).
+    Служебные (с «_») — участки и отсчёты, только в памяти."""
     groups: list[dict[str, Any]] = []
     for s in sorted(spans, key=lambda x: (x["_s"], x["_e"])):
         if groups:
@@ -1241,6 +1243,11 @@ def segment_spans(
                                 _tz(horizon) if horizon else None)
         pts, init = _drop_runup(pts, init, rpm_runup)
         add("RPM_UNDERSPEED", _spans(pts, t0, t1, brk, init, "RPM"))
+        # v5.2.14 (вариант «а»): у кластера рядом с vmin датчика — подтверждённая
+        # частотой глубина v_min (минимум v* по его отсчётам, rpm_freq.v_star)
+        for c in out.get("RPM_UNDERSPEED") or []:
+            vs = [v_star(p[1], p[2], prm) for s in c["_spans"] for p in s["_pts"] if p[1] is not None]
+            c["v_min"] = _rnd(min(vs)) if vs else None
     guarded("RPM_UNDERSPEED", _rpm)
 
     # Заброс оборотов по v* (v5.1.23, п.2, В2): обороты и k·f_max опроса выше
@@ -1251,6 +1258,10 @@ def segment_spans(
             return
         pts, init = _over_points(seg_by_addr, cfg, oprm, t0, t1, held, carry, gaps, packets)
         add("RPM_OVERSPEED", _spans(pts, t0, t1, brk, init, "RPM"))
+        # v5.2.14: подтверждённая частотой высота кластера v_max (rpm_freq.v_over)
+        for c in out.get("RPM_OVERSPEED") or []:
+            vs = [v_over(p[1], p[2]) for s in c["_spans"] for p in s["_pts"] if p[1] is not None]
+            c["v_max"] = _rnd(max(vs)) if vs else None
     guarded("RPM_OVERSPEED", _over)
 
     # Близость к уставкам: пол давления (В3). v5.1.31 (В-26.1): кластеры по

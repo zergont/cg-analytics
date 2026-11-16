@@ -10,9 +10,11 @@
 """Сверка оборотов с частотой генератора (v5.1.21, решения владельца 15.10.2026).
 
 ДГУ №1 15.10 04:42–09:24 МСК: 12 одиночных отсчётов оборотов 1417–1479 при
-частоте 49,9–50,1 Гц, через 9–11 с каждый раз 1495–1501. Это сбой датчика
-оборотов, а не провал: двигатель на 1417 об/мин дал бы генератору 47,2 Гц.
-Каждый такой отсчёт заводил «Просадку оборотов» на весь подсегмент (24 ч).
+частоте 49,9–50,1 Гц, через 9–11 с каждый раз 1495–1501. С частотой отсчёт не
+сходится (двигатель на 1417 об/мин дал бы генератору 47,2 Гц), а провалом не
+подтверждён; доказательством сбоя датчика это не считается (v5.2.14, решение
+владельца 16.11.2026): обороты и частота могут быть прочитаны в разные моменты
+опроса. Каждый такой отсчёт заводил «Просадку оборотов» на весь подсегмент (24 ч).
 
 Частота опроса отсчёта оборотов в момент t — набор значений регистра частоты:
 - удержанное на t (последняя реальная строка не позже t). Держится, пока идут
@@ -35,6 +37,11 @@
   отсчёт в заборе, только если выше порога (1575 об/мин при уставке разноса
   1725) и обороты, и k·f_max опроса; без частоты (нет, вне 40–65 Гц) заброса
   нет — по одним оборотам не ловим.
+- v_star / v_over / rpm_freq_mismatch / dip_view / over_view — подача провала
+  и заброса (v5.2.14, решение владельца 16.11.2026, вариант «а»): глубина и
+  высота — по оборотам, подтверждённым частотой, показания датчика — рядом, с
+  признаком расхождения, без вердикта «сбой датчика». Критерии (is_dip,
+  is_over) и фильтр 1а не меняются.
 """
 
 from __future__ import annotations
@@ -294,6 +301,131 @@ def dip_marks(
     return out
 
 
+# ── Подача провала и заброса (v5.2.14, решение владельца 16.11.2026, «а») ───
+# Сининда-1 14.11 17:05:07: ДГУ №1 и ДГУ №2 в параллели на общей шине, частота
+# у обеих 49,4 Гц (k·f = 1482 об/мин), датчик оборотов ДГУ №1 — 1344, ДГУ №2 —
+# 1472. Эпизод ДГУ №1 записан с rpm_min 1344 и drop_pct 11,1 — а это размах от
+# максимума (1511 − 1344), не глубина провала; гейт прочёл «11 % просадки», а
+# «по частоте ≈ 1482» — как «1482 Гц». Расхождение датчика с частотой — не
+# доказательство сбоя датчика: панель отдаёт регистры не одновременно, обороты
+# и частота могут быть прочитаны в разные моменты опроса (расхождений за сутки
+# у ДГУ №1 и №2: 12.11 — 1 и 0, 13.11 — 5 и 2, 14.11 при раскачке частоты шины
+# 49,2–50,6 Гц — 89 и 11). Поэтому глубина — по v* (обороты, подтверждённые
+# частотой), показания датчика — рядом, с признаком расхождения. Заброс — та же
+# подача зеркально: высота — min(обороты, k·f_max), расхождение — датчик выше.
+
+
+def v_star(rpm: float, kf: float | None, prm: dict[str, Any]) -> float:
+    """Обороты отсчёта провала, подтверждённые частотой: v* = max(обороты, k·f_min)
+    — то же v*, что решает провал (is_dip). Без частоты (kf None — нет, 0 или вне
+    freq_valid_hz) и при правиле B (dip_needs_freq: false) — обороты по датчику."""
+    if kf is not None and prm.get("dip_needs_freq", True):
+        return max(float(rpm), float(kf))
+    return float(rpm)
+
+
+def v_over(rpm: float, kf: float | None) -> float:
+    """Обороты отсчёта заброса, подтверждённые частотой: min(обороты, k·f_max) —
+    заброс (is_over) требует, чтобы порог превышали и обороты, и частота, так что
+    подтверждено меньшее из двух (зеркало v* провала). Без частоты — обороты."""
+    if kf is not None:
+        return min(float(rpm), float(kf))
+    return float(rpm)
+
+
+def rpm_freq_mismatch(rpm: float, kf: float | None, prm: dict[str, Any], over: bool = False) -> bool:
+    """Датчик оборотов расходится с оборотами по частоте генератора больше допуска сверки.
+
+    Допуск — tolerance_rpm сверки (10 об/мин ≈ 0,33 Гц при k = 30): тот же, что
+    у фильтра 1а (k·f ≥ порог + допуск); шаг частоты 0,1 Гц — 3 об/мин, так что
+    расхождение на один-два шага частоты признаком не считается. Только в
+    сторону нарушения: у провала датчик ниже k·f_min (датчик выше — обычное
+    дело, f_min — минимум частоты всего опроса), у заброса (over) — выше k·f_max."""
+    if kf is None:
+        return False
+    tol = float(prm.get("tolerance_rpm", 10.0))
+    return float(rpm) > float(kf) + tol if over else float(rpm) < float(kf) - tol
+
+
+def _freq_view(pts: list[tuple], prm: dict[str, Any], over: bool) -> dict[str, Any] | None:
+    """Общая часть dip_view / over_view: отсчёты [(момент, обороты, k·f или None)]."""
+    rows = [(p[0], float(p[1]), None if p[2] is None else float(p[2])) for p in pts or []
+            if p[1] is not None]
+    if not rows:
+        return None
+    k = float(prm.get("k") or 30.0)
+    kfs = [kf for _, _, kf in rows if kf is not None]
+    if over:
+        vfun = lambda r: v_over(r[1], r[2])  # noqa: E731
+        vp = min(rows, key=lambda r: (-vfun(r), r[0]))          # наибольшее, раннее
+        freq_rpm = round(max(kfs), 1) if kfs else None
+        rpm_ext = max(r[1] for r in rows)
+    else:
+        vfun = lambda r: v_star(r[1], r[2], prm)  # noqa: E731
+        vp = min(rows, key=lambda r: (vfun(r), r[0]))           # наименьшее, раннее
+        freq_rpm = round(min(kfs), 1) if kfs else None
+        rpm_ext = min(r[1] for r in rows)
+    # «По частоте» — только когда в этом отсчёте датчик с частотой не сходится и
+    # значение дала частота; в пределах допуска — «при частоте» (ревью v5.2.14)
+    by_freq = (rpm_freq_mismatch(vp[1], vp[2], prm, over)
+               and (over or bool(prm.get("dip_needs_freq", True))))
+    mm = [r for r in rows if rpm_freq_mismatch(r[1], r[2], prm, over)]
+    mp = min(mm, key=lambda r: ((-r[1] if over else r[1]), r[0])) if mm else None
+    return {
+        "rpm": rpm_ext,
+        "freq_rpm": freq_rpm,
+        "freq_hz": round(freq_rpm / k, 2) if freq_rpm is not None else None,
+        "v": round(vfun(vp), 1),
+        "v_rpm": vp[1],
+        "v_kf": vp[2],
+        "v_hz": round(vp[2] / k, 2) if vp[2] is not None else None,
+        "v_by_freq": bool(by_freq),
+        "mismatch": bool(mm) if kfs else None,
+        "mismatch_count": len(mm),
+        "mm_rpm": mp[1] if mp else None,
+        "mm_hz": round(mp[2] / k, 2) if mp else None,
+        "mm_same": bool(mp is not None and mp[0] == vp[0] and mp[1] == vp[1]),
+    }
+
+
+def dip_view(pts: list[tuple], prm: dict[str, Any]) -> dict[str, Any] | None:
+    """Подача провала по его отсчётам (v5.2.14).
+
+    pts — отсчёты провала [(момент, обороты по датчику, k·f_min опроса или
+    None)] (live.sub_samples по участкам RPM_UNDERSPEED; k·f — только у
+    отсчёта, частоте которого можно верить). None — отсчётов нет. Иначе:
+    - rpm_min — минимум оборотов по датчику (как было);
+    - freq_rpm_min / freq_hz_min — минимум оборотов по частоте генератора
+      (k·f_min) и сама частота, Гц; None — частоты в провале нет;
+    - v_min (и v) — подтверждённая глубина: минимум v* по отсчётам; v_rpm,
+      v_kf, v_hz — датчик, k·f и частота в отсчёте v_min; v_by_freq — v_min
+      дала частота, а датчик в этом отсчёте с ней не сходится;
+    - mismatch — признак расхождения (rpm_freq_mismatch хотя бы у одного
+      отсчёта); None — сверять не с чем (частоты в провале нет);
+      mismatch_count — число таких отсчётов;
+    - mm_rpm, mm_hz — самый низкий из расходящихся отсчётов датчика и его
+      частота; mm_same — это тот же отсчёт, что дал v_min."""
+    w = _freq_view(pts, prm, over=False)
+    if w is None:
+        return None
+    return dict(w, rpm_min=w["rpm"], freq_rpm_min=w["freq_rpm"], freq_hz_min=w["freq_hz"], v_min=w["v"])
+
+
+def over_view(pts: list[tuple], prm: dict[str, Any]) -> dict[str, Any] | None:
+    """Подача заброса по его отсчётам (v5.2.14, та же подача, что у провала).
+
+    pts — отсчёты заброса [(момент, обороты, k·f_max опроса)] (участки
+    RPM_OVERSPEED), prm — overspeed_params. rpm_max — максимум датчика;
+    freq_rpm_max / freq_hz_max — максимум по частоте генератора; v_max (и v) —
+    подтверждённая высота: максимум min(обороты, k·f_max) по отсчётам;
+    расхождение — датчик выше k·f_max больше допуска; mm_rpm — самый высокий из
+    расходящихся отсчётов. Остальные поля — как у dip_view."""
+    w = _freq_view(pts, prm, over=True)
+    if w is None:
+        return None
+    return dict(w, rpm_max=w["rpm"], freq_rpm_max=w["freq_rpm"], freq_hz_max=w["freq_hz"], v_max=w["v"])
+
+
 def overspeed_params(cfg, base: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Параметры заброса оборотов (RPM_OVERSPEED, v5.1.23, решение В2′ 17.10.2026).
 
@@ -385,7 +517,11 @@ def over_marks(
 
 
 def glitch_details(samples: list[dict], tz=None) -> str:
-    """Текст проверки source_rpm_glitch: время местное (МСК), не UTC, как у нулей."""
+    """Текст проверки source_rpm_glitch: время местное (МСК), не UTC, как у нулей.
+
+    v5.2.14 (решение владельца 16.11.2026): без вердикта «сбой датчика» —
+    отсчёт не сходится с частотой генератора, но обороты и частота могут быть
+    прочитаны в разные моменты опроса (панель отдаёт регистры не одновременно)."""
     from .labels import fmt_number
     if tz is None:
         try:
@@ -402,5 +538,6 @@ def glitch_details(samples: list[dict], tz=None) -> str:
         shown.append(f"{t.astimezone(tz).strftime('%H:%M:%S')} ({fmt_number(s.get('rpm'), 0)}"
                      + (f" при {fmt_number(hz, 1)} Гц)" if hz is not None else ")"))
     more = f" и ещё {len(samples) - 5}" if len(samples) > 5 else ""
-    return ("отброшены отсчёты оборотов, не подтверждённые частотой генератора "
-            f"(сбой датчика), всего {len(samples)}: {', '.join(shown)}{more}")
+    return ("отброшены из расчёта отсчёты оборотов, не сходящиеся с частотой генератора "
+            "(не доказательство сбоя датчика: обороты и частота могут быть прочитаны "
+            f"в разные моменты опроса), всего {len(samples)}: {', '.join(shown)}{more}")

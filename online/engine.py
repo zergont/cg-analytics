@@ -2563,9 +2563,9 @@ async def _load_incident_context(
         return None
 
 
-# Напоминание снять ключ переходного месяца (решение В5 15.10.2026): ключу больше
-# этого — предупреждение в журнал при старте сервиса
-_COUNTS_SINCE_WARN_DAYS = 35
+# v5.2.14: ключ переходного месяца снят из KB (решение В5 15.10.2026 — «после
+# 15.11 снять»), напоминание о нём (warn_stale_counts_since) удалено; фильтр
+# остаётся возможностью ключа — без ключа None, счётчики без фильтра.
 # Нечитаемые значения ключа, о которых уже предупредили (не спамить журнал)
 _COUNTS_SINCE_BAD: set[str] = set()
 
@@ -2605,22 +2605,6 @@ def analytics_counts_since(cfg) -> datetime | None:
             logger.warning("ALARM_EPISODES.analytics_counts_since = %s не прочитан — счётчики "
                            "аналитики без фильтра", _key, exc_info=True)
         return None
-
-
-def warn_stale_counts_since(cfg, now: datetime | None = None) -> bool:
-    """Ключ analytics_counts_since старше 35 дней — предупреждение в журнал
-    (зовёт менеджер при старте сервиса). True — предупредили."""
-    since = analytics_counts_since(cfg)
-    if since is None:
-        return False
-    now = _tz_utc(now or datetime.now(timezone.utc))
-    if (now - since).total_seconds() <= _COUNTS_SINCE_WARN_DAYS * 86400:
-        return False
-    logger.warning(
-        "ALARM_EPISODES.analytics_counts_since = %s — ключу больше %d дней: переходный "
-        "месяц v5.1.21 прошёл, снимите ключ в detectors.yaml (решение В5 15.10.2026)",
-        since.isoformat(), _COUNTS_SINCE_WARN_DAYS)
-    return True
 
 
 def _det_clusters(d) -> list[dict]:

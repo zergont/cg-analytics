@@ -18,8 +18,10 @@ from typing import Any
 
 # Версия формата входа заключения (build_claude_input; v5.2.1, В12): любая
 # правка порядка или текста сборщика входа поднимает её — за этим следит
-# эталонный тест scripts/test_v521_prompts.py. 5.2.1 — картина объекта (В11)
-CONCLUSION_INPUT_VERSION = "5.2.1"
+# эталонный тест scripts/test_v521_prompts.py. 5.2.1 — картина объекта (В11);
+# 5.2.14 — строки просадки и заброса оборотов в иерархии обнаружений: глубина и
+# высота по v_min / v_max и расхождение датчика с частотой (_group_worst)
+CONCLUSION_INPUT_VERSION = "5.2.14"
 
 # Русские названия RUN_STATE (из analytics/serializer.py — дублируем чтобы не создавать зависимость)
 RUN_STATE_RU: dict[int, str] = {
@@ -175,6 +177,25 @@ def _plural_hits(n: int) -> str:
     return f"{n} срабатываний"
 
 
+def _num(x: Any) -> float | None:
+    """Число значения (bool — не число)."""
+    return x if isinstance(x, (int, float)) and not isinstance(x, bool) else None
+
+
+def _mismatch_note(values_list: list[dict], pick) -> str:
+    """«; датчик оборотов 1344 об/мин при 49,4 Гц — с частотой генератора не
+    сходится (…)» по расходящемуся отсчёту (v5.2.14); pick — min у провала, max у
+    заброса. Записи без rpm_freq_mismatch_rpm (до v5.2.14) — пусто, как было."""
+    mm = [(v["rpm_freq_mismatch_rpm"], _num(v.get("rpm_freq_mismatch_hz"))) for v in values_list
+          if v.get("rpm_freq_mismatch") is True and _num(v.get("rpm_freq_mismatch_rpm")) is not None]
+    if not mm:
+        return ""
+    from analytics.labels import fmt_number
+    r, hz = pick(mm, key=lambda x: x[0])
+    return (f"; датчик оборотов {r:.0f} об/мин" + (f" при {fmt_number(hz, 1)} Гц" if hz is not None else "")
+            + " — с частотой генератора не сходится (могли быть прочитаны в разные моменты опроса)")
+
+
 def _group_worst(scenario: str, values_list: list[dict]) -> str | None:
     """Худший показатель группы за период — вместо дампа каждого срабатывания."""
     def _nums(key):
@@ -208,22 +229,35 @@ def _group_worst(scenario: str, values_list: list[dict]) -> str | None:
         if vals:
             return f"I₂ до {max(vals):.1f}% I_ном" + (f" при пороге {thr[0]:.0f}%" if thr else "")
     elif scenario == "RPM_UNDERSPEED":
-        mins = _nums("rpm_min")
-        if mins:
+        # v5.2.14 (вариант «а»): глубина — v_min (обороты, подтверждённые частотой
+        # генератора), у записей до v5.2.14 — rpm_min датчика; расхождение — сам
+        # расходящийся отсчёт (rpm_freq_mismatch_rpm/_hz), а не крайнее показание
+        # датчика (оно может быть отсчётом без частоты); без вердикта «сбой датчика»
+        deps = [x for x in (_num(v.get("v_min")) if _num(v.get("v_min")) is not None
+                            else _num(v.get("rpm_min")) for v in values_list) if x is not None]
+        if deps:
             thr = _nums("threshold_rpm")
-            base = f"мин. {min(mins):.0f} об/мин"
-            return base + (f" — на {thr[0] - min(mins):.0f} ниже порога {thr[0]:.0f}" if thr else "")
+            base = f"мин. {min(deps):.0f} об/мин"
+            base += f" — на {thr[0] - min(deps):.0f} ниже порога {thr[0]:.0f}" if thr else ""
+            return base + _mismatch_note(values_list, min)
     elif scenario == "RPM_OVERSPEED":
-        # v5.1.23: запас до уставки разноса панели (код 234), а не до порога аналитики
-        maxs = _nums("rpm_max")
+        # v5.1.23: запас до уставки разноса панели (код 234), а не до порога аналитики.
+        # v5.2.14: высота — v_max (подтверждённая частотой), у записей до v5.2.14 —
+        # rpm_max датчика; запас до уставки — по датчику (rpm_max): останов 234
+        # панель решает по своему датчику; расхождение — сам расходящийся отсчёт
+        maxs = [x for x in (_num(v.get("v_max")) if _num(v.get("v_max")) is not None
+                            else _num(v.get("rpm_max")) for v in values_list) if x is not None]
         if maxs:
             ovs = _nums("overspeed_rpm")
             base = f"макс. {max(maxs):.0f} об/мин"
-            if not ovs:
-                return base
-            left = ovs[0] - max(maxs)
-            return base + (f" — до уставки разноса {ovs[0]:.0f} осталось {left:.0f}" if left > 0
-                           else f" — выше уставки разноса {ovs[0]:.0f} на {-left:.0f}")
+            sens = [x for x in (_num(v.get("rpm_max")) for v in values_list) if x is not None] or maxs
+            if ovs:
+                left = ovs[0] - max(sens)
+                base += (f" — до уставки разноса {ovs[0]:.0f} осталось {left:.0f}" if left > 0
+                         else f" — выше уставки разноса {ovs[0]:.0f} на {-left:.0f}")
+                if any(v.get("rpm_freq_mismatch") is True for v in values_list):
+                    base += " по датчику оборотов"
+            return base + _mismatch_note(values_list, max)
     elif scenario == "COKING_RISK":
         secs = _nums("low_load_zone_sec")
         if secs:

@@ -582,13 +582,17 @@ _d3 = max(_o3, key=lambda d: d.values["rpm_max"]) if _o3 else None
 check(_d3 is not None and _d3.values["rpm_max"] == 1606.0 and _d3.values["freq_hz_max"] == 53.6
       and _d3.values["freq_rpm_max"] == 1608.0 and _d3.values["threshold_rpm"] == 1575.0
       and _d3.values["proximity_pct"] == 8.69565 and _d3.values["front_count"] == 1
-      and _d3.values["overspeed_rpm"] == 1725.0 and _d3.values["margin_rpm"] == 119.0,
-      f"3а: поля детекции (rpm_max, freq_rpm_max, threshold, overspeed, margin): {_d3 and _d3.values}")
+      and _d3.values["overspeed_rpm"] == 1725.0 and _d3.values["margin_rpm"] == 119.0
+      and _d3.values["v_max"] == 1606.0 and _d3.values["above_threshold_rpm"] == 31.0
+      and _d3.values["rpm_freq_mismatch"] is False,
+      f"3а: поля детекции (rpm_max, freq_rpm_max, threshold, overspeed, margin; v5.2.14 — v_max, "
+      f"above_threshold_rpm, rpm_freq_mismatch): {_d3 and _d3.values}")
 check(_d3 is not None and _d3.severity == "CAUTION" and _d3.fault_codes == [] and _d3.ref_codes == [234]
       and _d3.source == "METRIC_RULE" and _d3.related_roles == ["RPM", "FREQUENCY"],
       f"3а: CAUTION, код 234 справочный (панель его не выставляла): {_d3 and (_d3.severity, _d3.fault_codes, _d3.ref_codes)}")
-check(_d3 is not None and _d3.trigger == ("Обороты макс. 1606 об/мин (53,6 Гц, по частоте ≈ 1608) — "
-                                          "выше порога 1575 (91,3 % уставки разноса 1725), до уставки осталось 119, "
+# v5.2.14: та же подача, что у провала — подтверждённая высота min(1606, 1608), частота в Гц
+check(_d3 is not None and _d3.trigger == ("До 1606 об/мин при частоте генератора 53,6 Гц (на 31 выше порога "
+                                          "1575 — 91,3 % уставки разноса 1725; до уставки осталось 119), "
                                           "фронтов: 1"),
       f"3а: текст срабатывания: {_d3 and _d3.trigger}")
 check(dets(_segs3, "RPM_UNDERSPEED"), "3а: просадка 1310 при 44 Гц того же пуска — по-прежнему есть")
@@ -603,7 +607,7 @@ check(len(_cl3b) == 1 and _cl3b[0]["start"] == iso(M15(12, 42, 19)) and _cl3b[0]
       and _cl3b[0]["spans"] == 2,
       f"3б: при 1552,5 — эпизод 12:42:19–12:43:09, два участка (1569, 1563 — заброс): {_cl3b}")
 _d3b = max(_o3b, key=lambda d: d.values["rpm_max"]) if _o3b else None
-check(_d3b is not None and "выше порога 1552,5 (90 % уставки разноса 1725)" in _d3b.trigger,
+check(_d3b is not None and "выше порога 1552,5 — 90 % уставки разноса 1725" in _d3b.trigger,
       f"3б: текст при 1552,5 — «1552,5 (90 % …)»: {_d3b and _d3b.trigger}")
 
 # ── 3в. ДГУ №1 16.10 #35929: 1696/56,8 с 09:26:03 по 09:26:12, до уставки 29 ──
@@ -702,7 +706,7 @@ _hier = _fmt_detections_hierarchy({"subsegments": [{"duration_sec": 60, "detecti
 check("Заброс оборотов" in _hier and "макс. 1606 об/мин — до уставки разноса 1725 осталось 119" in _hier,
       f"3ж: иерархия обнаружений (заключение) — имя и запас: {_hier!r}")
 _md3 = to_markdown(_segs3, "SN", "pcc", 2, M15(12, 40), M15(12, 45), tz=MSK)
-check("**Заброс оборотов** (CAUTION)" in _md3 and "Обороты макс. 1606 об/мин" in _md3
+check("**Заброс оборотов** (CAUTION)" in _md3 and "До 1606 об/мин при частоте генератора 53,6 Гц" in _md3
       and "Нарушение: 15.10 12:42:19–12:42:29" in _md3 and "1575,0" not in _md3 and "1552,5" not in _md3,
       "3ж: отчёт — пункт «Заброс оборотов», текст и строка нарушения МСК")
 
@@ -2296,7 +2300,8 @@ check(all(k in d_all and "live" in d_all[k].values for k in _KEYS),
       f"9б: без сбоев — все четыре по участкам: {[(k, k in d_all and 'live' in d_all[k].values) for k in _KEYS]}")
 d_rpm = run9(dict(base9, RPM_UNDERSPEED=None))
 check("RPM_UNDERSPEED" in d_rpm and "live" not in d_rpm["RPM_UNDERSPEED"].values
-      and d_rpm["RPM_UNDERSPEED"].t_detected == iso(L0) and "RPM мин. 1418" in d_rpm["RPM_UNDERSPEED"].trigger,
+      and d_rpm["RPM_UNDERSPEED"].t_detected == iso(L0)
+      and d_rpm["RPM_UNDERSPEED"].trigger.startswith("До 1418 об/мин"),
       f"9б: сбой просадки — по подсегменту (min 1418), начало подсегмента: "
       f"{d_rpm.get('RPM_UNDERSPEED') and d_rpm['RPM_UNDERSPEED'].trigger}")
 check(all(k in d_rpm and "live" in d_rpm[k].values for k in ("LIMIT_PROXIMITY", "COOLING_FAILURE", "OIL_DILUTION")),

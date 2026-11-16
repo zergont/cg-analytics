@@ -576,7 +576,8 @@ reset_router()
 # ══ 7. prompt_version ════════════════════════════════════════════════════════
 import corpus.preprocessor as prep  # noqa: E402
 v0 = prompts.system_for("seg_auto")[1]["version"]
-check(re.fullmatch(r"seg_auto·code·[0-9a-f]{10}·r5\.2\.1·in5\.2\.1", v0), f"7: формат версии: {v0}")
+# v5.2.14: формат входа заключения — 5.2.14 (строка просадки оборотов в _group_worst)
+check(re.fullmatch(r"seg_auto·code·[0-9a-f]{10}·r5\.2\.1·in5\.2\.14", v0), f"7: формат версии: {v0}")
 router.apply_task("seg_auto", "api", "Другой текст")
 check(prompts.system_for("seg_auto")[1]["version"] != v0, "7а: смена текста — новая версия")
 reset_router()
@@ -1016,9 +1017,13 @@ check(json.dumps(STRUCT, sort_keys=True, default=str) == s_copy
 # ══ 11. Эталон формата входа: вход изменился — подними *_INPUT_VERSION ═══════
 # При правке сборщика входа: поднять версию и записать новый отпечаток сюда
 INPUT_REF = {
-    "conclusion": ("5.2.1", "CONCLUSION_INPUT_VERSION"),
-    "gate": ("5.2.1", "GATE_INPUT_VERSION"),
-    "incident": ("5.2.1", "INCIDENT_INPUT_VERSION"),
+    # 5.2.14: строка просадки оборотов в _group_worst (эталон-фикстура без
+    # обнаружений, отпечаток прежний)
+    "conclusion": ("5.2.14", "CONCLUSION_INPUT_VERSION"),
+    # 5.2.14: строки срабатывания просадки и заброса оборотов (фикстуры без
+    # них — отпечатки прежние)
+    "gate": ("5.2.14", "GATE_INPUT_VERSION"),
+    "incident": ("5.2.14", "INCIDENT_INPUT_VERSION"),
 }
 REF_SHA = {"conclusion": "e051e3f40d", "gate": "bb5adfd47b", "incident": "210cc45298"}
 FIX_PIC = "Картина объекта (карта установок):\nОбъект: Тест. На объекте одна установка — соседей нет."

@@ -177,7 +177,7 @@ zero_glitch:
 # Сверка оборотов с частотой генератора (v5.1.21, см. _defaults: legacy-слой заменяет стек)
 rpm_freq_check:
   enabled: true
-  tolerance_rpm: 10
+  tolerance_rpm: 10         # v5.2.14: и признак расхождения в провале и забросе (см. _defaults)
   freq_hold_max_sec: 1800
   freq_valid_hz: [40, 55]
   poll_window_max_sec: 60

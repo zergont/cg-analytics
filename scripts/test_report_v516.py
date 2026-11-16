@@ -148,10 +148,11 @@ ep_s = dict(ep, gate_suppressed=True)
 md3 = render_summary_md(build_summary_parts([s1], [ep_s], tz=MSK, t_from=T0, t_to=T0 + timedelta(hours=24)))
 check("снято ИИ" in md3 and "активен на конец" not in md3, f"12:\n{md3}")
 
-# 13. Недоскорость: «на 12 ниже порога (размах 37)»
+# 13. Недоскорость: «на 12 ниже порога»; размах 37 — полем spread_rpm, в строке его нет (v5.2.14)
 from analytics.detectors import _detect_rpm_underspeed  # noqa: E402
 rd = _detect_rpm_underspeed({"RPM": {"min": 1473, "max": 1510, "median": 1497}}, DerivedMetrics(), T0, cfg)
-check(rd and "на 12 ниже порога 1485" in rd[0].trigger and "размах 37" in rd[0].trigger
+check(rd and "на 12 ниже порога 1485" in rd[0].trigger and "размах" not in rd[0].trigger
+      and rd[0].values.get("spread_rpm") == 37 and rd[0].values.get("drop_rpm") == 27.0
       and rd[0].severity == "CAUTION", f"13: {rd and rd[0].trigger}")
 
 

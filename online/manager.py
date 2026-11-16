@@ -206,20 +206,6 @@ class OnlineManager:
         # движков (подписи панелей — из их конфигов), фоном: старт не держит
         self.schedule_picture_refresh()
 
-        # Напоминание снять ключ переходного месяца v5.1.21 (решение В5): ключ
-        # analytics_counts_since старше 35 дней — предупреждение, раз на значение
-        try:
-            from online.engine import analytics_counts_since, warn_stale_counts_since
-            _since_seen: set = set()
-            for _eng in self._engines.values():
-                _s = analytics_counts_since(_eng.cfg)
-                if _s is not None and _s not in _since_seen:
-                    _since_seen.add(_s)
-                    warn_stale_counts_since(_eng.cfg)
-        except Exception:
-            logger.warning("OnlineManager: срок ключа analytics_counts_since не проверен",
-                           exc_info=True)
-
         # Запустить планировщик статус-строк (ИИ-оператор Уровень 1)
         self._status_task = asyncio.create_task(
             self._run_status_scheduler(), name="status_line_scheduler"

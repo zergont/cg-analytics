@@ -180,8 +180,11 @@ GATE_RULES_VERSION = "5.1.15"
 # Версия формата входа гейта (build_warning_prompt; v5.2.1, В12): любая правка
 # порядка или текста сборщика входа поднимает её — за этим следит эталонный тест
 # scripts/test_v521_prompts.py. В prompt_version, не в хеши составов: от текста
-# входа fault_hash / suppressed_hash не зависят, GATE_RULES_VERSION не трогаем
-GATE_INPUT_VERSION = "5.2.1"
+# входа fault_hash / suppressed_hash не зависят, GATE_RULES_VERSION не трогаем.
+# 5.2.14 — строки срабатывания просадки и заброса оборотов (подача расхождения
+# датчика с частотой, решение владельца 16.11.2026): разборы до и после
+# различаются по prompt_version
+GATE_INPUT_VERSION = "5.2.14"
 
 
 def _limit(d: dict) -> dict:

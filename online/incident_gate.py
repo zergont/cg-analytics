@@ -468,8 +468,10 @@ def _fault_codes_line(incident: dict[str, Any]) -> str | None:
 
 
 # Версия формата входа совета (build_incident_prompt; v5.2.1, В12): правка
-# порядка или текста сборщика поднимает её (эталонный тест test_v521_prompts)
-INCIDENT_INPUT_VERSION = "5.2.1"
+# порядка или текста сборщика поднимает её (эталонный тест test_v521_prompts).
+# 5.2.14 — строки срабатывания просадки и заброса оборотов в отчётах сегментов
+# во входе совета (подача расхождения датчика с частотой)
+INCIDENT_INPUT_VERSION = "5.2.14"
 
 
 def build_incident_prompt(

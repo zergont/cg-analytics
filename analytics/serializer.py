@@ -2608,11 +2608,13 @@ def _fmt_sub_ranges(idxs: list[int], seg_idx: int) -> str:
                      for r in out)
 
 
-# Худшее значение группы: (ключ values, направление) — что «хуже» для сценария
+# Худшее значение группы: (ключ values, направление) — что «хуже» для сценария;
+# кортеж ключей — первый числовой (v5.2.14: просадка и заброс — по v_min / v_max,
+# подтверждённым частотой; у записей до v5.2.14 — по rpm_min / rpm_max датчика)
 _WORST_KEY = {
     "OIL_DILUTION": ("oil_press_min", min),
-    "RPM_UNDERSPEED": ("rpm_min", min),
-    "RPM_OVERSPEED": ("rpm_max", max),
+    "RPM_UNDERSPEED": (("v_min", "rpm_min"), min),
+    "RPM_OVERSPEED": (("v_max", "rpm_max"), max),
     "LIMIT_PROXIMITY": ("value", max),
     "COOLING_FAILURE": ("coolant_temp_max", max),
     "PHASE_CURRENT_SPREAD": ("pct_max", max),
@@ -2634,11 +2636,21 @@ def _det_worst(entries: list[tuple[int, dict]]) -> tuple[int, dict] | None:
     if not rule:
         return None
     key, pick = rule
-    vals = [(i, d) for i, d in entries
-            if isinstance((d.get("values") or {}).get(key), (int, float))]
+    keys = key if isinstance(key, tuple) else (key,)
+
+    def _num(d: dict) -> float | None:
+        v = d.get("values") or {}
+        for k in keys:
+            x = v.get(k)
+            if isinstance(x, (int, float)) and not isinstance(x, bool):
+                return x
+        return None
+    vals = [(i, d, _num(d)) for i, d in entries]
+    vals = [x for x in vals if x[2] is not None]
     if not vals:
         return None
-    return pick(vals, key=lambda x: x[1]["values"][key])
+    w = pick(vals, key=lambda x: x[2])
+    return w[0], w[1]
 
 
 def _group_detections(subsegments: list) -> list[dict]:
