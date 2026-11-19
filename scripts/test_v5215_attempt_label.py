@@ -127,7 +127,8 @@ for _p in ("knowledge_base/_defaults/analytics/segmentation.yaml",
           f"3е: {_p} — подпись в комментарии и crank_rpm_min 50")
 
 # 3ж. VERSION
-check((ROOT / "VERSION").read_text(encoding="utf-8").strip() == "5.2.15", "3ж: VERSION = 5.2.15")
+check(tuple(int(x) for x in (ROOT / "VERSION").read_text(encoding="utf-8").strip().split(".")) >= (5, 2, 15),
+      "3ж: VERSION не ниже 5.2.15")
 
 if _errors:
     print(f"FAIL — {len(_errors)} расхождений:")

@@ -2971,11 +2971,15 @@ async def db_health_page(request: Request):
 
 @router.get("/api/db/health")
 async def api_db_health():
+    from fastapi.encoders import jsonable_encoder
     from db.analytics import get_db_health_stats
     from db.source import get_source_mode
     stats = await get_db_health_stats()
     stats["source_mode"] = get_source_mode()
-    return JSONResponse(stats)
+    # v5.2.16: sync_state[].last_sync_at — datetime (TIMESTAMPTZ), JSONResponse его
+    # не сериализует: ответ 500, автообновление страницы /db стояло. jsonable_encoder
+    # отдаёт ISO 8601 с поясом — страница разбирает его через new Date(...).
+    return JSONResponse(jsonable_encoder(stats))
 
 
 @router.post("/settings/source-mode")
